@@ -13,7 +13,7 @@ pub struct ColumnDef {
 pub fn get_schema_columns() -> Vec<ColumnDef> {
     TagType::all_variants().iter()
         .map(|t| ColumnDef {
-            name: t.db_column_name(),
+            name: t.as_str(),
             sql_type: t.sql_type(),
         })
         .collect()
@@ -23,7 +23,7 @@ pub fn get_schema_columns() -> Vec<ColumnDef> {
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TagType {
-    // All System Tags are Searchable
+    // All System Tags are Searchable and represent DB Columns
     Path,
     ParentDir,
     FileName,
@@ -51,7 +51,7 @@ pub enum TagTypeEnum {
 }
 
 impl TagType {
-    pub fn db_column_name(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             TagType::Path => "path",
             TagType::ParentDir => "parentdir",
@@ -74,23 +74,6 @@ impl TagType {
             TagType::SizeBytes | TagType::ModifiedTs => "BIGINT",
             TagType::Tags => "MAP(TEXT, TEXT)",
             _ => "TEXT",
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TagType::FileName => "filename",
-            TagType::Stem => "stem",
-            TagType::Directory => "directory",
-            TagType::Extension => "extension",
-            TagType::ParentDir => "parentdir",
-            TagType::Path => "path",
-            TagType::SizeBytes => "size_bytes",
-            TagType::ModifiedTs => "modified_ts",
-            TagType::Kind => "kind",
-            TagType::SizeStr => "size_str",
-            TagType::ModifiedStr => "modified_str",
-            TagType::Tags => "tags",
         }
     }
 
@@ -151,17 +134,20 @@ impl TypedTag {
 
     fn to_sql(&self) -> String {
         let val = Self::escape(&self.value);
+        let dir_col = TagType::Directory.as_str();
+        let name_col = TagType::FileName.as_str();
+
         match &self.tag_type {
             TagTypeEnum::System(sys) => match sys {
-                TagType::FileName => format!("(directory = FALSE AND {} ILIKE '%{}%')", sys.db_column_name(), val),
-                TagType::Stem => format!("(directory = FALSE AND {} ILIKE '%{}%')", sys.db_column_name(), val),
-                TagType::Directory => format!("({} = TRUE AND {} ILIKE '%{}%')", TagType::Directory.db_column_name(), TagType::FileName.db_column_name(), val), 
-                TagType::Extension => format!("{} = '{}'", sys.db_column_name(), val),
-                TagType::ParentDir => format!("({} ILIKE '%/{}' OR {} = '{}')", sys.db_column_name(), val, sys.db_column_name(), val),
+                TagType::FileName => format!("({} = FALSE AND {} ILIKE '%{}%')", dir_col, sys.as_str(), val),
+                TagType::Stem => format!("({} = FALSE AND {} ILIKE '%{}%')", dir_col, sys.as_str(), val),
+                TagType::Directory => format!("({} = TRUE AND {} ILIKE '%{}%')", dir_col, name_col, val), 
+                TagType::Extension => format!("{} = '{}'", sys.as_str(), val),
+                TagType::ParentDir => format!("({} ILIKE '%/{}' OR {} = '{}')", sys.as_str(), val, sys.as_str(), val),
                 TagType::Path | TagType::Kind | TagType::SizeStr | TagType::ModifiedStr => 
-                    format!("{} ILIKE '%{}%'", sys.db_column_name(), val),
+                    format!("{} ILIKE '%{}%'", sys.as_str(), val),
                 TagType::SizeBytes | TagType::ModifiedTs => 
-                    format!("{} = {}", sys.db_column_name(), val), 
+                    format!("{} = {}", sys.as_str(), val), 
                 TagType::Tags => format!("1=0"),
             },
             TagTypeEnum::User(key) => format!("element_at(tags, '{}') ILIKE '%{}%'", Self::escape(key), val),
