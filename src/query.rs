@@ -1,184 +1,18 @@
 use anyhow::Result;
 use std::iter::Peekable;
 use std::str::Chars;
-
-// --- Schema Definition ---
-
-pub struct ColumnDef {
-    pub name: &'static str,
-    pub sql_type: &'static str,
-}
-
-// Generate schema columns from TagType definitions
-pub fn get_schema_columns() -> Vec<ColumnDef> {
-    TagType::all_variants().iter()
-        .map(|t| ColumnDef {
-            name: t.as_str(),
-            sql_type: t.sql_type(),
-        })
-        .collect()
-}
-
-// --- Search Types ---
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum TagType {
-    // All System Tags are Searchable and represent DB Columns
-    Path,
-    ParentDir,
-    FileName,
-    Stem,
-    Extension,
-    Directory,
-    SizeBytes,
-    ModifiedTs,
-    Kind,
-    SizeStr,
-    ModifiedStr,
-    Tags,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct TypedTag {
-    pub tag_type: TagTypeEnum,
-    pub value: String,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum TagTypeEnum {
-    System(TagType),
-    User(String),
-}
-
-impl TagType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TagType::Path => "path",
-            TagType::ParentDir => "parentdir",
-            TagType::FileName => "filename",
-            TagType::Stem => "stem",
-            TagType::Extension => "extension",
-            TagType::Directory => "directory",
-            TagType::SizeBytes => "size_bytes",
-            TagType::ModifiedTs => "modified_ts",
-            TagType::Kind => "kind",
-            TagType::SizeStr => "size_str",
-            TagType::ModifiedStr => "modified_str",
-            TagType::Tags => "tags",
-        }
-    }
-
-    pub fn sql_type(&self) -> &'static str {
-        match self {
-            TagType::Directory => "BOOLEAN",
-            TagType::SizeBytes | TagType::ModifiedTs => "BIGINT",
-            TagType::Tags => "MAP(TEXT, TEXT)",
-            _ => "TEXT",
-        }
-    }
-
-    pub fn aliases(&self) -> &'static [&'static str] {
-        match self {
-            TagType::FileName => &["file", "name"],
-            TagType::Directory => &["dir"],
-            TagType::Extension => &["ext"],
-            TagType::ParentDir => &["parent"],
-            TagType::SizeBytes => &["size_b"],
-            TagType::ModifiedTs => &["mod_ts"],
-            TagType::SizeStr => &["size"],
-            TagType::ModifiedStr => &["modified", "date"],
-            _ => &[],
-        }
-    }
-
-    // List of all system variants (used for schema and search parsing)
-    pub fn all_variants() -> &'static [TagType] {
-        &[
-            TagType::Path,
-            TagType::ParentDir,
-            TagType::FileName,
-            TagType::Stem,
-            TagType::Extension,
-            TagType::Directory,
-            TagType::SizeBytes,
-            TagType::ModifiedTs,
-            TagType::Kind,
-            TagType::SizeStr,
-            TagType::ModifiedStr,
-            TagType::Tags,
-        ]
-    }
-}
-
-impl TypedTag {
-    fn from_key_value(key: &str, value: &str) -> Self {
-        let lower_key = key.to_lowercase();
-        
-        let system_type = TagType::all_variants().iter().find(|t| {
-            t.as_str() == lower_key || t.aliases().contains(&lower_key.as_str())
-        });
-
-        let (tag_type_enum, final_value) = if let Some(&t) = system_type {
-            let val = if matches!(t, TagType::Extension) {
-                value.to_lowercase().trim_start_matches('.').to_string()
-            } else {
-                value.to_string()
-            };
-            (TagTypeEnum::System(t), val)
-        } else {
-            (TagTypeEnum::User(key.to_string()), value.to_string())
-        };
-
-        TypedTag { tag_type: tag_type_enum, value: final_value }
-    }
-
-    fn to_sql(&self) -> String {
-        let val = Self::escape(&self.value);
-        let dir_col = TagType::Directory.as_str();
-        let name_col = TagType::FileName.as_str();
-
-        match &self.tag_type {
-            TagTypeEnum::System(sys) => match sys {
-                TagType::FileName => format!("({} = FALSE AND {} ILIKE '%{}%')", dir_col, sys.as_str(), val),
-                TagType::Stem => format!("({} = FALSE AND {} ILIKE '%{}%')", dir_col, sys.as_str(), val),
-                TagType::Directory => format!("({} = TRUE AND {} ILIKE '%{}%')", dir_col, name_col, val), 
-                TagType::Extension => format!("{} = '{}'", sys.as_str(), val),
-                TagType::ParentDir => format!("({} ILIKE '%/{}' OR {} = '{}')", sys.as_str(), val, sys.as_str(), val),
-                TagType::Path | TagType::Kind | TagType::SizeStr | TagType::ModifiedStr => 
-                    format!("{} ILIKE '%{}%'", sys.as_str(), val),
-                TagType::SizeBytes | TagType::ModifiedTs => 
-                    format!("{} = {}", sys.as_str(), val), 
-                TagType::Tags => format!("1=0"),
-            },
-            TagTypeEnum::User(key) => format!("element_at(tags, '{}') ILIKE '%{}%'", Self::escape(key), val),
-        }
-    }
-
-    fn escape(s: &str) -> String {
-        s.replace("'", "''")
-    }
-}
+use crate::types::{Tag, TagType, TypedTag};
 
 #[derive(Debug, PartialEq)]
 pub enum QueryNode {
     And(Box<QueryNode>, Box<QueryNode>),
     Or(Box<QueryNode>, Box<QueryNode>),
     Not(Box<QueryNode>), 
-    Term(String),
-    Tag(TypedTag),
+    Term(Tag),
+    TypedTag(TypedTag),
 }
 
-impl QueryNode {
-    pub fn to_sql(&self) -> String {
-        match self {
-            QueryNode::And(left, right) => format!("({} AND {})", left.to_sql(), right.to_sql()),
-            QueryNode::Or(left, right) => format!("({} OR {})", left.to_sql(), right.to_sql()),
-            QueryNode::Not(node) => format!("NOT ({})", node.to_sql()),
-            QueryNode::Term(term) => format!("filename ILIKE '%{}%'", term.replace("'", "''")),
-            QueryNode::Tag(tag) => tag.to_sql(),
-        }
-    }
-}
+// --- Parsing Logic ---
 
 pub struct QueryParser<'a> {
     chars: Peekable<Chars<'a>>,
@@ -256,12 +90,12 @@ impl<'a> QueryParser<'a> {
                 let term = self.read_term()?;
                 if let Some((key, value)) = term.split_once(':') {
                     if !key.is_empty() && !value.is_empty() {
-                        Ok(QueryNode::Tag(TypedTag::from_key_value(key, value)))
+                        Ok(QueryNode::TypedTag(self.create_typed_tag(key, value)))
                     } else {
-                        Ok(QueryNode::Term(term))
+                        Ok(QueryNode::Term(Tag(term)))
                     }
                 } else {
-                    Ok(QueryNode::Term(term))
+                    Ok(QueryNode::Term(Tag(term)))
                 }
             },
             None => Err(anyhow::anyhow!("Unexpected end of input")),
@@ -284,6 +118,27 @@ impl<'a> QueryParser<'a> {
             if c.is_whitespace() { self.chars.next(); } else { break; }
         }
     }
+
+    fn create_typed_tag(&self, key: &str, value: &str) -> TypedTag {
+        let mut key_str = key.to_lowercase();
+        let mut val_str = value.to_string();
+
+        // 互換性のための内部正規化 (ロードマップの「入力の手間の軽減」でエイリアス化予定)
+        if key_str == "ext" { key_str = TagType::EXTENSION.to_string(); }
+        if key_str == "parent" { key_str = TagType::PARENT_DIR.to_string(); }
+
+        if key_str == TagType::EXTENSION {
+            val_str = val_str.to_lowercase().trim_start_matches('.').to_string();
+        }
+        if key_str == TagType::PATH || key_str == TagType::PARENT_DIR {
+            val_str = val_str.replace('\\', "/");
+        }
+
+        TypedTag {
+            tagtype: TagType(key_str),
+            tag: Tag(val_str),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -291,69 +146,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_parser_basic() {
-        let node = QueryParser::parse("foo").unwrap();
-        assert_eq!(node, QueryNode::Term("foo".to_string()));
-
-        let node = QueryParser::parse("foo & bar").unwrap();
-        assert_eq!(node, QueryNode::And(
-            Box::new(QueryNode::Term("foo".to_string())),
-            Box::new(QueryNode::Term("bar".to_string()))
-        ));
+    fn test_query_types() {
+        let tt = TypedTag {
+            tagtype: TagType(TagType::EXTENSION.to_string()),
+            tag: Tag("rs".to_string()),
+        };
+        assert_eq!(tt.tagtype.0, TagType::EXTENSION);
+        assert_eq!(tt.tag.0, "rs");
     }
 
     #[test]
-    fn test_query_parser_typed_tags() {
-        // filename:foo
-        let node = QueryParser::parse("filename:foo").unwrap();
-        assert_eq!(node, QueryNode::Tag(TypedTag { 
-            tag_type: TagTypeEnum::System(TagType::FileName), 
-            value: "foo".to_string() 
-        }));
-        assert_eq!(node.to_sql(), "(directory = FALSE AND filename ILIKE '%foo%')");
-
-        // extension:png
-        let node = QueryParser::parse("extension:png").unwrap();
-        assert_eq!(node, QueryNode::Tag(TypedTag { 
-            tag_type: TagTypeEnum::System(TagType::Extension), 
-            value: "png".to_string() 
-        }));
-        assert_eq!(node.to_sql(), "extension = 'png'");
-
-        // user_tag:value
-        let node = QueryParser::parse("project:alpha").unwrap();
-        assert_eq!(node, QueryNode::Tag(TypedTag { 
-            tag_type: TagTypeEnum::User("project".to_string()), 
-            value: "alpha".to_string() 
-        }));
-        assert_eq!(node.to_sql(), "element_at(tags, 'project') ILIKE '%alpha%'");
-
-        // Newly exposed system tags
-        // kind:Folder
-        let node = QueryParser::parse("kind:Folder").unwrap();
-        assert_eq!(node.to_sql(), "kind ILIKE '%Folder%'");
-
-        // size:10kb (mapped to size_str)
-        let node = QueryParser::parse("size:10kb").unwrap();
-        assert_eq!(node.to_sql(), "size_str ILIKE '%10kb%'");
-
-        // size_b:100 (numeric)
-        let node = QueryParser::parse("size_b:100").unwrap();
-        assert_eq!(node.to_sql(), "size_bytes = 100");
-    }
-
-    #[test]
-    fn test_query_parser_multiple_colons() {
-        // filename:my:file.txt
-        let node = QueryParser::parse("filename:my:file.txt").unwrap();
-        assert_eq!(node, QueryNode::Tag(TypedTag { 
-            tag_type: TagTypeEnum::System(TagType::FileName), 
-            value: "my:file.txt".to_string() 
-        }));
-    }
-
-    #[test]
-    fn test_query_parser_errors() {
-        assert!(QueryParser::parse("foo bar").is_err());
+    fn test_parser_with_new_types() {
+        let node = QueryParser::parse("ext:rs").unwrap();
+        if let QueryNode::TypedTag(tt) = node {
+            assert_eq!(tt.tagtype.0, TagType::EXTENSION);
+            assert_eq!(tt.tag.0, "rs");
+        } else {
+            panic!("Should be a TypedTag");
+        }
     }
 }

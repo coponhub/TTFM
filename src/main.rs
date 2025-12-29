@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
-use ttfm::{FileManager, FileEntry};
-use prettytable::{Table, Row, Cell, format};
+use ttfm::FileManager;
 use anyhow::Result;
 use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -66,12 +65,12 @@ fn main() -> Result<()> {
         Commands::Search { query } => {
             println!("Searching for: '{}'", query);
             let results = fm.search(query)?;
-            print_table(&results);
+            print_results(&results);
         }
         Commands::List => {
             println!("Listing files...");
             let results = fm.search("")?; // Empty query returns list
-            print_table(&results);
+            print_results(&results);
         }
         Commands::Clear => {
             fm.clear_index()?;
@@ -82,31 +81,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn print_table(entries: &[FileEntry]) {
-    if entries.is_empty() {
+fn print_results(paths: &[String]) {
+    if paths.is_empty() {
         println!("No files found.");
         return;
     }
 
-    let mut table = Table::new();
-    table.set_format(*format::consts::FORMAT_NO_LINESEP_WITH_TITLE);
-    table.set_titles(Row::new(vec![
-        Cell::new("Name"),
-        Cell::new("Type"),
-        Cell::new("Size"),
-        Cell::new("Modified"),
-        Cell::new("Path"),
-    ]));
-
-    for entry in entries {
-        table.add_row(Row::new(vec![
-            Cell::new(&entry.name),
-            Cell::new(&entry.kind),
-            Cell::new(&entry.size),
-            Cell::new(&entry.modified),
-            Cell::new(&entry.path),
-        ]));
+    for path in paths {
+        println!("{}", path);
     }
-
-    table.printstd();
+    println!("\nTotal: {} results found.", paths.len());
 }

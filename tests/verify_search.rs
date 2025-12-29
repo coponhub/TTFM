@@ -60,7 +60,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         } else {
             println!("FAIL (Expected {}, got {})", expected_count, results.len());
             for r in &results {
-                println!(" - Found: {}", r.name);
+                println!(" - Found: {}", r);
             }
             panic!("Test failed for query: '{}'", query);
         }

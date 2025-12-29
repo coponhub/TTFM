@@ -9,7 +9,6 @@ duckdb = { version = "1.0", features = ["bundled"] }
 walkdir = "2.4"
 anyhow = "1.0"
 chrono = "0.4"
-prettytable-rs = "0.10"
 indicatif = "0.18.3"
 
 [dev-dependencies]
