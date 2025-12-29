@@ -15,11 +15,26 @@ pub enum QueryNode {
 
 // --- Parsing Logic ---
 
+/// クエリ文字列を解析し、抽象構文木（AST）を構築するパーサ。
 pub struct QueryParser<'a> {
     chars: Peekable<Chars<'a>>,
 }
 
 impl<'a> QueryParser<'a> {
+    /// 検索クエリ文字列を解析して `QueryNode` を返します。
+    ///
+    /// # 構文
+    /// - `&` (AND), `|` (OR), `-` (NOT) の論理演算子をサポート
+    /// - `()` によるグループ化が可能
+    /// - `key:value` 形式の型付き検索をサポート
+    /// - 単一の単語はファイル名検索として扱われる
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ttfm::QueryParser;
+    /// let node = QueryParser::parse("extension:rs & (project | report)").unwrap();
+    /// ```
     pub fn parse(input: &'a str) -> Result<QueryNode> {
         let mut parser = QueryParser {
             chars: input.chars().peekable(),

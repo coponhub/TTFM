@@ -5,17 +5,17 @@ use chrono::{DateTime, Local};
 use crate::types::TypedTag;
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 
-/// 機能拡張の単位を表すトレイト。
+/// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
 /// 
-/// 以下の2つの責任を持ちます：
-/// 1. **抽出 (Tagger)**: ファイルからメタデータ（タグ値）を抽出してDBに保存する。
-/// 2. **検索 (Search)**: ユーザーの検索クエリ（TypedTag）をSQL条件式に変換する。
+/// 新しいタグ機能（例：Exif情報、Gitステータスなど）を追加する場合は、
+/// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
 pub trait TagFunction: Send + Sync {
-    /// この機能が保持するTagger（抽出ロジック）を取得します。
+    /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
     fn tagger(&self) -> &dyn Tagger;
 
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
-    /// この機能が担当しないタグの場合は `None` を返します。
+    /// 
+    /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
     fn to_sql(&self, tag: &TypedTag) -> Option<String>;
 }
 
