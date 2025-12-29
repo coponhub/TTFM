@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::iter::Peekable;
 use std::str::Chars;
 use crate::types::{Tag, TagType, TypedTag};
+use crate::functions::{ExtensionFunction, ParentDirFunction, PathFunction};
 
 #[derive(Debug, PartialEq)]
 pub enum QueryNode {
@@ -120,17 +121,13 @@ impl<'a> QueryParser<'a> {
     }
 
     fn create_typed_tag(&self, key: &str, value: &str) -> TypedTag {
-        let mut key_str = key.to_lowercase();
+        let key_str = key.to_lowercase();
         let mut val_str = value.to_string();
 
-        // 互換性のための内部正規化 (ロードマップの「入力の手間の軽減」でエイリアス化予定)
-        if key_str == "ext" { key_str = TagType::EXTENSION.to_string(); }
-        if key_str == "parent" { key_str = TagType::PARENT_DIR.to_string(); }
-
-        if key_str == TagType::EXTENSION {
+        if key_str == ExtensionFunction::NAME {
             val_str = val_str.to_lowercase().trim_start_matches('.').to_string();
         }
-        if key_str == TagType::PATH || key_str == TagType::PARENT_DIR {
+        if key_str == PathFunction::NAME || key_str == ParentDirFunction::NAME {
             val_str = val_str.replace('\\', "/");
         }
 
@@ -148,18 +145,18 @@ mod tests {
     #[test]
     fn test_query_types() {
         let tt = TypedTag {
-            tagtype: TagType(TagType::EXTENSION.to_string()),
+            tagtype: TagType(ExtensionFunction::NAME.to_string()),
             tag: Tag("rs".to_string()),
         };
-        assert_eq!(tt.tagtype.0, TagType::EXTENSION);
+        assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
         assert_eq!(tt.tag.0, "rs");
     }
 
     #[test]
-    fn test_parser_with_new_types() {
-        let node = QueryParser::parse("ext:rs").unwrap();
+    fn test_normalization_parse() {
+        let node = QueryParser::parse("EXTENSION:RS").unwrap();
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.0, TagType::EXTENSION);
+            assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
             assert_eq!(tt.tag.0, "rs");
         } else {
             panic!("Should be a TypedTag");

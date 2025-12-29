@@ -25,7 +25,7 @@ use functions::{
     ModifiedStrFunction,
     UserTagsFunction,
 };
-use types::{TagType, TypedTag}; 
+use types::TypedTag; 
 
 // Parquetファイル名
 const DEFAULT_INDEX_FILE: &str = "file_index.parquet";
@@ -102,7 +102,7 @@ impl FunctionRegistry {
             }
         }
         // フォールバック
-        format!("element_at({}, '{}') ILIKE '%{}%'", TagType::TAGS, Self::escape(&tag.tagtype.0), Self::escape(&tag.tag.0))
+        format!("element_at({}, '{}') ILIKE '%{}%'", UserTagsFunction::NAME, Self::escape(&tag.tagtype.0), Self::escape(&tag.tag.0))
     }
     
     fn escape(s: &str) -> String {
@@ -268,7 +268,7 @@ mod tests {
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
         assert_eq!(fm.search("report").unwrap().len(), 1);
-        assert_eq!(fm.search("ext:pdf").unwrap().len(), 1);
+        assert_eq!(fm.search("extension:pdf").unwrap().len(), 1);
         
         fm.clear_index().unwrap();
     }

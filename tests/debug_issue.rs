@@ -35,9 +35,8 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
     let fm = FileManager::new_with_index_path(&index_path)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    // 3. 検索実行: parent:src & extension:rs
-    println!("--- Debug Search Results ---");
-    let results = fm.search("parent:src & extension:rs")?;
+    // 3. 検索実行: parentdir:src & extension:rs
+    let results = fm.search("parentdir:src & extension:rs")?;
     
     for path in &results {
         println!("Hit: {}", path);
