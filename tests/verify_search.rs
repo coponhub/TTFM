@@ -36,19 +36,17 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
 
     // 3. Verify Queries
     let test_cases = vec![
-        ("project & report", 2),
-        ("project & -draft", 2),
-        ("project & (alpha | beta)", 3),
-        ("image & 2024", 2),
-        ("image & 2024 & -png", 1),
-        ("-(txt | zip | pdf | jpg | png)", 4), // 3 folders + 1 root directory
-        // Folder specific searches
-        ("docs", 1),            // work_docs
-        ("photos | backup", 3), // personal_photos, temp_backup, backup_2023.zip
-        ("work & docs", 1),     // work_docs
-        ("docs & -work", 0),    // none
-        // Error cases (implicit AND logic check)
-        ("project report", 0), 
+        ("filename:project & filename:report", 2),
+        ("filename:project & -filename:draft", 2),
+        ("filename:project & (filename:alpha | filename:beta)", 3),
+        ("filename:image & filename:2024", 2),
+        ("filename:image & filename:2024 & -extension:png", 1),
+        ("-(extension:txt | extension:zip | extension:pdf | extension:jpg | extension:png)", 4), // 3 folders + 1 root directory
+        // Folder specific searches (directories are also entries with filenames)
+        ("filename:docs", 1),            // work_docs
+        ("filename:photos | filename:backup", 3), // personal_photos, temp_backup, backup_2023.zip
+        ("filename:work & filename:docs", 1),     // work_docs
+        ("filename:docs & -filename:work", 0),    // none
     ];
 
     for (query, expected_count) in test_cases {

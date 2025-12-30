@@ -103,7 +103,6 @@ impl FunctionRegistry {
             QueryNode::And(left, right) => format!("({} AND {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
             QueryNode::Or(left, right) => format!("({} OR {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
             QueryNode::Not(child) => format!("NOT ({})", self.generate_sql(child, tags_path)),
-            QueryNode::Term(tag) => format!("l.filename ILIKE '%{}%'", tag.0.replace("'", "''")),
             QueryNode::TypedTag(tt) => self.tag_to_sql(tt),
         };
         // プレースホルダを実際のパスに置換（各Function実装がこれを使う）
@@ -335,17 +334,10 @@ impl FileManager {
         let sql_where = if query.trim().is_empty() {
             String::new()
         } else {
-            match QueryParser::parse(query) {
-                Ok(node) => {
-                    // ここで生成されるSQLは、エイリアス e, l を使う前提、
-                    // または tags テーブルへのサブクエリを含む必要がある。
-                    format!("WHERE {}", self.registry.generate_sql(&node, &self.tags_path().to_string_lossy()))
-                },
-                Err(_) => {
-                    // 単純検索はファイル名マッチ
-                    format!("WHERE l.filename ILIKE '%{}%'", query.replace("'", "''")) 
-                }
-            }
+            let node = QueryParser::parse(query)?;
+            // ここで生成されるSQLは、エイリアス e, l を使う前提、
+            // または tags テーブルへのサブクエリを含む必要がある。
+            format!("WHERE {}", self.registry.generate_sql(&node, &self.tags_path().to_string_lossy()))
         };
 
         let sql = format!(
@@ -424,9 +416,14 @@ mod tests {
         let fm = FileManager::new_with_index_path(&index_path).unwrap();
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-        assert_eq!(fm.search("report").unwrap().len(), 1);
+        // 修正: Type指定なしの検索はエラーになるため、明示的に filename: を使用するか、
+        // エラーになることを確認する。ここでは filename: を使ってヒットすることを確認する。
+        assert_eq!(fm.search("filename:report").unwrap().len(), 1);
         assert_eq!(fm.search("extension:pdf").unwrap().len(), 1);
         
+        // 修正: Type指定なしの検索がエラーになることを確認
+        assert!(fm.search("report").is_err());
+
         fm.clear_index().unwrap();
     }
 }

@@ -14,8 +14,6 @@ pub enum QueryNode {
     Or(Box<QueryNode>, Box<QueryNode>),
     /// NOT条件 (`-A`)
     Not(Box<QueryNode>),
-    /// 単なる検索語（ファイル名部分一致など）
-    Term(Tag),
     /// 型付きタグ検索 (`key:value`)
     TypedTag(TypedTag),
 }
@@ -40,15 +38,14 @@ impl<'a> QueryParser<'a> {
     /// - `&` (AND), `|` (OR), `-` (NOT) の論理演算子をサポート
     /// - `()` によるグループ化が可能
     /// - `key:value` 形式の型付き検索をサポート
-    /// - 単一の単語はファイル名検索として扱われる
     ///
     /// # Examples
     ///
     /// ```
     /// use ttfm::{QueryParser, QueryNode};
     /// 
-    /// // 拡張子が "rs" かつ ("project" または "report" を含む)
-    /// let node = QueryParser::parse("extension:rs & (project | report)").unwrap();
+    /// // 拡張子が "rs" かつ ("project" または "report" タグを持つ)
+    /// let node = QueryParser::parse("extension:rs & (tag:project | tag:report)").unwrap();
     /// ```
     pub fn parse(input: &'a str) -> Result<QueryNode> {
         let mut parser = QueryParser {
@@ -94,9 +91,28 @@ impl<'a> QueryParser<'a> {
                     let right = self.parse_factor()?;
                     left = QueryNode::And(Box::new(left), Box::new(right));
                 } else {
-                    // それ以外の文字（次の単語など）が続く場合は、ここでは処理せず
-                    // parse() メソッドで "Unexpected characters" エラーにする
-                    break;
+                    // ここに到達するのは、次の単語が続く場合など
+                    // しかし、parse_factorで単語を処理するので、
+                    // 明示的な演算子がなくても連続するタームはANDとして扱う必要があるかもしれない。
+                    // 現状のロジックでは Term がなくなったので、
+                    // "key:val key2:val2" のようなケースをどう扱うか。
+                    // 以前は Term で処理されていたが、ここでは parse_factor が呼ばれるはず。
+                    
+                    // 試しに parse_factor を呼んでみて、成功すれば AND として繋ぐ
+                    // ただし、もし parse_factor が失敗するならループを抜けるべき。
+                    // 現状の parse_factor は "term" が ":" を含まないとエラーになる。
+                    
+                    // 以前のロジック:
+                    // } else { break; } 
+                    // だった。
+                    
+                    // "key:val key2:val2" をパースする場合、
+                    // 1. parse_factor -> key:val
+                    // 2. loop -> peek は 'k'
+                    // 3. else -> parse_factor -> key2:val2 (成功) -> AND
+                    
+                    let right = self.parse_factor()?;
+                    left = QueryNode::And(Box::new(left), Box::new(right));
                 }
             } else { break; }
         }
@@ -129,10 +145,11 @@ impl<'a> QueryParser<'a> {
                     if !key.is_empty() && !value.is_empty() {
                         Ok(QueryNode::TypedTag(self.create_typed_tag(key, value)))
                     } else {
-                        Ok(QueryNode::Term(Tag(term)))
+                         // "key:" or ":val" case
+                         Err(anyhow::anyhow!("Invalid tag format. Use 'key:value'. Found: '{}'", term))
                     }
                 } else {
-                    Ok(QueryNode::Term(Tag(term)))
+                    Err(anyhow::anyhow!("Missing tag type. Use 'key:value' format. Found: '{}'", term))
                 }
             },
             None => Err(anyhow::anyhow!("Unexpected end of input")),

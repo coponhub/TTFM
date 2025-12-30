@@ -33,8 +33,8 @@ impl WasiView for WasmStore {
     fn table(&mut self) -> &mut ResourceTable { &mut self.resource_table }
 }
 
-/// スレッドローカルなインスタンスキャッシュ。
-/// (Plugin名, (Store, Pluginインスタンス)) の形式で保持します。
+// スレッドローカルなインスタンスキャッシュ。
+// (Plugin名, (Store, Pluginインスタンス)) の形式で保持します。
 thread_local! {
     static INSTANCE_CACHE: RefCell<HashMap<String, (Store<WasmStore>, Plugin)>> = RefCell::new(HashMap::new());
 }

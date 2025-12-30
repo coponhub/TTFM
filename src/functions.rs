@@ -535,8 +535,6 @@ impl TagFunction for ModifiedStrFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use tempfile::tempdir;
     use crate::types::{TypedTag, TagType, Tag};
 
     // Helper to create a TypedTag

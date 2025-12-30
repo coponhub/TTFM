@@ -1,5 +1,5 @@
 use ttfm::plugins::WasmPlugin;
-use ttfm::{Tagger, TagValue};
+use ttfm::Tagger;
 use std::path::Path;
 
 #[test]
