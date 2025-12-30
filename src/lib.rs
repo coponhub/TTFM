@@ -15,6 +15,7 @@ pub mod plugins;
 pub mod config;
 mod taggers;
 mod functions;
+mod indexing;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
@@ -34,8 +35,8 @@ use functions::{
 };
 pub use types::{TagType, TypedTag}; 
 
-/// インデックスのデフォルト保存先ファイル名。
-const DEFAULT_INDEX_FILE: &str = ".ttfm/db/file_index.parquet";
+/// インデックス（データベース）のデフォルト保存先ディレクトリ。
+const DEFAULT_DB_DIR: &str = ".ttfm/db";
 
 /// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
 pub struct FunctionRegistry {
@@ -97,14 +98,16 @@ impl FunctionRegistry {
     // --- Search Support ---
 
     /// クエリツリーを辿って、DuckDBで使用可能なSQL WHERE条件式を生成します。
-    pub fn generate_sql(&self, node: &QueryNode) -> String {
-        match node {
-            QueryNode::And(left, right) => format!("({} AND {})", self.generate_sql(left), self.generate_sql(right)),
-            QueryNode::Or(left, right) => format!("({} OR {})", self.generate_sql(left), self.generate_sql(right)),
-            QueryNode::Not(child) => format!("NOT ({})", self.generate_sql(child)),
-            QueryNode::Term(tag) => format!("filename ILIKE '%{}%'", tag.0.replace("'", "''")),
+    pub fn generate_sql(&self, node: &QueryNode, tags_path: &str) -> String {
+        let sql = match node {
+            QueryNode::And(left, right) => format!("({} AND {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
+            QueryNode::Or(left, right) => format!("({} OR {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
+            QueryNode::Not(child) => format!("NOT ({})", self.generate_sql(child, tags_path)),
+            QueryNode::Term(tag) => format!("l.filename ILIKE '%{}%'", tag.0.replace("'", "''")),
             QueryNode::TypedTag(tt) => self.tag_to_sql(tt),
-        }
+        };
+        // プレースホルダを実際のパスに置換（各Function実装がこれを使う）
+        sql.replace("__TAGS_TABLE__", &format!("'{}'", tags_path))
     }
 
     /// `TypedTag` を具体的なSQL条件に変換します。
@@ -125,35 +128,26 @@ impl FunctionRegistry {
 pub struct FileManager {
     /// DuckDB接続
     conn: Connection,
-    /// インデックス（Parquet）の出力先
-    index_path: std::path::PathBuf,
+    /// データベースディレクトリのパス
+    db_dir: std::path::PathBuf,
     /// 利用可能な機能のレジストリ
     registry: FunctionRegistry,
 }
 
 impl FileManager {
     /// デフォルト設定で `FileManager` を作成します。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ttfm::FileManager;
-    /// let fm = FileManager::new().unwrap();
-    /// ```
     pub fn new() -> Result<Self> {
-        Self::new_with_index_path(DEFAULT_INDEX_FILE)
+        Self::new_with_db_dir(DEFAULT_DB_DIR)
     }
 
-    /// 指定されたインデックス保存先で `FileManager` を作成します。
-    pub fn new_with_index_path<P: AsRef<Path>>(index_path: P) -> Result<Self> {
-        let index_path = index_path.as_ref().to_path_buf();
+    /// 指定されたデータベースディレクトリで `FileManager` を作成します。
+    pub fn new_with_db_dir<P: AsRef<Path>>(db_dir: P) -> Result<Self> {
+        let db_dir = db_dir.as_ref().to_path_buf();
         
-        // インデックスファイルの親ディレクトリを作成（存在しない場合）
-        if let Some(parent) = index_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .context(format!("Failed to create database directory: {:?}", parent))?;
-            }
+        // データベースディレクトリを作成（存在しない場合）
+        if !db_dir.exists() {
+            std::fs::create_dir_all(&db_dir)
+                .context(format!("Failed to create database directory: {:?}", db_dir))?;
         }
 
         let conn = Connection::open_in_memory()
@@ -161,10 +155,19 @@ impl FileManager {
         
         Ok(Self { 
             conn,
-            index_path,
+            db_dir,
             registry: FunctionRegistry::with_standard(),
         })
     }
+    
+    // 互換性のためのエイリアス
+    pub fn new_with_index_path<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::new_with_db_dir(path)
+    }
+
+    fn entities_path(&self) -> std::path::PathBuf { self.db_dir.join("entities.parquet") }
+    fn locations_path(&self) -> std::path::PathBuf { self.db_dir.join("locations.parquet") }
+    fn tags_path(&self) -> std::path::PathBuf { self.db_dir.join("tags.parquet") }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
     pub fn new_in_memory() -> Result<Self> {
@@ -172,20 +175,6 @@ impl FileManager {
     }
 
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
-    ///
-    /// # Arguments
-    ///
-    /// * `root_path` - スキャンを開始するルートディレクトリ
-    /// * `on_progress` - 進捗状況を受け取るコールバック
-    /// * `dry_run` - trueの場合、書き込みを行いません
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ttfm::FileManager;
-    /// let fm = FileManager::new_with_index_path("temp.parquet").unwrap();
-    /// fm.index_directory(".", Some(&|count| println!("Progress: {}", count)), false).unwrap();
-    /// ```
     pub fn index_directory<P: AsRef<Path>, F>(&self, root_path: P, on_progress: Option<&F>, dry_run: bool) -> Result<usize> 
     where
         F: Fn(usize) + Sync + Send,
@@ -193,48 +182,100 @@ impl FileManager {
         let root_path = root_path.as_ref();
         
         if !dry_run {
-            let columns_sql = self.registry.get_all_columns().iter()
-                .map(|col| format!("{} {}", col.name, col.sql_type))
-                .collect::<Vec<_>>()
-                .join(", ");
-            
-            let create_sql = format!("CREATE TABLE IF NOT EXISTS temp_files ({})", columns_sql);
-
-            self.conn.execute(&create_sql, [])
-                .context("Failed to create temporary table")?;
-            
-            self.conn.execute("DELETE FROM temp_files", [])?;
+            // 3つのテーブルを作成
+            self.conn.execute_batch("
+                CREATE TABLE IF NOT EXISTS temp_entities (id BIGINT, size BIGINT, mtime BIGINT);
+                CREATE TABLE IF NOT EXISTS temp_locations (entity_id BIGINT, path VARCHAR, filename VARCHAR, parentdir VARCHAR);
+                CREATE TABLE IF NOT EXISTS temp_tags (entity_id BIGINT, tag_type VARCHAR, tag_value VARCHAR);
+                DELETE FROM temp_entities;
+                DELETE FROM temp_locations;
+                DELETE FROM temp_tags;
+            ")?;
         }
 
-        // ファイルリストを先に収集
+        // ファイルリストを収集
+        // データベースディレクトリ自体はインデックス対象から除外する
+        let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
+        
         let entries: Vec<_> = WalkDir::new(root_path)
             .into_iter()
             .filter_map(|e| e.ok())
+            .filter(|e| {
+                // DBディレクトリ配下のファイルは除外
+                if let Ok(path) = e.path().canonicalize() {
+                     !path.starts_with(&db_dir_canonical)
+                } else {
+                    true
+                }
+            })
             .collect();
 
-        // registry だけを切り出して並列処理に渡す (Connectionを含まないためSync)
+        // カラム名を取得（並列処理の外で一度だけ取得）
+        let column_names: Vec<String> = self.registry.get_all_columns()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        
+        // registry だけを切り出して並列処理に渡す
         let registry = &self.registry;
 
-        // 並列にプラグイン処理を実行
-        let results: Vec<Result<Vec<TagValue>>> = entries.par_iter()
-            .map(|entry| registry.process_file(entry.path()))
+        // 並列処理: スキャン -> タグ付け -> 行データ変換
+        // Entity ID はここで連番を振るのが難しい（並列だから）。
+        // したがって、一旦 `enumerate` でインデックスをつけて、それを ID とする。
+        let results: Vec<Result<(crate::indexing::EntityRow, crate::indexing::LocationRow, Vec<crate::indexing::TagRow>)>> = entries
+            .par_iter()
+            .enumerate()
+            .map(|(id, entry)| {
+                // IDは1から始める
+                let entity_id = (id + 1) as i64;
+                
+                // タグ付け実行
+                let values = registry.process_file(entry.path())?;
+                
+                // カラム名と値をペアにする
+                let data: Vec<(String, TagValue)> = column_names.iter()
+                    .zip(values.into_iter())
+                    .map(|(k, v)| (k.clone(), v))
+                    .collect();
+                
+                // 3つの構造体に変換
+                Ok(crate::indexing::convert_to_rows(entity_id, &data))
+            })
             .collect();
 
         let mut count = 0;
         
         if !dry_run {
-            let mut appender = self.conn.appender("temp_files")?;
-            for row_result in results {
-                let row_values = row_result?;
-                let params: Vec<Box<dyn ToSql>> = row_values.iter()
-                    .map(|v| v.to_sql_param())
-                    .collect();
-                
-                let params_ref: Vec<&dyn ToSql> = params.iter()
-                    .map(|b| b.as_ref())
-                    .collect();
+            let mut app_entities = self.conn.appender("temp_entities")?;
+            let mut app_locations = self.conn.appender("temp_locations")?;
+            let mut app_tags = self.conn.appender("temp_tags")?;
 
-                appender.append_row(params_ref.as_slice())?;
+            for row_result in results {
+                let (entity, loc, tags) = row_result?;
+                
+                // Entities
+                app_entities.append_row(&[
+                    &entity.id as &dyn ToSql,
+                    &entity.size,
+                    &entity.mtime
+                ])?;
+
+                // Locations
+                app_locations.append_row(&[
+                    &loc.entity_id as &dyn ToSql,
+                    &loc.path,
+                    &loc.filename,
+                    &loc.parentdir
+                ])?;
+
+                // Tags (複数行)
+                for tag in tags {
+                    app_tags.append_row(&[
+                        &tag.entity_id as &dyn ToSql,
+                        &tag.tag_type,
+                        &tag.tag_value
+                    ])?;
+                }
                 
                 count += 1;
                 if let Some(cb) = on_progress {
@@ -248,58 +289,71 @@ impl FileManager {
         if let Some(cb) = on_progress { cb(count); }
 
         if !dry_run {
-            if self.index_path.exists() {
-                std::fs::remove_file(&self.index_path).ok();
-            }
+            // 古いファイルを削除（念のため）
+            if self.entities_path().exists() { std::fs::remove_file(self.entities_path()).ok(); }
+            if self.locations_path().exists() { std::fs::remove_file(self.locations_path()).ok(); }
+            if self.tags_path().exists() { std::fs::remove_file(self.tags_path()).ok(); }
             
-            let path_str = self.index_path.to_string_lossy();
-            self.conn.execute(&format!("COPY temp_files TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", path_str), [])
-                .context("Failed to export to Parquet")?;
+            // エクスポート
+            let entities_str = self.entities_path().to_string_lossy().to_string();
+            let locations_str = self.locations_path().to_string_lossy().to_string();
+            let tags_str = self.tags_path().to_string_lossy().to_string();
+
+            self.conn.execute(&format!("COPY temp_entities TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", entities_str), [])
+                .context("Failed to export entities")?;
+            self.conn.execute(&format!("COPY temp_locations TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", locations_str), [])
+                .context("Failed to export locations")?;
+            self.conn.execute(&format!("COPY temp_tags TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", tags_str), [])
+                .context("Failed to export tags")?;
             
-            self.conn.execute("DROP TABLE temp_files", []).ok();
+            // 一時テーブル削除
+            self.conn.execute_batch("DROP TABLE temp_entities; DROP TABLE temp_locations; DROP TABLE temp_tags;").ok();
         }
         
         Ok(count)
     }
 
     /// クエリ文字列を使用してインデックスを検索し、一致したファイルのパス一覧を返します。
-    /// インデックスファイル（Parquet）が読み込まれて検索が実行されます。
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - 検索クエリ。空文字列の場合は全件表示（上限100件）になります。
-    ///
-    /// # Returns
-    ///
-    /// 一致したファイルの絶対/相対パスのベクタ。
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use ttfm::FileManager;
-    /// let fm = FileManager::new().unwrap();
-    /// // インデックス作成済みの前提
-    /// let results = fm.search("extension:rs").unwrap();
-    /// ```
     pub fn search(&self, query: &str) -> Result<Vec<String>> {
-        if !self.index_path.exists() {
-             return Err(anyhow::anyhow!("Index not found. Please run 'index' command first."));
+        if !self.entities_path().exists() || !self.locations_path().exists() || !self.tags_path().exists() {
+             return Err(anyhow::anyhow!("Index not found or incomplete. Please run 'index' command first."));
         }
 
-        let table_name = format!("'{}'", self.index_path.to_string_lossy());
+        // Parquetファイルを直接参照するためのパス文字列
+        let entities_path = format!("'{}'", self.entities_path().to_string_lossy());
+        let locations_path = format!("'{}'", self.locations_path().to_string_lossy());
+        // tagsテーブルは各TagFunctionが個別に参照するため、ここではメインのJOINには含めないか、
+        // あるいは `search_base` VIEWを作っておく。
 
+        // メインの検索対象は Entities + Locations
+        // DuckDBではParquetファイルをテーブルとして直接扱える
+        let base_sql = format!(
+            "SELECT l.path, l.parentdir AS directory 
+             FROM {} e 
+             JOIN {} l ON e.id = l.entity_id",
+            entities_path, locations_path
+        );
+
+        // クエリパースとWHERE句の生成
         let sql_where = if query.trim().is_empty() {
             String::new()
         } else {
             match QueryParser::parse(query) {
-                Ok(node) => format!("WHERE {}", self.registry.generate_sql(&node)),
-                Err(_) => format!("WHERE filename ILIKE '%{}%'", query.replace("'", "''")) 
+                Ok(node) => {
+                    // ここで生成されるSQLは、エイリアス e, l を使う前提、
+                    // または tags テーブルへのサブクエリを含む必要がある。
+                    format!("WHERE {}", self.registry.generate_sql(&node, &self.tags_path().to_string_lossy()))
+                },
+                Err(_) => {
+                    // 単純検索はファイル名マッチ
+                    format!("WHERE l.filename ILIKE '%{}%'", query.replace("'", "''")) 
+                }
             }
         };
 
         let sql = format!(
-            "SELECT path FROM {} {} ORDER BY directory DESC, path ASC LIMIT 100",
-            table_name, sql_where
+            "{} {} ORDER BY l.parentdir DESC, l.path ASC LIMIT 100",
+            base_sql, sql_where
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -308,12 +362,12 @@ impl FileManager {
 
         Ok(paths)
     }
-    
+
     /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
-        if self.index_path.exists() {
-            std::fs::remove_file(&self.index_path).context("Failed to remove index file")?;
-        }
+        if self.entities_path().exists() { std::fs::remove_file(self.entities_path()).ok(); }
+        if self.locations_path().exists() { std::fs::remove_file(self.locations_path()).ok(); }
+        if self.tags_path().exists() { std::fs::remove_file(self.tags_path()).ok(); }
         Ok(())
     }
 
