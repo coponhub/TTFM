@@ -10,11 +10,12 @@ use walkdir::WalkDir;
 
 pub mod types;
 pub mod query;
+pub mod plugins;
 mod taggers;
 mod functions;
 
 pub use query::{QueryParser, QueryNode};
-pub use taggers::{ColumnDef, TagValue};
+pub use taggers::{ColumnDef, TagValue, Tagger};
 use functions::{
     TagFunction,
     PathFunction,
@@ -28,7 +29,6 @@ use functions::{
     KindFunction,
     SizeStrFunction,
     ModifiedStrFunction,
-    UserTagsFunction,
 };
 pub use types::{TagType, TypedTag}; 
 
@@ -68,7 +68,6 @@ impl FunctionRegistry {
         reg.register(Box::new(KindFunction::new()));
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
-        reg.register(Box::new(UserTagsFunction::new()));
         reg
     }
 
@@ -106,7 +105,8 @@ impl FunctionRegistry {
         }
     }
 
-    /// `TypedTag` をSQL条件に変換します。対応機能がない場合はユーザータグ検索にフォールバックします。
+    /// `TypedTag` を具体的なSQL条件に変換します。
+    /// 各機能に問い合わせ、対応するものがない場合は常に偽となる条件を返します。
     fn tag_to_sql(&self, tag: &TypedTag) -> String {
         // 各Functionに問い合わせる
         for func in &self.functions {
@@ -114,13 +114,8 @@ impl FunctionRegistry {
                 return sql;
             }
         }
-        // フォールバック: ユーザー定義タグ(MAP型)からの検索
-        format!("element_at({}, '{}') ILIKE '%{}%'", UserTagsFunction::NAME, Self::escape(&tag.tagtype.0), Self::escape(&tag.tag.0))
-    }
-    
-    /// SQLインジェクション防止用の簡易エスケープ処理。
-    fn escape(s: &str) -> String {
-        s.replace("'", "''")
+        // マッチする機能がない場合は常に偽
+        "1=0".to_string()
     }
 }
 
@@ -306,6 +301,33 @@ impl FileManager {
     pub fn clear_index(&self) -> Result<()> {
         if self.index_path.exists() {
             std::fs::remove_file(&self.index_path).context("Failed to remove index file")?;
+        }
+        Ok(())
+    }
+
+    /// 指定されたディレクトリからWasmプラグインをロードし、レジストリに登録します。
+    /// ".wasm" 拡張子を持つファイルを対象とします。
+    pub fn load_plugins<P: AsRef<Path>>(&mut self, dir: P) -> Result<()> {
+        let dir = dir.as_ref();
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(()); // ディレクトリがない場合は何もしない
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
+                match crate::plugins::WasmPlugin::new(&path) {
+                    Ok(plugin) => {
+                        let adapter = plugin.into_adapter()?;
+                        println!("Loaded plugin: {} from {:?}", adapter.name, path);
+                        self.registry.register(Box::new(adapter));
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load plugin {:?}: {}", path, e);
+                    }
+                }
+            }
         }
         Ok(())
     }

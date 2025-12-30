@@ -53,7 +53,10 @@ enum Commands {
 /// アプリケーションのエントリポイント。
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let fm = FileManager::new()?;
+    let mut fm = FileManager::new()?;
+
+    // デフォルトのプラグインディレクトリからロード
+    fm.load_plugins("plugins")?;
 
     match &cli.command {
         Commands::Index { path, dry_run } => {

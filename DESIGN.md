@@ -52,3 +52,76 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
     2. この際、クエリは &(AND) |(OR) -(Not) ()(括弧)を組み合わせた論理式を受け付ける。 
 2. 各 `TypedTag` ノードについて、対応する `TagFunction` が SQL 条件式を生成。
 3. DuckDB を介して Parquet ファイルに対して SQL クエリを実行し、結果を返す。
+
+## 5. プラグインシステム設計 (WebAssembly)
+
+バイナリを再コンパイルすることなく機能を拡張するため、`wasmtime` を用いた WebAssembly (Wasm) プラグインシステムを導入する。
+
+### 5.1 アーキテクチャ概要
+Wasmモジュールはホスト（Rust）から見て1つの `TagFunction` として振る舞う。
+ホスト側で `WasmPluginAdapter`（仮称）を作成し、これが `TagFunction` トレイトを実装することで、既存の `FunctionRegistry` にそのまま登録可能とする。
+
+### 5.2 インターフェース定義 (WIT: Wasm Interface Type)
+Wasmコンポーネントモデルを採用し、`wit` ファイルでインターフェースを定義する。将来的な拡張性を考慮し、プラグイン種別を特定する `core` インターフェースを設ける。
+
+```wit
+package ttfm:plugin
+
+// プラグインの基本情報を定義する共通インターフェース
+interface core {
+    enum plugin-kind {
+        tag-function,
+        // 将来的な拡張例:
+        // query-analyzer,
+        // action-handler,
+        // ui-component
+    }
+
+    record plugin-info {
+        name: string,
+        version: string,
+        kind: plugin-kind,
+    }
+
+    // プラグインの種別やバージョンを返す
+    get-info: func() -> plugin-info
+}
+
+// TagFunction (メタデータ抽出) 固有のインターフェース
+interface tag-function {
+    // カラム定義の型
+    record column-def {
+        name: string,
+        sql-type: string, // "TEXT", "BIGINT", etc.
+    }
+    
+    // 提供するカラムのリスト
+    get-columns: func() -> list<column-def>
+    
+    // 値のバリアント
+    variant tag-value {
+        text(string),
+        big-int(s64),
+        boolean(bool),
+        empty,
+    }
+    
+    // 指定されたファイルのパスを受け取り、タグ値を返す
+    tag-file: func(path: string) -> list<tag-value>
+}
+
+world plugin {
+    export core
+    export tag-function
+}
+```
+
+### 5.3 ホスト側の責務 (Rust)
+1.  **プラグイン探索**: 所定のディレクトリ（例: `~/.config/ttfm/plugins/`）から `.wasm` ファイルをロードする。
+2.  **アダプタ生成**: ロードしたWasmモジュールごとに `WasmPluginAdapter` を生成し、`FunctionRegistry` に登録する。
+3.  **WASI構成**: プラグインが対象ファイルを読み込めるよう、実行時にWASIのファイルシステムアクセス権限（Read-Only）を動的に付与する。
+4.  **SQL生成**: Wasm側にはSQL生成ロジックを持たせず（複雑化回避）、ホスト側が標準的なSQL（単純なカラム一致検索など）を自動生成するフォールバックロジックを使用する。
+
+### 5.4 ゲスト側の責務 (Wasm/Rust, C, etc.)
+1.  **ファイル解析**: 渡されたファイルパス（WASIパス）を開き、内容を解析する（例: 先頭バイトを読んでMIME判定）。
+2.  **値の返却**: 解析結果を `tag-value` のリストとして返す。

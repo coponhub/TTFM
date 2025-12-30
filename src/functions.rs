@@ -27,7 +27,7 @@ pub trait TagFunction: Send + Sync {
 /// # Arguments
 ///
 /// * `s` - エスケープ対象の文字列
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace("'", "''")
 }
 
@@ -500,46 +500,6 @@ impl TagFunction for ModifiedStrFunction {
 }
 
 // ========================================================
-// 12. User Tags Function
-// ========================================================
-
-struct UserTagsTagger;
-
-impl Tagger for UserTagsTagger {
-    fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: UserTagsFunction::NAME.to_string(), sql_type: "MAP(TEXT, TEXT)" }]
-    }
-    /// ユーザー定義タグを抽出します（現状は空マップを返すプレースホルダー）。
-    fn tag_file(&self, _path: &Path) -> Result<Vec<TagValue>> {
-        // 現在は常に空のタグマップを返します。将来的にCLIやGUIで付与されたタグをここで読み込むことができます。
-        Ok(vec![TagValue::Null])
-    }
-}
-
-/// ユーザー定義タグ（`tags`）に関する機能。
-///
-/// # Examples
-/// - Query: `project:alpha` -> ユーザータグ "project" の値に "alpha" を含むファイルを検索
-pub struct UserTagsFunction { tagger: UserTagsTagger }
-
-impl UserTagsFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "tags";
-    /// 新しい `UserTagsFunction` インスタンスを作成します。
-    pub fn new() -> Self { Self { tagger: UserTagsTagger } }
-}
-
-impl TagFunction for UserTagsFunction {
-    fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
-        // Fallback for unknown tags
-        let key = &tag.tagtype.0;
-        let val = escape(&tag.tag.0);
-        Some(format!("element_at({}, '{}') ILIKE '%{}%'", Self::NAME, key, val))
-    }
-}
-
-// ========================================================
 // Unit Tests
 // ========================================================
 
@@ -629,13 +589,6 @@ mod tests {
         let f = ParentDirFunction::new();
         let sql = f.to_sql(&ttag(ParentDirFunction::NAME, "src")).unwrap();
         assert_eq!(sql, "(parentdir ILIKE '%/src' OR parentdir = 'src')");
-    }
-
-    #[test]
-    fn test_user_tags_fallback() {
-        let f = UserTagsFunction::new();
-        let sql = f.to_sql(&ttag("project", "alpha")).unwrap();
-        assert_eq!(sql, "element_at(tags, 'project') ILIKE '%alpha%'");
     }
     
     #[test]

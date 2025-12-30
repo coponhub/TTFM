@@ -1,0 +1,45 @@
+package ttfm:plugin;
+
+// プラグインの基本情報を定義する共通インターフェース
+interface core {
+    enum plugin-kind {
+        tag-function,
+    }
+
+    record plugin-info {
+        name: string,
+        version: string,
+        kind: plugin-kind,
+    }
+
+    // プラグインの種別やバージョンを返す
+    get-info: func() -> plugin-info;
+}
+
+// TagFunction (メタデータ抽出) 固有のインターフェース
+interface tag-function {
+    // カラム定義の型
+    record column-def {
+        name: string,
+        sql-type: string,
+    }
+    
+    // 提供するカラムのリスト
+    get-columns: func() -> list<column-def>;
+    
+    // 値のバリアント
+    variant tag-value {
+        text(string),
+        big-int(s64),
+        boolean(bool),
+        empty,
+    }
+    
+    // 指定されたファイルのパスを受け取り、タグ値を返す
+    tag-file: func(path: string) -> list<tag-value>;
+}
+
+world plugin {
+    export core;
+    export tag-function;
+}
