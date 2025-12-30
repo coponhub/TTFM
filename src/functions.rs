@@ -66,7 +66,7 @@ impl TagFunction for PathFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!("l.path ILIKE '%{}%'", escape(&tag.tag.0)));
+            return Some(format!("l.{} ILIKE '%{}%'", Self::NAME, escape(&tag.tag.0)));
         }
         None
     }
@@ -96,7 +96,7 @@ pub struct ParentDirFunction { tagger: ParentDirTagger }
 
 impl ParentDirFunction {
     /// この機能の識別子名。
-    pub const NAME: &'static str = "parentdir"; // DB column matches
+    pub const NAME: &'static str = "parentdir";
     /// 新しい `ParentDirFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ParentDirTagger } }
 }
@@ -106,8 +106,7 @@ impl TagFunction for ParentDirFunction {
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
             let val = escape(&tag.tag.0);
-            // l.parentdir を使用
-            return Some(format!("(l.parentdir ILIKE '%/{}' OR l.parentdir = '{}')", val, val));
+            return Some(format!("(l.{} ILIKE '%/{}' OR l.{} = '{}')", Self::NAME, val, Self::NAME, val));
         }
         None
     }
@@ -145,11 +144,10 @@ impl TagFunction for FilenameFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            // ディレクトリ除外条件は tags テーブルを参照する必要がある
             let val = escape(&tag.tag.0);
             return Some(format!(
-                "(l.filename ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                val, DirectoryFunction::NAME
+                "(l.{} ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
+                Self::NAME, val, DirectoryFunction::NAME
             ));
         }
         None
@@ -189,11 +187,10 @@ impl TagFunction for StemFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            // Stem検索もファイル名検索として処理 + ディレクトリ除外
              let val = escape(&tag.tag.0);
              return Some(format!(
-                "(l.filename ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                val, DirectoryFunction::NAME
+                "(l.{} ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
+                FilenameFunction::NAME, val, DirectoryFunction::NAME
             ));
         }
         None
@@ -234,7 +231,7 @@ impl TagFunction for ExtensionFunction {
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
             let val = escape(&tag.tag.0);
-            return Some(format!("l.extension = '{}'", val));
+            return Some(format!("l.{} = '{}'", Self::NAME, val));
         }
         None
     }
@@ -273,10 +270,9 @@ impl TagFunction for DirectoryFunction {
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
             let val = escape(&tag.tag.0);
-            // ディレクトリ名マッチ (filename) かつ directoryタグがtrue
             return Some(format!(
-                "(l.filename ILIKE '%{}%' AND EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                val, Self::NAME
+                "(l.{} ILIKE '%{}%' AND EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
+                FilenameFunction::NAME, val, Self::NAME
             ));
         }
         None
@@ -317,8 +313,7 @@ impl TagFunction for SizeBytesFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            // e.size
-            return Some(format!("e.size = {}", escape(&tag.tag.0)));
+            return Some(format!("e.{} = {}", Self::NAME, escape(&tag.tag.0)));
         }
         None
     }
@@ -361,8 +356,7 @@ impl TagFunction for ModifiedTsFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            // e.mtime
-            return Some(format!("e.mtime = {}", escape(&tag.tag.0)));
+            return Some(format!("e.{} = {}", Self::NAME, escape(&tag.tag.0)));
         }
         None
     }
@@ -405,7 +399,6 @@ impl TagFunction for KindFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
-            // Tagsテーブル参照
             return Some(format!(
                 "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
                 Self::NAME, escape(&tag.tag.0)
@@ -545,33 +538,30 @@ mod tests {
     #[test]
     fn test_path_function() {
         let f = PathFunction::new();
-        // SQL Check
         let sql = f.to_sql(&ttag(PathFunction::NAME, "foo")).unwrap();
-        assert_eq!(sql, "l.path ILIKE '%foo%'");
+        assert_eq!(sql, format!("l.{} ILIKE '%foo%'", PathFunction::NAME));
     }
 
     #[test]
     fn test_filename_function() {
         let f = FilenameFunction::new();
-        // SQL Check
         let sql = f.to_sql(&ttag(FilenameFunction::NAME, "report")).unwrap();
-        assert!(sql.contains("l.filename ILIKE '%report%' "));
+        assert!(sql.contains(&format!("l.{} ILIKE '%report%'", FilenameFunction::NAME)));
         assert!(sql.contains("NOT EXISTS"));
-        assert!(sql.contains("tag_type = 'directory'"));
+        assert!(sql.contains(&format!("tag_type = '{}'", DirectoryFunction::NAME)));
     }
 
     #[test]
     fn test_extension_function() {
         let f = ExtensionFunction::new();
-        // SQL Check
         let sql = f.to_sql(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
-        assert_eq!(sql, "l.extension = 'rs'");
+        assert_eq!(sql, format!("l.{} = 'rs'", ExtensionFunction::NAME));
     }
 
     #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
         let sql = f.to_sql(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
-        assert_eq!(sql, "e.size = 123");
+        assert_eq!(sql, format!("e.{} = 123", SizeBytesFunction::NAME));
     }
 }

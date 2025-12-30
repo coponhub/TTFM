@@ -4,11 +4,8 @@
 //! DuckDBをバックエンドに使用し、Parquet形式でのインデックス保存と高速な検索を実現します。
 
 use anyhow::{Context, Result};
-use duckdb::{Connection, ToSql};
-use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
-use rayon::prelude::*;
-use std::time::UNIX_EPOCH;
+use duckdb::Connection;
+use std::path::Path;
 use file_id::get_file_id;
 
 pub mod types;
@@ -17,7 +14,7 @@ pub mod plugins;
 pub mod config;
 mod taggers;
 mod functions;
-mod indexing;
+pub mod indexing;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
@@ -38,7 +35,7 @@ use functions::{
 pub use types::{TagType, TypedTag}; 
 
 /// ファイルの一意識別子を取得し、文字列として返します。
-fn get_inode_string(path: &Path) -> String {
+pub(crate) fn get_inode_string(path: &Path) -> String {
     match get_file_id(path) {
         Ok(id) => format!("{:?}", id),
         Err(_) => path.to_string_lossy().to_string(), // フォールバックとしてパスを使用
@@ -177,7 +174,6 @@ impl FileManager {
     fn entities_path(&self) -> std::path::PathBuf { self.db_dir.join("entities.parquet") }
     fn locations_path(&self) -> std::path::PathBuf { self.db_dir.join("locations.parquet") }
     fn tags_path(&self) -> std::path::PathBuf { self.db_dir.join("tags.parquet") }
-    fn temp_scan_path(&self) -> std::path::PathBuf { self.db_dir.join("current_scan.parquet") }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
     pub fn new_in_memory() -> Result<Self> {
@@ -189,299 +185,8 @@ impl FileManager {
     where
         F: Fn(usize) + Sync + Send,
     {
-        let root_path = root_path.as_ref();
-        
-        // --- 1. Scan Phase ---
-        if !dry_run {
-            self.conn.execute_batch("
-                CREATE TABLE IF NOT EXISTS temp_scan (path VARCHAR, inode VARCHAR, size BIGINT, mtime BIGINT);
-                DELETE FROM temp_scan;
-            ")?;
-        }
-
-        let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
-        let (tx, rx) = std::sync::mpsc::channel::<(String, String, i64, i64)>();
-        let mut count = 0;
-
-        // 並列スキャンの実行
-        let walker = ignore::WalkBuilder::new(root_path)
-            .hidden(false) // 隠しファイルも対象にする
-            .git_ignore(true) // .gitignore は尊重する（設定次第で変更可能）
-            .threads(rayon::current_num_threads()) // Rayonと同じスレッド数を使用
-            .build_parallel();
-
-        let scan_thread = std::thread::spawn(move || {
-            walker.run(|| {
-                let tx = tx.clone();
-                let db_dir_canonical = db_dir_canonical.clone();
-                Box::new(move |result| {
-                    if let Ok(entry) = result {
-                        // DBディレクトリ配下のファイルは除外
-                        if let Ok(path) = entry.path().canonicalize() {
-                            if path.starts_with(&db_dir_canonical) { return ignore::WalkState::Continue; }
-                        }
-
-                        let path_str = entry.path().to_string_lossy().to_string();
-                        let inode = get_inode_string(entry.path());
-                        let metadata = match entry.metadata() {
-                            Ok(m) => m,
-                            Err(_) => return ignore::WalkState::Continue,
-                        };
-                        let size = if entry.path().is_dir() { 0 } else { metadata.len() as i64 };
-                        let mtime = metadata.modified()
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-                            .unwrap_or(0);
-
-                        let _ = tx.send((path_str, inode, size, mtime));
-                    }
-                    ignore::WalkState::Continue
-                })
-            });
-        });
-
-        // メインスレッドで受信して Appender に書き込む
-        {
-            let mut appender = if !dry_run { Some(self.conn.appender("temp_scan")?) } else { None };
-
-            for (path_str, inode, size, mtime) in rx {
-                if let Some(ref mut app) = appender {
-                    app.append_row(&[
-                        &path_str as &dyn ToSql,
-                        &inode,
-                        &size,
-                        &mtime
-                    ])?;
-                }
-
-                count += 1;
-                if let Some(cb) = on_progress {
-                    if count % 1000 == 0 { cb(count); }
-                }
-            }
-        }
-
-        scan_thread.join().map_err(|_| anyhow::anyhow!("Scan thread panicked"))?;
-
-        if !dry_run {
-            // スキャン結果を Parquet に出力
-            let scan_path = self.temp_scan_path().to_string_lossy().to_string();
-            self.conn.execute(&format!("COPY temp_scan TO '{}' (FORMAT 'parquet')", scan_path), [])
-                .context("Failed to export current_scan.parquet")?;
-            self.conn.execute("DROP TABLE temp_scan", [])?;
-        }
-
-        if let Some(cb) = on_progress { cb(count); }
-
-        if dry_run {
-            return Ok(count);
-        }
-
-        // --- 2. Diff Phase ---
-        // 既存データの有無を確認
-        let has_existing = self.entities_path().exists() && self.locations_path().exists();
-        let entities_str = self.entities_path().to_string_lossy().to_string();
-        let locations_str = self.locations_path().to_string_lossy().to_string();
-        let scan_path_str = self.temp_scan_path().to_string_lossy().to_string();
-
-        // Parquetファイル参照用のSQLフラグメント
-        let old_entities_sql = format!("read_parquet('{}')", entities_str);
-        let old_locations_sql = format!("read_parquet('{}')", locations_str);
-        let current_scan_sql = format!("read_parquet('{}')", scan_path_str);
-
-        let max_id: i64;
-        let to_tag: Vec<crate::indexing::ScanEntry>;
-        let mut moved: Vec<(i64, String)> = Vec::new(); // entity_id, new_path
-        let mut deleted_ids: Vec<i64> = Vec::new();
-        let mut unchanged_ids: Vec<i64> = Vec::new();
-
-        if has_existing {
-            // 1. 最大IDを取得
-            max_id = self.conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {}", old_entities_sql), [], |r| r.get(0))?;
-
-            // 2. To Process (新規 または 内容変更) を抽出
-            let mut stmt = self.conn.prepare(
-                &format!("SELECT s.path, s.inode, s.size, s.mtime 
-                 FROM {} s
-                 WHERE NOT EXISTS (
-                    SELECT 1 FROM {} e 
-                    WHERE e.inode = s.inode AND e.mtime = s.mtime AND e.size = s.size
-                 )", current_scan_sql, old_entities_sql)
-            )?;
-            to_tag = stmt.query_map([], |row| Ok(crate::indexing::ScanEntry {
-                path: row.get(0)?,
-                inode: row.get(1)?,
-                size: row.get(2)?,
-                mtime: row.get(3)?,
-            }))?.collect::<std::result::Result<Vec<_>, _>>()?;
-
-            // 3. Moved (Inode/Metadata一致 だが Path不一致) を抽出
-            let mut stmt = self.conn.prepare(
-                &format!("SELECT e.id, s.path 
-                 FROM {} e
-                 JOIN {} s ON e.inode = s.inode
-                 JOIN {} l ON e.id = l.entity_id
-                 WHERE l.path != s.path AND s.mtime = e.mtime AND s.size = e.size",
-                 old_entities_sql, current_scan_sql, old_locations_sql)
-            )?;
-            moved = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            // 4. Deleted (既存にあるがスキャン結果にない、または再タグ付け対象になった古いエントリ)
-            let mut stmt = self.conn.prepare(
-                &format!("SELECT id FROM {} 
-                 EXCEPT 
-                 SELECT e.id FROM {} e 
-                 JOIN {} s ON e.inode = s.inode 
-                 WHERE e.mtime = s.mtime AND e.size = s.size",
-                 old_entities_sql, old_entities_sql, current_scan_sql)
-            )?;
-            deleted_ids = stmt.query_map([], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            // 5. Unchanged
-            let mut stmt = self.conn.prepare(
-                &format!("SELECT e.id FROM {} e
-                 JOIN {} s ON e.inode = s.inode
-                 JOIN {} l ON e.id = l.entity_id
-                 WHERE l.path = s.path AND s.mtime = e.mtime AND s.size = e.size",
-                 old_entities_sql, current_scan_sql, old_locations_sql)
-            )?;
-            unchanged_ids = stmt.query_map([], |row| row.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        } else {
-            max_id = 0;
-            // 初回インデックス時は全件を to_tag へ
-            let mut stmt = self.conn.prepare(&format!("SELECT path, inode, size, mtime FROM {}", current_scan_sql))?;
-            to_tag = stmt.query_map([], |row| Ok(crate::indexing::ScanEntry {
-                path: row.get(0)?,
-                inode: row.get(1)?,
-                size: row.get(2)?,
-                mtime: row.get(3)?,
-            }))?.collect::<std::result::Result<Vec<_>, _>>()?;
-        }
-
-        // --- 3. Tagging Phase ---
-        self.conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS temp_entities (id BIGINT, inode VARCHAR, size BIGINT, mtime BIGINT);
-            CREATE TABLE IF NOT EXISTS temp_locations (entity_id BIGINT, path VARCHAR, filename VARCHAR, parentdir VARCHAR, extension VARCHAR);
-            CREATE TABLE IF NOT EXISTS temp_tags (entity_id BIGINT, tag_type VARCHAR, tag_value VARCHAR);
-            DELETE FROM temp_entities;
-            DELETE FROM temp_locations;
-            DELETE FROM temp_tags;
-        ")?;
-
-        let columns: Vec<ColumnDef> = self.registry.get_all_columns();
-        let registry = &self.registry;
-
-        let tagging_results: Vec<Result<(crate::indexing::EntityRow, crate::indexing::LocationRow, Vec<crate::indexing::TagRow>)>> = to_tag
-            .par_iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let entity_id = max_id + (i as i64) + 1;
-                let path = Path::new(&entry.path);
-                let values = registry.process_file(path)?;
-                let data: Vec<(ColumnDef, TagValue)> = columns.iter()
-                    .zip(values.into_iter())
-                    .map(|(c, v)| (c.clone(), v))
-                    .collect();
-                Ok(crate::indexing::convert_to_rows(entity_id, entry.inode.clone(), &data))
-            })
-            .collect();
-
-        // 移動分の Location 生成
-        let moved_locations: Vec<crate::indexing::LocationRow> = moved.into_iter().map(|(eid, path_str)| {
-            let p = Path::new(&path_str);
-            let filename = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let parentdir = p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let extension = p.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default();
-            
-            crate::indexing::LocationRow {
-                entity_id: eid,
-                path: path_str,
-                filename,
-                parentdir,
-                extension,
-            }
-        }).collect();
-
-        // --- 4. Merge/Finalize Phase ---
-        {
-            let mut app_entities = self.conn.appender("temp_entities")?;
-            let mut app_locations = self.conn.appender("temp_locations")?;
-            let mut app_tags = self.conn.appender("temp_tags")?;
-
-            for res in tagging_results {
-                let (entity, loc, tags) = res?;
-                app_entities.append_row(&[&entity.id as &dyn ToSql, &entity.inode, &entity.size, &entity.mtime])?;
-                app_locations.append_row(&[&loc.entity_id as &dyn ToSql, &loc.path, &loc.filename, &loc.parentdir, &loc.extension])?;
-                for t in tags {
-                    app_tags.append_row(&[&t.entity_id as &dyn ToSql, &t.tag_type, &t.tag_value])?;
-                }
-            }
-            
-            for loc in moved_locations {
-                app_locations.append_row(&[&loc.entity_id as &dyn ToSql, &loc.path, &loc.filename, &loc.parentdir, &loc.extension])?;
-            }
-        }
-
-        // Parquetファイルへの最終マージ書き出し
-        let tags_str = self.tags_path().to_string_lossy().to_string();
-
-        if has_existing {
-            // 既存データのうち、維持するもの（Unchanged + Moved）と 新規分を結合
-            // 削除・更新された ID は除外
-            let filter = if deleted_ids.is_empty() { "1=1".to_string() } else { 
-                format!("id NOT IN ({})", deleted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) 
-            };
-            
-            let entities_tmp = format!("{}.tmp", entities_str);
-            let locations_tmp = format!("{}.tmp", locations_str);
-            let tags_tmp = format!("{}.tmp", tags_str);
-
-            // Entities: (Old - Deleted) + New
-            self.conn.execute(&format!("COPY (
-                SELECT * FROM {} WHERE {}
-                UNION ALL SELECT * FROM temp_entities
-            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", old_entities_sql, filter, entities_tmp), [])?;
-
-            // Locations: (Old - Deleted - Moved) + New + UpdatedMoved
-            let keep_filter = if unchanged_ids.is_empty() { "1=0".to_string() } else {
-                format!("entity_id IN ({})", unchanged_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
-            };
-            
-            self.conn.execute(&format!("COPY (
-                SELECT * FROM {} WHERE {}
-                UNION ALL SELECT * FROM temp_locations
-            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", old_locations_sql, keep_filter, locations_tmp), [])?;
-
-            // Tags: (Old - Deleted) + New
-            let tags_filter = if deleted_ids.is_empty() { "1=1".to_string() } else { 
-                format!("entity_id NOT IN ({})", deleted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) 
-            };
-            let old_tags_sql = format!("read_parquet('{}')", tags_str);
-            self.conn.execute(&format!("COPY (
-                SELECT * FROM {} WHERE {}
-                UNION ALL SELECT * FROM temp_tags
-            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", old_tags_sql, tags_filter, tags_tmp), [])?;
-
-            // リネームして確定
-            std::fs::rename(&entities_tmp, &entities_str)?;
-            std::fs::rename(&locations_tmp, &locations_str)?;
-            std::fs::rename(&tags_tmp, &tags_str)?;
-
-        } else {
-            // 初回保存
-            self.conn.execute(&format!("COPY temp_entities TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", entities_str), [])?;
-            self.conn.execute(&format!("COPY temp_locations TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", locations_str), [])?;
-            self.conn.execute(&format!("COPY temp_tags TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", tags_str), [])?;
-        }
-        
-        // クリーンアップ
-        self.conn.execute_batch("DROP TABLE temp_entities; DROP TABLE temp_locations; DROP TABLE temp_tags;").ok();
-        std::fs::remove_file(self.temp_scan_path()).ok();
-        
-        Ok(count)
+        let indexer = crate::indexing::Indexer::new(&self.conn, &self.registry, self.db_dir.clone());
+        indexer.run(root_path, on_progress, dry_run)
     }
 
     /// クエリ文字列を使用してインデックスを検索し、一致したファイルのパス一覧を返します。

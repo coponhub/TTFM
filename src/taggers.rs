@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
+use duckdb::types::{ToSql, ToSqlOutput, Null};
 
 /// カラムが所属すべきテーブル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,15 +32,14 @@ pub enum TagValue {
     Map(Vec<(String, String)>), 
 }
 
-impl TagValue {
-    /// DuckDBの `ToSql` パラメータに変換します。
-    pub fn to_sql_param(&self) -> Box<dyn duckdb::ToSql> {
+impl ToSql for TagValue {
+    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
         match self {
-            TagValue::Text(s) => Box::new(s.clone()),
-            TagValue::BigInt(i) => Box::new(*i),
-            TagValue::Boolean(b) => Box::new(*b),
-            TagValue::Null => Box::new(Option::<String>::None),
-            TagValue::Map(_) => Box::new(Option::<String>::None), 
+            TagValue::Text(s) => Ok(ToSqlOutput::from(s.as_str())),
+            TagValue::BigInt(i) => Ok(ToSqlOutput::from(*i)),
+            TagValue::Boolean(b) => Ok(ToSqlOutput::from(*b)),
+            TagValue::Null => Ok(ToSqlOutput::from(Null)),
+            TagValue::Map(_) => Ok(ToSqlOutput::from(Null)),
         }
     }
 }
