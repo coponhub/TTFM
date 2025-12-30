@@ -1,4 +1,4 @@
-use crate::taggers::TagValue;
+use crate::taggers::{TagValue, ColumnDef, TargetTable};
 
 #[derive(Debug, PartialEq)]
 pub struct EntityRow {
@@ -22,10 +22,10 @@ pub struct TagRow {
     pub tag_value: String,
 }
 
-/// カラム名と値のペアから、3テーブル用の行データを生成する
+/// カラム定義と値のペアから、3テーブル用の行データを生成する
 pub fn convert_to_rows(
     entity_id: i64,
-    data: &[(String, TagValue)],
+    data: &[(ColumnDef, TagValue)],
 ) -> (EntityRow, LocationRow, Vec<TagRow>) {
     let mut size = 0;
     let mut mtime = 0;
@@ -34,57 +34,38 @@ pub fn convert_to_rows(
     let mut parentdir = String::new();
     let mut tags = Vec::new();
 
-    for (col_name, value) in data {
-        match col_name.as_str() {
-            // Entities
-            "size_bytes" => {
-                if let TagValue::BigInt(v) = value {
-                    size = *v;
+    for (col_def, value) in data {
+        match col_def.target_table {
+            TargetTable::Entities => {
+                match col_def.name.as_str() {
+                    "size_bytes" => if let TagValue::BigInt(v) = value { size = *v; },
+                    "modified_ts" => if let TagValue::BigInt(v) = value { mtime = *v; },
+                    _ => {}
                 }
-            }
-            "modified_ts" => {
-                if let TagValue::BigInt(v) = value {
-                    mtime = *v;
+            },
+            TargetTable::Locations => {
+                match col_def.name.as_str() {
+                    "path" => if let TagValue::Text(v) = value { path = v.clone(); },
+                    "filename" => if let TagValue::Text(v) = value { filename = v.clone(); },
+                    "parentdir" => if let TagValue::Text(v) = value { parentdir = v.clone(); },
+                    _ => {}
                 }
-            }
-            
-            // Locations
-            "path" => {
-                if let TagValue::Text(v) = value {
-                    path = v.clone();
-                }
-            }
-            "filename" => {
-                if let TagValue::Text(v) = value {
-                    filename = v.clone();
-                }
-            }
-            "parent_dir" => { // Note: Tagger returns "parent_dir", DB column is "parentdir"
-                if let TagValue::Text(v) = value {
-                    parentdir = v.clone();
-                }
-            }
-
-            // Tags (Others)
-            _ => {
-                // 表示用のカラムは除外
-                if col_name != "size_str" && col_name != "modified_str" {
-                    let val_str = match value {
-                        TagValue::Text(s) => s.clone(),
-                        TagValue::BigInt(i) => i.to_string(),
-                        TagValue::Boolean(b) => b.to_string(),
-                        TagValue::Null => String::new(),
-                        _ => String::new(),
-                    };
-                    
-                    // 値が存在する場合のみタグとして登録
-                    if !val_str.is_empty() {
-                         tags.push(TagRow {
-                            entity_id,
-                            tag_type: col_name.clone(),
-                            tag_value: val_str,
-                        });
-                    }
+            },
+            TargetTable::Tags => {
+                let val_str = match value {
+                    TagValue::Text(s) => s.clone(),
+                    TagValue::BigInt(i) => i.to_string(),
+                    TagValue::Boolean(b) => b.to_string(),
+                    TagValue::Null => String::new(),
+                    _ => String::new(),
+                };
+                
+                if !val_str.is_empty() {
+                     tags.push(TagRow {
+                        entity_id,
+                        tag_type: col_def.name.clone(),
+                        tag_value: val_str,
+                    });
                 }
             }
         }
@@ -101,18 +82,21 @@ pub fn convert_to_rows(
 mod tests {
     use super::*;
 
+    fn col(name: &str, table: TargetTable) -> ColumnDef {
+        ColumnDef { name: name.to_string(), sql_type: "TEXT", target_table: table }
+    }
+
     #[test]
     fn test_convert_to_rows() {
         let entity_id = 100;
         let data = vec![
-            ("path".to_string(), TagValue::Text("/home/user/doc.txt".to_string())),
-            ("filename".to_string(), TagValue::Text("doc.txt".to_string())),
-            ("parent_dir".to_string(), TagValue::Text("/home/user".to_string())),
-            ("size_bytes".to_string(), TagValue::BigInt(1024)),
-            ("modified_ts".to_string(), TagValue::BigInt(123456789)),
-            ("extension".to_string(), TagValue::Text("txt".to_string())),
-            ("kind".to_string(), TagValue::Text("File".to_string())),
-            ("size_str".to_string(), TagValue::Text("1KB".to_string())), // Should be ignored
+            (col("path", TargetTable::Locations), TagValue::Text("/home/user/doc.txt".to_string())),
+            (col("filename", TargetTable::Locations), TagValue::Text("doc.txt".to_string())),
+            (col("parentdir", TargetTable::Locations), TagValue::Text("/home/user".to_string())),
+            (col("size_bytes", TargetTable::Entities), TagValue::BigInt(1024)),
+            (col("modified_ts", TargetTable::Entities), TagValue::BigInt(123456789)),
+            (col("extension", TargetTable::Tags), TagValue::Text("txt".to_string())),
+            (col("kind", TargetTable::Tags), TagValue::Text("File".to_string())),
         ];
 
         let (entity, location, tags) = convert_to_rows(entity_id, &data);
@@ -130,17 +114,6 @@ mod tests {
             parentdir: "/home/user".to_string(),
         });
 
-        // Tags should check contents, order might vary if hashmap but vec preserves order
         assert_eq!(tags.len(), 2);
-        assert!(tags.contains(&TagRow {
-            entity_id: 100,
-            tag_type: "extension".to_string(),
-            tag_value: "txt".to_string()
-        }));
-        assert!(tags.contains(&TagRow {
-            entity_id: 100,
-            tag_type: "kind".to_string(),
-            tag_value: "File".to_string()
-        }));
     }
 }

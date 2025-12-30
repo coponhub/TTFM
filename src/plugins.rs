@@ -73,6 +73,7 @@ impl WasmPlugin {
         let columns = wasm_cols.into_iter().map(|c| ColumnDef {
             name: c.name,
             sql_type: Box::leak(c.sql_type.into_boxed_str()), 
+            target_table: crate::taggers::TargetTable::Tags,
         }).collect();
         
         Ok(WasmPluginAdapter {
@@ -145,7 +146,10 @@ impl TagFunction for WasmPluginAdapter {
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == self.name {
             let val = escape(&tag.tag.0);
-            return Some(format!("{} ILIKE '%{}%'", self.name, val));
+            return Some(format!(
+                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
+                self.name, val
+            ));
         }
         None
     }

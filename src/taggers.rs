@@ -1,6 +1,14 @@
 use anyhow::Result;
 use std::path::Path;
 
+/// カラムが所属すべきテーブル。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetTable {
+    Entities,
+    Locations,
+    Tags,
+}
+
 /// データベースのカラム定義。
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
@@ -8,6 +16,8 @@ pub struct ColumnDef {
     pub name: String,
     /// SQLのデータ型（例: "TEXT", "BIGINT"）
     pub sql_type: &'static str,
+    /// 所属テーブル
+    pub target_table: TargetTable,
 }
 
 /// Taggerが抽出して返す値の型。

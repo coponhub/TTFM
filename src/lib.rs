@@ -210,11 +210,8 @@ impl FileManager {
             })
             .collect();
 
-        // カラム名を取得（並列処理の外で一度だけ取得）
-        let column_names: Vec<String> = self.registry.get_all_columns()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        // カラム定義を取得（並列処理の外で一度だけ取得）
+        let columns: Vec<ColumnDef> = self.registry.get_all_columns();
         
         // registry だけを切り出して並列処理に渡す
         let registry = &self.registry;
@@ -232,10 +229,10 @@ impl FileManager {
                 // タグ付け実行
                 let values = registry.process_file(entry.path())?;
                 
-                // カラム名と値をペアにする
-                let data: Vec<(String, TagValue)> = column_names.iter()
+                // カラム定義と値をペアにする
+                let data: Vec<(ColumnDef, TagValue)> = columns.iter()
                     .zip(values.into_iter())
-                    .map(|(k, v)| (k.clone(), v))
+                    .map(|(c, v)| (c.clone(), v))
                     .collect();
                 
                 // 3つの構造体に変換
