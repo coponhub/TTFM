@@ -1,3 +1,8 @@
+//! # TTFM (Typed Tag File Manager) CLI
+//! 
+//! このバイナリは、Typed Tag（型付きタグ）を用いたファイル管理システムのコマンドラインインターフェースを提供します。
+//! インデックスの作成、検索、一覧表示、削除などの操作が可能です。
+
 use clap::{Parser, Subcommand};
 use ttfm::FileManager;
 use anyhow::Result;
@@ -5,42 +10,47 @@ use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 
+/// TTFM (Typed Tag File Manager) のメインCLI構造体。
+/// `clap` を使用してコマンドライン引数を解析します。
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help = true)]
 #[command(help_template = "Usage: file_manager <COMMAND>\n\n{after-help}\n\nOptions:\n{options}")]
 #[command(after_help = "Commands:\n  index <PATH>      Index a directory recursively\n  search <QUERY>    Search for files\n  list              List all files (limited to 100)\n  clear             Clear the entire index")]
 struct Cli {
+    /// 実行するサブコマンド
     #[command(subcommand)]
     command: Commands,
 }
 
+/// TTFM で利用可能なサブコマンド。
 #[derive(Subcommand)]
 enum Commands {
-    /// Index a directory recursively
+    /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
     #[command(hide = true)]
     Index {
-        /// The directory path to start indexing from (e.g., "." or "/home/user")
+        /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
         path: PathBuf,
         
-        /// Perform a scan without writing to the database (for benchmarking)
+        /// trueの場合、データベースへの書き込みやParquet保存を行わず、スキャン速度の計測のみを行います。
         #[arg(long)]
         dry_run: bool,
     },
-    /// Search for files
+    /// クエリを使用してファイルを検索します。
     #[command(hide = true)]
     Search {
-        /// Query string to match against filenames or paths
+        /// 検索クエリ文字列。論理演算（&, |, -）や型付きタグ（extension:rs等）が使用可能です。
         query: String,
     },
-    /// List all files
+    /// インデックスからファイルの一覧を表示します（最大100件）。
     #[command(hide = true)]
     List,
-    /// Clear the entire index
+    /// 作成されたインデックスファイルを削除します。
     #[command(hide = true)]
     Clear,
 }
 
+/// アプリケーションのエントリポイント。
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let fm = FileManager::new()?;
@@ -69,7 +79,7 @@ fn main() -> Result<()> {
         }
         Commands::List => {
             println!("Listing files...");
-            let results = fm.search("")?; // Empty query returns list
+            let results = fm.search("")?;
             print_results(&results);
         }
         Commands::Clear => {
@@ -81,6 +91,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// 検索結果のパス一覧を標準出力に表示します。
 fn print_results(paths: &[String]) {
     if paths.is_empty() {
         println!("No files found.");

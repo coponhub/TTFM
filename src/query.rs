@@ -4,18 +4,31 @@ use std::str::Chars;
 use crate::types::{Tag, TagType, TypedTag};
 use crate::functions::{ExtensionFunction, ParentDirFunction, PathFunction};
 
+/// 検索クエリの構造を表す抽象構文木（AST）ノード。
+/// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq)]
 pub enum QueryNode {
+    /// AND条件 (`A & B` または `A B`)
     And(Box<QueryNode>, Box<QueryNode>),
+    /// OR条件 (`A | B`)
     Or(Box<QueryNode>, Box<QueryNode>),
-    Not(Box<QueryNode>), 
+    /// NOT条件 (`-A`)
+    Not(Box<QueryNode>),
+    /// 単なる検索語（ファイル名部分一致など）
     Term(Tag),
+    /// 型付きタグ検索 (`key:value`)
     TypedTag(TypedTag),
 }
 
 // --- Parsing Logic ---
 
-/// クエリ文字列を解析し、抽象構文木（AST）を構築するパーサ。
+/// クエリ文字列を解析し、抽象構文木（AST）を構築する再帰下降パーサ。
+///
+/// # 演算子の優先順位（高い順）
+/// 1. 括弧 `()`
+/// 2. NOT `-`
+/// 3. AND `&` (または空白)
+/// 4. OR `|`
 pub struct QueryParser<'a> {
     chars: Peekable<Chars<'a>>,
 }
@@ -32,7 +45,9 @@ impl<'a> QueryParser<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ttfm::QueryParser;
+    /// use ttfm::{QueryParser, QueryNode};
+    /// 
+    /// // 拡張子が "rs" かつ ("project" または "report" を含む)
     /// let node = QueryParser::parse("extension:rs & (project | report)").unwrap();
     /// ```
     pub fn parse(input: &'a str) -> Result<QueryNode> {
@@ -47,6 +62,7 @@ impl<'a> QueryParser<'a> {
         Ok(node)
     }
 
+    /// 式（Expression）を解析します。主にOR演算を処理します。
     fn parse_expression(&mut self) -> Result<QueryNode> {
         let mut left = self.parse_and_term()?;
         loop {
@@ -62,6 +78,7 @@ impl<'a> QueryParser<'a> {
         Ok(left)
     }
 
+    /// AND項を解析します。`&` 演算子または暗黙のANDを処理します。
     fn parse_and_term(&mut self) -> Result<QueryNode> {
         let mut left = self.parse_factor()?;
         loop {
@@ -73,9 +90,12 @@ impl<'a> QueryParser<'a> {
                     let right = self.parse_factor()?;
                     left = QueryNode::And(Box::new(left), Box::new(right));
                 } else if c == '(' || c == '-' {
+                    // 括弧やマイナスの前のみ、暗黙のANDとして扱う
                     let right = self.parse_factor()?;
                     left = QueryNode::And(Box::new(left), Box::new(right));
                 } else {
+                    // それ以外の文字（次の単語など）が続く場合は、ここでは処理せず
+                    // parse() メソッドで "Unexpected characters" エラーにする
                     break;
                 }
             } else { break; }
@@ -83,6 +103,7 @@ impl<'a> QueryParser<'a> {
         Ok(left)
     }
 
+    /// 因子（括弧、NOT、リテラル）を解析します。
     fn parse_factor(&mut self) -> Result<QueryNode> {
         self.skip_whitespace();
         match self.chars.peek() {
@@ -118,6 +139,7 @@ impl<'a> QueryParser<'a> {
         }
     }
 
+    /// 文字列リテラルを読み込みます。
     fn read_term(&mut self) -> Result<String> {
         self.skip_whitespace();
         let mut term = String::new();
@@ -129,12 +151,14 @@ impl<'a> QueryParser<'a> {
         if term.is_empty() { Err(anyhow::anyhow!("Empty term")) } else { Ok(term) }
     }
 
+    /// 空白文字をスキップします。
     fn skip_whitespace(&mut self) {
         while let Some(&c) = self.chars.peek() {
             if c.is_whitespace() { self.chars.next(); } else { break; }
         }
     }
 
+    /// キーと値から `TypedTag` を生成し、正規化を行います。
     fn create_typed_tag(&self, key: &str, value: &str) -> TypedTag {
         let key_str = key.to_lowercase();
         let mut val_str = value.to_string();

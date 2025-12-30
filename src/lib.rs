@@ -32,10 +32,10 @@ use functions::{
 };
 pub use types::{TagType, TypedTag}; 
 
-/// インデックスのデフォルト保存先ファイル名
+/// インデックスのデフォルト保存先ファイル名。
 const DEFAULT_INDEX_FILE: &str = "file_index.parquet";
 
-/// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ
+/// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
 pub struct FunctionRegistry {
     /// 登録されている機能のリスト
     functions: Vec<Box<dyn TagFunction>>,
@@ -43,31 +43,17 @@ pub struct FunctionRegistry {
 
 impl FunctionRegistry {
     /// 空のレジストリを作成します。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ttfm::FunctionRegistry;
-    /// let reg = FunctionRegistry::new();
-    /// ```
     pub fn new() -> Self {
         Self { functions: Vec::new() }
     }
 
-    /// 新しい機能をレジストリに追加します。
+    /// 新しい機能（`TagFunction`）をレジストリに追加します。
     pub fn register(&mut self, func: Box<dyn TagFunction>) {
         self.functions.push(func);
     }
 
     /// 標準的な機能をすべて登録したレジストリを返します。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ttfm::FunctionRegistry;
-    /// let reg = FunctionRegistry::with_standard();
-    /// assert!(!reg.get_all_columns().is_empty());
-    /// ```
+    /// これにはファイル名、拡張子、サイズ、更新日時、ユーザータグなどが含まれます。
     pub fn with_standard() -> Self {
         let mut reg = Self::new();
         // 登録順序が重要（カラム順序になるため）
@@ -97,7 +83,7 @@ impl FunctionRegistry {
         cols
     }
 
-    /// 指定されたファイルパスに対して、全機能のタグ付けを実行し、1行分のデータを返します。
+    /// 指定されたファイルパスに対してタグ付けを実行し、1行分のデータを返します。
     pub fn process_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let mut row = Vec::new();
         for func in &self.functions {
@@ -120,8 +106,7 @@ impl FunctionRegistry {
         }
     }
 
-    /// `TypedTag` を具体的なSQL条件に変換します。
-    /// 対応する機能がない場合はユーザー定義タグ（MAP）検索にフォールバックします。
+    /// `TypedTag` をSQL条件に変換します。対応機能がない場合はユーザータグ検索にフォールバックします。
     fn tag_to_sql(&self, tag: &TypedTag) -> String {
         // 各Functionに問い合わせる
         for func in &self.functions {
@@ -133,14 +118,13 @@ impl FunctionRegistry {
         format!("element_at({}, '{}') ILIKE '%{}%'", UserTagsFunction::NAME, Self::escape(&tag.tagtype.0), Self::escape(&tag.tag.0))
     }
     
-    /// SQLインジェクション防止用の簡易エスケープ処理
+    /// SQLインジェクション防止用の簡易エスケープ処理。
     fn escape(s: &str) -> String {
         s.replace("'", "''")
     }
 }
 
 /// ファイル管理システムのメインインターフェース。
-/// データベース接続の管理、インデックス作成、検索を実行します。
 pub struct FileManager {
     /// DuckDB接続
     conn: Connection,
@@ -164,13 +148,6 @@ impl FileManager {
     }
 
     /// 指定されたインデックス保存先で `FileManager` を作成します。
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ttfm::FileManager;
-    /// let fm = FileManager::new_with_index_path("my_index.parquet").unwrap();
-    /// ```
     pub fn new_with_index_path<P: AsRef<Path>>(index_path: P) -> Result<Self> {
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
@@ -190,9 +167,10 @@ impl FileManager {
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
     ///
     /// # Arguments
+    ///
     /// * `root_path` - スキャンを開始するルートディレクトリ
-    /// * `on_progress` - 進捗状況（スキャン済み件数）を受け取るコールバック
-    /// * `dry_run` - trueの場合、データベースへの書き込みやParquetへの保存を行いません
+    /// * `on_progress` - 進捗状況を受け取るコールバック
+    /// * `dry_run` - trueの場合、書き込みを行いません
     ///
     /// # Examples
     ///
@@ -278,13 +256,22 @@ impl FileManager {
     }
 
     /// クエリ文字列を使用してインデックスを検索し、一致したファイルのパス一覧を返します。
+    /// インデックスファイル（Parquet）が読み込まれて検索が実行されます。
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - 検索クエリ。空文字列の場合は全件表示（上限100件）になります。
+    ///
+    /// # Returns
+    ///
+    /// 一致したファイルの絶対/相対パスのベクタ。
     ///
     /// # Examples
     ///
     /// ```
     /// use ttfm::FileManager;
     /// let fm = FileManager::new_with_index_path("example_index.parquet").unwrap();
-    /// fm.index_directory(".", None::<&fn(usize)>, false).unwrap();
+    /// // インデックス作成済みの前提
     /// let results = fm.search("extension:rs").unwrap();
     /// ```
     pub fn search(&self, query: &str) -> Result<Vec<String>> {
@@ -315,7 +302,7 @@ impl FileManager {
         Ok(paths)
     }
     
-    /// 作成されたインデックスファイルを削除します。
+    /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
         if self.index_path.exists() {
             std::fs::remove_file(&self.index_path).context("Failed to remove index file")?;

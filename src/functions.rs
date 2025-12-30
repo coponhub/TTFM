@@ -22,7 +22,11 @@ pub trait TagFunction: Send + Sync {
 // --- Utilities ---
 
 /// SQLインジェクションを防ぐための簡易エスケープ処理。
-/// シングルクォートを2つ重ねてエスケープします。
+/// 文字列内のシングルクォートを2つ重ねてエスケープします。
+///
+/// # Arguments
+///
+/// * `s` - エスケープ対象の文字列
 fn escape(s: &str) -> String {
     s.replace("'", "''")
 }
@@ -38,6 +42,7 @@ impl Tagger for PathTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: PathFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// ファイルの絶対パスを抽出し、パスセパレータを正規化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         // Windowsのバックスラッシュをスラッシュに正規化
         Ok(vec![TagValue::Text(path.to_string_lossy().replace('\\', "/"))])
@@ -45,11 +50,15 @@ impl Tagger for PathTagger {
 }
 
 /// ファイルのフルパス（`path`）に関する機能。
-/// `path:foo` のような検索を担当します。
+///
+/// # Examples
+/// - Query: `path:documents` -> パスに "documents" を含むファイルを検索
 pub struct PathFunction { tagger: PathTagger }
 
 impl PathFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "path";
+    /// 新しい `PathFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: PathTagger } }
 }
 
@@ -80,11 +89,15 @@ impl Tagger for ParentDirTagger {
 }
 
 /// 親ディレクトリパス（`parentdir`）に関する機能。
-/// `parent:src` のような検索を担当します。
+///
+/// # Examples
+/// - Query: `parentdir:src` -> 親ディレクトリが ".../src" または "src" であるファイルを検索
 pub struct ParentDirFunction { tagger: ParentDirTagger }
 
 impl ParentDirFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "parentdir";
+    /// 新しい `ParentDirFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ParentDirTagger } }
 }
 
@@ -115,11 +128,15 @@ impl Tagger for FilenameTagger {
 }
 
 /// ファイル名（`filename`）に関する機能。
-/// `filename:report` のような検索を担当します。ディレクトリは除外されます。
+///
+/// # Examples
+/// - Query: `filename:report` -> ファイル名に "report" を含むファイルを検索（ディレクトリ除外）
 pub struct FilenameFunction { tagger: FilenameTagger }
 
 impl FilenameFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "filename";
+    /// 新しい `FilenameFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: FilenameTagger } }
 }
 
@@ -143,17 +160,22 @@ impl Tagger for StemTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: StemFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// 拡張子を除いたファイル名（ステム）を抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         Ok(vec![TagValue::Text(path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())])
     }
 }
 
 /// 拡張子を除いたファイル名（`stem`）に関する機能。
-/// 実質的にはファイル名検索と同じ挙動を提供します。
+///
+/// # Examples
+/// - Query: `stem:image` -> 拡張子なし名に対する検索（現状はファイル名検索）
 pub struct StemFunction { tagger: StemTagger }
 
 impl StemFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "stem";
+    /// 新しい `StemFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: StemTagger } }
 }
 
@@ -178,17 +200,22 @@ impl Tagger for ExtensionTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: ExtensionFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// ファイルの拡張子を抽出し、小文字化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         Ok(vec![TagValue::Text(path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default())])
     }
 }
 
 /// 拡張子（`extension`）に関する機能。
-/// `ext:rs` のような検索を担当します。ディレクトリは除外されます。
+///
+/// # Examples
+/// - Query: `extension:rs` または `ext:rs` -> 拡張子が "rs" のファイルを検索
 pub struct ExtensionFunction { tagger: ExtensionTagger }
 
 impl ExtensionFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "extension";
+    /// 新しい `ExtensionFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ExtensionTagger } }
 }
 
@@ -219,11 +246,15 @@ impl Tagger for DirectoryTagger {
 }
 
 /// ディレクトリ判定（`directory`）に関する機能。
-/// `directory:foo` とすると、`foo` という名前を含む**ディレクトリ**を検索します。
+///
+/// # Examples
+/// - Query: `directory:src` -> 名前に "src" を含むディレクトリを検索
 pub struct DirectoryFunction { tagger: DirectoryTagger }
 
 impl DirectoryFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "directory";
+    /// 新しい `DirectoryFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: DirectoryTagger } }
 }
 
@@ -248,6 +279,7 @@ impl Tagger for SizeBytesTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: SizeBytesFunction::NAME.to_string(), sql_type: "BIGINT" }]
     }
+    /// ファイルサイズ（バイト数）を抽出します。ディレクトリの場合は0とします。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let size = if path.is_dir() { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
         Ok(vec![TagValue::BigInt(size as i64)])
@@ -255,11 +287,15 @@ impl Tagger for SizeBytesTagger {
 }
 
 /// ファイルサイズ（バイト単位、`size_bytes`）に関する機能。
-/// 数値一致検索などを担当します。
+///
+/// # Examples
+/// - Query: `size_bytes:1024` -> サイズがちょうど1024バイトのファイルを検索
 pub struct SizeBytesFunction { tagger: SizeBytesTagger }
 
 impl SizeBytesFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "size_bytes";
+    /// 新しい `SizeBytesFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: SizeBytesTagger } }
 }
 
@@ -283,6 +319,7 @@ impl Tagger for ModifiedTsTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: ModifiedTsFunction::NAME.to_string(), sql_type: "BIGINT" }]
     }
+    /// 最終更新日時のUNIXタイムスタンプを抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let ts = std::fs::metadata(path)
             .and_then(|m| m.modified())
@@ -292,11 +329,16 @@ impl Tagger for ModifiedTsTagger {
     }
 }
 
-/// 更新日時（タイムスタンプ、`modified_ts`）に関する機能。
+/// 更新日時（UNIXタイムスタンプ、`modified_ts`）に関する機能。
+///
+/// # Examples
+/// - Query: `modified_ts:1700000000` -> 指定のタイムスタンプを持つファイルを検索
 pub struct ModifiedTsFunction { tagger: ModifiedTsTagger }
 
 impl ModifiedTsFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "modified_ts";
+    /// 新しい `ModifiedTsFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ModifiedTsTagger } }
 }
 
@@ -320,6 +362,7 @@ impl Tagger for KindTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: KindFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let is_dir = path.is_dir();
         let ext = path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default();
@@ -329,11 +372,16 @@ impl Tagger for KindTagger {
 }
 
 /// ファイルの種類（`kind`）に関する機能。
-/// "Folder", "PDF File" などの表示用文字列を作成・検索します。
+///
+/// # Examples
+/// - Query: `kind:Folder` -> ディレクトリを検索
+/// - Query: `kind:PDF` -> PDFファイルを検索
 pub struct KindFunction { tagger: KindTagger }
 
 impl KindFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "kind";
+    /// 新しい `KindFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: KindTagger } }
 }
 
@@ -371,6 +419,7 @@ impl Tagger for SizeStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: SizeStrFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// ファイルサイズを読みやすい文字列（例: "1.5 MB"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let size = if path.is_dir() { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
         let str = if path.is_dir() { "-".to_string() } else { Self::format_size(size) };
@@ -379,11 +428,15 @@ impl Tagger for SizeStrTagger {
 }
 
 /// ファイルサイズ文字列表現（`size_str`）に関する機能。
-/// "1.5 MB" のような文字列を検索対象にします。
+///
+/// # Examples
+/// - Query: `size_str:KB` -> キロバイト単位のファイルを検索
 pub struct SizeStrFunction { tagger: SizeStrTagger }
 
 impl SizeStrFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "size_str";
+    /// 新しい `SizeStrFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: SizeStrTagger } }
 }
 
@@ -415,6 +468,7 @@ impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: ModifiedStrFunction::NAME.to_string(), sql_type: "TEXT" }]
     }
+    /// 最終更新日時を読みやすい文字列（例: "2024-01-01 12:00"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let ts = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let str = ts.map(|t| Self::format_time(t)).unwrap_or_default();
@@ -423,11 +477,15 @@ impl Tagger for ModifiedStrTagger {
 }
 
 /// 更新日時文字列表現（`modified_str`）に関する機能。
-/// "2024-01-01" のような日付文字列を検索対象にします。
+///
+/// # Examples
+/// - Query: `modified_str:2024` -> 2024年に更新されたファイルを検索
 pub struct ModifiedStrFunction { tagger: ModifiedStrTagger }
 
 impl ModifiedStrFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "modified_str";
+    /// 新しい `ModifiedStrFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ModifiedStrTagger } }
 }
 
@@ -451,6 +509,7 @@ impl Tagger for UserTagsTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef { name: UserTagsFunction::NAME.to_string(), sql_type: "MAP(TEXT, TEXT)" }]
     }
+    /// ユーザー定義タグを抽出します（現状は空マップを返すプレースホルダー）。
     fn tag_file(&self, _path: &Path) -> Result<Vec<TagValue>> {
         // 現在は常に空のタグマップを返します。将来的にCLIやGUIで付与されたタグをここで読み込むことができます。
         Ok(vec![TagValue::Null])
@@ -458,11 +517,15 @@ impl Tagger for UserTagsTagger {
 }
 
 /// ユーザー定義タグ（`tags`）に関する機能。
-/// 未知のタグタイプ（`project:alpha`など）はすべてここで処理されます。
+///
+/// # Examples
+/// - Query: `project:alpha` -> ユーザータグ "project" の値に "alpha" を含むファイルを検索
 pub struct UserTagsFunction { tagger: UserTagsTagger }
 
 impl UserTagsFunction {
+    /// この機能の識別子名。
     pub const NAME: &'static str = "tags";
+    /// 新しい `UserTagsFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: UserTagsTagger } }
 }
 
@@ -515,7 +578,7 @@ mod tests {
         let f = FilenameFunction::new();
         // SQL Check
         let sql = f.to_sql(&ttag(FilenameFunction::NAME, "report")).unwrap();
-        assert!(sql.contains("filename ILIKE '%report%' "));
+        assert!(sql.contains("filename ILIKE '%report%'"));
         assert!(sql.contains("directory = FALSE"));
         
         // Tagging Check
@@ -548,7 +611,7 @@ mod tests {
         let f = DirectoryFunction::new();
         // SQL Check
         let sql = f.to_sql(&ttag(DirectoryFunction::NAME, "src")).unwrap();
-        assert!(sql.contains("filename ILIKE '%src%' "));
+        assert!(sql.contains("filename ILIKE '%src%'"));
         assert!(sql.contains("directory = TRUE"));
 
         // Tagging Check
