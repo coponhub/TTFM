@@ -55,7 +55,7 @@ fn main() -> Result<()> {
 
     // プラグインが有効な場合のみロード
     if config.plugins.enabled {
-        fm.load_plugins("plugins")?;
+        fm.load_plugins("plugins", &config.plugins.status)?;
     }
 
     match &cli.command {

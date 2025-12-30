@@ -143,3 +143,20 @@ TTFMの動作をユーザーが柔軟に変更できるようにするため、T
 [plugins]
 enabled = false  # 全てのWasmプラグインを無効化
 ```
+
+### 6.3 個別プラグインの制御
+`[plugins.status]` セクションを使用することで、プラグインごとの有効・無効を個別に設定できる。
+
+- キーにはプラグイン名（Wasmモジュールが返す名前）、値には `true` (有効) または `false` (無効) を指定する。
+- `[plugins] enabled` が `false` の場合は、個別設定に関わらず全てのプラグインが停止する。
+- 個別設定が存在しないプラグインは、デフォルトで `true` (有効) とみなされる。
+
+**設定例 (`ttfm.toml`)**:
+```toml
+[plugins]
+enabled = true
+
+[plugins.status]
+sample = false    # sampleプラグインのみ無効化
+mimetype = true   # mimetypeプラグインは明示的に有効
+```

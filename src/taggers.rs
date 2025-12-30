@@ -11,7 +11,7 @@ pub struct ColumnDef {
 }
 
 /// Taggerが抽出して返す値の型。
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TagValue {
     Text(String),
     BigInt(i64),

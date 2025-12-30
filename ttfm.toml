@@ -1,2 +1,8 @@
+# TTFM Configuration File
+
 [plugins]
-enabled = false
+enabled = true
+
+[plugins.status]
+mimetype = true
+sample = false

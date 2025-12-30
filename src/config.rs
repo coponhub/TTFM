@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 use std::fs;
+use std::collections::HashMap;
 use anyhow::Result;
 
 /// TTFMの全体設定を保持する構造体。
@@ -17,11 +18,18 @@ pub struct PluginsConfig {
     /// Wasmプラグインをロードするかどうか
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// 個別プラグインの有効/無効設定
+    #[serde(default)]
+    pub status: HashMap<String, bool>,
 }
 
 impl Default for PluginsConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self { 
+            enabled: true,
+            status: HashMap::new(),
+        }
     }
 }
 
@@ -70,6 +78,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::new();
         assert!(config.plugins.enabled);
+        assert!(config.plugins.status.is_empty());
     }
 
     #[test]
@@ -81,11 +90,17 @@ enabled = false"#;
     }
 
     #[test]
-    fn test_parse_enabled_true() {
+    fn test_parse_plugin_status() {
         let toml = r#"[plugins]
-enabled = true"#;
+enabled = true
+
+[plugins.status]
+sample = false
+mimetype = true"#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.plugins.enabled);
+        assert_eq!(config.plugins.status.get("sample"), Some(&false));
+        assert_eq!(config.plugins.status.get("mimetype"), Some(&true));
     }
 
     #[test]

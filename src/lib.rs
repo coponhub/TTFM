@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use duckdb::{Connection, ToSql};
 use std::path::Path;
 use walkdir::WalkDir;
+use rayon::prelude::*;
 
 pub mod types;
 pub mod query;
@@ -177,7 +178,7 @@ impl FileManager {
     /// ```
     pub fn index_directory<P: AsRef<Path>, F>(&self, root_path: P, on_progress: Option<&F>, dry_run: bool) -> Result<usize> 
     where
-        F: Fn(usize),
+        F: Fn(usize) + Sync + Send,
     {
         let root_path = root_path.as_ref();
         
@@ -195,43 +196,43 @@ impl FileManager {
             self.conn.execute("DELETE FROM temp_files", [])?;
         }
 
+        // ファイルリストを先に収集
+        let entries: Vec<_> = WalkDir::new(root_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .collect();
+
+        // registry だけを切り出して並列処理に渡す (Connectionを含まないためSync)
+        let registry = &self.registry;
+
+        // 並列にプラグイン処理を実行
+        let results: Vec<Result<Vec<TagValue>>> = entries.par_iter()
+            .map(|entry| registry.process_file(entry.path()))
+            .collect();
+
         let mut count = 0;
         
-        {
-            let mut appender = if !dry_run {
-                Some(self.conn.appender("temp_files")?)
-            } else {
-                None
-            };
-    
-            for entry in WalkDir::new(root_path) {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("Warning: Failed to access file: {}", e);
-                        continue;
-                    }
-                };
+        if !dry_run {
+            let mut appender = self.conn.appender("temp_files")?;
+            for row_result in results {
+                let row_values = row_result?;
+                let params: Vec<Box<dyn ToSql>> = row_values.iter()
+                    .map(|v| v.to_sql_param())
+                    .collect();
                 
-                let row_values = self.registry.process_file(entry.path())?;
+                let params_ref: Vec<&dyn ToSql> = params.iter()
+                    .map(|b| b.as_ref())
+                    .collect();
 
-                if let Some(ref mut app) = appender {
-                    let params: Vec<Box<dyn ToSql>> = row_values.iter()
-                        .map(|v| v.to_sql_param())
-                        .collect();
-                    
-                    let params_ref: Vec<&dyn ToSql> = params.iter()
-                        .map(|b| b.as_ref())
-                        .collect();
-
-                    app.append_row(params_ref.as_slice())?;
-                }
+                appender.append_row(params_ref.as_slice())?;
                 
                 count += 1;
                 if let Some(cb) = on_progress {
                     if count % 100 == 0 { cb(count); }
                 }
             }
+        } else {
+            count = results.len();
         }
 
         if let Some(cb) = on_progress { cb(count); }
@@ -308,7 +309,7 @@ impl FileManager {
 
     /// 指定されたディレクトリからWasmプラグインをロードし、レジストリに登録します。
     /// ".wasm" 拡張子を持つファイルを対象とします。
-    pub fn load_plugins<P: AsRef<Path>>(&mut self, dir: P) -> Result<()> {
+    pub fn load_plugins<P: AsRef<Path>>(&mut self, dir: P, status: &std::collections::HashMap<String, bool>) -> Result<()> {
         let dir = dir.as_ref();
         if !dir.exists() || !dir.is_dir() {
             return Ok(()); // ディレクトリがない場合は何もしない
@@ -321,8 +322,17 @@ impl FileManager {
                 match crate::plugins::WasmPlugin::new(&path) {
                     Ok(plugin) => {
                         let adapter = plugin.into_adapter()?;
-                        println!("Loaded plugin: {} from {:?}", adapter.name, path);
-                        self.registry.register(Box::new(adapter));
+                        
+                        // 個別設定のチェック
+                        let is_enabled = *status.get(&adapter.name).unwrap_or(&true);
+                        println!("DEBUG: Plugin name='{}', is_enabled={}, config_value={:?}", 
+                                 adapter.name, is_enabled, status.get(&adapter.name));
+                        if is_enabled {
+                            println!("Loaded plugin: {} from {:?}", adapter.name, path);
+                            self.registry.register(Box::new(adapter));
+                        } else {
+                            println!("Plugin {} is disabled via config. Skipping.", adapter.name);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Warning: Failed to load plugin {:?}: {}", path, e);

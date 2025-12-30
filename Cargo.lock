@@ -3110,6 +3110,7 @@ dependencies = [
  "dirs 5.0.1",
  "duckdb",
  "indicatif",
+ "rayon",
  "serde",
  "tempfile",
  "toml",
