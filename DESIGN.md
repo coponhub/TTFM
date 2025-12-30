@@ -41,10 +41,11 @@ index作成時の書き込みはduckdbの一括書き込みで行う。
 - `path`: フルパス (UNIQUE)
 - `filename`: ファイル名
 - `parentdir`: 親ディレクトリパス（検索最適化用）
+- `extension`: 拡張子
 
 #### C. `tags` テーブル (属性) (.ttfm/db/tags.parquet)
 - `entity_id`: `entities.id` への外部キー
-- `tag_type`: タグの種類（例: `extension`, `mimetype`, `project`）
+- `tag_type`: タグの種類（例: `mimetype`, `project`）
 - `tag_value`: タグの値
 
 ### 3.3 プラグイン・コンポーネント設計 (TagFunction パターン)
@@ -65,20 +66,35 @@ index作成時の書き込みはduckdbの一括書き込みで行う。
 個別の `TagFunction` を一括管理するハブ。
 - インデックス作成時は `TagFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `TagFunction` にSQL変換を委譲する。
 
-## 4. プロセス設計
+### 4. プロセス設計
 
 ### 4.1 インデックス作成 (`ttfm index`)
-1. 指定ディレクトリを再帰的にスキャン。
-2. 各ファイルに対し、OSレベルの識別子（`inode`, `device_id`）を取得し、**同期と移動検知**を行う。
-    - 同一パスで `inode`, `mtime` が不変なら更新をスキップ。
-    - パスは異なるが同一 Inode がDBに存在する場合、**移動 (mv)** と判定し `locations` テーブルのみを更新する。
-3. 新規または更新されたファイルに対し、`FunctionRegistry` に登録された全ての `TagFunction` 経由で `Tagger` を実行。
-4. 生成されたタグ値を DuckDB のインメモリテーブルへ挿入。
-5. 最終的に単一（または複数）の Parquet ファイルとして ZSTD 圧縮して書き出し。
+既存のインデックスデータと現在のファイルシステムの状態を比較し、差分のみを効率的に更新する。
+スケーラビリティを確保するため、スキャン結果は一時的に Parquet ファイルとして保存し、DuckDB の外部テーブル機能を用いて比較を行う。
+
+#### A. 処理フロー
+
+1.  **Scan Phase (走査)**:
+    - `WalkDir` を用い、`file-id` クレートで各ファイルの一意識別子を取得しながらディレクトリを走査する。
+    - 取得したメタデータ（Path, Inode, Size, Mtime）を、DuckDB を介して **一時的な Parquet ファイル** (`current_scan.parquet`) に書き出す。
+
+2.  **Diff Phase (差分分析)**:
+    - DuckDB 上で、`current_scan.parquet` (最新) と既存の Parquet ファイルを Inode をキーにして比較し、以下の 4 カテゴリに分類する。
+        - **To Process**: 新規、または Mtime/Size が変化したファイル。
+        - **Moved**: Inode は一致するが、Path が異なるファイル。
+          - アクション: **Location (path, parentdir, filename) の情報を更新する。**
+        - **Unchanged**: 全てのメタデータが一致するファイル（処理をスキップ）。
+        - **Deleted**: 既存インデックスにあるが、今回の走査で見つからなかったファイル。
+
+3.  **Tagging Phase (実行)**:
+    - **To Process** のリストに対してのみ `Tagger` を実行し、メタデータを抽出する。
+
+4.  **Merge Phase (統合)**:
+    - 既存データ、新規抽出分、および更新された Location 情報を DuckDB 上で統合し、最終的な `entities`, `locations`, `tags` Parquet ファイルを更新・保存する。
 
 ### 4.2 検索 (`ttfm search`)
 1. 検索クエリをパーサによって AST（抽象構文木）へ変換。
-    1. クエリはTypedTagを受け付ける。
+    1. クエリはTypedTag (`key:value`) を受け付ける。
     2. この際、クエリは &(AND) |(OR) -(Not) ()(括弧)を組み合わせた論理式を受け付ける。 
 2. 各 `TypedTag` ノードについて、対応する `TagFunction` が SQL 条件式を生成。
 3. `tags` および `locations` テーブルを対象とした DuckDB を介して Parquet ファイルに対して SQL クエリを実行し、結果を返す。

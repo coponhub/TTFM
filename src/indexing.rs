@@ -13,6 +13,7 @@ pub struct LocationRow {
     pub path: String,
     pub filename: String,
     pub parentdir: String,
+    pub extension: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -32,6 +33,7 @@ pub fn convert_to_rows(
     let mut path = String::new();
     let mut filename = String::new();
     let mut parentdir = String::new();
+    let mut extension = String::new();
     let mut tags = Vec::new();
 
     for (col_def, value) in data {
@@ -48,6 +50,7 @@ pub fn convert_to_rows(
                     "path" => if let TagValue::Text(v) = value { path = v.clone(); },
                     "filename" => if let TagValue::Text(v) = value { filename = v.clone(); },
                     "parentdir" => if let TagValue::Text(v) = value { parentdir = v.clone(); },
+                    "extension" => if let TagValue::Text(v) = value { extension = v.clone(); },
                     _ => {}
                 }
             },
@@ -73,7 +76,7 @@ pub fn convert_to_rows(
 
     (
         EntityRow { id: entity_id, size, mtime },
-        LocationRow { entity_id, path, filename, parentdir },
+        LocationRow { entity_id, path, filename, parentdir, extension },
         tags
     )
 }
@@ -93,9 +96,9 @@ mod tests {
             (col("path", TargetTable::Locations), TagValue::Text("/home/user/doc.txt".to_string())),
             (col("filename", TargetTable::Locations), TagValue::Text("doc.txt".to_string())),
             (col("parentdir", TargetTable::Locations), TagValue::Text("/home/user".to_string())),
+            (col("extension", TargetTable::Locations), TagValue::Text("txt".to_string())),
             (col("size_bytes", TargetTable::Entities), TagValue::BigInt(1024)),
             (col("modified_ts", TargetTable::Entities), TagValue::BigInt(123456789)),
-            (col("extension", TargetTable::Tags), TagValue::Text("txt".to_string())),
             (col("kind", TargetTable::Tags), TagValue::Text("File".to_string())),
         ];
 
@@ -112,8 +115,9 @@ mod tests {
             path: "/home/user/doc.txt".to_string(),
             filename: "doc.txt".to_string(),
             parentdir: "/home/user".to_string(),
+            extension: "txt".to_string(),
         });
 
-        assert_eq!(tags.len(), 2);
+        assert_eq!(tags.len(), 1);
     }
 }

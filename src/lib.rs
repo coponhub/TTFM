@@ -184,7 +184,7 @@ impl FileManager {
             // 3つのテーブルを作成
             self.conn.execute_batch("
                 CREATE TABLE IF NOT EXISTS temp_entities (id BIGINT, size BIGINT, mtime BIGINT);
-                CREATE TABLE IF NOT EXISTS temp_locations (entity_id BIGINT, path VARCHAR, filename VARCHAR, parentdir VARCHAR);
+                CREATE TABLE IF NOT EXISTS temp_locations (entity_id BIGINT, path VARCHAR, filename VARCHAR, parentdir VARCHAR, extension VARCHAR);
                 CREATE TABLE IF NOT EXISTS temp_tags (entity_id BIGINT, tag_type VARCHAR, tag_value VARCHAR);
                 DELETE FROM temp_entities;
                 DELETE FROM temp_locations;
@@ -261,7 +261,8 @@ impl FileManager {
                     &loc.entity_id as &dyn ToSql,
                     &loc.path,
                     &loc.filename,
-                    &loc.parentdir
+                    &loc.parentdir,
+                    &loc.extension
                 ])?;
 
                 // Tags (複数行)

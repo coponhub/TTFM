@@ -208,7 +208,7 @@ struct ExtensionTagger;
 
 impl Tagger for ExtensionTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: ExtensionFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: ExtensionFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Locations }]
     }
     /// ファイルの拡張子を抽出し、小文字化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -234,10 +234,7 @@ impl TagFunction for ExtensionFunction {
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
             let val = escape(&tag.tag.0);
-            return Some(format!(
-                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = '{}')",
-                Self::NAME, val
-            ));
+            return Some(format!("l.extension = '{}'", val));
         }
         None
     }
@@ -568,9 +565,7 @@ mod tests {
         let f = ExtensionFunction::new();
         // SQL Check
         let sql = f.to_sql(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
-        assert!(sql.contains("EXISTS"));
-        assert!(sql.contains("tag_type = 'extension'"));
-        assert!(sql.contains("tag_value = 'rs'"));
+        assert_eq!(sql, "l.extension = 'rs'");
     }
 
     #[test]
