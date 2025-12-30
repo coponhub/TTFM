@@ -5,6 +5,9 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
 
 ## Current Status (v0.1.0)
 - [x] **Core Indexing**: Recursive directory scanning with fast insertion via DuckDB Appender.
+- [x] **High Performance**: 
+  - **Parallel Processing**: Multi-threaded indexing using `rayon`.
+  - **Instance Pooling**: Wasm instance caching (`thread_local`) for minimal overhead.
 - [x] **Storage**: ZSTD-compressed Parquet file storage (`file_index.parquet`).
 - [x] **Query Parsing**: Custom parser supporting `&`, `|`, `-` (NOT), and parentheses.
 - [x] **Typed Search**: 
@@ -12,6 +15,10 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
   - `ext:` / `extension:` (exact match, excludes directories)
   - `parent:` (normalized path match)
   - `kind:Folder` (directory filtering)
+- [x] **Plugin System (WebAssembly)**: 
+  - **WIT Interface**: Standardized plugin interface for `TagFunction`.
+  - **Wasm Runtime**: High-speed plugin execution via `wasmtime`.
+  - **MIME Type Plugin**: Proof-of-concept plugin with directory detection (`inode/directory`).
 - [x] **Cross-Platform**: Path normalization (`\` -> `/`) for Windows/Linux compatibility.
 - [x] **CLI Interface**: Basic `index`, `search`, `list`, `clear` commands.
 
@@ -48,16 +55,18 @@ Create a desktop interface for ease of use.
 - [ ] **Incremental Indexing**: Detect changes and update only modified files (watch mode).
 - [ ] **Content Indexing**: (Optional/Future) Index text content within files.
 
-### 6. Plugin System (WebAssembly)
-Enable extending functionality by adding external plugin files (e.g., `.wasm`) without recompiling the binary.
-- [ ] **Interface Design**: Define Wasm interface (WIT) compatible with `TagFunction`.
-- [ ] **Runtime Integration**: Integrate `wasmtime` to load and execute plugins.
-- [ ] **Plugin Discovery**: Load plugins from user configuration directory.
-- [ ] **MIME Type Plugin**: Implement MIME detection as a proof-of-concept Wasm plugin.
+### 6. Entity-Centric Management (v0.2.0)
+Transition to a normalized schema to track file identities and movements.
+- [ ] **Schema Refactoring**: Implement 3-table structure (`entities`, `locations`, `tags`).
+- [ ] **Physical Identification**: Track files via `inode` and `device_id`.
+- [ ] **Incremental Sync**: Skip unchanged files by comparing `mtime` and `inode`.
+- [ ] **Move Detection**: Detect and update `mv` operations without losing tags.
+- [ ] **Content Hashing**: Implement SHA-256 (or BLAKE3) for deduplication and verification.
 
 ---
 
 ## Technical Debt / Refactoring
+- [x] **Performance Optimization**: Solved initial plugin overhead via parallelization and pooling.
 - [ ] **Error Handling**: Standardize error messages for invalid queries.
-- [ ] **Performance**: Benchmark indexing speed on large storage (100k+ files).
+- [ ] **Benchmark**: Validate performance on extreme datasets (1M+ files).
 - [ ] **Test Coverage**: Add more edge cases for Windows paths and complex boolean logic.
