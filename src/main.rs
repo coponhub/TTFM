@@ -1,17 +1,12 @@
-//! # TTFM (Typed Tag File Manager) CLI
-//! 
-//! このバイナリは、Typed Tag（型付きタグ）を用いたファイル管理システムのコマンドラインインターフェースを提供します。
-//! インデックスの作成、検索、一覧表示、削除などの操作が可能です。
-
 use clap::{Parser, Subcommand};
 use ttfm::FileManager;
+use ttfm::config::Config;
 use anyhow::Result;
 use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 
 /// TTFM (Typed Tag File Manager) のメインCLI構造体。
-/// `clap` を使用してコマンドライン引数を解析します。
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help = true)]
@@ -55,8 +50,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut fm = FileManager::new()?;
 
-    // デフォルトのプラグインディレクトリからロード
-    fm.load_plugins("plugins")?;
+    // 設定ファイルの読み込み
+    let config = Config::load();
+
+    // プラグインが有効な場合のみロード
+    if config.plugins.enabled {
+        fm.load_plugins("plugins")?;
+    }
 
     match &cli.command {
         Commands::Index { path, dry_run } => {

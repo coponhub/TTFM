@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 pub mod types;
 pub mod query;
 pub mod plugins;
+pub mod config;
 mod taggers;
 mod functions;
 

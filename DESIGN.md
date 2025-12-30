@@ -71,10 +71,6 @@ package ttfm:plugin
 interface core {
     enum plugin-kind {
         tag-function,
-        // 将来的な拡張例:
-        // query-analyzer,
-        // action-handler,
-        // ui-component
     }
 
     record plugin-info {
@@ -92,7 +88,7 @@ interface tag-function {
     // カラム定義の型
     record column-def {
         name: string,
-        sql-type: string, // "TEXT", "BIGINT", etc.
+        sql-type: string,
     }
     
     // 提供するカラムのリスト
@@ -125,3 +121,25 @@ world plugin {
 ### 5.4 ゲスト側の責務 (Wasm/Rust, C, etc.)
 1.  **ファイル解析**: 渡されたファイルパス（WASIパス）を開き、内容を解析する（例: 先頭バイトを読んでMIME判定）。
 2.  **値の返却**: 解析結果を `tag-value` のリストとして返す。
+
+## 6. 設定管理 (Configuration Management)
+
+TTFMの動作をユーザーが柔軟に変更できるようにするため、TOML形式の設定ファイルを導入する。
+
+### 6.1 設定ファイルの仕様
+- **フォーマット**: TOML
+- **ファイル名**: `ttfm.toml`
+- **探索パス**:
+    1. カレントディレクトリ (プロジェクト固有設定)
+    2. ユーザー設定ディレクトリ (例: Linuxでは `~/.config/ttfm/ttfm.toml`)
+
+### 6.2 プラグイン制御設定
+`[plugins]` セクションにて、Wasmプラグインシステムの有効・無効を切り替えることができる。
+
+- `enabled` (boolean): `false` に設定した場合、`plugins/` ディレクトリからのロードをスキップする。大量のファイルを高速にインデックスしたい場合や、一時的にプラグイン機能を停止したい場合に有効である。
+
+**設定例 (`ttfm.toml`)**:
+```toml
+[plugins]
+enabled = false  # 全てのWasmプラグインを無効化
+```
