@@ -26,22 +26,23 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 
 ### 3.2 データベース・スキーマ (3-Table Structure)
 実体と属性を分離し、移動検知や柔軟な拡張を可能にするため、以下の3つのテーブルによる構成を採用する。
+index作成時の書き込みはduckdbの一括書き込みで行う。
+これらのテーブルは".ttfm/db/"ディレクトリに格納される。
 
-#### A. `entities` テーブル (実体)
+#### A. `entities` テーブル (実体) (.ttfm/db/entities.parquet)
 - `id`: 内部管理用ユニークID (PRIMARY KEY)
 - `inode`: OSレベルの識別子 (Inode number / File Index)
 - `device_id`: デバイス識別子
 - `size`: ファイルサイズ
 - `mtime`: 最終更新日時
 - `hash`: コンテンツハッシュ (オプション。重複検知や実体確認に使用)
-
-#### B. `locations` テーブル (場所)
+#### B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)
 - `entity_id`: `entities.id` への外部キー
 - `path`: フルパス (UNIQUE)
 - `filename`: ファイル名
-- `parent_dir`: 親ディレクトリパス（検索最適化用）
+- `parentdir`: 親ディレクトリパス（検索最適化用）
 
-#### C. `tags` テーブル (属性)
+#### C. `tags` テーブル (属性) (.ttfm/db/tags.parquet)
 - `entity_id`: `entities.id` への外部キー
 - `tag_type`: タグの種類（例: `extension`, `mimetype`, `project`）
 - `tag_value`: タグの値

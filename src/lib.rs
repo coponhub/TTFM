@@ -35,7 +35,7 @@ use functions::{
 pub use types::{TagType, TypedTag}; 
 
 /// インデックスのデフォルト保存先ファイル名。
-const DEFAULT_INDEX_FILE: &str = "file_index.parquet";
+const DEFAULT_INDEX_FILE: &str = ".ttfm/db/file_index.parquet";
 
 /// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
 pub struct FunctionRegistry {
@@ -146,12 +146,22 @@ impl FileManager {
 
     /// 指定されたインデックス保存先で `FileManager` を作成します。
     pub fn new_with_index_path<P: AsRef<Path>>(index_path: P) -> Result<Self> {
+        let index_path = index_path.as_ref().to_path_buf();
+        
+        // インデックスファイルの親ディレクトリを作成（存在しない場合）
+        if let Some(parent) = index_path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .context(format!("Failed to create database directory: {:?}", parent))?;
+            }
+        }
+
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
         
         Ok(Self { 
             conn,
-            index_path: index_path.as_ref().to_path_buf(),
+            index_path,
             registry: FunctionRegistry::with_standard(),
         })
     }
@@ -265,9 +275,9 @@ impl FileManager {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use ttfm::FileManager;
-    /// let fm = FileManager::new_with_index_path("example_index.parquet").unwrap();
+    /// let fm = FileManager::new().unwrap();
     /// // インデックス作成済みの前提
     /// let results = fm.search("extension:rs").unwrap();
     /// ```
