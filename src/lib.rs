@@ -200,25 +200,50 @@ impl FileManager {
         }
 
         let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String, i64, i64)>();
         let mut count = 0;
 
+        // 並列スキャンの実行
+        let walker = ignore::WalkBuilder::new(root_path)
+            .hidden(false) // 隠しファイルも対象にする
+            .git_ignore(true) // .gitignore は尊重する（設定次第で変更可能）
+            .threads(rayon::current_num_threads()) // Rayonと同じスレッド数を使用
+            .build_parallel();
+
+        let scan_thread = std::thread::spawn(move || {
+            walker.run(|| {
+                let tx = tx.clone();
+                let db_dir_canonical = db_dir_canonical.clone();
+                Box::new(move |result| {
+                    if let Ok(entry) = result {
+                        // DBディレクトリ配下のファイルは除外
+                        if let Ok(path) = entry.path().canonicalize() {
+                            if path.starts_with(&db_dir_canonical) { return ignore::WalkState::Continue; }
+                        }
+
+                        let path_str = entry.path().to_string_lossy().to_string();
+                        let inode = get_inode_string(entry.path());
+                        let metadata = match entry.metadata() {
+                            Ok(m) => m,
+                            Err(_) => return ignore::WalkState::Continue,
+                        };
+                        let size = if entry.path().is_dir() { 0 } else { metadata.len() as i64 };
+                        let mtime = metadata.modified()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+                            .unwrap_or(0);
+
+                        let _ = tx.send((path_str, inode, size, mtime));
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+        });
+
+        // メインスレッドで受信して Appender に書き込む
         {
             let mut appender = if !dry_run { Some(self.conn.appender("temp_scan")?) } else { None };
 
-            for entry in WalkDir::new(root_path).into_iter().filter_map(|e| e.ok()) {
-                // DBディレクトリ配下のファイルは除外
-                if let Ok(path) = entry.path().canonicalize() {
-                    if path.starts_with(&db_dir_canonical) { continue; }
-                }
-
-                let path_str = entry.path().to_string_lossy().to_string();
-                let inode = get_inode_string(entry.path());
-                let metadata = entry.metadata()?;
-                let size = if entry.path().is_dir() { 0 } else { metadata.len() as i64 };
-                let mtime = metadata.modified()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-                    .unwrap_or(0);
-
+            for (path_str, inode, size, mtime) in rx {
                 if let Some(ref mut app) = appender {
                     app.append_row(&[
                         &path_str as &dyn ToSql,
@@ -233,7 +258,9 @@ impl FileManager {
                     if count % 1000 == 0 { cb(count); }
                 }
             }
-        } // Appender is dropped here
+        }
+
+        scan_thread.join().map_err(|_| anyhow::anyhow!("Scan thread panicked"))?;
 
         if !dry_run {
             // スキャン結果を Parquet に出力

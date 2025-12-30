@@ -18,6 +18,7 @@ toml = "0.8"
 dirs = "5.0"
 rayon = "1.11.0"
 file-id = "0.2.3"
+ignore = "0.4.25"
 
 [dev-dependencies]
 tempfile = "3.24.0"
