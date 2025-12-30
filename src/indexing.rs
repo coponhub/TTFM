@@ -3,6 +3,15 @@ use crate::taggers::{TagValue, ColumnDef, TargetTable};
 #[derive(Debug, PartialEq)]
 pub struct EntityRow {
     pub id: i64,
+    pub inode: String, // file-id を文字列として保持
+    pub size: i64,
+    pub mtime: i64,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ScanEntry {
+    pub path: String,
+    pub inode: String,
     pub size: i64,
     pub mtime: i64,
 }
@@ -26,6 +35,7 @@ pub struct TagRow {
 /// カラム定義と値のペアから、3テーブル用の行データを生成する
 pub fn convert_to_rows(
     entity_id: i64,
+    inode: String,
     data: &[(ColumnDef, TagValue)],
 ) -> (EntityRow, LocationRow, Vec<TagRow>) {
     let mut size = 0;
@@ -75,7 +85,7 @@ pub fn convert_to_rows(
     }
 
     (
-        EntityRow { id: entity_id, size, mtime },
+        EntityRow { id: entity_id, inode, size, mtime },
         LocationRow { entity_id, path, filename, parentdir, extension },
         tags
     )
@@ -92,6 +102,7 @@ mod tests {
     #[test]
     fn test_convert_to_rows() {
         let entity_id = 100;
+        let inode = "test-inode".to_string();
         let data = vec![
             (col("path", TargetTable::Locations), TagValue::Text("/home/user/doc.txt".to_string())),
             (col("filename", TargetTable::Locations), TagValue::Text("doc.txt".to_string())),
@@ -102,10 +113,11 @@ mod tests {
             (col("kind", TargetTable::Tags), TagValue::Text("File".to_string())),
         ];
 
-        let (entity, location, tags) = convert_to_rows(entity_id, &data);
+        let (entity, location, tags) = convert_to_rows(entity_id, inode, &data);
 
         assert_eq!(entity, EntityRow {
             id: 100,
+            inode: "test-inode".to_string(),
             size: 1024,
             mtime: 123456789
         });
