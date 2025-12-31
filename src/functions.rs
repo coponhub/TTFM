@@ -378,7 +378,17 @@ impl Tagger for SizeBytesTagger {
     }
     /// ファイルサイズ（バイト数）を抽出します。ディレクトリの場合は0とします。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let size = if path.is_dir() { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
+        let size = if path.is_dir() { 
+            0 
+        } else { 
+            match std::fs::metadata(path) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    eprintln!("Warning: Failed to get metadata for size {:?}: {}", path, e);
+                    0
+                }
+            }
+        };
         Ok(vec![TagValue::BigInt(size as i64)])
     }
 }
@@ -429,10 +439,14 @@ impl Tagger for ModifiedTsTagger {
     }
     /// 最終更新日時のUNIXタイムスタンプを抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ts = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64)
-            .unwrap_or(0);
+        let ts = match std::fs::metadata(path).and_then(|m| m.modified()) {
+            Ok(t) => t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
+            Err(e) => {
+                // ファイルが見つからない等のエラーはスキャン中に発生しうる
+                eprintln!("Warning: Failed to get mtime for {:?}: {}", path, e);
+                0
+            }
+        };
         Ok(vec![TagValue::BigInt(ts)])
     }
 }
@@ -465,10 +479,14 @@ impl TagDefinition for ModifiedTsFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileTimestamp;
-    fn generate(_path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
-        let ts = metadata.modified()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-            .unwrap_or(0);
+    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
+        let ts = match metadata.modified() {
+            Ok(t) => t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
+            Err(e) => {
+                eprintln!("Warning: Failed to get mtime from metadata for {:?}: {}", path, e);
+                0
+            }
+        };
         FileTimestamp(ts)
     }
 }
