@@ -8,7 +8,6 @@ use anyhow::{Result, Context};
 use duckdb::{Connection, ToSql};
 use sea_query::{Query, Expr, Alias, Condition, JoinType, SqliteQueryBuilder, Func, Table, ColumnDef as SeaColumnDef, Iden};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 
 // --- Iden Definitions ---
@@ -138,7 +137,7 @@ impl<'a> Indexer<'a> {
         }
 
         let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
-        let (tx, rx) = std::sync::mpsc::channel::<(String, String, i64, i64)>();
+        let (tx, rx) = std::sync::mpsc::channel::<ScanEntry>();
         let mut count = 0;
 
         let walker = ignore::WalkBuilder::new(root_path)
@@ -157,18 +156,13 @@ impl<'a> Indexer<'a> {
                             if path.starts_with(&db_dir_canonical) { return ignore::WalkState::Continue; }
                         }
 
-                        let path_str = entry.path().to_string_lossy().to_string();
-                        let inode = crate::get_inode_string(entry.path());
                         let metadata = match entry.metadata() {
                             Ok(m) => m,
                             Err(_) => return ignore::WalkState::Continue,
                         };
-                        let size = if entry.path().is_dir() { 0 } else { metadata.len() as i64 };
-                        let mtime = metadata.modified()
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-                            .unwrap_or(0);
 
-                        let _ = tx.send((path_str, inode, size, mtime));
+                        let scan_entry = ScanEntry::from_path_metadata(entry.path(), &metadata);
+                        let _ = tx.send(scan_entry);
                     }
                     ignore::WalkState::Continue
                 })
@@ -177,10 +171,10 @@ impl<'a> Indexer<'a> {
 
         {
             let mut appender = if !dry_run { Some(self.conn.appender("temp_scan")?) } else { None };
-            for (path_str, inode, size, mtime) in rx {
+            for entry in rx {
                 if let Some(ref mut app) = appender {
-                    // Appender still uses indices, which must match schema order
-                    app.append_row(&[&path_str as &dyn ToSql, &inode, &size, &mtime])?;
+                    let params = entry.as_params();
+                    app.append_row(&*params)?;
                 }
                 count += 1;
                 if let Some(cb) = on_progress {
@@ -242,9 +236,9 @@ impl<'a> Indexer<'a> {
                 .to_string(SqliteQueryBuilder);
 
             let mut stmt = self.conn.prepare(&query).context("Failed to prepare initial scan query")?;
-            let to_tag = stmt.query_map([], |row| Ok(ScanEntry {
-                path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
-            }))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            let to_tag = stmt.query_map([], |row| {
+                ScanEntry::from_row(row)
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
             
             return Ok(IndexDiff { to_tag, moved: vec![], deleted_ids: vec![], unchanged_ids: vec![] });
         }
@@ -265,9 +259,9 @@ impl<'a> Indexer<'a> {
 
         let to_tag = self.conn.prepare(&query_to_tag)
             .context("Failed to prepare diff query (to_tag)")?
-            .query_map([], |row| Ok(ScanEntry {
-                path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
-            }))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            .query_map([], |row| {
+                ScanEntry::from_row(row)
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         // 2. moved: Identity match AND Integrity match AND Path mismatch
         // Path is typically first column (role Location)
@@ -359,7 +353,7 @@ impl<'a> Indexer<'a> {
 
         let tagging_results = to_tag.into_par_iter().enumerate().map(|(i, entry)| {
             let entity_id = max_id + (i as i64) + 1;
-            let path = Path::new(&entry.path);
+            let path = Path::new(&entry.path.value);
             let values = self.registry.process_file(path)?;
             
             let mut entity_row = DynamicRow { id: entity_id, values: Vec::new() };

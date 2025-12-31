@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local};
-use crate::types::TypedTag;
+use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
@@ -16,9 +16,6 @@ pub trait TagFunction: Send + Sync {
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
     /// 
     /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
-    /// 指定された `TypedTag` に対する検索SQL条件を生成します。
-    /// 
-    /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
     fn to_sql(&self, tag: &TypedTag) -> Option<String>;
 
     /// このタグが「スキャンID（同一性確認のキー）」であるかどうかを返します。
@@ -28,6 +25,41 @@ pub trait TagFunction: Send + Sync {
     /// このタグが「整合性チェック（変更検知）」に使われるかどうかを返します。
     /// 例: size, mtime, hash
     fn is_integrity(&self) -> bool { false }
+}
+
+/// 型レベルでのタグ定義情報を保持するトレイト。
+pub trait TagDefinition {
+    /// タグの識別子名。
+    const NAME: &'static str;
+    /// スキャンにおける役割。
+    const ROLE: ScanRole;
+    /// 対応する Rust の型。
+    type RustType: DBType + std::fmt::Debug + PartialEq + Clone;
+    /// パスとメタデータから値を生成します。
+    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType;
+}
+
+/// `TagDefinition` に基づく値を保持するコンテナ。
+pub struct Field<D: TagDefinition> {
+    pub value: D::RustType,
+}
+
+impl<D: TagDefinition> std::fmt::Debug for Field<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<D: TagDefinition> PartialEq for Field<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<D: TagDefinition> Clone for Field<D> {
+    fn clone(&self) -> Self {
+        Self { value: self.value.clone() }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -43,26 +75,11 @@ pub struct ScanColumn {
     pub role: ScanRole,
 }
 
-/// スキャン時に取得されるファイルの基本情報の構造体。
-/// `src/functions.rs` 内の標準タグ関数と対応しています。
-#[derive(Debug, PartialEq, Clone)]
-pub struct ScanEntry {
-    pub path: String,
-    pub inode: String,
-    pub size: i64,
-    pub mtime: i64,
-}
-
-impl ScanEntry {
-    /// スキャン時に作成される `temp_scan` テーブルのカラム構成を定義します。
-    pub fn schema() -> Vec<ScanColumn> {
-        vec![
-            ScanColumn { name: PathFunction::NAME, sql_type: "VARCHAR", role: ScanRole::Location },
-            ScanColumn { name: InodeFunction::NAME, sql_type: "VARCHAR", role: ScanRole::ScanId },
-            ScanColumn { name: SizeBytesFunction::NAME, sql_type: "BIGINT", role: ScanRole::Integrity },
-            ScanColumn { name: ModifiedTsFunction::NAME, sql_type: "BIGINT", role: ScanRole::Integrity },
-        ]
-    }
+crate::define_scan_entry! {
+    path: PathFunction,
+    inode: InodeFunction,
+    size: SizeBytesFunction,
+    mtime: ModifiedTsFunction,
 }
 
 // --- Utilities ---
@@ -115,6 +132,15 @@ impl TagFunction for PathFunction {
             return Some(format!("l.{} ILIKE '%{}%'", Self::NAME, escape(&tag.tag.0)));
         }
         None
+    }
+}
+
+impl TagDefinition for PathFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Location;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: &std::fs::Metadata) -> Self::RustType {
+        path.to_string_lossy().replace('\\', "/")
     }
 }
 
@@ -366,6 +392,16 @@ impl TagFunction for SizeBytesFunction {
     fn is_integrity(&self) -> bool { true }
 }
 
+impl TagDefinition for SizeBytesFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Integrity;
+    type RustType = FileSize;
+    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
+        let size = if path.is_dir() { 0 } else { metadata.len() as i64 };
+        FileSize(size)
+    }
+}
+
 // ========================================================
 // 8. Modified TS Function
 // ========================================================
@@ -410,6 +446,18 @@ impl TagFunction for ModifiedTsFunction {
     fn is_integrity(&self) -> bool { true }
 }
 
+impl TagDefinition for ModifiedTsFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Integrity;
+    type RustType = FileTimestamp;
+    fn generate(_path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
+        let ts = metadata.modified()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+            .unwrap_or(0);
+        FileTimestamp(ts)
+    }
+}
+
 // ========================================================
 // 9. Inode Function
 // ========================================================
@@ -443,6 +491,15 @@ impl TagFunction for InodeFunction {
         None
     }
     fn is_scanid(&self) -> bool { true }
+}
+
+impl TagDefinition for InodeFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::ScanId;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: &std::fs::Metadata) -> Self::RustType {
+        crate::get_inode_string(path)
+    }
 }
 
 // ========================================================

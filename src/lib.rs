@@ -12,6 +12,7 @@ pub mod types;
 pub mod query;
 pub mod plugins;
 pub mod config;
+pub mod macros;
 mod taggers;
 mod functions;
 pub mod indexing;
