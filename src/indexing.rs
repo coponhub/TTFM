@@ -160,8 +160,14 @@ impl<'a> Indexer<'a> {
                             Err(_) => return ignore::WalkState::Continue,
                         };
 
-                        let scan_entry = ScanEntry::from_path_metadata(entry.path(), &metadata);
-                        let _ = tx.send(scan_entry);
+                        match ScanEntry::from_path_metadata(entry.path(), &metadata) {
+                            Ok(scan_entry) => {
+                                let _ = tx.send(scan_entry);
+                            }
+                            Err(e) => {
+                                eprintln!("Error: Failed to process {:?}: {}", entry.path(), e);
+                            }
+                        }
                     }
                     ignore::WalkState::Continue
                 })

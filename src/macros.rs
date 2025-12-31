@@ -44,10 +44,10 @@ macro_rules! define_scan_entry {
             }
 
             /// パスとメタデータから `ScanEntry` を生成します。
-            pub fn from_path_metadata(path: &std::path::Path, metadata: &std::fs::Metadata) -> Self {
-                Self {
-                    $( $name: $crate::functions::Field { value: <$func as $crate::functions::TagDefinition>::generate(path, Some(metadata)) }, )*
-                }
+            pub fn from_path_metadata(path: &std::path::Path, metadata: &std::fs::Metadata) -> anyhow::Result<Self> {
+                Ok(Self {
+                    $( $name: $crate::functions::Field { value: <$func as $crate::functions::TagDefinition>::generate(path, Some(metadata))? }, )*
+                })
             }
 
                         /// DuckDBの行(`row`)から `ScanEntry` を生成します。

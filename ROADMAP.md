@@ -66,7 +66,29 @@ Transition to a normalized schema to track file identities and movements.
 ---
 
 ## Technical Debt / Refactoring
-- [x] **Performance Optimization**: Solved initial plugin overhead via parallelization and pooling.
-- [ ] **Error Handling**: Standardize error messages for invalid queries.
+
+- [x] **Phase 1: Error Handling & Architecture**:
+
+  - [x] Refactored `ScanEntry` using macros and `TagDefinition` for better DRY and type safety.
+
+  - [x] Improved error handling by replacing silent failures with `Result` propagation and logging.
+
+  - [x] Unified static (`TagDefinition`) and dynamic (`TagFunction`) tag systems using `ScanRole`.
+
+  - [x] Generalized file move detection logic to be implementation-agnostic.
+
+- [ ] **Phase 2: Plugin System Optimization**:
+
+  - [ ] Optimize WASM instance management to prevent initialization bottlenecks during parallel indexing.
+
+  - [ ] Enhance WASI security by restricting `preopened_dir` to specific scan targets.
+
+- [ ] **Phase 3: Database & Search Refinement**:
+
+  - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
+
+  - [ ] Standardize error messages for invalid queries.
+
 - [ ] **Benchmark**: Validate performance on extreme datasets (1M+ files).
+
 - [ ] **Test Coverage**: Add more edge cases for Windows paths and complex boolean logic.
