@@ -18,15 +18,11 @@ pub trait TagFunction: Send + Sync {
     /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
     fn to_sql(&self, tag: &TypedTag) -> Option<String>;
 
-    /// このタグが「スキャンID（同一性確認のキー）」であるかどうかを返します。
-    /// 例: inode
-    fn is_scanid(&self) -> bool { false }
-
-    /// このタグが「整合性チェック（変更検知）」に使われるかどうかを返します。
-    /// 例: size, mtime, hash
-    fn is_integrity(&self) -> bool { false }
+    /// このタグのスキャンにおける役割を返します。
+    fn role(&self) -> ScanRole { ScanRole::Other }
 
     /// パスのみから値を生成できる場合、その値を返します。
+    /// （移動処理などで、実際にファイルを開かずにタグを更新するために使用）
     fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
 }
 
@@ -38,8 +34,8 @@ pub trait TagDefinition {
     const ROLE: ScanRole;
     /// 対応する Rust の型。
     type RustType: DBType + std::fmt::Debug + PartialEq + Clone;
-    /// パスとメタデータから値を生成します。
-    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType;
+    /// パスと（もしあれば）メタデータから値を生成します。
+    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Self::RustType;
 }
 
 /// `TagDefinition` に基づく値を保持するコンテナ。
@@ -65,11 +61,12 @@ impl<D: TagDefinition> Clone for Field<D> {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ScanRole {
     Location,
     ScanId,
     Integrity,
+    Other,
 }
 
 pub struct ScanColumn {
@@ -136,6 +133,7 @@ impl TagFunction for PathFunction {
         }
         None
     }
+    fn role(&self) -> ScanRole { ScanRole::Location }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
         Some(TagValue::Text(path.to_string_lossy().replace('\\', "/")))
     }
@@ -145,7 +143,7 @@ impl TagDefinition for PathFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
-    fn generate(path: &Path, _metadata: &std::fs::Metadata) -> Self::RustType {
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
         path.to_string_lossy().replace('\\', "/")
     }
 }
@@ -188,8 +186,18 @@ impl TagFunction for ParentDirFunction {
         }
         None
     }
+    fn role(&self) -> ScanRole { ScanRole::Location }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Some(TagValue::Text(path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default()))
+        Some(TagValue::Text(Self::generate(path, None)))
+    }
+}
+
+impl TagDefinition for ParentDirFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Location;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default()
     }
 }
 
@@ -233,8 +241,18 @@ impl TagFunction for FilenameFunction {
         }
         None
     }
+    fn role(&self) -> ScanRole { ScanRole::Location }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Some(TagValue::Text(path.file_name().unwrap_or_default().to_string_lossy().to_string()))
+        Some(TagValue::Text(Self::generate(path, None)))
+    }
+}
+
+impl TagDefinition for FilenameFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Location;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        path.file_name().unwrap_or_default().to_string_lossy().to_string()
     }
 }
 
@@ -281,6 +299,15 @@ impl TagFunction for StemFunction {
     }
 }
 
+impl TagDefinition for StemFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Other;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    }
+}
+
 // ========================================================
 // 5. Extension Function
 // ========================================================
@@ -319,8 +346,18 @@ impl TagFunction for ExtensionFunction {
         }
         None
     }
+    fn role(&self) -> ScanRole { ScanRole::Location }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Some(TagValue::Text(path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default()))
+        Some(TagValue::Text(Self::generate(path, None)))
+    }
+}
+
+impl TagDefinition for ExtensionFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Location;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default()
     }
 }
 
@@ -363,6 +400,15 @@ impl TagFunction for DirectoryFunction {
             ));
         }
         None
+    }
+}
+
+impl TagDefinition for DirectoryFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Other;
+    type RustType = bool;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        path.is_dir()
     }
 }
 
@@ -414,16 +460,22 @@ impl TagFunction for SizeBytesFunction {
         }
         None
     }
-    fn is_integrity(&self) -> bool { true }
+    fn role(&self) -> ScanRole { ScanRole::Integrity }
 }
 
 impl TagDefinition for SizeBytesFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileSize;
-    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
-        let size = if path.is_dir() { 0 } else { metadata.len() as i64 };
-        FileSize(size)
+    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        let size = if path.is_dir() { 
+            0 
+        } else if let Some(m) = metadata {
+            m.len()
+        } else {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        };
+        FileSize(size as i64)
     }
 }
 
@@ -472,18 +524,24 @@ impl TagFunction for ModifiedTsFunction {
         }
         None
     }
-    fn is_integrity(&self) -> bool { true }
+    fn role(&self) -> ScanRole { ScanRole::Integrity }
 }
 
 impl TagDefinition for ModifiedTsFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileTimestamp;
-    fn generate(path: &Path, metadata: &std::fs::Metadata) -> Self::RustType {
-        let ts = match metadata.modified() {
+    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        let ts_res = if let Some(m) = metadata {
+            m.modified()
+        } else {
+            std::fs::metadata(path).and_then(|m| m.modified())
+        };
+
+        let ts = match ts_res {
             Ok(t) => t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
             Err(e) => {
-                eprintln!("Warning: Failed to get mtime from metadata for {:?}: {}", path, e);
+                eprintln!("Warning: Failed to get mtime for {:?}: {}", path, e);
                 0
             }
         };
@@ -523,14 +581,14 @@ impl TagFunction for InodeFunction {
         }
         None
     }
-    fn is_scanid(&self) -> bool { true }
+    fn role(&self) -> ScanRole { ScanRole::ScanId }
 }
 
 impl TagDefinition for InodeFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::ScanId;
     type RustType = String;
-    fn generate(path: &Path, _metadata: &std::fs::Metadata) -> Self::RustType {
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
         crate::get_inode_string(path)
     }
 }
@@ -547,10 +605,20 @@ impl Tagger for KindTagger {
     }
     /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
+        Ok(vec![TagValue::Text(KindFunction::generate(path, None))])
+    }
+}
+
+// ...
+
+impl TagDefinition for KindFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Other;
+    type RustType = String;
+    fn generate(path: &Path, _metadata: Option<&std::fs::Metadata>) -> Self::RustType {
         let is_dir = path.is_dir();
         let ext = path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default();
-        let kind = if is_dir { "Folder".to_string() } else if ext.is_empty() { "File".to_string() } else { format!("{} File", ext.to_uppercase()) };
-        Ok(vec![TagValue::Text(kind)])
+        if is_dir { "Folder".to_string() } else if ext.is_empty() { "File".to_string() } else { format!("{} File", ext.to_uppercase()) }
     }
 }
 
@@ -607,9 +675,26 @@ impl Tagger for SizeStrTagger {
     }
     /// ファイルサイズを読みやすい文字列（例: "1.5 MB"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let size = if path.is_dir() { 0 } else { std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
-        let str = if path.is_dir() { "-".to_string() } else { Self::format_size(size) };
-        Ok(vec![TagValue::Text(str)])
+        Ok(vec![TagValue::Text(SizeStrFunction::generate(path, None))])
+    }
+}
+
+// ...
+
+impl TagDefinition for SizeStrFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Other;
+    type RustType = String;
+    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        let size = if path.is_dir() { 
+            0 
+        } else if let Some(m) = metadata {
+            m.len()
+        } else {
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        };
+        
+        if path.is_dir() { "-".to_string() } else { SizeStrTagger::format_size(size) }
     }
 }
 
@@ -659,9 +744,24 @@ impl Tagger for ModifiedStrTagger {
     }
     /// 最終更新日時を読みやすい文字列（例: "2024-01-01 12:00"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ts = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let str = ts.map(|t| Self::format_time(t)).unwrap_or_default();
-        Ok(vec![TagValue::Text(str)])
+        Ok(vec![TagValue::Text(ModifiedStrFunction::generate(path, None))])
+    }
+}
+
+// ...
+
+impl TagDefinition for ModifiedStrFunction {
+    const NAME: &'static str = Self::NAME;
+    const ROLE: ScanRole = ScanRole::Other;
+    type RustType = String;
+    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Self::RustType {
+        let ts_res = if let Some(m) = metadata {
+            m.modified()
+        } else {
+            std::fs::metadata(path).and_then(|m| m.modified())
+        };
+
+        ts_res.map(ModifiedStrTagger::format_time).unwrap_or_default()
     }
 }
 
@@ -736,13 +836,13 @@ mod tests {
         let f = SizeBytesFunction::new();
         let sql = f.to_sql(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
         assert_eq!(sql, format!("e.{} = 123", SizeBytesFunction::NAME));
-        assert!(f.is_integrity());
+        assert_eq!(f.role(), ScanRole::Integrity);
     }
 
     #[test]
     fn test_inode_function() {
         let f = InodeFunction::new();
-        assert!(f.is_scanid());
+        assert_eq!(f.role(), ScanRole::ScanId);
         assert_eq!(f.tagger().get_columns()[0].name, "inode");
     }
 }

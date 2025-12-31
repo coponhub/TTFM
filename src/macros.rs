@@ -46,7 +46,7 @@ macro_rules! define_scan_entry {
             /// パスとメタデータから `ScanEntry` を生成します。
             pub fn from_path_metadata(path: &std::path::Path, metadata: &std::fs::Metadata) -> Self {
                 Self {
-                    $( $name: $crate::functions::Field { value: <$func as $crate::functions::TagDefinition>::generate(path, metadata) }, )*
+                    $( $name: $crate::functions::Field { value: <$func as $crate::functions::TagDefinition>::generate(path, Some(metadata)) }, )*
                 }
             }
 

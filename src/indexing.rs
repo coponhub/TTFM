@@ -387,8 +387,8 @@ impl<'a> Indexer<'a> {
             
             for func in functions {
                 let cols = func.tagger().get_columns();
-                for col in cols {
-                    if col.target_table == TargetTable::Locations {
+                for _ in cols {
+                    if func.role() == ScanRole::Location {
                         let val = func.generate_from_path(p).unwrap_or(TagValue::Null);
                         values.push(val);
                     }
