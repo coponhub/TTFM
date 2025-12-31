@@ -53,6 +53,12 @@ pub struct FunctionRegistry {
     functions: Vec<Box<dyn TagFunction>>,
 }
 
+impl Default for FunctionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FunctionRegistry {
     /// 空のレジストリを作成します。
     pub fn new() -> Self {

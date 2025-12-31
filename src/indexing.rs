@@ -343,15 +343,14 @@ impl<'a> Indexer<'a> {
     fn tagging_phase(&self, to_tag: Vec<ScanEntry>, moved: Vec<(i64, String)>) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
         let columns = self.registry.get_all_columns();
         let entities_path = self.entities_path();
-        let max_id: i64 = if entities_path.exists() {
-            let entities_str = entities_path.to_string_lossy().to_string();
-            // SELECT COALESCE(MAX(id), 0) FROM read_parquet('...')
-            let query = Query::select()
-                .expr(Func::cust(DBFunc::Coalesce).args([Expr::col(Col::Id).max().into(), Expr::val(0).into()]))
-                .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
-                .to_string(SqliteQueryBuilder);
-                
-            self.conn.query_row(&query, [], |r| r.get(0))?
+                    let max_id: i64 = if entities_path.exists() {
+                    let entities_str = entities_path.to_string_lossy().to_string();
+                    // SELECT COALESCE(MAX(id), 0) FROM read_parquet('...')
+                    let query = Query::select()
+                        .expr(Func::cust(DBFunc::Coalesce).args([Expr::col(Col::Id).max(), Expr::val(0).into()]))
+                        .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+                        .to_string(SqliteQueryBuilder);
+                    self.conn.query_row(&query, [], |r| r.get(0))?
         } else {
             0
         };
@@ -466,7 +465,7 @@ impl<'a> Indexer<'a> {
                 app_loc.append_row(loc_refs.as_slice())?;
 
                 for t in res.tags {
-                    app_tag.append_row(&[&t.entity_id as &dyn ToSql, &t.tag_type, &t.tag_value])?;
+                    app_tag.append_row([&t.entity_id as &dyn ToSql, &t.tag_type, &t.tag_value])?;
                 }
             }
 

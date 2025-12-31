@@ -35,6 +35,12 @@ impl Default for PluginsConfig {
 
 fn default_true() -> bool { true }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Config {
     /// デフォルトの設定を生成します。
     pub fn new() -> Self {
