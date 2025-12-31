@@ -81,11 +81,17 @@ impl<'a> Indexer<'a> {
     fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
     /// Helper to execute "COPY (query) TO 'path' (FORMAT 'parquet', COMPRESSION 'zstd')"
+    /// Performs an atomic write by using a temporary file.
     fn copy_to_parquet(&self, query: sea_query::SelectStatement, path: &str) -> Result<()> {
         let sql = query.to_string(SqliteQueryBuilder);
-        // DuckDB COPY syntax needs to be constructed manually as it wraps the query
-        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", sql, path);
-        self.conn.execute(&copy_sql, []).with_context(|| format!("Failed to export parquet to {}", path))?;
+        let tmp_path = format!("{}.tmp", path);
+        
+        // Always write to a temporary file first
+        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", sql, tmp_path);
+        self.conn.execute(&copy_sql, []).with_context(|| format!("Failed to export parquet to {}", tmp_path))?;
+        
+        // Atomically rename to the target path
+        std::fs::rename(&tmp_path, path).with_context(|| format!("Failed to rename {} to {}", tmp_path, path))?;
         Ok(())
     }
 
@@ -480,7 +486,7 @@ impl<'a> Indexer<'a> {
         // Helper to construct Merge Query:
         // SELECT * FROM read_parquet(old) WHERE filter UNION ALL SELECT * FROM temp_table
         let merge_and_write = |parquet_path: &str, temp_table: &str, filter_cond: Option<Condition>| -> Result<()> {
-            if Path::new(parquet_path).exists() {
+            let query = if Path::new(parquet_path).exists() {
                 let mut base_query = Query::select();
                 base_query.expr(Expr::cust("*")).from_subquery(self.parquet_query(parquet_path), Tbl::OldAlias);
                 
@@ -488,18 +494,15 @@ impl<'a> Indexer<'a> {
                     base_query.cond_where(cond);
                 }
 
-                let union_query = base_query.union(
+                base_query.union(
                     sea_query::UnionType::All,
                     Query::select().expr(Expr::cust("*")).from(Alias::new(temp_table)).to_owned()
-                ).to_owned();
-
-                self.copy_to_parquet(union_query, &format!("{}.tmp", parquet_path))?;
-                std::fs::rename(format!("{}.tmp", parquet_path), parquet_path)?;
+                ).to_owned()
             } else {
-                let query = Query::select().expr(Expr::cust("*")).from(Alias::new(temp_table)).to_owned();
-                self.copy_to_parquet(query, parquet_path)?;
-            }
-            Ok(())
+                Query::select().expr(Expr::cust("*")).from(Alias::new(temp_table)).to_owned()
+            };
+
+            self.copy_to_parquet(query, parquet_path)
         };
 
         let deleted_filter = if deleted_ids.is_empty() { None } else {
