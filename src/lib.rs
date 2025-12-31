@@ -28,6 +28,7 @@ use functions::{
     DirectoryFunction,
     SizeBytesFunction,
     ModifiedTsFunction,
+    InodeFunction,
     KindFunction,
     SizeStrFunction,
     ModifiedStrFunction,
@@ -67,6 +68,7 @@ impl FunctionRegistry {
     pub fn with_standard() -> Self {
         let mut reg = Self::new();
         // 登録順序が重要（カラム順序になるため）
+        reg.register(Box::new(InodeFunction::new()));
         reg.register(Box::new(PathFunction::new()));
         reg.register(Box::new(ParentDirFunction::new()));
         reg.register(Box::new(FilenameFunction::new()));
@@ -79,6 +81,11 @@ impl FunctionRegistry {
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
         reg
+    }
+
+    /// 全ての登録済み関数への参照を返します。
+    pub fn all_functions(&self) -> &[Box<dyn TagFunction>] {
+        &self.functions
     }
 
     // --- Indexing Support ---

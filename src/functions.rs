@@ -16,7 +16,53 @@ pub trait TagFunction: Send + Sync {
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
     /// 
     /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
+    /// 指定された `TypedTag` に対する検索SQL条件を生成します。
+    /// 
+    /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
     fn to_sql(&self, tag: &TypedTag) -> Option<String>;
+
+    /// このタグが「スキャンID（同一性確認のキー）」であるかどうかを返します。
+    /// 例: inode
+    fn is_scanid(&self) -> bool { false }
+
+    /// このタグが「整合性チェック（変更検知）」に使われるかどうかを返します。
+    /// 例: size, mtime, hash
+    fn is_integrity(&self) -> bool { false }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ScanRole {
+    Location,
+    ScanId,
+    Integrity,
+}
+
+pub struct ScanColumn {
+    pub name: &'static str,
+    pub sql_type: &'static str,
+    pub role: ScanRole,
+}
+
+/// スキャン時に取得されるファイルの基本情報の構造体。
+/// `src/functions.rs` 内の標準タグ関数と対応しています。
+#[derive(Debug, PartialEq, Clone)]
+pub struct ScanEntry {
+    pub path: String,
+    pub inode: String,
+    pub size: i64,
+    pub mtime: i64,
+}
+
+impl ScanEntry {
+    /// スキャン時に作成される `temp_scan` テーブルのカラム構成を定義します。
+    pub fn schema() -> Vec<ScanColumn> {
+        vec![
+            ScanColumn { name: PathFunction::NAME, sql_type: "VARCHAR", role: ScanRole::Location },
+            ScanColumn { name: InodeFunction::NAME, sql_type: "VARCHAR", role: ScanRole::ScanId },
+            ScanColumn { name: SizeBytesFunction::NAME, sql_type: "BIGINT", role: ScanRole::Integrity },
+            ScanColumn { name: ModifiedTsFunction::NAME, sql_type: "BIGINT", role: ScanRole::Integrity },
+        ]
+    }
 }
 
 // --- Utilities ---
@@ -304,7 +350,7 @@ pub struct SizeBytesFunction { tagger: SizeBytesTagger }
 
 impl SizeBytesFunction {
     /// この機能の識別子名。
-    pub const NAME: &'static str = "size_bytes";
+    pub const NAME: &'static str = "size";
     /// 新しい `SizeBytesFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: SizeBytesTagger } }
 }
@@ -317,6 +363,7 @@ impl TagFunction for SizeBytesFunction {
         }
         None
     }
+    fn is_integrity(&self) -> bool { true }
 }
 
 // ========================================================
@@ -347,7 +394,7 @@ pub struct ModifiedTsFunction { tagger: ModifiedTsTagger }
 
 impl ModifiedTsFunction {
     /// この機能の識別子名。
-    pub const NAME: &'static str = "modified_ts";
+    pub const NAME: &'static str = "mtime";
     /// 新しい `ModifiedTsFunction` インスタンスを作成します。
     pub fn new() -> Self { Self { tagger: ModifiedTsTagger } }
 }
@@ -360,10 +407,46 @@ impl TagFunction for ModifiedTsFunction {
         }
         None
     }
+    fn is_integrity(&self) -> bool { true }
 }
 
 // ========================================================
-// 9. Kind Function
+// 9. Inode Function
+// ========================================================
+
+struct InodeTagger;
+
+impl Tagger for InodeTagger {
+    fn get_columns(&self) -> Vec<ColumnDef> {
+        vec![ColumnDef { name: InodeFunction::NAME.to_string(), sql_type: "VARCHAR", target_table: TargetTable::Entities }]
+    }
+    fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
+        let inode = crate::get_inode_string(path);
+        Ok(vec![TagValue::Text(inode)])
+    }
+}
+
+/// ファイル識別子（`inode`）に関する機能。
+pub struct InodeFunction { tagger: InodeTagger }
+
+impl InodeFunction {
+    pub const NAME: &'static str = "inode";
+    pub fn new() -> Self { Self { tagger: InodeTagger } }
+}
+
+impl TagFunction for InodeFunction {
+    fn tagger(&self) -> &dyn Tagger { &self.tagger }
+    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+        if tag.tagtype.0 == Self::NAME {
+            return Some(format!("e.{} = '{}'", Self::NAME, escape(&tag.tag.0)));
+        }
+        None
+    }
+    fn is_scanid(&self) -> bool { true }
+}
+
+// ========================================================
+// 10. Kind Function
 // ========================================================
 
 struct KindTagger;
@@ -563,5 +646,13 @@ mod tests {
         let f = SizeBytesFunction::new();
         let sql = f.to_sql(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
         assert_eq!(sql, format!("e.{} = 123", SizeBytesFunction::NAME));
+        assert!(f.is_integrity());
+    }
+
+    #[test]
+    fn test_inode_function() {
+        let f = InodeFunction::new();
+        assert!(f.is_scanid());
+        assert_eq!(f.tagger().get_columns()[0].name, "inode");
     }
 }

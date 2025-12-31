@@ -1,8 +1,8 @@
 use crate::taggers::{TagValue, TargetTable};
 use crate::FunctionRegistry;
 use crate::functions::{
-    SizeBytesFunction, ModifiedTsFunction, PathFunction,
-    FilenameFunction, ParentDirFunction, ExtensionFunction,
+    PathFunction, FilenameFunction, ParentDirFunction, ExtensionFunction,
+    ScanEntry, ScanRole,
 };
 use anyhow::{Result, Context};
 use duckdb::{Connection, ToSql};
@@ -34,9 +34,6 @@ enum Tbl {
 #[derive(Iden)]
 enum Col {
     Path,
-    Inode,
-    Size,
-    Mtime,
     Id,
     EntityId,
     TagType,
@@ -47,14 +44,6 @@ enum Col {
 enum DBFunc {
     ReadParquet,
     Coalesce,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct ScanEntry {
-    pub path: String,
-    pub inode: String,
-    pub size: i64,
-    pub mtime: i64,
 }
 
 struct IndexDiff {
@@ -128,15 +117,19 @@ impl<'a> Indexer<'a> {
         F: Fn(usize) + Sync + Send,
     {
         if !dry_run {
-            let create_sql = Table::create()
-                .table(Tbl::TempScan)
-                .if_not_exists()
-                .col(SeaColumnDef::new(Col::Path).string())
-                .col(SeaColumnDef::new(Col::Inode).string())
-                .col(SeaColumnDef::new(Col::Size).big_integer())
-                .col(SeaColumnDef::new(Col::Mtime).big_integer())
-                .to_string(SqliteQueryBuilder);
+            let mut create_table = Table::create();
+            create_table.table(Tbl::TempScan).if_not_exists();
             
+            for col_def in ScanEntry::schema() {
+                let mut col = SeaColumnDef::new(Alias::new(col_def.name));
+                match col_def.sql_type {
+                    "BIGINT" => col.big_integer(),
+                    _ => col.string(),
+                };
+                create_table.col(&mut col);
+            }
+            
+            let create_sql = create_table.to_string(SqliteQueryBuilder);
             self.conn.execute(&create_sql, []).context("Failed to create temp_scan table")?;
             
             // Clear table
@@ -186,6 +179,7 @@ impl<'a> Indexer<'a> {
             let mut appender = if !dry_run { Some(self.conn.appender("temp_scan")?) } else { None };
             for (path_str, inode, size, mtime) in rx {
                 if let Some(ref mut app) = appender {
+                    // Appender still uses indices, which must match schema order
                     app.append_row(&[&path_str as &dyn ToSql, &inode, &size, &mtime])?;
                 }
                 count += 1;
@@ -217,9 +211,33 @@ impl<'a> Indexer<'a> {
         let locations_str = self.locations_path().to_string_lossy().to_string();
         let scan_path_str = self.temp_scan_path().to_string_lossy().to_string();
 
+        let schema = ScanEntry::schema();
+        let col_aliases: Vec<Alias> = schema.iter().map(|c| Alias::new(c.name)).collect();
+        
+        let identity_match = || {
+            let mut cond = Condition::all();
+            for (i, col_def) in schema.iter().enumerate() {
+                if matches!(col_def.role, ScanRole::ScanId) {
+                    let col = col_aliases[i].clone();
+                    cond = cond.add(Expr::col((Tbl::EntAlias, col.clone())).eq(Expr::col((Tbl::ScanAlias, col.clone()))));
+                }
+            }
+            cond
+        };
+        let integrity_match = || {
+            let mut cond = Condition::all();
+            for (i, col_def) in schema.iter().enumerate() {
+                if matches!(col_def.role, ScanRole::Integrity) {
+                    let col = col_aliases[i].clone();
+                    cond = cond.add(Expr::col((Tbl::EntAlias, col.clone())).eq(Expr::col((Tbl::ScanAlias, col.clone()))));
+                }
+            }
+            cond
+        };
+
         if !has_existing {
             let query = Query::select()
-                .columns([Col::Path, Col::Inode, Col::Size, Col::Mtime])
+                .columns(col_aliases.clone())
                 .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
                 .to_string(SqliteQueryBuilder);
 
@@ -231,26 +249,16 @@ impl<'a> Indexer<'a> {
             return Ok(IndexDiff { to_tag, moved: vec![], deleted_ids: vec![], unchanged_ids: vec![] });
         }
 
-        // Configurable column names (currently constants, but prepared for dynamic retrieval)
-        let col_ent_size = Alias::new(SizeBytesFunction::NAME);
-        let col_ent_mtime = Alias::new(ModifiedTsFunction::NAME);
-
-        // 1. to_tag
+        // 1. to_tag: WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE identity AND integrity)
         let subquery_exists = Query::select()
             .expr(Expr::val(1))
             .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
-            .and_where(Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode))))
-            .and_where(Expr::col((Tbl::EntAlias, col_ent_mtime.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Mtime))))
-            .and_where(Expr::col((Tbl::EntAlias, col_ent_size.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Size))))
+            .cond_where(identity_match())
+            .cond_where(integrity_match())
             .to_owned();
 
         let query_to_tag = Query::select()
-            .columns([
-                (Tbl::ScanAlias, Col::Path),
-                (Tbl::ScanAlias, Col::Inode),
-                (Tbl::ScanAlias, Col::Size),
-                (Tbl::ScanAlias, Col::Mtime)
-            ])
+            .columns(col_aliases.iter().map(|a| (Tbl::ScanAlias, a.clone())).collect::<Vec<_>>())
             .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
             .and_where(Expr::exists(subquery_exists).not())
             .to_string(SqliteQueryBuilder);
@@ -261,16 +269,19 @@ impl<'a> Indexer<'a> {
                 path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
             }))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // 2. moved
+        // 2. moved: Identity match AND Integrity match AND Path mismatch
+        // Path is typically first column (role Location)
+        let col_path = col_aliases[0].clone();
+        
         let query_moved = Query::select()
             .column((Tbl::EntAlias, Col::Id))
-            .column((Tbl::ScanAlias, Col::Path))
+            .column((Tbl::ScanAlias, col_path.clone()))
             .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
             .join_subquery(
                 JoinType::InnerJoin,
                 self.parquet_query(&scan_path_str),
                 Tbl::ScanAlias,
-                Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode)))
+                identity_match()
             )
             .join_subquery(
                 JoinType::InnerJoin,
@@ -278,16 +289,15 @@ impl<'a> Indexer<'a> {
                 Tbl::LocAlias,
                 Expr::col((Tbl::EntAlias, Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::EntityId)))
             )
-            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, Col::Path))))
-            .and_where(Expr::col((Tbl::ScanAlias, Col::Mtime)).eq(Expr::col((Tbl::EntAlias, col_ent_mtime.clone()))))
-            .and_where(Expr::col((Tbl::ScanAlias, Col::Size)).eq(Expr::col((Tbl::EntAlias, col_ent_size.clone()))))
+            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, col_path.clone()))))
+            .cond_where(integrity_match())
             .to_string(SqliteQueryBuilder);
 
         let moved = self.conn.prepare(&query_moved)
             .context("Failed to prepare diff query (moved)")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // 3. deleted_ids
+        // 3. deleted_ids: Identity match missing in Scan
         let query_deleted = Query::select()
             .column((Tbl::EntAlias, Col::Id))
             .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
@@ -295,19 +305,16 @@ impl<'a> Indexer<'a> {
                 JoinType::LeftJoin,
                 self.parquet_query(&scan_path_str),
                 Tbl::ScanAlias,
-                Condition::all()
-                    .add(Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode))))
-                    .add(Expr::col((Tbl::EntAlias, col_ent_mtime.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Mtime))))
-                    .add(Expr::col((Tbl::EntAlias, col_ent_size.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Size))))
+                Condition::all().add(identity_match()).add(integrity_match())
             )
-            .and_where(Expr::col((Tbl::ScanAlias, Col::Inode)).is_null())
+            .and_where(Expr::col((Tbl::ScanAlias, col_path.clone())).is_null()) // Check path null as proxy for record missing
             .to_string(SqliteQueryBuilder);
 
         let deleted_ids = self.conn.prepare(&query_deleted)
             .context("Failed to prepare diff query (deleted_ids)")?
             .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // 4. unchanged_ids
+        // 4. unchanged_ids: Identity match AND Integrity match AND Path match
         let query_unchanged = Query::select()
             .column((Tbl::EntAlias, Col::Id))
             .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
@@ -315,7 +322,7 @@ impl<'a> Indexer<'a> {
                 JoinType::InnerJoin,
                 self.parquet_query(&scan_path_str),
                 Tbl::ScanAlias,
-                Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode)))
+                identity_match()
             )
             .join_subquery(
                 JoinType::InnerJoin,
@@ -323,9 +330,8 @@ impl<'a> Indexer<'a> {
                 Tbl::LocAlias,
                 Expr::col((Tbl::EntAlias, Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::EntityId)))
             )
-            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, Col::Path))))
-            .and_where(Expr::col((Tbl::ScanAlias, Col::Mtime)).eq(Expr::col((Tbl::EntAlias, col_ent_mtime.clone()))))
-            .and_where(Expr::col((Tbl::ScanAlias, Col::Size)).eq(Expr::col((Tbl::EntAlias, col_ent_size.clone()))))
+            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, col_path.clone()))))
+            .cond_where(integrity_match())
             .to_string(SqliteQueryBuilder);
 
         let unchanged_ids = self.conn.prepare(&query_unchanged)
@@ -357,7 +363,6 @@ impl<'a> Indexer<'a> {
             let values = self.registry.process_file(path)?;
             
             let mut entity_row = DynamicRow { id: entity_id, values: Vec::new() };
-            entity_row.values.push(TagValue::Text(entry.inode));
             
             let mut location_row = DynamicRow { id: entity_id, values: Vec::new() };
             let mut tags = Vec::new();
@@ -413,13 +418,13 @@ impl<'a> Indexer<'a> {
         let location_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
 
         // Helper to create temp table definition
-        let create_temp_table = |name: &str, base_cols: Vec<(Col, &str)>, dyn_cols: &Vec<&crate::taggers::ColumnDef>| -> String {
+        let create_temp_table = |name: &str, base_cols: Vec<(Alias, &str)>, dyn_cols: &Vec<&crate::taggers::ColumnDef>| -> String {
             let mut create = Table::create()
                 .table(Alias::new(name))
                 .to_owned();
             
-            for (col_iden, col_type) in base_cols {
-                let mut def = SeaColumnDef::new(col_iden);
+            for (col_alias, col_type) in base_cols {
+                let mut def = SeaColumnDef::new(col_alias);
                 match col_type {
                     "BIGINT" => def.big_integer(),
                     _ => def.string(),
@@ -439,8 +444,8 @@ impl<'a> Indexer<'a> {
             create.to_string(SqliteQueryBuilder)
         };
 
-        let sql_ents = create_temp_table("temp_entities", vec![(Col::Id, "BIGINT"), (Col::Inode, "VARCHAR")], &entity_cols);
-        let sql_locs = create_temp_table("temp_locations", vec![(Col::EntityId, "BIGINT")], &location_cols);
+        let sql_ents = create_temp_table("temp_entities", vec![(Alias::new("id"), "BIGINT")], &entity_cols);
+        let sql_locs = create_temp_table("temp_locations", vec![(Alias::new("entity_id"), "BIGINT")], &location_cols);
         
         let sql_tags = Table::create().table(Tbl::TempTags)
             .col(SeaColumnDef::new(Col::EntityId).big_integer())
