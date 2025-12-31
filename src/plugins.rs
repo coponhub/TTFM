@@ -1,7 +1,7 @@
 use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use std::path::Path;
 use std::sync::Arc;
 use std::cell::RefCell;
@@ -64,12 +64,15 @@ impl WasmPlugin {
     /// プラグインを実行可能なアダプターに変換します。
     pub fn into_adapter(self) -> Result<WasmPluginAdapter> {
         // カラム情報を取得するために一度だけインスタンス化
-        let mut store = self.create_store()?;
-        let plugin = Plugin::instantiate(&mut store, &self.component, &self.linker)?;
-        let info = plugin.ttfm_plugin_core().call_get_info(&mut store)?;
+        let mut store = self.create_store().context("Failed to create store for introspection")?;
+        let plugin = Plugin::instantiate(&mut store, &self.component, &self.linker)
+            .context("Failed to instantiate plugin for introspection")?;
+        let info = plugin.ttfm_plugin_core().call_get_info(&mut store)
+            .context("Failed to call get_info")?;
         
         let interface = plugin.ttfm_plugin_tag_function();
-        let wasm_cols = interface.call_get_columns(&mut store).unwrap_or_default();
+        let wasm_cols = interface.call_get_columns(&mut store)
+            .context("Failed to call get_columns")?;
         let columns = wasm_cols.into_iter().map(|c| ColumnDef {
             name: c.name,
             sql_type: Box::leak(c.sql_type.into_boxed_str()), 
@@ -127,11 +130,12 @@ impl Tagger for WasmPluginAdapter {
                 cache.insert(self.name.clone(), (store, plugin));
             }
             
-            let (store, plugin) = cache.get_mut(&self.name).unwrap();
+            let (store, plugin) = cache.get_mut(&self.name)
+                .ok_or_else(|| anyhow::anyhow!("Plugin instance missing from cache"))?;
             let interface = plugin.ttfm_plugin_tag_function();
             
             interface.call_tag_file(store, &path_str)
-                .map_err(|e| anyhow::anyhow!("Wasm execution error: {}", e))
+                .with_context(|| format!("Wasm execution error for file: {}", path_str))
         })?;
             
         Ok(results.into_iter().map(convert_tag_value).collect())

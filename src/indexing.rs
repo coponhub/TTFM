@@ -4,7 +4,7 @@ use crate::functions::{
     SizeBytesFunction, ModifiedTsFunction, PathFunction,
     FilenameFunction, ParentDirFunction, ExtensionFunction,
 };
-use anyhow::Result;
+use anyhow::{Result, Context};
 use duckdb::{Connection, ToSql};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -66,7 +66,7 @@ impl<'a> Indexer<'a> {
             self.conn.execute_batch("
                 CREATE TABLE IF NOT EXISTS temp_scan (path VARCHAR, inode VARCHAR, size BIGINT, mtime BIGINT);
                 DELETE FROM temp_scan;
-            ")?;
+            ").context("Failed to prepare temp_scan table")?;
         }
 
         let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
@@ -120,12 +120,14 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        scan_thread.join().map_err(|_| anyhow::anyhow!("Scan thread panicked"))?;
+        scan_thread.join().map_err(|e| anyhow::anyhow!("Scan thread panicked: {:?}", e))?;
 
         if !dry_run {
             let scan_path = self.temp_scan_path().to_string_lossy().to_string();
-            self.conn.execute(&format!("COPY temp_scan TO '{}' (FORMAT 'parquet')", scan_path), [])?;
-            self.conn.execute("DROP TABLE temp_scan", [])?;
+            self.conn.execute(&format!("COPY temp_scan TO '{}' (FORMAT 'parquet')", scan_path), [])
+                .with_context(|| format!("Failed to export temp_scan to {}", scan_path))?;
+            self.conn.execute("DROP TABLE temp_scan", [])
+                .context("Failed to drop temp_scan table")?;
         }
 
         if let Some(cb) = on_progress { cb(count); }
@@ -140,7 +142,8 @@ impl<'a> Indexer<'a> {
         let current_scan_sql = format!("read_parquet('{}')", scan_path_str);
 
         if !has_existing {
-            let mut stmt = self.conn.prepare(&format!("SELECT path, inode, size, mtime FROM {}", current_scan_sql))?;
+            let mut stmt = self.conn.prepare(&format!("SELECT path, inode, size, mtime FROM {}", current_scan_sql))
+                .context("Failed to prepare initial scan query")?;
             let to_tag = stmt.query_map([], |row| Ok(ScanEntry {
                 path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
             }))?.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -158,7 +161,8 @@ impl<'a> Indexer<'a> {
             "SELECT s.path, s.inode, s.size, s.mtime FROM {} s 
              WHERE NOT EXISTS (SELECT 1 FROM {} e WHERE e.inode = s.inode AND e.{} = s.mtime AND e.{} = s.size)", 
              current_scan_sql, old_entities_sql, mtime_col, size_col
-        ))?.query_map([], |row| Ok(ScanEntry {
+        )).context("Failed to prepare diff query (to_tag)")?
+        .query_map([], |row| Ok(ScanEntry {
             path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
         }))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -166,18 +170,21 @@ impl<'a> Indexer<'a> {
             "SELECT e.id, s.path FROM {} e JOIN {} s ON e.inode = s.inode JOIN {} l ON e.id = l.entity_id 
              WHERE l.path != s.path AND s.mtime = e.{} AND s.size = e.{}",
              old_entities_sql, current_scan_sql, old_locations_sql, mtime_col, size_col
-        ))?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        )).context("Failed to prepare diff query (moved)")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         let deleted_ids = self.conn.prepare(&format!(
             "SELECT id FROM {} EXCEPT SELECT e.id FROM {} e JOIN {} s ON e.inode = s.inode WHERE e.{} = s.mtime AND e.{} = s.size",
             old_entities_sql, old_entities_sql, current_scan_sql, mtime_col, size_col
-        ))?.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        )).context("Failed to prepare diff query (deleted_ids)")?
+        .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         let unchanged_ids = self.conn.prepare(&format!(
             "SELECT e.id FROM {} e JOIN {} s ON e.inode = s.inode JOIN {} l ON e.id = l.entity_id 
              WHERE l.path = s.path AND s.mtime = e.{} AND s.size = e.{}",
              old_entities_sql, current_scan_sql, old_locations_sql, mtime_col, size_col
-        ))?.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        )).context("Failed to prepare diff query (unchanged_ids)")?
+        .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(IndexDiff { to_tag, moved, deleted_ids, unchanged_ids })
     }
