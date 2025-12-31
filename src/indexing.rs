@@ -6,9 +6,48 @@ use crate::functions::{
 };
 use anyhow::{Result, Context};
 use duckdb::{Connection, ToSql};
+use sea_query::{Query, Expr, Alias, Condition, JoinType, SqliteQueryBuilder, Func, Table, ColumnDef as SeaColumnDef, Iden};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
+
+// --- Iden Definitions ---
+
+#[derive(Iden)]
+enum Tbl {
+    TempScan,
+    TempEntities,
+    TempLocations,
+    TempTags,
+    #[iden = "scan"] // Alias for current_scan
+    ScanAlias, 
+    #[iden = "e"]    // Alias for entities
+    EntAlias,
+    #[iden = "l"]    // Alias for locations
+    LocAlias,
+    #[iden = "old"]  // Alias for old parquet
+    OldAlias,
+    #[iden = "origin"] // Internal alias for read_parquet subquery
+    OriginAlias,
+}
+
+#[derive(Iden)]
+enum Col {
+    Path,
+    Inode,
+    Size,
+    Mtime,
+    Id,
+    EntityId,
+    TagType,
+    TagValue,
+}
+
+#[derive(Iden)]
+enum DBFunc {
+    ReadParquet,
+    Coalesce,
+}
 
 #[derive(Debug, PartialEq)]
 pub struct ScanEntry {
@@ -41,6 +80,26 @@ impl<'a> Indexer<'a> {
     fn tags_path(&self) -> PathBuf { self.db_dir.join("tags.parquet") }
     fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
+    /// Helper to execute "COPY (query) TO 'path' (FORMAT 'parquet', COMPRESSION 'zstd')"
+    fn copy_to_parquet(&self, query: sea_query::SelectStatement, path: &str) -> Result<()> {
+        let sql = query.to_string(SqliteQueryBuilder);
+        // DuckDB COPY syntax needs to be constructed manually as it wraps the query
+        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", sql, path);
+        self.conn.execute(&copy_sql, []).with_context(|| format!("Failed to export parquet to {}", path))?;
+        Ok(())
+    }
+
+    /// Helper to create a subquery: (SELECT * FROM read_parquet('path'))
+    fn parquet_query(&self, path: &str) -> sea_query::SelectStatement {
+         Query::select()
+            .expr(Expr::cust("*"))
+            .from_function(
+                Func::cust(DBFunc::ReadParquet).arg(Expr::val(path)),
+                Tbl::OriginAlias
+            )
+            .to_owned()
+    }
+
     pub fn run<P, F>(&self, root_path: P, on_progress: Option<&F>, dry_run: bool) -> Result<usize>
     where
         P: AsRef<Path>,
@@ -63,10 +122,20 @@ impl<'a> Indexer<'a> {
         F: Fn(usize) + Sync + Send,
     {
         if !dry_run {
-            self.conn.execute_batch("
-                CREATE TABLE IF NOT EXISTS temp_scan (path VARCHAR, inode VARCHAR, size BIGINT, mtime BIGINT);
-                DELETE FROM temp_scan;
-            ").context("Failed to prepare temp_scan table")?;
+            let create_sql = Table::create()
+                .table(Tbl::TempScan)
+                .if_not_exists()
+                .col(SeaColumnDef::new(Col::Path).string())
+                .col(SeaColumnDef::new(Col::Inode).string())
+                .col(SeaColumnDef::new(Col::Size).big_integer())
+                .col(SeaColumnDef::new(Col::Mtime).big_integer())
+                .to_string(SqliteQueryBuilder);
+            
+            self.conn.execute(&create_sql, []).context("Failed to create temp_scan table")?;
+            
+            // Clear table
+            let delete_sql = sea_query::Query::delete().from_table(Tbl::TempScan).to_string(SqliteQueryBuilder);
+            self.conn.execute(&delete_sql, []).context("Failed to clear temp_scan table")?;
         }
 
         let db_dir_canonical = self.db_dir.canonicalize().unwrap_or_else(|_| self.db_dir.clone());
@@ -124,10 +193,12 @@ impl<'a> Indexer<'a> {
 
         if !dry_run {
             let scan_path = self.temp_scan_path().to_string_lossy().to_string();
-            self.conn.execute(&format!("COPY temp_scan TO '{}' (FORMAT 'parquet')", scan_path), [])
-                .with_context(|| format!("Failed to export temp_scan to {}", scan_path))?;
-            self.conn.execute("DROP TABLE temp_scan", [])
-                .context("Failed to drop temp_scan table")?;
+            // COPY (SELECT * FROM temp_scan) TO ...
+            let query = Query::select().expr(Expr::cust("*")).from(Tbl::TempScan).to_owned();
+            self.copy_to_parquet(query, &scan_path)?;
+            
+            let drop_sql = Table::drop().table(Tbl::TempScan).to_string(SqliteQueryBuilder);
+            self.conn.execute(&drop_sql, []).context("Failed to drop temp_scan table")?;
         }
 
         if let Some(cb) = on_progress { cb(count); }
@@ -139,11 +210,14 @@ impl<'a> Indexer<'a> {
         let entities_str = self.entities_path().to_string_lossy().to_string();
         let locations_str = self.locations_path().to_string_lossy().to_string();
         let scan_path_str = self.temp_scan_path().to_string_lossy().to_string();
-        let current_scan_sql = format!("read_parquet('{}')", scan_path_str);
 
         if !has_existing {
-            let mut stmt = self.conn.prepare(&format!("SELECT path, inode, size, mtime FROM {}", current_scan_sql))
-                .context("Failed to prepare initial scan query")?;
+            let query = Query::select()
+                .columns([Col::Path, Col::Inode, Col::Size, Col::Mtime])
+                .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
+                .to_string(SqliteQueryBuilder);
+
+            let mut stmt = self.conn.prepare(&query).context("Failed to prepare initial scan query")?;
             let to_tag = stmt.query_map([], |row| Ok(ScanEntry {
                 path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
             }))?.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -151,40 +225,106 @@ impl<'a> Indexer<'a> {
             return Ok(IndexDiff { to_tag, moved: vec![], deleted_ids: vec![], unchanged_ids: vec![] });
         }
 
-        let old_entities_sql = format!("read_parquet('{}')", entities_str);
-        let old_locations_sql = format!("read_parquet('{}')", locations_str);
+        // Configurable column names (currently constants, but prepared for dynamic retrieval)
+        let col_ent_size = Alias::new(SizeBytesFunction::NAME);
+        let col_ent_mtime = Alias::new(ModifiedTsFunction::NAME);
 
-        let size_col = SizeBytesFunction::NAME;
-        let mtime_col = ModifiedTsFunction::NAME;
+        // 1. to_tag
+        let subquery_exists = Query::select()
+            .expr(Expr::val(1))
+            .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+            .and_where(Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode))))
+            .and_where(Expr::col((Tbl::EntAlias, col_ent_mtime.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Mtime))))
+            .and_where(Expr::col((Tbl::EntAlias, col_ent_size.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Size))))
+            .to_owned();
 
-        let to_tag = self.conn.prepare(&format!(
-            "SELECT s.path, s.inode, s.size, s.mtime FROM {} s 
-             WHERE NOT EXISTS (SELECT 1 FROM {} e WHERE e.inode = s.inode AND e.{} = s.mtime AND e.{} = s.size)", 
-             current_scan_sql, old_entities_sql, mtime_col, size_col
-        )).context("Failed to prepare diff query (to_tag)")?
-        .query_map([], |row| Ok(ScanEntry {
-            path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
-        }))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let query_to_tag = Query::select()
+            .columns([
+                (Tbl::ScanAlias, Col::Path),
+                (Tbl::ScanAlias, Col::Inode),
+                (Tbl::ScanAlias, Col::Size),
+                (Tbl::ScanAlias, Col::Mtime)
+            ])
+            .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
+            .and_where(Expr::exists(subquery_exists).not())
+            .to_string(SqliteQueryBuilder);
 
-        let moved = self.conn.prepare(&format!(
-            "SELECT e.id, s.path FROM {} e JOIN {} s ON e.inode = s.inode JOIN {} l ON e.id = l.entity_id 
-             WHERE l.path != s.path AND s.mtime = e.{} AND s.size = e.{}",
-             old_entities_sql, current_scan_sql, old_locations_sql, mtime_col, size_col
-        )).context("Failed to prepare diff query (moved)")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let to_tag = self.conn.prepare(&query_to_tag)
+            .context("Failed to prepare diff query (to_tag)")?
+            .query_map([], |row| Ok(ScanEntry {
+                path: row.get(0)?, inode: row.get(1)?, size: row.get(2)?, mtime: row.get(3)?,
+            }))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
-        let deleted_ids = self.conn.prepare(&format!(
-            "SELECT id FROM {} EXCEPT SELECT e.id FROM {} e JOIN {} s ON e.inode = s.inode WHERE e.{} = s.mtime AND e.{} = s.size",
-            old_entities_sql, old_entities_sql, current_scan_sql, mtime_col, size_col
-        )).context("Failed to prepare diff query (deleted_ids)")?
-        .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        // 2. moved
+        let query_moved = Query::select()
+            .column((Tbl::EntAlias, Col::Id))
+            .column((Tbl::ScanAlias, Col::Path))
+            .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+            .join_subquery(
+                JoinType::InnerJoin,
+                self.parquet_query(&scan_path_str),
+                Tbl::ScanAlias,
+                Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode)))
+            )
+            .join_subquery(
+                JoinType::InnerJoin,
+                self.parquet_query(&locations_str),
+                Tbl::LocAlias,
+                Expr::col((Tbl::EntAlias, Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::EntityId)))
+            )
+            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, Col::Path))))
+            .and_where(Expr::col((Tbl::ScanAlias, Col::Mtime)).eq(Expr::col((Tbl::EntAlias, col_ent_mtime.clone()))))
+            .and_where(Expr::col((Tbl::ScanAlias, Col::Size)).eq(Expr::col((Tbl::EntAlias, col_ent_size.clone()))))
+            .to_string(SqliteQueryBuilder);
 
-        let unchanged_ids = self.conn.prepare(&format!(
-            "SELECT e.id FROM {} e JOIN {} s ON e.inode = s.inode JOIN {} l ON e.id = l.entity_id 
-             WHERE l.path = s.path AND s.mtime = e.{} AND s.size = e.{}",
-             old_entities_sql, current_scan_sql, old_locations_sql, mtime_col, size_col
-        )).context("Failed to prepare diff query (unchanged_ids)")?
-        .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+        let moved = self.conn.prepare(&query_moved)
+            .context("Failed to prepare diff query (moved)")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // 3. deleted_ids
+        let query_deleted = Query::select()
+            .column((Tbl::EntAlias, Col::Id))
+            .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+            .join_subquery(
+                JoinType::LeftJoin,
+                self.parquet_query(&scan_path_str),
+                Tbl::ScanAlias,
+                Condition::all()
+                    .add(Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode))))
+                    .add(Expr::col((Tbl::EntAlias, col_ent_mtime.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Mtime))))
+                    .add(Expr::col((Tbl::EntAlias, col_ent_size.clone())).eq(Expr::col((Tbl::ScanAlias, Col::Size))))
+            )
+            .and_where(Expr::col((Tbl::ScanAlias, Col::Inode)).is_null())
+            .to_string(SqliteQueryBuilder);
+
+        let deleted_ids = self.conn.prepare(&query_deleted)
+            .context("Failed to prepare diff query (deleted_ids)")?
+            .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // 4. unchanged_ids
+        let query_unchanged = Query::select()
+            .column((Tbl::EntAlias, Col::Id))
+            .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+            .join_subquery(
+                JoinType::InnerJoin,
+                self.parquet_query(&scan_path_str),
+                Tbl::ScanAlias,
+                Expr::col((Tbl::EntAlias, Col::Inode)).eq(Expr::col((Tbl::ScanAlias, Col::Inode)))
+            )
+            .join_subquery(
+                JoinType::InnerJoin,
+                self.parquet_query(&locations_str),
+                Tbl::LocAlias,
+                Expr::col((Tbl::EntAlias, Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::EntityId)))
+            )
+            .and_where(Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, Col::Path))))
+            .and_where(Expr::col((Tbl::ScanAlias, Col::Mtime)).eq(Expr::col((Tbl::EntAlias, col_ent_mtime.clone()))))
+            .and_where(Expr::col((Tbl::ScanAlias, Col::Size)).eq(Expr::col((Tbl::EntAlias, col_ent_size.clone()))))
+            .to_string(SqliteQueryBuilder);
+
+        let unchanged_ids = self.conn.prepare(&query_unchanged)
+            .context("Failed to prepare diff query (unchanged_ids)")?
+            .query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(IndexDiff { to_tag, moved, deleted_ids, unchanged_ids })
     }
@@ -194,7 +334,13 @@ impl<'a> Indexer<'a> {
         let entities_path = self.entities_path();
         let max_id: i64 = if entities_path.exists() {
             let entities_str = entities_path.to_string_lossy().to_string();
-            self.conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM read_parquet('{}')", entities_str), [], |r| r.get(0))?
+            // SELECT COALESCE(MAX(id), 0) FROM read_parquet('...')
+            let query = Query::select()
+                .expr(Func::cust(DBFunc::Coalesce).args([Expr::col(Col::Id).max().into(), Expr::val(0).into()]))
+                .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
+                .to_string(SqliteQueryBuilder);
+                
+            self.conn.query_row(&query, [], |r| r.get(0))?
         } else {
             0
         };
@@ -260,19 +406,43 @@ impl<'a> Indexer<'a> {
         let entity_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Entities).collect();
         let location_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
 
-        let mut ent_sql = "CREATE TABLE temp_entities (id BIGINT, inode VARCHAR".to_string();
-        for col in &entity_cols { ent_sql.push_str(&format!(", {} {}", col.name, col.sql_type)); }
-        ent_sql.push_str(");");
+        // Helper to create temp table definition
+        let create_temp_table = |name: &str, base_cols: Vec<(Col, &str)>, dyn_cols: &Vec<&crate::taggers::ColumnDef>| -> String {
+            let mut create = Table::create()
+                .table(Alias::new(name))
+                .to_owned();
+            
+            for (col_iden, col_type) in base_cols {
+                let mut def = SeaColumnDef::new(col_iden);
+                match col_type {
+                    "BIGINT" => def.big_integer(),
+                    _ => def.string(),
+                };
+                create.col(&mut def);
+            }
 
-        let mut loc_sql = "CREATE TABLE temp_locations (entity_id BIGINT".to_string();
-        for col in &location_cols { loc_sql.push_str(&format!(", {} {}", col.name, col.sql_type)); }
-        loc_sql.push_str(");");
+            for col in dyn_cols {
+                let mut def = SeaColumnDef::new(Alias::new(&col.name));
+                match col.sql_type {
+                    "BIGINT" => def.big_integer(),
+                    "BOOLEAN" => def.boolean(),
+                    _ => def.string(),
+                };
+                create.col(&mut def);
+            }
+            create.to_string(SqliteQueryBuilder)
+        };
 
-        self.conn.execute_batch(&format!("
-            {}
-            {}
-            CREATE TABLE temp_tags (entity_id BIGINT, tag_type VARCHAR, tag_value VARCHAR);
-        ", ent_sql, loc_sql))?;
+        let sql_ents = create_temp_table("temp_entities", vec![(Col::Id, "BIGINT"), (Col::Inode, "VARCHAR")], &entity_cols);
+        let sql_locs = create_temp_table("temp_locations", vec![(Col::EntityId, "BIGINT")], &location_cols);
+        
+        let sql_tags = Table::create().table(Tbl::TempTags)
+            .col(SeaColumnDef::new(Col::EntityId).big_integer())
+            .col(SeaColumnDef::new(Col::TagType).string())
+            .col(SeaColumnDef::new(Col::TagValue).string())
+            .to_string(SqliteQueryBuilder);
+
+        self.conn.execute_batch(&format!("{};{};{}", sql_ents, sql_locs, sql_tags))?;
 
         {
             let mut app_ent = self.conn.appender("temp_entities")?;
@@ -307,31 +477,54 @@ impl<'a> Indexer<'a> {
         let locations_str = self.locations_path().to_string_lossy().to_string();
         let tags_str = self.tags_path().to_string_lossy().to_string();
 
-        if Path::new(&entities_str).exists() {
-            let filter = if deleted_ids.is_empty() { "1=1".to_string() } else { 
-                format!("id NOT IN ({})", deleted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) 
-            };
-            let keep_filter = if unchanged_ids.is_empty() { "1=0".to_string() } else {
-                format!("entity_id IN ({})", unchanged_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","))
-            };
-            let tags_filter = if deleted_ids.is_empty() { "1=1".to_string() } else { 
-                format!("entity_id NOT IN ({})", deleted_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")) 
-            };
+        // Helper to construct Merge Query:
+        // SELECT * FROM read_parquet(old) WHERE filter UNION ALL SELECT * FROM temp_table
+        let merge_and_write = |parquet_path: &str, temp_table: &str, filter_cond: Option<Condition>| -> Result<()> {
+            if Path::new(parquet_path).exists() {
+                let mut base_query = Query::select();
+                base_query.expr(Expr::cust("*")).from_subquery(self.parquet_query(parquet_path), Tbl::OldAlias);
+                
+                if let Some(cond) = filter_cond {
+                    base_query.cond_where(cond);
+                }
 
-            self.conn.execute(&format!("COPY (SELECT * FROM read_parquet('{}') WHERE {} UNION ALL SELECT * FROM temp_entities) TO '{}.tmp' (FORMAT 'parquet', COMPRESSION 'zstd')", entities_str, filter, entities_str), [])?;
-            self.conn.execute(&format!("COPY (SELECT * FROM read_parquet('{}') WHERE {} UNION ALL SELECT * FROM temp_locations) TO '{}.tmp' (FORMAT 'parquet', COMPRESSION 'zstd')", locations_str, keep_filter, locations_str), [])?;
-            self.conn.execute(&format!("COPY (SELECT * FROM read_parquet('{}') WHERE {} UNION ALL SELECT * FROM temp_tags) TO '{}.tmp' (FORMAT 'parquet', COMPRESSION 'zstd')", tags_str, tags_filter, tags_str), [])?;
+                let union_query = base_query.union(
+                    sea_query::UnionType::All,
+                    Query::select().expr(Expr::cust("*")).from(Alias::new(temp_table)).to_owned()
+                ).to_owned();
 
-            std::fs::rename(format!("{}.tmp", entities_str), &entities_str)?;
-            std::fs::rename(format!("{}.tmp", locations_str), &locations_str)?;
-            std::fs::rename(format!("{}.tmp", tags_str), &tags_str)?;
+                self.copy_to_parquet(union_query, &format!("{}.tmp", parquet_path))?;
+                std::fs::rename(format!("{}.tmp", parquet_path), parquet_path)?;
+            } else {
+                let query = Query::select().expr(Expr::cust("*")).from(Alias::new(temp_table)).to_owned();
+                self.copy_to_parquet(query, parquet_path)?;
+            }
+            Ok(())
+        };
+
+        let deleted_filter = if deleted_ids.is_empty() { None } else {
+             Some(Condition::all().add(Expr::col(Col::Id).is_not_in(deleted_ids.clone())))
+        };
+        let unchanged_filter = if unchanged_ids.is_empty() { 
+            // 1=0 (False)
+            Some(Condition::all().add(Expr::val(1).eq(0))) 
         } else {
-            self.conn.execute(&format!("COPY temp_entities TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", entities_str), [])?;
-            self.conn.execute(&format!("COPY temp_locations TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", locations_str), [])?;
-            self.conn.execute(&format!("COPY temp_tags TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", tags_str), [])?;
-        }
+             Some(Condition::all().add(Expr::col(Col::EntityId).is_in(unchanged_ids)))
+        };
+        let tags_filter = if deleted_ids.is_empty() { None } else {
+            Some(Condition::all().add(Expr::col(Col::EntityId).is_not_in(deleted_ids)))
+        };
 
-        self.conn.execute_batch("DROP TABLE temp_entities; DROP TABLE temp_locations; DROP TABLE temp_tags;").ok();
+        merge_and_write(&entities_str, "temp_entities", deleted_filter)?;
+        merge_and_write(&locations_str, "temp_locations", unchanged_filter)?;
+        merge_and_write(&tags_str, "temp_tags", tags_filter)?;
+
+        let drop_sql = Table::drop().table(Tbl::TempEntities)
+            .table(Tbl::TempLocations)
+            .table(Tbl::TempTags)
+            .to_string(SqliteQueryBuilder);
+        self.conn.execute(&drop_sql, []).ok();
+        
         std::fs::remove_file(self.temp_scan_path()).ok();
         Ok(())
     }
