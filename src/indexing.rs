@@ -1,7 +1,6 @@
 use crate::taggers::{TagValue, TargetTable};
 use crate::FunctionRegistry;
 use crate::functions::{
-    PathFunction, FilenameFunction, ParentDirFunction, ExtensionFunction,
     ScanEntry, ScanRole,
 };
 use anyhow::{Result, Context};
@@ -381,23 +380,18 @@ impl<'a> Indexer<'a> {
             Ok(TaggingResult { entity_row, location_row, tags })
         }).collect::<Result<Vec<_>>>()?;
 
+        let functions = self.registry.all_functions();
         let moved_locations = moved.into_iter().map(|(eid, path_str)| {
             let p = Path::new(&path_str);
             let mut values = Vec::new();
-            for col in &columns {
-                if col.target_table == TargetTable::Locations {
-                    let val = if col.name == PathFunction::NAME {
-                        TagValue::Text(path_str.clone())
-                    } else if col.name == FilenameFunction::NAME {
-                        TagValue::Text(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
-                    } else if col.name == ParentDirFunction::NAME {
-                        TagValue::Text(p.parent().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
-                    } else if col.name == ExtensionFunction::NAME {
-                        TagValue::Text(p.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default())
-                    } else {
-                        TagValue::Null
-                    };
-                    values.push(val);
+            
+            for func in functions {
+                let cols = func.tagger().get_columns();
+                for col in cols {
+                    if col.target_table == TargetTable::Locations {
+                        let val = func.generate_from_path(p).unwrap_or(TagValue::Null);
+                        values.push(val);
+                    }
                 }
             }
             DynamicRow { id: eid, values }

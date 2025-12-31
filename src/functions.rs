@@ -25,6 +25,9 @@ pub trait TagFunction: Send + Sync {
     /// このタグが「整合性チェック（変更検知）」に使われるかどうかを返します。
     /// 例: size, mtime, hash
     fn is_integrity(&self) -> bool { false }
+
+    /// パスのみから値を生成できる場合、その値を返します。
+    fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
 }
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
@@ -133,6 +136,9 @@ impl TagFunction for PathFunction {
         }
         None
     }
+    fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
+        Some(TagValue::Text(path.to_string_lossy().replace('\\', "/")))
+    }
 }
 
 impl TagDefinition for PathFunction {
@@ -182,6 +188,9 @@ impl TagFunction for ParentDirFunction {
         }
         None
     }
+    fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
+        Some(TagValue::Text(path.parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default()))
+    }
 }
 
 // ========================================================
@@ -223,6 +232,9 @@ impl TagFunction for FilenameFunction {
             ));
         }
         None
+    }
+    fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
+        Some(TagValue::Text(path.file_name().unwrap_or_default().to_string_lossy().to_string()))
     }
 }
 
@@ -306,6 +318,9 @@ impl TagFunction for ExtensionFunction {
             return Some(format!("l.{} = '{}'", Self::NAME, val));
         }
         None
+    }
+    fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
+        Some(TagValue::Text(path.extension().map(|e| e.to_string_lossy().to_string().to_lowercase()).unwrap_or_default()))
     }
 }
 
