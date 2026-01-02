@@ -76,7 +76,7 @@ impl WasmPlugin {
         let columns = wasm_cols.into_iter().map(|c| ColumnDef {
             name: c.name,
             sql_type: Box::leak(c.sql_type.into_boxed_str()), 
-            target_table: crate::taggers::TargetTable::Tags,
+            target_table: crate::taggers::TargetTable::FileTags,
         }).collect();
         
         Ok(WasmPluginAdapter {

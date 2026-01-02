@@ -5,9 +5,11 @@ use duckdb::types::{ToSql, ToSqlOutput, Null};
 /// カラムが所属すべきテーブル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetTable {
-    Entities,
+    FileEntities,
     Locations,
-    Tags,
+    FileTags,
+    ItemEntities,
+    ItemTags,
 }
 
 /// データベースのカラム定義。

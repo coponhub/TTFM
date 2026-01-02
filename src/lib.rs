@@ -35,7 +35,7 @@ use functions::{
     ModifiedStrFunction,
 };
 pub use types::{TagType, TypedTag}; 
-
+use functions::escape;
 /// ファイルの一意識別子を取得し、文字列として返します。
 pub(crate) fn get_inode_string(path: &Path) -> String {
     match get_file_id(path) {
@@ -131,7 +131,7 @@ impl FunctionRegistry {
     }
 
     /// `TypedTag` を具体的なSQL条件に変換します。
-    /// 各機能に問い合わせ、対応するものがない場合は常に偽となる条件を返します。
+    /// 各機能に問い合わせ、対応するものがない場合は汎用のタグ検索SQLを返します。
     fn tag_to_sql(&self, tag: &TypedTag) -> String {
         // 各Functionに問い合わせる
         for func in &self.functions {
@@ -139,8 +139,12 @@ impl FunctionRegistry {
                 return sql;
             }
         }
-        // マッチする機能がない場合は常に偽
-        "1=0".to_string()
+        // マッチする機能がない場合は、汎用のタグテーブルを検索
+        // View 'all_tags' schema: target_id, target_kind, type, value
+        format!(
+            "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.target_id = e.id AND t.target_kind = 'file' AND t.type = '{}' AND t.value ILIKE '%{}%')",
+            escape(&tag.tagtype.0), escape(&tag.tag.0)
+        )
     }
 }
 
@@ -173,10 +177,16 @@ impl FileManager {
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
         
+        let registry = FunctionRegistry::with_standard();
+        
+        // Initialize tables and views
+        let indexer = crate::indexing::Indexer::new(&conn, &registry, db_dir.clone());
+        indexer.initialize_tables().context("Failed to initialize database tables")?;
+
         Ok(Self { 
             conn,
             db_dir,
-            registry: FunctionRegistry::with_standard(),
+            registry,
         })
     }
     
@@ -185,9 +195,11 @@ impl FileManager {
         Self::new_with_db_dir(path)
     }
 
-    fn entities_path(&self) -> std::path::PathBuf { self.db_dir.join("entities.parquet") }
+    fn file_entities_path(&self) -> std::path::PathBuf { self.db_dir.join("file_entities.parquet") }
     fn locations_path(&self) -> std::path::PathBuf { self.db_dir.join("locations.parquet") }
-    fn tags_path(&self) -> std::path::PathBuf { self.db_dir.join("tags.parquet") }
+    fn file_tags_path(&self) -> std::path::PathBuf { self.db_dir.join("file_tags.parquet") }
+    fn item_entities_path(&self) -> std::path::PathBuf { self.db_dir.join("item_entities.parquet") }
+    fn item_tags_path(&self) -> std::path::PathBuf { self.db_dir.join("item_tags.parquet") }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
     pub fn new_in_memory() -> Result<Self> {
@@ -205,12 +217,12 @@ impl FileManager {
 
     /// クエリ文字列を使用してインデックスを検索し、一致したファイルのパス一覧を返します。
     pub fn search(&self, query: &str) -> Result<Vec<String>> {
-        if !self.entities_path().exists() || !self.locations_path().exists() || !self.tags_path().exists() {
+        if !self.file_entities_path().exists() || !self.locations_path().exists() || !self.file_tags_path().exists() {
              return Err(anyhow::anyhow!("Index not found or incomplete. Please run 'index' command first."));
         }
 
         // Parquetファイルを直接参照するためのパス文字列
-        let entities_path = format!("'{}'", self.entities_path().to_string_lossy());
+        let entities_path = format!("'{}'", self.file_entities_path().to_string_lossy());
         let locations_path = format!("'{}'", self.locations_path().to_string_lossy());
         // tagsテーブルは各TagFunctionが個別に参照するため、ここではメインのJOINには含めないか、
         // あるいは `search_base` VIEWを作っておく。
@@ -231,7 +243,8 @@ impl FileManager {
             let node = QueryParser::parse(query)?;
             // ここで生成されるSQLは、エイリアス e, l を使う前提、
             // または tags テーブルへのサブクエリを含む必要がある。
-            format!("WHERE {}", self.registry.generate_sql(&node, &self.tags_path().to_string_lossy()))
+            // ユーザー定義タグの検索には 'all_tags' ビューを使用する。
+            format!("WHERE {}", self.registry.generate_sql(&node, "all_tags"))
         };
 
         let sql = format!(
@@ -248,9 +261,114 @@ impl FileManager {
 
     /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
-        if self.entities_path().exists() { std::fs::remove_file(self.entities_path()).ok(); }
+        if self.file_entities_path().exists() { std::fs::remove_file(self.file_entities_path()).ok(); }
         if self.locations_path().exists() { std::fs::remove_file(self.locations_path()).ok(); }
-        if self.tags_path().exists() { std::fs::remove_file(self.tags_path()).ok(); }
+        if self.file_tags_path().exists() { std::fs::remove_file(self.file_tags_path()).ok(); }
+        if self.item_entities_path().exists() { std::fs::remove_file(self.item_entities_path()).ok(); }
+        if self.item_tags_path().exists() { std::fs::remove_file(self.item_tags_path()).ok(); }
+        Ok(())
+    }
+
+    /// 新しいアイテム（Type, Label, Note等）をデータベースに追加します。
+    /// ItemのIDは負の数を使用し、-1 から降順で採番されます。
+    pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
+        let path = self.item_entities_path();
+        if !path.exists() {
+             return Err(anyhow::anyhow!("Item entities table not found. Please run index first or re-initialize."));
+        }
+        
+        // 1. Get current min ID
+        let query = format!(
+            "SELECT MIN(id) FROM read_parquet('{}')", 
+            path.to_string_lossy()
+        );
+        let min_id: i64 = self.conn.query_row(&query, [], |r| r.get(0)).unwrap_or(0);
+        let new_id = if min_id > -1 { -1 } else { min_id - 1 };
+
+        // 2. Append new row via Temp Table & COPY
+        // Since we cannot append to parquet directly easily in DuckDB without Appender (which requires table),
+        // we'll load existing, union, and overwrite. For small item tables this is fine.
+        // Or better: Create a tiny parquet for the new row and merge?
+        // Let's use the same approach as indexing: Create temp table, insert, then overwrite parquet.
+        // For efficiency with small items table, loading all to memory is fine.
+        
+        let path_str = path.to_string_lossy();
+        let tmp_path = format!("{}.tmp", path_str);
+        
+        self.conn.execute_batch(&format!(r#"
+            CREATE TABLE temp_add_item AS SELECT * FROM read_parquet('{}');
+            INSERT INTO temp_add_item (id, kind, content) VALUES ({}, '{}', '{}');
+            COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
+            DROP TABLE temp_add_item;
+        "#, path_str, new_id, kind, content, tmp_path))?;
+
+        std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
+
+        Ok(new_id)
+    }
+
+    /// アイテム（ファイルまたは Item Entity）にタグを付与します。
+    /// タグの Type や TypedTag 自体が未登録の場合は、自動的に Item Entity として登録します。
+    pub fn tag_item(&self, target: &str, tag_str: &str) -> Result<()> {
+        let (key, value) = tag_str.split_once(':')
+            .context("Tag must be in 'key:value' format")?;
+
+        // 1. タグ自体の Item Entity が存在することを確認（なければ作成）
+        self.get_or_create_item("type", key)?;
+        self.get_or_create_item("label", value)?;
+        self.get_or_create_item("typedtag", tag_str)?;
+
+        // 2. ターゲットの ID を特定
+        let target_id = if let Ok(id) = target.parse::<i64>() {
+            id
+        } else {
+            // パスとして扱い、file_entities から ID を取得
+            let query = format!(
+                "SELECT entity_id FROM read_parquet('{}') WHERE path = '{}'",
+                self.locations_path().to_string_lossy(), escape(target)
+            );
+            self.conn.query_row(&query, [], |r| r.get(0))
+                .context(format!("File not found: {}", target))?
+        };
+
+        // 3. 適切なテーブルにタグを保存
+        if target_id >= 0 {
+            // File Entity へのタグ付け
+            self.append_tag_to_parquet(self.file_tags_path(), "temp_add_file_tag", "entity_id", target_id, key, value)?;
+        } else {
+            // Item Entity へのタグ付け
+            self.append_tag_to_parquet(self.item_tags_path(), "temp_add_item_tag", "item_id", target_id, key, value)?;
+        }
+
+        Ok(())
+    }
+
+    fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
+        let path = self.item_entities_path();
+        let query = format!(
+            "SELECT id FROM read_parquet('{}') WHERE kind = '{}' AND content = '{}'",
+            path.to_string_lossy(), kind, escape(content)
+        );
+        
+        if let Ok(id) = self.conn.query_row(&query, [], |r| r.get(0)) {
+            Ok(id)
+        } else {
+            self.add_item(kind, content)
+        }
+    }
+
+    fn append_tag_to_parquet(&self, path: std::path::PathBuf, temp_table: &str, id_col: &str, id: i64, key: &str, value: &str) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        let tmp_path = format!("{}.tmp", path_str);
+
+        self.conn.execute_batch(&format!(r#"
+            CREATE TABLE {} AS SELECT * FROM read_parquet('{}');
+            INSERT INTO {} ({}, tag_type, tag_value) VALUES ({}, '{}', '{}');
+            COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
+            DROP TABLE {};
+        "#, temp_table, path_str, temp_table, id_col, id, escape(key), escape(value), temp_table, tmp_path, temp_table))?;
+
+        std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())
     }
 
@@ -337,6 +455,73 @@ mod tests {
         let results = fm.search("extension:txt").unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("test.txt"));
+    }
+
+    #[test]
+    fn test_add_item_and_get_or_create() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // 1. add_item のテスト
+        let id = fm.add_item("type", "location").unwrap();
+        assert_eq!(id, -1);
+
+        // 2. get_or_create_item のテスト（既存のものを取得）
+        let id2 = fm.get_or_create_item("type", "location").unwrap();
+        assert_eq!(id, id2);
+
+        // 3. get_or_create_item のテスト（新規作成）
+        let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
+        assert_eq!(id3, -2);
+    }
+
+    #[test]
+    fn test_tag_item_entity() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // Noteを作成
+        let note_id = fm.add_item("note", "This is a test note").unwrap();
+        
+        // Noteにタグを付与
+        fm.tag_item(&note_id.to_string(), "status:done").unwrap();
+
+        // tag_item の副作用で type, label, typedtag が作成されているはず
+        assert_eq!(fm.get_or_create_item("type", "status").unwrap(), -2);
+        assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
+        assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
+
+        // item_tags テーブルに正しく書き込まれているか確認
+        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE item_id = {}", 
+            fm.item_tags_path().to_string_lossy(), note_id);
+        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_value, "done");
+    }
+
+    #[test]
+    fn test_tag_file_entity() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // 1. テストファイルを作成してインデックス
+        let file_path = dir.path().join("test_file.txt");
+        std::fs::write(&file_path, "test content").unwrap();
+        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
+
+        // 2. ファイルにタグを付与
+        // パスは index_directory によって "./test_file.txt" または絶対パスとして登録される
+        // ここでは登録されたパスを取得して使用する
+        let registered_path = fm.search("extension:txt").unwrap()[0].clone();
+        fm.tag_item(&registered_path, "manual:true").unwrap();
+
+        // 3. file_tags テーブルに正しく書き込まれているか確認
+        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE tag_type = 'manual'", 
+            fm.file_tags_path().to_string_lossy());
+        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_value, "true");
     }
 
     #[test]

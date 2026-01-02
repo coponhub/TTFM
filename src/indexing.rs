@@ -14,12 +14,18 @@ use rayon::prelude::*;
 #[derive(Iden)]
 enum Tbl {
     TempScan,
-    TempEntities,
+    TempFileEntities,
     TempLocations,
-    TempTags,
+    TempFileTags,
+    // 将来的にプラグインなどがインデックス中に Item Entity (Type, Label, Note等) を
+    // 自動生成してマージする場合に備えて定義。
+    #[allow(dead_code)]
+    TempItemEntities,
+    #[allow(dead_code)]
+    TempItemTags,
     #[iden = "scan"] // Alias for current_scan
     ScanAlias, 
-    #[iden = "e"]    // Alias for entities
+    #[iden = "e"]    // Alias for file_entities
     EntAlias,
     #[iden = "l"]    // Alias for locations
     LocAlias,
@@ -62,9 +68,11 @@ impl<'a> Indexer<'a> {
         Self { conn, registry, db_dir }
     }
 
-    fn entities_path(&self) -> PathBuf { self.db_dir.join("entities.parquet") }
+    fn file_entities_path(&self) -> PathBuf { self.db_dir.join("file_entities.parquet") }
     fn locations_path(&self) -> PathBuf { self.db_dir.join("locations.parquet") }
-    fn tags_path(&self) -> PathBuf { self.db_dir.join("tags.parquet") }
+    fn file_tags_path(&self) -> PathBuf { self.db_dir.join("file_tags.parquet") }
+    fn item_entities_path(&self) -> PathBuf { self.db_dir.join("item_entities.parquet") }
+    fn item_tags_path(&self) -> PathBuf { self.db_dir.join("item_tags.parquet") }
     fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
     /// Helper to execute "COPY (query) TO 'path' (FORMAT 'parquet', COMPRESSION 'zstd')"
@@ -91,6 +99,123 @@ impl<'a> Indexer<'a> {
                 Tbl::OriginAlias
             )
             .to_owned()
+    }
+
+    pub fn initialize_tables(&self) -> Result<()> {
+        // 1. Ensure Parquet files exist (create empty ones if missing)
+        self.ensure_empty_parquet_if_missing(&self.file_entities_path(), TargetTable::FileEntities)?;
+        self.ensure_empty_parquet_if_missing(&self.locations_path(), TargetTable::Locations)?;
+        self.ensure_empty_parquet_if_missing(&self.file_tags_path(), TargetTable::FileTags)?;
+        self.ensure_empty_parquet_if_missing(&self.item_entities_path(), TargetTable::ItemEntities)?;
+        self.ensure_empty_parquet_if_missing(&self.item_tags_path(), TargetTable::ItemTags)?;
+
+        // 2. Create Unified View
+        let view_sql = format!(r#"
+            CREATE OR REPLACE VIEW all_tags AS
+            SELECT 
+                e.id AS target_id, 
+                'file' AS target_kind, 
+                t.tag_type AS type, 
+                t.tag_value AS value 
+            FROM read_parquet('{}') e
+            JOIN read_parquet('{}') t ON e.id = t.entity_id
+            UNION ALL
+            SELECT 
+                l.entity_id AS target_id, 
+                'file' AS target_kind, 
+                'path' AS type, 
+                l.path AS value 
+            FROM read_parquet('{}') l
+            UNION ALL
+            SELECT 
+                i.id AS target_id, 
+                'item' AS target_kind, 
+                it.tag_type AS type, 
+                it.tag_value AS value 
+            FROM read_parquet('{}') i
+            JOIN read_parquet('{}') it ON i.id = it.item_id
+        "#, 
+        self.file_entities_path().to_string_lossy(),
+        self.file_tags_path().to_string_lossy(),
+        self.locations_path().to_string_lossy(),
+        self.item_entities_path().to_string_lossy(),
+        self.item_tags_path().to_string_lossy()
+        );
+        
+        self.conn.execute(&view_sql, []).context("Failed to create unified view 'all_tags'")?;
+
+        Ok(())
+    }
+
+    fn ensure_empty_parquet_if_missing(&self, path: &Path, target: TargetTable) -> Result<()> {
+        if path.exists() { return Ok(()); }
+
+        let table_name = format!("temp_init_{:?}", target);
+        let mut create = Table::create().table(Alias::new(&table_name)).to_owned();
+
+        match target {
+            TargetTable::FileEntities => {
+                // Should match columns from registry for FileEntities
+                // For now, minimal set to make it work. Ideally get from registry.
+                // But registry columns are dynamic. 
+                // We need at least 'id' for the view.
+                 let columns = self.registry.get_all_columns();
+                 let cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::FileEntities).collect();
+                 
+                 create.col(SeaColumnDef::new(Alias::new("id")).big_integer()); // Base ID
+                 for c in cols {
+                     let mut def = SeaColumnDef::new(Alias::new(&c.name));
+                     match c.sql_type {
+                         "BIGINT" => def.big_integer(),
+                         _ => def.string(),
+                     };
+                     create.col(&mut def);
+                 }
+            },
+            TargetTable::Locations => {
+                let columns = self.registry.get_all_columns();
+                let cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
+                create.col(SeaColumnDef::new(Alias::new("entity_id")).big_integer());
+                for c in cols {
+                     let mut def = SeaColumnDef::new(Alias::new(&c.name));
+                     match c.sql_type { "BIGINT" => def.big_integer(), _ => def.string() };
+                     create.col(&mut def);
+                }
+            },
+            TargetTable::FileTags => {
+                create.col(SeaColumnDef::new(Col::EntityId).big_integer())
+                      .col(SeaColumnDef::new(Col::TagType).string())
+                      .col(SeaColumnDef::new(Col::TagValue).string());
+            },
+            TargetTable::ItemEntities => {
+                create.col(SeaColumnDef::new(Alias::new("id")).big_integer())
+                      .col(SeaColumnDef::new(Alias::new("kind")).string())
+                      .col(SeaColumnDef::new(Alias::new("content")).string());
+            },
+            TargetTable::ItemTags => {
+                create.col(SeaColumnDef::new(Alias::new("item_id")).big_integer())
+                      .col(SeaColumnDef::new(Col::TagType).string())
+                      .col(SeaColumnDef::new(Col::TagValue).string());
+            },
+        }
+
+        let create_sql = create.to_string(SqliteQueryBuilder);
+        self.conn.execute(&create_sql, []).context(format!("Failed to create init table {}", table_name))?;
+        
+        let path_str = path.to_string_lossy();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context(format!("Failed to create directory {:?}", parent))?;
+        }
+        
+        let copy_sql = format!("COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", table_name, path_str);
+        self.conn.execute(&copy_sql, []).context(format!("Failed to write empty parquet {}", path_str))?;
+
+        let drop_sql = Table::drop().table(Alias::new(&table_name)).to_string(SqliteQueryBuilder);
+        self.conn.execute(&drop_sql, []).ok();
+
+        Ok(())
     }
 
     pub fn run<P, F>(&self, root_path: P, on_progress: Option<&F>, dry_run: bool) -> Result<usize>
@@ -205,8 +330,8 @@ impl<'a> Indexer<'a> {
     }
 
     fn diff_phase(&self) -> Result<IndexDiff> {
-        let has_existing = self.entities_path().exists() && self.locations_path().exists();
-        let entities_str = self.entities_path().to_string_lossy().to_string();
+        let has_existing = self.file_entities_path().exists() && self.locations_path().exists();
+        let entities_str = self.file_entities_path().to_string_lossy().to_string();
         let locations_str = self.locations_path().to_string_lossy().to_string();
         let scan_path_str = self.temp_scan_path().to_string_lossy().to_string();
 
@@ -342,9 +467,9 @@ impl<'a> Indexer<'a> {
 
     fn tagging_phase(&self, to_tag: Vec<ScanEntry>, moved: Vec<(i64, String)>) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
         let columns = self.registry.get_all_columns();
-        let entities_path = self.entities_path();
-                    let max_id: i64 = if entities_path.exists() {
-                    let entities_str = entities_path.to_string_lossy().to_string();
+        let file_entities_path = self.file_entities_path();
+                    let max_id: i64 = if file_entities_path.exists() {
+                    let entities_str = file_entities_path.to_string_lossy().to_string();
                     // SELECT COALESCE(MAX(id), 0) FROM read_parquet('...')
                     let query = Query::select()
                         .expr(Func::cust(DBFunc::Coalesce).args([Expr::col(Col::Id).max(), Expr::val(0).into()]))
@@ -367,9 +492,9 @@ impl<'a> Indexer<'a> {
 
             for (col_def, val) in columns.iter().zip(values.into_iter()) {
                 match col_def.target_table {
-                    TargetTable::Entities => entity_row.values.push(val),
+                    TargetTable::FileEntities => entity_row.values.push(val),
                     TargetTable::Locations => location_row.values.push(val),
-                    TargetTable::Tags => {
+                    TargetTable::FileTags => {
                         let val_str = match val {
                             TagValue::Text(s) => s,
                             TagValue::BigInt(i) => i.to_string(),
@@ -380,6 +505,7 @@ impl<'a> Indexer<'a> {
                             tags.push(TagRow { entity_id, tag_type: col_def.name.clone(), tag_value: val_str });
                         }
                     }
+                    _ => {} // Ignore ItemEntities/ItemTags for file scanning
                 }
             }
             Ok(TaggingResult { entity_row, location_row, tags })
@@ -407,7 +533,7 @@ impl<'a> Indexer<'a> {
 
     fn merge_phase(&self, tagging_results: Vec<TaggingResult>, moved_locations: Vec<DynamicRow>, deleted_ids: Vec<i64>, unchanged_ids: Vec<i64>) -> Result<()> {
         let columns = self.registry.get_all_columns();
-        let entity_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Entities).collect();
+        let entity_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::FileEntities).collect();
         let location_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
 
         // Helper to create temp table definition
@@ -437,10 +563,10 @@ impl<'a> Indexer<'a> {
             create.to_string(SqliteQueryBuilder)
         };
 
-        let sql_ents = create_temp_table("temp_entities", vec![(Alias::new("id"), "BIGINT")], &entity_cols);
+        let sql_ents = create_temp_table("temp_file_entities", vec![(Alias::new("id"), "BIGINT")], &entity_cols);
         let sql_locs = create_temp_table("temp_locations", vec![(Alias::new("entity_id"), "BIGINT")], &location_cols);
         
-        let sql_tags = Table::create().table(Tbl::TempTags)
+        let sql_tags = Table::create().table(Tbl::TempFileTags)
             .col(SeaColumnDef::new(Col::EntityId).big_integer())
             .col(SeaColumnDef::new(Col::TagType).string())
             .col(SeaColumnDef::new(Col::TagValue).string())
@@ -449,9 +575,9 @@ impl<'a> Indexer<'a> {
         self.conn.execute_batch(&format!("{};{};{}", sql_ents, sql_locs, sql_tags))?;
 
         {
-            let mut app_ent = self.conn.appender("temp_entities")?;
+            let mut app_ent = self.conn.appender("temp_file_entities")?;
             let mut app_loc = self.conn.appender("temp_locations")?;
-            let mut app_tag = self.conn.appender("temp_tags")?;
+            let mut app_tag = self.conn.appender("temp_file_tags")?;
 
             for res in tagging_results {
                 let mut ent_refs: Vec<&dyn ToSql> = Vec::with_capacity(res.entity_row.values.len() + 1);
@@ -477,9 +603,9 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        let entities_str = self.entities_path().to_string_lossy().to_string();
+        let entities_str = self.file_entities_path().to_string_lossy().to_string();
         let locations_str = self.locations_path().to_string_lossy().to_string();
-        let tags_str = self.tags_path().to_string_lossy().to_string();
+        let tags_str = self.file_tags_path().to_string_lossy().to_string();
 
         // Helper to construct Merge Query:
         // SELECT * FROM read_parquet(old) WHERE filter UNION ALL SELECT * FROM temp_table
@@ -516,13 +642,13 @@ impl<'a> Indexer<'a> {
             Some(Condition::all().add(Expr::col(Col::EntityId).is_not_in(deleted_ids)))
         };
 
-        merge_and_write(&entities_str, "temp_entities", deleted_filter)?;
+        merge_and_write(&entities_str, "temp_file_entities", deleted_filter)?;
         merge_and_write(&locations_str, "temp_locations", unchanged_filter)?;
-        merge_and_write(&tags_str, "temp_tags", tags_filter)?;
+        merge_and_write(&tags_str, "temp_file_tags", tags_filter)?;
 
-        let drop_sql = Table::drop().table(Tbl::TempEntities)
+        let drop_sql = Table::drop().table(Tbl::TempFileEntities)
             .table(Tbl::TempLocations)
-            .table(Tbl::TempTags)
+            .table(Tbl::TempFileTags)
             .to_string(SqliteQueryBuilder);
         self.conn.execute(&drop_sql, []).ok();
         
@@ -554,6 +680,27 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use crate::FileManager;
+
+    #[test]
+    fn test_initialize_tables() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let indexer = Indexer::new(&conn, &registry, db_dir.clone());
+
+        indexer.initialize_tables().unwrap();
+
+        assert!(db_dir.join("file_entities.parquet").exists());
+        assert!(db_dir.join("locations.parquet").exists());
+        assert!(db_dir.join("file_tags.parquet").exists());
+        assert!(db_dir.join("item_entities.parquet").exists());
+        assert!(db_dir.join("item_tags.parquet").exists());
+
+        // View がクエリ可能か確認
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM all_tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0); // 初期状態は空
+    }
 
     #[test]
     fn test_indexer_basic_flow() {

@@ -264,7 +264,7 @@ struct StemTagger;
 
 impl Tagger for StemTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: StemFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: StemFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
     }
     /// 拡張子を除いたファイル名（ステム）を抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -369,7 +369,7 @@ struct DirectoryTagger;
 
 impl Tagger for DirectoryTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: DirectoryFunction::NAME.to_string(), sql_type: "BOOLEAN", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: DirectoryFunction::NAME.to_string(), sql_type: "BOOLEAN", target_table: TargetTable::FileTags }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         Ok(vec![TagValue::Boolean(path.is_dir())])
@@ -420,7 +420,7 @@ struct SizeBytesTagger;
 
 impl Tagger for SizeBytesTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: SizeBytesFunction::NAME.to_string(), sql_type: "BIGINT", target_table: TargetTable::Entities }]
+        vec![ColumnDef { name: SizeBytesFunction::NAME.to_string(), sql_type: "BIGINT", target_table: TargetTable::FileEntities }]
     }
     /// ファイルサイズ（バイト数）を抽出します。ディレクトリの場合は0とします。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -487,7 +487,7 @@ struct ModifiedTsTagger;
 
 impl Tagger for ModifiedTsTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: ModifiedTsFunction::NAME.to_string(), sql_type: "BIGINT", target_table: TargetTable::Entities }]
+        vec![ColumnDef { name: ModifiedTsFunction::NAME.to_string(), sql_type: "BIGINT", target_table: TargetTable::FileEntities }]
     }
     /// 最終更新日時のUNIXタイムスタンプを抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -552,7 +552,7 @@ struct InodeTagger;
 
 impl Tagger for InodeTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: InodeFunction::NAME.to_string(), sql_type: "VARCHAR", target_table: TargetTable::Entities }]
+        vec![ColumnDef { name: InodeFunction::NAME.to_string(), sql_type: "VARCHAR", target_table: TargetTable::FileEntities }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let inode = crate::get_inode_string(path);
@@ -596,7 +596,7 @@ struct KindTagger;
 
 impl Tagger for KindTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: KindFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: KindFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
     }
     /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -666,7 +666,7 @@ impl SizeStrTagger {
 
 impl Tagger for SizeStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: SizeStrFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: SizeStrFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
     }
     /// ファイルサイズを読みやすい文字列（例: "1.5 MB"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -735,7 +735,7 @@ impl ModifiedStrTagger {
 
 impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: ModifiedStrFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::Tags }]
+        vec![ColumnDef { name: ModifiedStrFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
     }
     /// 最終更新日時を読みやすい文字列（例: "2024-01-01 12:00"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {

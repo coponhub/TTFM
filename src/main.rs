@@ -43,6 +43,18 @@ enum Commands {
     /// 作成されたインデックスファイルを削除します。
     #[command(hide = true)]
     Clear,
+    /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
+    Tag {
+        /// 対象のパスまたはID
+        target: String,
+        /// 付与するタグ (key:value)
+        tag: String,
+    },
+    /// メモを作成します。
+    Note {
+        /// メモの内容
+        content: String,
+    },
 }
 
 /// アプリケーションのエントリポイント。
@@ -88,6 +100,14 @@ fn main() -> Result<()> {
         Commands::Clear => {
             fm.clear_index()?;
             println!("Index cleared.");
+        }
+        Commands::Tag { target, tag } => {
+            fm.tag_item(target, tag)?;
+            println!("Tagged '{}' with '{}'", target, tag);
+        }
+        Commands::Note { content } => {
+            let id = fm.add_item("note", content)?;
+            println!("Created note (ID: {})", id);
         }
     }
 
