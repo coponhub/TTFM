@@ -12,8 +12,18 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - **SystemTag**: システムによってファイルから自動的に抽出されるタグ（拡張子、サイズ、更新日時など）。
 - **UserTag**: ユーザーが手動で定義・付与するタグ。
 
-### 2.2 実体中心設計 (Entity-Centric)
-ファイルは「パス（場所）」ではなく、OSレベルの識別子（Inode, Device ID）およびコンテンツハッシュによって一意に識別される **Entity（実体）** として管理される。これにより、ファイル名が変更されたり別のディレクトリに移動（mv）されたりしても、同一のファイルとして認識し、付随するメタデータ（タグ）を維持することが可能となる。
+### 2.2 実体中心設計 (Item/Entity-Centric)
+システムが管理する全ての対象は **Item（アイテム）** と呼ばれる一意のIDを持つ対象として定義される。Itemにはその実体である **Entity（エンティティ）** があり、以下の分類で管理される。
+
+- **File Entity**: ファイルシステム上の実ファイルに基づく実体。InodeおよびDevice IDによって同一性が追跡される。
+- **Item Entity**: ファイル以外の対象に基づく実体。
+    - **Kinds**:
+        - `type`: タグの型（例: `location`）。
+        - `typedtag`: 型と値のペア（例: `location:tokyo`）。
+        - `label`: タグの値（例: `tokyo`）。
+        - `note`: ユーザーが作成する仮想的なテキストメモ。
+
+これらの実体はすべてデータベース上のItemとして、等しくタグ付けの対象となる。これにより、ファイルだけでなくタグ定義自体にメタデータを付与したり、メモ情報を記録・管理したりすることが可能となる。
 
 ### 2.3 非ディレクトリ指向
 ファイルシステム上の「パス」は単なる属性の一つとして扱われ、ユーザーは「どのフォルダにあるか」ではなく「どのような属性（タグ）を持っているか」に基づいてファイルを管理する。
@@ -24,29 +34,53 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 データの保存形式は **DuckDB** エンジンを用いた **ZSTD圧縮 Parquet ファイル** に完全に統一する。
 - 高い圧縮率と、ファイルをメモリに全ロードせずにクエリ可能なパフォーマンスを両立する。
 
-### 3.2 データベース・スキーマ (3-Table Structure)
-実体と属性を分離し、移動検知や柔軟な拡張を可能にするため、以下の3つのテーブルによる構成を採用する。
-index作成時の書き込みはduckdbの一括書き込みで行う。
+### 3.2 データベース・スキーマ (File & Item Store)
+実体と属性を分離し、移動検知や柔軟な拡張を可能にするため、以下の構成を採用する。
+書き込みは DuckDB を介して Parquet ファイルに対して行われる。
 これらのテーブルは".ttfm/db/"ディレクトリに格納される。
 
-#### A. `entities` テーブル (実体) (.ttfm/db/entities.parquet)
+#### 1. File Store (大規模データ用)
+ファイルの実体とパス、およびタグを管理する。
+
+**A. `file_entities` テーブル (実体) (.ttfm/db/entities.parquet)**
 - `id`: 内部管理用ユニークID (PRIMARY KEY)
 - `inode`: OSレベルの識別子 (Inode number / File Index)
 - `device_id`: デバイス識別子
 - `size`: ファイルサイズ
 - `mtime`: 最終更新日時
 - `hash`: コンテンツハッシュ (オプション。重複検知や実体確認に使用)
-#### B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)
-- `entity_id`: `entities.id` への外部キー
+
+**B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)**
+- `entity_id`: `file_entities.id` への外部キー
 - `path`: フルパス (UNIQUE)
 - `filename`: ファイル名
 - `parentdir`: 親ディレクトリパス（検索最適化用）
 - `extension`: 拡張子
 
-#### C. `tags` テーブル (属性) (.ttfm/db/tags.parquet)
-- `entity_id`: `entities.id` への外部キー
+**C. `file_tags` テーブル (属性) (.ttfm/db/tags.parquet)**
+- `entity_id`: `file_entities.id` への外部キー
 - `tag_type`: タグの種類（例: `mimetype`, `project`）
 - `tag_value`: タグの値
+
+#### 2. Item Store (定義・仮想データ用)
+タグの定義やメモなどを管理する。
+
+**D. `item_entities` テーブル (.ttfm/db/items.parquet)**
+- `id`: ユニークID (PRIMARY KEY)
+- `kind`: `type`, `typedtag`, `label`, `note` のいずれか
+- `content`: 識別名（Type名等）または Note の本文
+
+**E. `item_tags` テーブル (.ttfm/db/item_tags.parquet)**
+- `item_id`: `item_entities.id` への外部キー
+- `type`: タグの種類
+- `value`: タグの値
+
+#### 3. Unified View (`all_tags`)
+全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
+- `target_id`: 対象のID
+- `target_kind`: `file` または `item`
+- `type`: タグの種類（`locations.path` も `type='path'` としてここに統合される）
+- `value`: タグの値
 
 ### 3.3 プラグイン・コンポーネント設計 (TagFunction パターン)
 新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
@@ -98,7 +132,7 @@ index作成時の書き込みはduckdbの一括書き込みで行う。
     - **To Process** のリストに対してのみ `Tagger` を実行し、メタデータを抽出する。
 
 4.  **Merge Phase (統合)**:
-    - 既存データ、新規抽出分、および更新された Location 情報を DuckDB 上で統合し、最終的な `entities`, `locations`, `tags` Parquet ファイルを更新・保存する。
+    - 既存データ、新規抽出分、および更新された Location 情報を DuckDB 上で統合し、最終的な `file_entities`, `locations`, `file_tags` Parquet ファイルを更新・保存する。
     - 読み込み中のファイル破壊を防ぐため、一旦 `.tmp` ファイルに書き出し、完了後にリネームを行う。
 
 #### B. 最適化のトレードオフ
