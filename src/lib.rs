@@ -19,6 +19,7 @@ pub mod indexing;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
+pub use types::{SearchResult, TagType, TypedTag};
 use functions::{
     TagFunction,
     PathFunction,
@@ -34,8 +35,8 @@ use functions::{
     SizeStrFunction,
     ModifiedStrFunction,
 };
-pub use types::{TagType, TypedTag}; 
 use functions::escape;
+
 /// ファイルの一意識別子を取得し、文字列として返します。
 pub(crate) fn get_inode_string(path: &Path) -> String {
     match get_file_id(path) {
@@ -71,7 +72,6 @@ impl FunctionRegistry {
     }
 
     /// 標準的な機能をすべて登録したレジストリを返します。
-    /// これにはファイル名、拡張子、サイズ、更新日時、ユーザータグなどが含まれます。
     pub fn with_standard() -> Self {
         let mut reg = Self::new();
         // 登録順序が重要（カラム順序になるため）
@@ -124,26 +124,42 @@ impl FunctionRegistry {
             QueryNode::And(left, right) => format!("({} AND {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
             QueryNode::Or(left, right) => format!("({} OR {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
             QueryNode::Not(child) => format!("NOT ({})", self.generate_sql(child, tags_path)),
-            QueryNode::TypedTag(tt) => self.tag_to_sql(tt),
+            QueryNode::TypedTag(tt) => self.tag_to_sql(tt, tags_path),
         };
         // プレースホルダを実際のパスに置換（各Function実装がこれを使う）
         sql.replace("__TAGS_TABLE__", &format!("'{}'", tags_path))
     }
 
+    /// `all_tags` ビューに対する検索SQL条件を生成します。
+    pub fn generate_sql_for_view(&self, node: &QueryNode, view_name: &str) -> String {
+        match node {
+            QueryNode::And(left, right) => format!("({}) AND ({})", self.generate_sql_for_view(left, view_name), self.generate_sql_for_view(right, view_name)),
+            QueryNode::Or(left, right) => format!("({}) OR ({})", self.generate_sql_for_view(left, view_name), self.generate_sql_for_view(right, view_name)),
+            QueryNode::Not(child) => {
+                format!("target_id NOT IN (SELECT DISTINCT target_id FROM {} WHERE {})", view_name, self.generate_sql_for_view(child, view_name))
+            }
+            QueryNode::TypedTag(tt) => {
+                // View 'all_tags' では全てのタグが type, value として統合されているため、
+                // タグの種類によらず一律この形式で検索可能。
+                format!("(type = '{}' AND value ILIKE '%{}%')", escape(&tt.tagtype.0), escape(&tt.tag.0))
+            }
+        }
+    }
+
     /// `TypedTag` を具体的なSQL条件に変換します。
-    /// 各機能に問い合わせ、対応するものがない場合は汎用のタグ検索SQLを返します。
-    fn tag_to_sql(&self, tag: &TypedTag) -> String {
+    fn tag_to_sql(&self, tag: &TypedTag, tags_view: &str) -> String {
         // 各Functionに問い合わせる
         for func in &self.functions {
             if let Some(sql) = func.to_sql(tag) {
-                return sql;
+                // `to_sql` が __TAGS_TABLE__ プレースホルダを使う前提
+                return sql.replace("__TAGS_TABLE__", tags_view);
             }
         }
         // マッチする機能がない場合は、汎用のタグテーブルを検索
         // View 'all_tags' schema: target_id, target_kind, type, value
         format!(
-            "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.target_id = e.id AND t.target_kind = 'file' AND t.type = '{}' AND t.value ILIKE '%{}%')",
-            escape(&tag.tagtype.0), escape(&tag.tag.0)
+            "EXISTS (SELECT 1 FROM {} t WHERE t.target_id = e.id AND t.type = '{}' AND t.value ILIKE '%{}%')",
+            tags_view, escape(&tag.tagtype.0), escape(&tag.tag.0)
         )
     }
 }
@@ -215,48 +231,82 @@ impl FileManager {
         indexer.run(root_path, on_progress, dry_run)
     }
 
-    /// クエリ文字列を使用してインデックスを検索し、一致したファイルのパス一覧を返します。
-    pub fn search(&self, query: &str) -> Result<Vec<String>> {
-        if !self.file_entities_path().exists() || !self.locations_path().exists() || !self.file_tags_path().exists() {
+    /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
+    pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
+        if !self.file_entities_path().exists() {
              return Err(anyhow::anyhow!("Index not found or incomplete. Please run 'index' command first."));
         }
 
-        // Parquetファイルを直接参照するためのパス文字列
-        let entities_path = format!("'{}'", self.file_entities_path().to_string_lossy());
-        let locations_path = format!("'{}'", self.locations_path().to_string_lossy());
-        // tagsテーブルは各TagFunctionが個別に参照するため、ここではメインのJOINには含めないか、
-        // あるいは `search_base` VIEWを作っておく。
-
-        // メインの検索対象は Entities + Locations
-        // DuckDBではParquetファイルをテーブルとして直接扱える
-        let base_sql = format!(
-            "SELECT l.path, l.parentdir AS directory 
-             FROM {} e 
-             JOIN {} l ON e.id = l.entity_id",
-            entities_path, locations_path
-        );
-
-        // クエリパースとWHERE句の生成
-        let sql_where = if query.trim().is_empty() {
-            String::new()
+        // 1. 検索条件にマッチするIDを抽出するサブクエリ
+        // generate_sql は __TAGS_TABLE__ のようなプレースホルダを使うが、
+        // to_sql の実装によっては `e.` や `l.` を使うものもあるため、
+        // 検索クエリの組み立てには注意が必要。
+        // ここでは、`all_tags` からIDを絞り込む方針で統一する。
+        let where_clause = if query.trim().is_empty() {
+            "1=1".to_string()
         } else {
             let node = QueryParser::parse(query)?;
-            // ここで生成されるSQLは、エイリアス e, l を使う前提、
-            // または tags テーブルへのサブクエリを含む必要がある。
-            // ユーザー定義タグの検索には 'all_tags' ビューを使用する。
-            format!("WHERE {}", self.registry.generate_sql(&node, "all_tags"))
+            // `e` alias を使わずに、`all_tags` のみで完結するSQLを生成する必要がある。
+            // そのためには、to_sql の実装を見直す必要がある。
+            // ここでは `generate_sql` のフォールバックロジックが `all_tags` を参照することを期待する。
+            self.registry.generate_sql_for_view(&node, "all_tags")
         };
 
-        let sql = format!(
-            "{} {} ORDER BY l.parentdir DESC, l.path ASC LIMIT 100",
-            base_sql, sql_where
+        let id_query = format!(
+            "SELECT DISTINCT target_id FROM all_tags WHERE {}", 
+            where_clause
         );
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let paths = stmt.query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<String>, _>>()?;
+        // 2. マッチしたIDの全タグを取得して集約
+        let sql = format!(r#"
+            SELECT 
+                t.target_id,
+                t.target_kind,
+                list(t.type) as types,
+                list(t.value) as values
+            FROM all_tags t
+            WHERE t.target_id IN ({})
+            GROUP BY t.target_id, t.target_kind
+            LIMIT 100
+        "#, id_query);
 
-        Ok(paths)
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let kind: String = row.get(1)?;
+            
+            use duckdb::types::Value;
+            let types_val: Value = row.get(2)?;
+            let values_val: Value = row.get(3)?;
+
+            fn value_to_string(v: &Value) -> String {
+                match v {
+                    Value::Text(s) => s.clone(),
+                    Value::BigInt(i) => i.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    _ => format!("{:?}", v),
+                }
+            }
+
+            let types: Vec<String> = if let Value::List(items) = types_val {
+                items.iter().map(value_to_string).collect()
+            } else { vec![] };
+            
+            let values: Vec<String> = if let Value::List(items) = values_val {
+                items.iter().map(value_to_string).collect()
+            } else { vec![] };
+
+            let tags = types.into_iter().zip(values.into_iter()).collect();
+            
+            Ok(SearchResult { id, kind, tags })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+
+        Ok(results)
     }
 
     /// インデックスファイル（Parquet）を削除します。
@@ -270,7 +320,6 @@ impl FileManager {
     }
 
     /// 新しいアイテム（Type, Label, Note等）をデータベースに追加します。
-    /// ItemのIDは負の数を使用し、-1 から降順で採番されます。
     pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
         if !path.exists() {
@@ -286,12 +335,6 @@ impl FileManager {
         let new_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         // 2. Append new row via Temp Table & COPY
-        // Since we cannot append to parquet directly easily in DuckDB without Appender (which requires table),
-        // we'll load existing, union, and overwrite. For small item tables this is fine.
-        // Or better: Create a tiny parquet for the new row and merge?
-        // Let's use the same approach as indexing: Create temp table, insert, then overwrite parquet.
-        // For efficiency with small items table, loading all to memory is fine.
-        
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
         
@@ -300,7 +343,7 @@ impl FileManager {
             INSERT INTO temp_add_item (id, kind, content) VALUES ({}, '{}', '{}');
             COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
             DROP TABLE temp_add_item;
-        "#, path_str, new_id, kind, content, tmp_path))?;
+        "#, path_str, new_id, kind, escape(content), tmp_path))?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
 
@@ -308,7 +351,6 @@ impl FileManager {
     }
 
     /// アイテム（ファイルまたは Item Entity）にタグを付与します。
-    /// タグの Type や TypedTag 自体が未登録の場合は、自動的に Item Entity として登録します。
     pub fn tag_item(&self, target: &str, tag_str: &str) -> Result<()> {
         let (key, value) = tag_str.split_once(':')
             .context("Tag must be in 'key:value' format")?;
@@ -343,7 +385,7 @@ impl FileManager {
         Ok(())
     }
 
-    fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
+    pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
         let query = format!(
             "SELECT id FROM read_parquet('{}') WHERE kind = '{}' AND content = '{}'",
@@ -444,84 +486,12 @@ mod tests {
         std::fs::write(&file_path, "hello world").unwrap(); // 11 bytes
         
         let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-        // 1. スキャン実行（index_directoryの一部として、あるいは内部的に確認）
-        // 現状は index_directory を呼ぶことで current_scan.parquet が作られ、最後に削除される
-        // テストのために、一時ファイルを削除しないモードか、あるいは内部関数をテストしたいところ
-        
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
         
         // 2. 結果の検証
-        // インデックス作成が成功していれば、内部的に正しくスキャンされているはず
         let results = fm.search("extension:txt").unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("test.txt"));
-    }
-
-    #[test]
-    fn test_add_item_and_get_or_create() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        // 1. add_item のテスト
-        let id = fm.add_item("type", "location").unwrap();
-        assert_eq!(id, -1);
-
-        // 2. get_or_create_item のテスト（既存のものを取得）
-        let id2 = fm.get_or_create_item("type", "location").unwrap();
-        assert_eq!(id, id2);
-
-        // 3. get_or_create_item のテスト（新規作成）
-        let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
-        assert_eq!(id3, -2);
-    }
-
-    #[test]
-    fn test_tag_item_entity() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        // Noteを作成
-        let note_id = fm.add_item("note", "This is a test note").unwrap();
-        
-        // Noteにタグを付与
-        fm.tag_item(&note_id.to_string(), "status:done").unwrap();
-
-        // tag_item の副作用で type, label, typedtag が作成されているはず
-        assert_eq!(fm.get_or_create_item("type", "status").unwrap(), -2);
-        assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
-        assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
-
-        // item_tags テーブルに正しく書き込まれているか確認
-        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE item_id = {}", 
-            fm.item_tags_path().to_string_lossy(), note_id);
-        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
-        assert_eq!(tag_value, "done");
-    }
-
-    #[test]
-    fn test_tag_file_entity() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        // 1. テストファイルを作成してインデックス
-        let file_path = dir.path().join("test_file.txt");
-        std::fs::write(&file_path, "test content").unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-
-        // 2. ファイルにタグを付与
-        // パスは index_directory によって "./test_file.txt" または絶対パスとして登録される
-        // ここでは登録されたパスを取得して使用する
-        let registered_path = fm.search("extension:txt").unwrap()[0].clone();
-        fm.tag_item(&registered_path, "manual:true").unwrap();
-
-        // 3. file_tags テーブルに正しく書き込まれているか確認
-        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE tag_type = 'manual'", 
-            fm.file_tags_path().to_string_lossy());
-        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
-        assert_eq!(tag_value, "true");
+        assert!(results[0].primary_value().unwrap().contains("test.txt"));
     }
 
     #[test]
@@ -537,14 +507,66 @@ mod tests {
         let fm = FileManager::new_with_index_path(&index_path).unwrap();
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-        // 修正: Type指定なしの検索はエラーになるため、明示的に filename: を使用するか、
-        // エラーになることを確認する。ここでは filename: を使ってヒットすることを確認する。
         assert_eq!(fm.search("filename:report").unwrap().len(), 1);
         assert_eq!(fm.search("extension:pdf").unwrap().len(), 1);
         
-        // 修正: Type指定なしの検索がエラーになることを確認
         assert!(fm.search("report").is_err());
 
         fm.clear_index().unwrap();
+    }
+
+    #[test]
+    fn test_add_item_and_get_or_create() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        let id = fm.add_item("type", "location").unwrap();
+        assert_eq!(id, -1);
+
+        let id2 = fm.get_or_create_item("type", "location").unwrap();
+        assert_eq!(id, id2);
+
+        let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
+        assert_eq!(id3, -2);
+    }
+
+    #[test]
+    fn test_tag_item_entity() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        let note_id = fm.add_item("note", "This is a test note").unwrap();
+        fm.tag_item(&note_id.to_string(), "status:done").unwrap();
+
+        assert_eq!(fm.get_or_create_item("type", "status").unwrap(), -2);
+        assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
+        assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
+
+        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE item_id = {}", 
+            fm.item_tags_path().to_string_lossy(), note_id);
+        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_value, "done");
+    }
+
+    #[test]
+    fn test_tag_file_entity() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        let file_path = dir.path().join("test_file.txt");
+        std::fs::write(&file_path, "test content").unwrap();
+        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
+
+        let results = fm.search("extension:txt").unwrap();
+        let registered_path = results[0].primary_value().unwrap();
+        fm.tag_item(registered_path, "manual:true").unwrap();
+
+        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE tag_type = 'manual'", 
+            fm.file_tags_path().to_string_lossy());
+        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
+        assert_eq!(tag_value, "true");
     }
 }

@@ -17,14 +17,14 @@ fn test_integration_file_tagging() {
     let _path_str = file_path.to_string_lossy();
     // 実際には相対パスで登録されているかもしれないので、searchで取得したパスを使うのが確実
     let registered_paths = fm.search("extension:txt").unwrap();
-    let target = &registered_paths[0];
+    let target = registered_paths[0].primary_value().unwrap();
     
     fm.tag_item(target, "status:reviewed").unwrap();
 
     // 3. 付与したタグで検索
     let results = fm.search("status:reviewed").unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], *target);
+    assert_eq!(results[0].primary_value().unwrap(), target);
 }
 
 #[test]
@@ -39,42 +39,27 @@ fn test_integration_tag_tagging() {
     File::create(&file_path).unwrap();
     fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
     let registered_paths = fm.search("extension:txt").unwrap();
+    let target = registered_paths[0].primary_value().unwrap();
     
-    fm.tag_item(&registered_paths[0], "project:mars").unwrap();
+    fm.tag_item(target, "project:mars").unwrap();
 
     // 2. タグ (project:mars) 自体にタグ (priority:high) を付ける
-    // "project:mars" は Item Entity (kind=typedtag) として登録されているはず
-    // IDを取得してタグ付けする、あるいは文字列 "project:mars" をターゲットにする機能があればよいが、
-    // tag_item は "ID" か "ファイルパス" を期待している。
-    // 文字列 "project:mars" から ID を引くヘルパーが必要。
-    
-    // 内部APIを使ってIDを特定
-    // get_or_create_item は private なので使えない。
-    // しかし、add_item で取得できるはずだが、重複チェックしたい。
-    
-    // 現状のAPIだと、Item EntityのIDを知る術が少ない。
-    // テストのためにSQLで直接IDを取得する。
-    let _query = format!("SELECT id FROM read_parquet('{}') WHERE content = 'project:mars' AND kind = 'typedtag'", 
-        db_dir.join("item_entities.parquet").to_string_lossy());
-    
-    // DuckDB接続を開く (テスト用なので fm.conn は使えない、privateだから)
-    // あ、FileManagerのフィールドはprivateだった。
-    
-    // パブリックなAPIが足りないことに気づく。
-    // 「タグにタグを付ける」には、そのタグのIDを知る必要がある。
-    // CLIでは `ttfm define ...` でIDが表示されるが、プログラムからは？
-    
-    // テスト戦略変更:
-    // API経由でやるなら、まず add_item して ID を得る。
-    let tag_id = fm.add_item("typedtag", "project:mars").unwrap(); // これでIDが返る (-1とか)
+    // get_or_create_item を使ってIDを取得
+    let tag_id = fm.get_or_create_item("typedtag", "project:mars").unwrap();
     
     // そのIDに対してタグを付ける
     fm.tag_item(&tag_id.to_string(), "priority:high").unwrap();
 
     // 3. 確認
-    // 現状 search() では Item Entity は検索できないので、DBファイルを直接チェックするしかないが、
-    // ライブラリのテストとしては内部状態を確認できないのは辛い。
-    // ここは「エラーにならずに実行できること」と「ファイル検索に影響しないこと」を確認。
+    // "priority:high" で検索して、"project:mars" がヒットすることを確認
+    let results = fm.search("priority:high").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, tag_id);
+    assert_eq!(results[0].primary_value().unwrap(), "project:mars");
+    
+    // さらに、ファイル検索に影響しないことも確認
+    let file_results = fm.search("project:mars").unwrap();
+    assert_eq!(file_results.len(), 1); // 元のファイルはヒットする
 }
 
 #[test]
@@ -89,7 +74,10 @@ fn test_integration_note_tagging() {
     // 2. Noteにタグ付与
     fm.tag_item(&note_id.to_string(), "category:meeting").unwrap();
 
-    // 3. 検索 (現状の仕様ではNoteはヒットしないことを確認)
+    // 3. 検索 (Noteがヒットすることを確認)
     let results = fm.search("category:meeting").unwrap();
-    assert_eq!(results.len(), 0);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, note_id);
+    assert_eq!(results[0].kind, "item");
+    assert_eq!(results[0].primary_value().unwrap(), "Meeting Memo");
 }

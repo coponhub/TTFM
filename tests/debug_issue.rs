@@ -39,7 +39,7 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
     let results = fm.search("parentdir:src & extension:rs")?;
     
     for path in &results {
-        println!("Hit: {}", path);
+        println!("Hit: {:?}", path);
     }
 
     // 期待値:
@@ -50,7 +50,10 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
     // sub_folder/mod.rs -> NG (parentは src/sub_folder なので parent:src にはヒットしないはず)
 
     // もし "sub_folder" がヒットしているなら、extension判定がバグっている
-    let sub_hits = results.iter().any(|p| p.contains("sub_folder") && !p.ends_with(".rs"));
+    let sub_hits = results.iter().any(|p| {
+        let val = p.primary_value().unwrap_or("");
+        val.contains("sub_folder") && !val.ends_with(".rs")
+    });
     if sub_hits {
         println!("ISSUE REPRODUCED: 'sub_folder' was found in results!");
     } else {
@@ -58,10 +61,10 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
     }
 
     // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
-    let strange_hits = results.iter().any(|p| p.contains("strange.rs") && !p.ends_with("ignored.txt"));
-    if strange_hits {
-        println!("ISSUE REPRODUCED: 'strange.rs' (folder) was found in results!");
-    }
+    let strange_hits = results.iter().any(|p| {
+        let val = p.primary_value().unwrap_or("");
+        val.contains("strange.rs") && !val.ends_with("ignored.txt")
+    });
 
     Ok(())
 }

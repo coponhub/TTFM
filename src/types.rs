@@ -70,3 +70,31 @@ impl TypedTag {
         }
     }
 }
+
+/// 検索結果を表す構造体。
+#[derive(Debug, PartialEq, Clone)]
+pub struct SearchResult {
+    pub id: i64,
+    pub kind: String, // 'file' or 'item'
+    pub tags: Vec<(String, String)>, // (type, value)
+}
+
+impl SearchResult {
+    /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
+    /// ファイルならパス、Noteならコンテンツなどを返します。
+    pub fn primary_value(&self) -> Option<&str> {
+        // path, content, name, value の順で探す
+        self.get_tag_value("path")
+            .or_else(|| self.get_tag_value("content"))
+            .or_else(|| self.get_tag_value("name"))
+            .or_else(|| self.get_tag_value("value"))
+            .or_else(|| self.get_tag_value("filename"))
+    }
+
+    /// 指定されたキーのタグ値を取得します。
+    pub fn get_tag_value(&self, key: &str) -> Option<&str> {
+        self.tags.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}

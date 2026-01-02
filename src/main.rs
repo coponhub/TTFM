@@ -114,15 +114,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// 検索結果のパス一覧を標準出力に表示します。
-fn print_results(paths: &[String]) {
-    if paths.is_empty() {
-        println!("No files found.");
+/// 検索結果の一覧を標準出力に表示します。
+fn print_results(results: &[ttfm::types::SearchResult]) {
+    if results.is_empty() {
+        println!("No items found.");
         return;
     }
 
-    for path in paths {
-        println!("{}", path);
+    for res in results {
+        let primary = res.primary_value().unwrap_or("(no primary value)");
+        println!("{} (ID: {}, Kind: {})", primary, res.id, res.kind);
+        
+        // タグの表示（間引きロジック）
+        let mut shown_tags = 0;
+        for (k, v) in &res.tags {
+            if k == "path" || k == "content" || k == "name" || k == "value" { continue; } // メインで表示済み
+            if shown_tags >= 5 {
+                println!("  ... and more");
+                break;
+            }
+            println!("  {}: {}", k, v);
+            shown_tags += 1;
+        }
+        println!();
     }
-    println!("\nTotal: {} results found.", paths.len());
+    println!("Total: {} results found.", results.len());
 }

@@ -110,34 +110,57 @@ impl<'a> Indexer<'a> {
         self.ensure_empty_parquet_if_missing(&self.item_tags_path(), TargetTable::ItemTags)?;
 
         // 2. Create Unified View
+        // Build dynamic SQL for locations columns
+        let columns = self.registry.get_all_columns();
+        let loc_cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
+        let mut loc_union_sqls = Vec::new();
+        for col in loc_cols {
+            loc_union_sqls.push(format!(
+                "SELECT entity_id AS target_id, 'file' AS target_kind, '{}' AS type, CAST({} AS VARCHAR) AS value FROM read_parquet('{}')",
+                col.name, col.name, self.locations_path().to_string_lossy()
+            ));
+        }
+        let loc_sql = loc_union_sqls.join(" UNION ALL ");
+
         let view_sql = format!(r#"
             CREATE OR REPLACE VIEW all_tags AS
+            -- Tags from file_tags
             SELECT 
-                e.id AS target_id, 
+                t.entity_id AS target_id, 
                 'file' AS target_kind, 
                 t.tag_type AS type, 
                 t.tag_value AS value 
-            FROM read_parquet('{}') e
-            JOIN read_parquet('{}') t ON e.id = t.entity_id
+            FROM read_parquet('{}') t
             UNION ALL
-            SELECT 
-                l.entity_id AS target_id, 
-                'file' AS target_kind, 
-                'path' AS type, 
-                l.path AS value 
-            FROM read_parquet('{}') l
+            -- Attributes from locations
+            {}
             UNION ALL
+            -- Item Entity Kind/Content
+            SELECT
+                id AS target_id,
+                'item' AS target_kind,
+                'itemtype' AS type,
+                kind AS value
+            FROM read_parquet('{}')
+            UNION ALL
+            SELECT
+                id AS target_id,
+                'item' AS target_kind,
+                'content' AS type,
+                content AS value
+            FROM read_parquet('{}')
+            UNION ALL
+            -- Tags from item_tags
             SELECT 
-                i.id AS target_id, 
+                it.item_id AS target_id, 
                 'item' AS target_kind, 
                 it.tag_type AS type, 
                 it.tag_value AS value 
-            FROM read_parquet('{}') i
-            JOIN read_parquet('{}') it ON i.id = it.item_id
+            FROM read_parquet('{}') it
         "#, 
-        self.file_entities_path().to_string_lossy(),
         self.file_tags_path().to_string_lossy(),
-        self.locations_path().to_string_lossy(),
+        loc_sql,
+        self.item_entities_path().to_string_lossy(),
         self.item_entities_path().to_string_lossy(),
         self.item_tags_path().to_string_lossy()
         );
@@ -718,6 +741,6 @@ mod tests {
         
         let results = fm.search("extension:rs").unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("test.rs"));
+        assert!(results[0].primary_value().unwrap().contains("test.rs"));
     }
 }
