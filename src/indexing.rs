@@ -1,7 +1,7 @@
 use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::FunctionRegistry;
 use crate::functions::{ScanEntry, ScanRole};
-use crate::db::{Tbl, Col, DuckDbFunc as DBFunc};
+use crate::db::{Tbl, Col, DuckDbFunc};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
@@ -101,7 +101,7 @@ impl QueryHelper {
         Query::select()
             .expr(Expr::cust("*"))
             .from_function(
-                Func::cust(DBFunc::ReadParquet).arg(Expr::val(path)),
+                Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(path)),
                 Tbl::OriginAlias,
             )
             .to_owned()
@@ -338,7 +338,6 @@ impl<'a> Indexer<'a> {
         let diff = self.diff_phase()?;
         let (results, moved) = self.tagging_phase(diff.to_tag, diff.moved)?;
         self.merge_phase(results, moved, diff.deleted_ids, diff.unchanged_ids)?;
-        self.update_system_items()?;
         Ok(count)
     }
 
@@ -597,7 +596,7 @@ impl<'a> Indexer<'a> {
             let entities_str = self.store.file_entities_path().to_string_lossy().to_string();
             let query = Query::select()
                 .expr(
-                    Func::cust(DBFunc::Coalesce)
+                    Func::cust(DuckDbFunc::Coalesce)
                         .args([Expr::col(Col::Id).max(), Expr::val(0).into()]),
                 )
                 .from_subquery(QueryHelper::parquet_query(&entities_str), Tbl::EntAlias)
@@ -676,6 +675,7 @@ impl<'a> Indexer<'a> {
         deleted_ids: Vec<i64>,
         unchanged_ids: Vec<i64>,
     ) -> Result<()> {
+        let has_updates = !results.is_empty() || !moved.is_empty();
         let all_cols = self.registry.get_all_columns();
         let sql_ents = self
             .build_table_schema(
@@ -750,6 +750,11 @@ impl<'a> Indexer<'a> {
             }),
         )?;
 
+        // 更新がある場合のみシステムItemを登録
+        if has_updates {
+            self.update_system_items()?;
+        }
+
         let drop_ents = Table::drop()
             .table(Alias::new("temp_file_entities"))
             .to_string(PostgresQueryBuilder);
@@ -765,46 +770,105 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-    /// システムItem（type, label, typedtag）を一括登録し、
-    /// 'origin: system' タグを付与します。
+    /// 今回の更新で発生したタグ情報（テンポラリテーブル）を元に、
+    /// システムItemを一括登録します。
     pub fn update_system_items(&self) -> Result<()> {
         let items_path = self.store.item_entities_path();
         let item_tags_path = self.store.item_tags_path();
-        let items_path_str = items_path.to_string_lossy();
-        let item_tags_path_str = item_tags_path.to_string_lossy();
+        let items_str_buf = items_path.to_string_lossy();
+        let itags_str_buf = item_tags_path.to_string_lossy();
+        let items_str = items_str_buf.as_ref();
+        let itags_str = itags_str_buf.as_ref();
 
-        // 1. 新規登録が必要なシステムItemを特定
-        // all_tagsビューから、現在のタグの種類と値を抽出し、未登録のものをリストアップします。
-        self.conn.execute_batch(&format!(r#"
-            CREATE TEMP TABLE candidates AS
-            WITH ut AS (SELECT DISTINCT type, value FROM all_tags)
-            SELECT 'type' as kind, type as content FROM ut
-            UNION
-            SELECT 'label' as kind, value as content FROM ut
-            UNION
-            SELECT 'typedtag' as kind, type || ':' || value as content FROM ut;
-            
-            CREATE TEMP TABLE new_items_raw AS
-            SELECT DISTINCT c.kind, c.content
-            FROM candidates c
-            LEFT JOIN read_parquet('{}') e 
-              ON c.kind = e.kind AND c.content = e.content
-            WHERE e.id IS NULL;
-        "#, items_path_str))?;
+        // 1. 今回の更新分（temp_file_tags, temp_locations）からタグ情報を抽出
+        let mut source_q = Query::select();
+        source_q
+            .expr_as(Expr::col(Col::TagType), Col::Type)
+            .expr_as(Expr::col(Col::TagValue), Col::Value)
+            .from(Tbl::TempFileTags);
 
-        let new_count: i64 = self.conn.query_row("SELECT COUNT(*) FROM new_items_raw", [], |r| r.get(0))?;
+        let all_cols = self.registry.get_all_columns();
+        for col in all_cols.iter().filter(|c| {
+            c.target_table == crate::taggers::TargetTable::Locations
+        }) {
+            let mut sub = Query::select();
+            sub.expr_as(Expr::val(col.name.clone()), Alias::new("type"))
+                .expr_as(
+                    Expr::col(Alias::new(&col.name))
+                        .cast_as(Alias::new("VARCHAR")),
+                    Alias::new("value"),
+                )
+                .from(Alias::new("temp_locations"));
+            source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
+        }
+
+        // 2. 登録候補 (kind, content) の生成
+        let mut cand_q = Query::select();
+        cand_q
+            .expr_as(Expr::val("type"), Col::Kind)
+            .expr_as(Expr::col(Col::Type), Col::Content)
+            .from_subquery(source_q.to_owned(), Alias::new("st"));
+
+        let mut label_q = Query::select();
+        label_q
+            .expr_as(Expr::val("label"), Col::Kind)
+            .expr_as(Expr::col(Col::Value), Col::Content)
+            .from_subquery(source_q.to_owned(), Alias::new("st"));
+        cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
+
+        let mut tt_q = Query::select();
+        tt_q.expr_as(Expr::val("typedtag"), Col::Kind)
+            .expr_as(
+                Expr::cust_with_exprs("$1 || ':' || $2", [
+                    Expr::col(Col::Type).into(),
+                    Expr::col(Col::Value).into(),
+                ]),
+                Col::Content,
+            )
+            .from_subquery(source_q.to_owned(), Alias::new("st"));
+        cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
+
+        // 3. 未登録のものを特定
+        let mut new_items_q = Query::select();
+        new_items_q
+            .column((Alias::new("c"), Col::Kind))
+            .column((Alias::new("c"), Col::Content))
+            .distinct()
+            .from_subquery(cand_q, Alias::new("c"))
+            .join_subquery(
+                JoinType::LeftJoin,
+                QueryHelper::parquet_query(items_str),
+                Tbl::EntAlias,
+                Condition::all()
+                    .add(Expr::col((Alias::new("c"), Col::Kind))
+                        .eq(Expr::col((Tbl::EntAlias, Col::Kind))))
+                    .add(Expr::col((Alias::new("c"), Col::Content))
+                        .eq(Expr::col((Tbl::EntAlias, Col::Content)))),
+            )
+            .and_where(Expr::col((Tbl::EntAlias, Col::Id)).is_null());
+
+        let sql = new_items_q.to_string(PostgresQueryBuilder);
+        self.conn.execute(
+            &format!("CREATE TEMP TABLE new_items_raw AS {}", sql), []
+        )?;
+
+        let new_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM new_items_raw", [], |r| r.get(0)
+        )?;
         if new_count == 0 {
-            self.conn.execute_batch("DROP TABLE candidates; DROP TABLE new_items_raw;")?;
+            self.conn.execute("DROP TABLE new_items_raw", [])?;
             return Ok(());
         }
 
-        // 2. IDの割り当てと保存
-        // 既存の最小ID（負の値）を取得し、そこからさらにデクリメントして新しいIDを生成します。
-        let min_id: i64 = self.conn.query_row(&format!("SELECT COALESCE(MIN(id), 0) FROM read_parquet('{}')", items_path_str), [], |r| r.get(0))?;
+        // 4. IDの割り当てと保存
+        let min_id_q = format!(
+            "SELECT COALESCE(MIN(id), 0) FROM read_parquet('{}')", items_str
+        );
+        let min_id: i64 = self.conn.query_row(&min_id_q, [], |r| r.get(0))?;
         let start_id = if min_id > -1 { -1 } else { min_id - 1 };
 
-        let tmp_items = format!("{}.tmp", items_path_str);
-        let tmp_item_tags = format!("{}.tmp", item_tags_path_str);
+        let tmp_items = format!("{}.tmp", items_str);
+        let tmp_itags = format!("{}.tmp", itags_str);
 
         self.conn.execute_batch(&format!(r#"
             CREATE TEMP TABLE new_items_with_id AS
@@ -813,32 +877,36 @@ impl<'a> Indexer<'a> {
                 kind,
                 content
             FROM new_items_raw;
-            
-            -- item_entitiesを更新
-            COPY (
-                SELECT * FROM read_parquet('{}')
-                UNION ALL
-                SELECT * FROM new_items_with_id
-            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
-            
-            -- origin:system タグを付与し、item_tagsを更新
-            COPY (
-                SELECT * FROM read_parquet('{}')
-                UNION ALL
-                SELECT 
-                    id as item_id,
-                    'origin' as tag_type,
-                    'system' as tag_value
-                FROM new_items_with_id
-            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
-        "#, start_id, items_path_str, tmp_items, item_tags_path_str, tmp_item_tags))?;
+        "#, start_id))?;
 
-        // 3. ファイルを原子的に置き換え
+        // item_entities 更新
+        let mut update_items_q = QueryHelper::parquet_query(items_str);
+        update_items_q.union(
+            sea_query::UnionType::All,
+            Query::select()
+                .expr(Expr::cust("*"))
+                .from(Alias::new("new_items_with_id"))
+                .to_owned()
+        );
+        self.store.save_parquet(update_items_q, Path::new(&tmp_items))?;
+
+        // item_tags 更新
+        let mut update_tags_q = QueryHelper::parquet_query(itags_str);
+        let mut new_tags_q = Query::select();
+        new_tags_q
+            .column(Col::Id)
+            .expr_as(Expr::val("origin"), Col::TagType)
+            .expr_as(Expr::val("system"), Col::TagValue)
+            .from(Alias::new("new_items_with_id"));
+        update_tags_q.union(sea_query::UnionType::All, new_tags_q.to_owned());
+        self.store.save_parquet(update_tags_q, Path::new(&tmp_itags))?;
+
         std::fs::rename(&tmp_items, &items_path)?;
-        std::fs::rename(&tmp_item_tags, &item_tags_path)?;
+        std::fs::rename(&tmp_itags, &item_tags_path)?;
 
-        // クリーンアップ
-        self.conn.execute_batch("DROP TABLE candidates; DROP TABLE new_items_raw; DROP TABLE new_items_with_id;")?;
+        self.conn.execute_batch(
+            "DROP TABLE new_items_raw; DROP TABLE new_items_with_id;"
+        )?;
 
         Ok(())
     }
@@ -958,156 +1026,136 @@ mod tests {
         let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
         let count = indexer.run(root, None::<&fn(usize)>, false).unwrap();
         assert!(count >= 1);
-                let results = fm.search("extension:rs").unwrap();
-                assert_eq!(results.len(), 1);
-                assert!(results[0].primary_value().unwrap().contains("test.rs"));
+        let results = fm.search("extension:rs").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].primary_value().unwrap().contains("test.rs"));
+    }
+
+    #[test]
+    fn test_system_items_registration() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 拡張子 .txt のファイルを作成
+        std::fs::write(root.join("hello.txt"), "hello").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // 1. item_entities に extension:txt 関連のItemがあるか確認
+        let items_path_buf = fm.item_entities_path();
+        let items_path = items_path_buf.to_string_lossy();
+        let query = format!(
+            "SELECT kind, content FROM read_parquet('{}') \
+             WHERE content IN ('extension', 'txt', 'extension:txt')",
+            items_path
+        );
+        let mut stmt = fm.conn.prepare(&query).unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(rows.iter().any(|(k, c)| k == "type" && c == "extension"));
+        assert!(rows.iter().any(|(k, c)| k == "label" && c == "txt"));
+        assert!(rows.iter().any(|(k, c)| k == "typedtag" && c == "extension:txt"));
+
+        // 2. それらのItemに origin:system タグがあるか確認
+        let item_tags_path_buf = fm.item_tags_path();
+        let item_tags_path = item_tags_path_buf.to_string_lossy();
+        let query_tags = format!(
+            r#"
+            SELECT COUNT(*) 
+            FROM read_parquet('{}') it
+            JOIN read_parquet('{}') ie ON it.item_id = ie.id
+            WHERE ie.content = 'extension:txt' 
+              AND it.tag_type = 'origin' AND it.tag_value = 'system'
+            "#,
+            item_tags_path, items_path
+        );
+
+        let count: i64 = fm.conn
+            .query_row(&query_tags, [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "origin:system tag should be attached to system items"
+        );
+    }
+
+    #[test]
+    fn test_or_negation_complex_behavior() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 1. ファイル準備 (.rs と .txt)
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("readme.txt"), "hello").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // 2. クエリ実行: itemtype:type | -extension:rs
+        let query = "itemtype:type | -extension:rs";
+        let results = fm.search(query).unwrap();
+
+        let mut found_type_item = false;
+        let mut found_txt_file = false;
+        let mut found_rs_file = false;
+
+        for r in results {
+            if r.kind == "item" && 
+               r.tags.iter().any(|(t, v)| t == "itemtype" && v == "type") {
+                found_type_item = true;
             }
-        
-            #[test]
-            fn test_system_items_registration() {
-                let dir = tempdir().unwrap();
-                let root = dir.path();
-                let db_dir = root.join(".ttfm/db");
-                
-                // 拡張子 .txt のファイルを作成
-                std::fs::write(root.join("hello.txt"), "hello").unwrap();
-                
-                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
-                indexer.run(root, None::<&fn(usize)>, false).unwrap();
-        
-                        // 1. item_entities に extension:txt 関連のItemがあるか確認
-        
-                        let items_path_buf = fm.item_entities_path();
-        
-                        let items_path = items_path_buf.to_string_lossy();
-        
-                        let query = format!(
-        
-                            "SELECT kind, content FROM read_parquet('{}') WHERE content IN ('extension', 'txt', 'extension:txt')",
-        
-                            items_path
-        
-                        );
-        
-                        let mut stmt = fm.conn.prepare(&query).unwrap();
-        
-                        let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
-        
-                            .map(|r| r.unwrap()).collect();
-        
-                        
-        
-                        assert!(rows.iter().any(|(k, c)| k == "type" && c == "extension"));
-        
-                        assert!(rows.iter().any(|(k, c)| k == "label" && c == "txt"));
-        
-                        assert!(rows.iter().any(|(k, c)| k == "typedtag" && c == "extension:txt"));
-        
-                
-        
-                        // 2. それらのItemに origin:system タグがあるか確認
-        
-                        let item_tags_path_buf = fm.item_tags_path();
-        
-                        let item_tags_path = item_tags_path_buf.to_string_lossy();
-        
-                        let query_tags = format!(
-        
-                            r#"
-        
-                            SELECT COUNT(*) 
-        
-                            FROM read_parquet('{}') it
-        
-                            JOIN read_parquet('{}') ie ON it.item_id = ie.id
-        
-                            WHERE ie.content = 'extension:txt' AND it.tag_type = 'origin' AND it.tag_value = 'system'
-        
-                            "#,
-        
-                            item_tags_path, items_path
-        
-                        );
-        
-                
-                        let count: i64 = fm.conn.query_row(&query_tags, [], |r| r.get(0)).unwrap();
-                        assert_eq!(count, 1, "origin:system tag should be attached to system items");
-                    }
-                
-                    #[test]
-                    fn test_or_negation_complex_behavior() {
-                        let dir = tempdir().unwrap();
-                        let root = dir.path();
-                        let db_dir = root.join(".ttfm/db");
-                        
-                        // 1. ファイル準備 (.rs と .txt)
-                        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
-                        std::fs::write(root.join("readme.txt"), "hello").unwrap();
-                        
-                        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-                        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
-                        indexer.run(root, None::<&fn(usize)>, false).unwrap();
-                
-                        // 2. クエリ実行: itemtype:type | -extension:rs
-                        // 期待される結果:
-                        // - itemtype:type のシステムItem (extension, filename など) -> 左辺にマッチ
-                        // - readme.txt -> 右辺 (-extension:rs) にマッチ (extension:txt は extension:rs ではないため)
-                        // - main.rs -> どちらにもマッチしない (左辺はItemのみ、右辺は extension:rs を除外するため)
-                        let query = "itemtype:type | -extension:rs";
-                        let results = fm.search(query).unwrap();
-                
-                        let mut found_type_item = false;
-                        let mut found_txt_file = false;
-                        let mut found_rs_file = false;
-                
-                        for r in results {
-                            if r.kind == "item" && r.tags.iter().any(|(t, v)| t == "itemtype" && v == "type") {
-                                found_type_item = true;
-                            }
-                            if r.kind == "file" {
-                                if r.tags.iter().any(|(t, v)| t == "extension" && v == "txt") {
-                                    found_txt_file = true;
-                                }
-                                if r.tags.iter().any(|(t, v)| t == "extension" && v == "rs") {
-                                    found_rs_file = true;
-                                }
-                            }
-                        }
-                
-                        assert!(found_type_item, "Should have found system items of kind 'type'");
-                                assert!(found_txt_file, "Should have found readme.txt");
-                                assert!(!found_rs_file, "Should NOT have found main.rs");
-                            }
-                        
-                            #[test]
-                            fn test_glob_search_behavior() {
-                                let dir = tempdir().unwrap();
-                                let root = dir.path();
-                                let db_dir = root.join(".ttfm/db");
-                                
-                                std::fs::write(root.join("project_alpha.pdf"), "").unwrap();
-                                std::fs::write(root.join("project_beta.txt"), "").unwrap();
-                                
-                                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-                                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
-                                indexer.run(root, None::<&fn(usize)>, false).unwrap();
-                        
-                                // 1. ワイルドカードによる部分一致
-                                let results = fm.search("filename:*alpha*").unwrap();
-                                assert_eq!(results.len(), 1);
-                                assert!(results[0].primary_value().unwrap().contains("alpha"));
-                        
-                                // 2. 複数のワイルドカード
-                                let results = fm.search("filename:project*").unwrap();
-                                assert_eq!(results.len(), 2);
-                        
-                                // 3. ワイルドカードなし (完全一致として動作)
-                                let results = fm.search("filename:project").unwrap();
-                                assert_eq!(results.len(), 0, "Exact match should fail without wildcard");
-                        
-                                let results = fm.search("filename:project_alpha.pdf").unwrap();
-                                assert_eq!(results.len(), 1, "Exact match should work with full name");
-                            }
-                        }
+            if r.kind == "file" {
+                if r.tags.iter().any(|(t, v)| t == "extension" && v == "txt") {
+                    found_txt_file = true;
+                }
+                if r.tags.iter().any(|(t, v)| t == "extension" && v == "rs") {
+                    found_rs_file = true;
+                }
+            }
+        }
+
+        assert!(found_type_item, "Should find system items");
+        assert!(found_txt_file, "Should find readme.txt");
+        assert!(!found_rs_file, "Should NOT find main.rs");
+    }
+
+    #[test]
+    fn test_glob_search_behavior() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        std::fs::write(root.join("project_alpha.pdf"), "").unwrap();
+        std::fs::write(root.join("project_beta.txt"), "").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // 1. ワイルドカードによる部分一致
+        let results = fm.search("filename:*alpha*").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].primary_value().unwrap().contains("alpha"));
+
+        // 2. 複数のワイルドカード
+        let results = fm.search("filename:project*").unwrap();
+        assert_eq!(results.len(), 2);
+
+        // 3. ワイルドカードなし (完全一致として動作)
+        let results = fm.search("filename:project").unwrap();
+        assert_eq!(results.len(), 0);
+
+        let results = fm.search("filename:project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 1);
+    }
+}
                         
