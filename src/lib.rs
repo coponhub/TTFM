@@ -23,7 +23,7 @@ pub mod indexing;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use types::{SearchResult, TagType, TypedTag};
+pub use types::{SearchResult, TagType, TypedTag, Label};
 use functions::{
     TagFunction,
     PathFunction,
@@ -192,7 +192,7 @@ impl FunctionRegistry {
                         .column(Col::TargetId)
                         .from(Alias::new(view_name))
                         .and_where(Expr::col(Col::Type).eq("filename"))
-                        .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.tag.0.clone())));
+                        .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
 
                     let mut q_dir = Query::select();
                     q_dir
@@ -210,7 +210,7 @@ impl FunctionRegistry {
                     .distinct()
                     .from(Alias::new(view_name))
                     .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                    .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.tag.0.clone())));
+                    .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
                 q
             }
         }
@@ -454,7 +454,7 @@ impl FileManager {
     }
 
     /// アイテム（ファイルまたは Item Entity）にタグを付与します。
-    pub fn tag_item(&self, target: &str, tag_str: &str) -> Result<()> {
+    pub fn tag_item(&self, item: &str, tag_str: &str) -> Result<()> {
         let (key, value) =
             tag_str.split_once(':').context("Tag must be in 'key:value' format")?;
 
@@ -464,7 +464,7 @@ impl FileManager {
         self.get_or_create_item("typedtag", tag_str)?;
 
         // 2. ターゲットの ID を特定
-        let target_id = if let Ok(id) = target.parse::<i64>() {
+        let item_id = if let Ok(id) = item.parse::<i64>() {
             id
         } else {
             // パスとして扱い、file_entities から ID を取得
@@ -474,22 +474,22 @@ impl FileManager {
                     QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
                     Tbl::LocAlias,
                 )
-                .and_where(Expr::col(Col::Path).eq(target))
+                .and_where(Expr::col(Col::Path).eq(item))
                 .to_string(PostgresQueryBuilder);
 
             self.conn
                 .query_row(&query, [], |r| r.get(0))
-                .context(format!("File not found: {}", target))?
+                .context(format!("Item not found: {}", item))?
         };
 
         // 3. 適切なテーブルにタグを保存
-        if target_id >= 0 {
+        if item_id >= 0 {
             // File Entity へのタグ付け
             self.append_tag_to_parquet(
                 self.file_tags_path(),
                 "temp_add_file_tag",
                 "entity_id",
-                target_id,
+                item_id,
                 key,
                 value,
             )?;
@@ -499,7 +499,7 @@ impl FileManager {
                 self.item_tags_path(),
                 "temp_add_item_tag",
                 "item_id",
-                target_id,
+                item_id,
                 key,
                 value,
             )?;

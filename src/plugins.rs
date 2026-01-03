@@ -180,7 +180,7 @@ impl TagFunction for WasmPluginAdapter {
 
     fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
         if tag.tagtype.0 == self.name {
-            return Some(exists_in_tags(&self.name, &tag.tag.0, false));
+            return Some(exists_in_tags(&self.name, &tag.label.0, false));
         }
         None
     }

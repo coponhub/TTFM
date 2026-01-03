@@ -50,7 +50,7 @@ pub struct TagType(pub String);
 
 /// タグの「値」部分（例: "rs", "src"）。
 #[derive(Debug, PartialEq, Clone)]
-pub struct Tag(pub String);
+pub struct Label(pub String);
 
 /// 「キー:値」のペアを表す構造体。
 #[derive(Debug, PartialEq, Clone)]
@@ -58,7 +58,7 @@ pub struct TypedTag {
     /// タグの型（キー）。例: "extension"
     pub tagtype: TagType,
     /// タグの値。例: "rs"
-    pub tag: Tag,
+    pub label: Label,
 }
 
 impl TypedTag {
@@ -66,7 +66,7 @@ impl TypedTag {
     pub fn new(key: String, value: String) -> Self {
         Self {
             tagtype: TagType(key),
-            tag: Tag(value),
+            label: Label(value),
         }
     }
 }

@@ -17,14 +17,14 @@ fn test_integration_file_tagging() {
     let _path_str = file_path.to_string_lossy();
     // 実際には相対パスで登録されているかもしれないので、searchで取得したパスを使うのが確実
     let registered_paths = fm.search("extension:txt").unwrap();
-    let target = registered_paths[0].primary_value().unwrap();
+    let item = registered_paths[0].primary_value().unwrap();
     
-    fm.tag_item(target, "status:reviewed").unwrap();
+    fm.tag_item(item, "status:reviewed").unwrap();
 
     // 3. 付与したタグで検索
     let results = fm.search("status:reviewed").unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].primary_value().unwrap(), target);
+    assert_eq!(results[0].primary_value().unwrap(), item);
 }
 
 #[test]
@@ -39,9 +39,9 @@ fn test_integration_tag_tagging() {
     File::create(&file_path).unwrap();
     fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
     let registered_paths = fm.search("extension:txt").unwrap();
-    let target = registered_paths[0].primary_value().unwrap();
+    let item = registered_paths[0].primary_value().unwrap();
     
-    fm.tag_item(target, "project:mars").unwrap();
+    fm.tag_item(item, "project:mars").unwrap();
 
     // 2. タグ (project:mars) 自体にタグ (priority:high) を付ける
     // get_or_create_item を使ってIDを取得

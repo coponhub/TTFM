@@ -164,7 +164,7 @@ impl TagFunction for PathFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr = Expr::col((Tbl::LocAlias, Col::Path))
-                .ilike(format!("%{}%", tag.tag.0));
+                .ilike(format!("%{}%", tag.label.0));
             return Some(expr.into());
         }
         None
@@ -238,7 +238,7 @@ impl TagFunction for ParentDirFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = &tag.tag.0;
+            let val = &tag.label.0;
             let expr = Expr::col((Tbl::LocAlias, Col::ParentDir))
                 .ilike(format!("%/{}", val))
                 .or(Expr::col((Tbl::LocAlias, Col::ParentDir)).eq(val.clone()));
@@ -319,7 +319,7 @@ impl TagFunction for FilenameFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = &tag.tag.0;
+            let val = &tag.label.0;
             let expr = Expr::col((Tbl::LocAlias, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
@@ -401,7 +401,7 @@ impl TagFunction for StemFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = &tag.tag.0;
+            let val = &tag.label.0;
             let expr = Expr::col((Tbl::LocAlias, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
@@ -477,7 +477,7 @@ impl TagFunction for ExtensionFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::LocAlias, Col::Extension)).eq(tag.tag.0.clone());
+                Expr::col((Tbl::LocAlias, Col::Extension)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -550,7 +550,7 @@ impl TagFunction for DirectoryFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = &tag.tag.0;
+            let val = &tag.label.0;
             let expr = Expr::col((Tbl::LocAlias, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(Self::NAME, "TRUE", true));
@@ -628,7 +628,7 @@ impl TagFunction for SizeBytesFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::EntAlias, Col::Size)).eq(tag.tag.0.clone());
+            let expr = Expr::col((Tbl::EntAlias, Col::Size)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -713,7 +713,7 @@ impl TagFunction for ModifiedTsFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::Mtime)).eq(tag.tag.0.clone());
+                Expr::col((Tbl::EntAlias, Col::Mtime)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -789,7 +789,7 @@ impl TagFunction for InodeFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::Inode)).eq(tag.tag.0.clone());
+                Expr::col((Tbl::EntAlias, Col::Inode)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -880,7 +880,7 @@ impl TagFunction for TypeFromExtFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
+            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
         }
         None
     }
@@ -971,7 +971,7 @@ impl TagFunction for SizeStrFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
+            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
         }
         None
     }
@@ -1049,7 +1049,7 @@ impl TagFunction for ModifiedStrFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
+            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
         }
         None
     }
@@ -1062,7 +1062,7 @@ impl TagFunction for ModifiedStrFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{TypedTag, TagType, Tag};
+    use crate::types::{TypedTag, TagType, Label};
     use sea_query::{Query, PostgresQueryBuilder};
 
     // Helper to stringify a SimpleExpr for testing
@@ -1078,7 +1078,7 @@ mod tests {
     fn ttag(key: &str, value: &str) -> TypedTag {
         TypedTag {
             tagtype: TagType(key.to_string()),
-            tag: Tag(value.to_string()),
+            label: Label(value.to_string()),
         }
     }
 

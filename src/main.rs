@@ -48,7 +48,7 @@ enum Commands {
     /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
     Tag {
         /// 対象のパスまたはID
-        target: String,
+        item: String,
         /// 付与するタグ (key:value)
         tag: String,
     },
@@ -103,9 +103,9 @@ fn main() -> Result<()> {
             fm.clear_index()?;
             println!("Index cleared.");
         }
-        Commands::Tag { target, tag } => {
-            fm.tag_item(target, tag)?;
-            println!("Tagged '{}' with '{}'", target, tag);
+        Commands::Tag { item, tag } => {
+            fm.tag_item(item, tag)?;
+            println!("Tagged '{}' with '{}'", item, tag);
         }
         Commands::Note { content } => {
             let id = fm.add_item("note", content)?;

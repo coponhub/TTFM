@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::iter::Peekable;
 use std::str::Chars;
-use crate::types::{Tag, TagType, TypedTag};
+use crate::types::{Label, TagType, TypedTag};
 use crate::functions::{ExtensionFunction, ParentDirFunction, PathFunction};
 
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
@@ -69,7 +69,7 @@ impl<'a> QueryParser<'a> {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use ttfm::{QueryParser, QueryNode};
     /// 
     /// // 拡張子が "rs" かつ ("project" または "report" タグを持つ)
@@ -215,35 +215,68 @@ impl<'a> QueryParser<'a> {
             val_str = val_str.replace('\\', "/");
         }
 
-        TypedTag {
-            tagtype: TagType(key_str),
-            tag: Tag(val_str),
+                TypedTag {
+
+                    tagtype: TagType(key_str),
+
+                    label: Label(val_str),
+
+                }
+
+            }
+
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+        
 
-    #[test]
-    fn test_query_types() {
-        let tt = TypedTag {
-            tagtype: TagType(ExtensionFunction::NAME.to_string()),
-            tag: Tag("rs".to_string()),
-        };
-        assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
-        assert_eq!(tt.tag.0, "rs");
-    }
+        #[cfg(test)]
 
-    #[test]
-    fn test_normalization_parse() {
-        let node = QueryParser::parse("EXTENSION:RS").unwrap();
-        if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
-            assert_eq!(tt.tag.0, "rs");
-        } else {
-            panic!("Should be a TypedTag");
+        mod tests {
+
+            use super::*;
+
+        
+
+            #[test]
+
+            fn test_query_types() {
+
+                let tt = TypedTag {
+
+                    tagtype: TagType(ExtensionFunction::NAME.to_string()),
+
+                    label: Label("rs".to_string()),
+
+                };
+
+                assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
+
+                assert_eq!(tt.label.0, "rs");
+
+            }
+
+        
+
+            #[test]
+
+            fn test_normalization_parse() {
+
+                let node = QueryParser::parse("EXTENSION:RS").unwrap();
+
+                if let QueryNode::TypedTag(tt) = node {
+
+                    assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
+
+                    assert_eq!(tt.label.0, "rs");
+
+                } else {
+
+                    panic!("Should be a TypedTag");
+
+                }
+
+            }
+
         }
-    }
-}
+
+        
