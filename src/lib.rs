@@ -512,31 +512,23 @@ impl FileManager {
         Ok(())
     }
 
-    /// アイテムの優先度（RANK）を設定します。
-    pub fn set_rank(&self, item: &str, rank: i64) -> Result<()> {
-        // 1. ターゲットの ID と種類を特定
-        let (item_id, is_file) = if let Ok(id) = item.parse::<i64>() {
-            (id, id >= 0)
-        } else {
-            // パスとして扱い、file_entities から ID を取得
-            let query = Query::select()
-                .column(Col::EntityId)
-                .from_subquery(
-                    QueryHelper::parquet_query(
-                        &self.locations_path().to_string_lossy()
-                    ),
-                    Tbl::LocAlias,
-                )
-                .and_where(Expr::col(Col::Path).eq(item))
-                .to_string(PostgresQueryBuilder);
+    /// 検索結果リストに対して優先度を一括設定します。
+    pub fn update_ranks(&self, results: &[SearchResult], rank: i64) -> Result<()> {
+        let file_ids: Vec<i64> = results.iter()
+            .filter(|r| r.kind == "file").map(|r| r.id).collect();
+        let item_ids: Vec<i64> = results.iter()
+            .filter(|r| r.kind == "item").map(|r| r.id).collect();
 
-            let id: i64 = self.conn
-                .query_row(&query, [], |r| r.get(0))
-                .context(format!("Item not found: {}", item))?;
-            (id, true)
-        };
+        if !file_ids.is_empty() {
+            self.batch_update_rank(&file_ids, true, rank)?;
+        }
+        if !item_ids.is_empty() {
+            self.batch_update_rank(&item_ids, false, rank)?;
+        }
+        Ok(())
+    }
 
-        // 2. 適切なテーブルを更新
+    fn batch_update_rank(&self, ids: &[i64], is_file: bool, rank: i64) -> Result<()> {
         let path = if is_file {
             self.file_entities_path()
         } else {
@@ -545,19 +537,14 @@ impl FileManager {
 
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
-        let store = crate::indexing::IndexStore::new(
-            &self.conn,
-            self.db_dir.clone()
-        );
-        let temp_table = Alias::new("temp_update_rank");
+        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
+        let temp_table = Alias::new("temp_batch_rank");
 
         store.create_table_as(
             temp_table.clone(),
             QueryHelper::parquet_query(&path_str)
         )?;
 
-        // UPDATE ... (DuckDB では UPDATE が使えるが、
-        // Parquet ベースなのでテーブル全体を書き換える)
         let quoted_table = {
             let sql = Query::select()
                 .column(temp_table.clone())
@@ -565,11 +552,14 @@ impl FileManager {
                 .to_string(PostgresQueryBuilder);
             sql.split_whitespace().nth(1).unwrap_or("").to_string()
         };
+
+        let id_list = ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let sql_update = format!(
-            "UPDATE {} SET rank = {} WHERE id = {}",
-            quoted_table,
-            rank,
-            item_id
+            "UPDATE {} SET rank = {} WHERE id IN ({})",
+            quoted_table, rank, id_list
         );
         self.conn.execute(&sql_update, [])?;
 
@@ -578,8 +568,12 @@ impl FileManager {
 
         std::fs::rename(&tmp_path, path)
             .context("Failed to update rank in parquet")?;
-
         Ok(())
+    }
+
+    /// IDを指定して優先度を設定します。
+    pub fn set_rank_by_id(&self, id: i64, is_file: bool, rank: i64) -> Result<()> {
+        self.batch_update_rank(&[id], is_file, rank)
     }
 
     /// 全てのタグ型の優先度（RANK）を取得します。

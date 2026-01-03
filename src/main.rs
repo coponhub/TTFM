@@ -18,6 +18,10 @@ struct Cli {
     /// 実行するサブコマンド
     #[command(subcommand)]
     command: Commands,
+
+    /// 全ての確認をスキップして 'yes' と回答します
+    #[arg(short, long, global = true)]
+    yes: bool,
 }
 
 /// TTFM で利用可能なサブコマンド。
@@ -59,7 +63,7 @@ enum Commands {
     },
     /// アイテムに優先度（RANK）を設定します。
     Rank {
-        /// 対象のパスまたはID
+        /// 対象のクエリ（例: "extension:rs"）
         item: String,
         /// 設定する優先度（数値が大きいほど上位に表示）
         value: i64,
@@ -119,8 +123,30 @@ fn main() -> Result<()> {
             println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
-            fm.set_rank(item, *value)?;
-            println!("Set rank of '{}' to {}", item, value);
+            let results = fm.search(item)?;
+            if results.is_empty() {
+                println!("No items matched query: '{}'", item);
+                return Ok(());
+            }
+
+            println!("Matched {} items.", results.len());
+            let do_update = if cli.yes {
+                true
+            } else {
+                print!("Set rank to {}? [y/N]: ", value);
+                use std::io::{self, Write};
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                input.trim().to_lowercase() == "y"
+            };
+
+            if do_update {
+                fm.update_ranks(&results, *value)?;
+                println!("Updated {} items.", results.len());
+            } else {
+                println!("Aborted.");
+            }
         }
     }
 
