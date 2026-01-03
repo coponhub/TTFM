@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use duckdb::Connection;
 use std::path::Path;
 use file_id::get_file_id;
-use sea_query::{Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func};
+use sea_query::{
+    Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
+};
 use crate::db::{Tbl, Col, DuckDbFunc};
 use crate::indexing::QueryHelper;
 
@@ -346,6 +348,8 @@ impl FileManager {
             .and_where(Expr::col(Col::TargetId).in_subquery(sub_query))
             .group_by_col(Col::TargetId)
             .group_by_col(Col::TargetKind)
+            .group_by_col(Col::Rank)
+            .order_by(Col::Rank, sea_query::Order::Desc)
             .limit(100);
 
         let sql = sql_query.to_string(PostgresQueryBuilder);
@@ -504,6 +508,76 @@ impl FileManager {
                 value,
             )?;
         }
+
+        Ok(())
+    }
+
+    /// アイテムの優先度（RANK）を設定します。
+    pub fn set_rank(&self, item: &str, rank: i64) -> Result<()> {
+        // 1. ターゲットの ID と種類を特定
+        let (item_id, is_file) = if let Ok(id) = item.parse::<i64>() {
+            (id, id >= 0)
+        } else {
+            // パスとして扱い、file_entities から ID を取得
+            let query = Query::select()
+                .column(Col::EntityId)
+                .from_subquery(
+                    QueryHelper::parquet_query(
+                        &self.locations_path().to_string_lossy()
+                    ),
+                    Tbl::LocAlias,
+                )
+                .and_where(Expr::col(Col::Path).eq(item))
+                .to_string(PostgresQueryBuilder);
+
+            let id: i64 = self.conn
+                .query_row(&query, [], |r| r.get(0))
+                .context(format!("Item not found: {}", item))?;
+            (id, true)
+        };
+
+        // 2. 適切なテーブルを更新
+        let path = if is_file {
+            self.file_entities_path()
+        } else {
+            self.item_entities_path()
+        };
+
+        let path_str = path.to_string_lossy();
+        let tmp_path = format!("{}.tmp", path_str);
+        let store = crate::indexing::IndexStore::new(
+            &self.conn,
+            self.db_dir.clone()
+        );
+        let temp_table = Alias::new("temp_update_rank");
+
+        store.create_table_as(
+            temp_table.clone(),
+            QueryHelper::parquet_query(&path_str)
+        )?;
+
+        // UPDATE ... (DuckDB では UPDATE が使えるが、
+        // Parquet ベースなのでテーブル全体を書き換える)
+        let quoted_table = {
+            let sql = Query::select()
+                .column(temp_table.clone())
+                .from(Alias::new("x"))
+                .to_string(PostgresQueryBuilder);
+            sql.split_whitespace().nth(1).unwrap_or("").to_string()
+        };
+        let sql_update = format!(
+            "UPDATE {} SET rank = {} WHERE id = {}",
+            quoted_table,
+            rank,
+            item_id
+        );
+        self.conn.execute(&sql_update, [])?;
+
+        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.drop_table(temp_table)?;
+
+        std::fs::rename(&tmp_path, path)
+            .context("Failed to update rank in parquet")?;
 
         Ok(())
     }

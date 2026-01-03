@@ -63,6 +63,7 @@ pub enum Col {
     Kind,
     Content,
     ItemId,
+    Rank,
 }
 
 /// DuckDB 固有の関数名を表す識別子。

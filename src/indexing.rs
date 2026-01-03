@@ -276,6 +276,7 @@ impl QueryHelper {
 
     fn build_all_tags_view_query(
         all_columns: &[ColumnDef],
+        ents: &str,
         file_tags: &str,
         locs: &str,
         items: &str,
@@ -284,23 +285,40 @@ impl QueryHelper {
         let mut base = Query::select();
         base.column((Tbl::TagAlias, Col::EntityId))
             .expr_as(Expr::val("file"), Alias::new("target_kind"))
+            .column((Tbl::EntAlias, Col::Rank))
             .column((Tbl::TagAlias, Col::TagType))
             .column((Tbl::TagAlias, Col::TagValue))
-            .from_subquery(Self::parquet_query(file_tags), Tbl::TagAlias);
+            .from_subquery(Self::parquet_query(file_tags), Tbl::TagAlias)
+            .join_subquery(
+                JoinType::InnerJoin,
+                Self::parquet_query(ents),
+                Tbl::EntAlias,
+                Expr::col((Tbl::TagAlias, Col::EntityId))
+                    .eq(Expr::col((Tbl::EntAlias, Col::Id)))
+            );
 
         for cd in all_columns
             .iter()
             .filter(|c| c.target_table == TargetTable::Locations)
         {
             let mut sub = Query::select();
-            sub.column(Col::EntityId)
+            sub.column((Tbl::LocAlias, Col::EntityId))
                 .expr_as(Expr::val("file"), Alias::new("target_kind"))
+                .column((Tbl::EntAlias, Col::Rank))
                 .expr_as(Expr::val(cd.name.clone()), Alias::new("tag_type"))
                 .expr_as(
-                    Expr::col(Alias::new(&cd.name)).cast_as(Alias::new("VARCHAR")),
+                    Expr::col((Tbl::LocAlias, Alias::new(&cd.name)))
+                        .cast_as(Alias::new("VARCHAR")),
                     Alias::new("tag_value"),
                 )
-                .from_subquery(Self::parquet_query(locs), Tbl::LocAlias);
+                .from_subquery(Self::parquet_query(locs), Tbl::LocAlias)
+                .join_subquery(
+                    JoinType::InnerJoin,
+                    Self::parquet_query(ents),
+                    Tbl::EntAlias,
+                    Expr::col((Tbl::LocAlias, Col::EntityId))
+                        .eq(Expr::col((Tbl::EntAlias, Col::Id)))
+                );
             base.union(sea_query::UnionType::All, sub.to_owned());
         }
 
@@ -308,6 +326,7 @@ impl QueryHelper {
         items_type
             .column(Col::Id)
             .expr_as(Expr::val("item"), Alias::new("target_kind"))
+            .column(Col::Rank)
             .expr_as(Expr::val("itemtype"), Alias::new("tag_type"))
             .column(Col::Kind)
             .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
@@ -317,6 +336,7 @@ impl QueryHelper {
         items_content
             .column(Col::Id)
             .expr_as(Expr::val("item"), Alias::new("target_kind"))
+            .column(Col::Rank)
             .expr_as(Expr::val("content"), Alias::new("tag_type"))
             .column(Col::Content)
             .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
@@ -324,16 +344,52 @@ impl QueryHelper {
 
         let mut itags = Query::select();
         itags
-            .column(Col::ItemId)
+            .column((Tbl::TagAlias, Col::ItemId))
             .expr_as(Expr::val("item"), Alias::new("target_kind"))
-            .column(Col::TagType)
-            .column(Col::TagValue)
-            .from_subquery(Self::parquet_query(item_tags), Tbl::TagAlias);
+            .column((Tbl::EntAlias, Col::Rank))
+            .column((Tbl::TagAlias, Col::TagType))
+            .column((Tbl::TagAlias, Col::TagValue))
+            .from_subquery(Self::parquet_query(item_tags), Tbl::TagAlias)
+            .join_subquery(
+                JoinType::InnerJoin,
+                Self::parquet_query(items),
+                Tbl::EntAlias,
+                Expr::col((Tbl::TagAlias, Col::ItemId))
+                    .eq(Expr::col((Tbl::EntAlias, Col::Id)))
+            );
         base.union(sea_query::UnionType::All, itags.to_owned());
+
+        // --- Explicit 'rank' tags ---
+        let mut file_rank_tag = Query::select();
+        file_rank_tag
+            .column(Col::Id)
+            .expr_as(Expr::val("file"), Alias::new("target_kind"))
+            .column(Col::Rank)
+            .expr_as(Expr::val("rank"), Alias::new("tag_type"))
+            .expr_as(
+                Expr::col(Col::Rank).cast_as(Alias::new("VARCHAR")),
+                Alias::new("tag_value")
+            )
+            .from_subquery(Self::parquet_query(ents), Tbl::EntAlias);
+        base.union(sea_query::UnionType::All, file_rank_tag.to_owned());
+
+        let mut item_rank_tag = Query::select();
+        item_rank_tag
+            .column(Col::Id)
+            .expr_as(Expr::val("item"), Alias::new("target_kind"))
+            .column(Col::Rank)
+            .expr_as(Expr::val("rank"), Alias::new("tag_type"))
+            .expr_as(
+                Expr::col(Col::Rank).cast_as(Alias::new("VARCHAR")),
+                Alias::new("tag_value")
+            )
+            .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
+        base.union(sea_query::UnionType::All, item_rank_tag.to_owned());
 
         Query::select()
             .expr_as(Expr::col(Alias::new("entity_id")), Alias::new("target_id"))
             .column(Alias::new("target_kind"))
+            .column(Col::Rank)
             .expr_as(Expr::col(Alias::new("tag_type")), Alias::new("type"))
             .expr_as(Expr::col(Alias::new("tag_value")), Alias::new("value"))
             .from_subquery(base.to_owned(), Alias::new("union_all_tags"))
@@ -414,6 +470,7 @@ impl<'a> Indexer<'a> {
 
         let q = QueryHelper::build_all_tags_view_query(
             &all_cols,
+            &self.store.file_entities_path().to_string_lossy(),
             &self.store.file_tags_path().to_string_lossy(),
             &self.store.locations_path().to_string_lossy(),
             &self.store.item_entities_path().to_string_lossy(),
@@ -657,7 +714,7 @@ impl<'a> Indexer<'a> {
                 let values = self.registry.process_file(Path::new(&entry.path.value))?;
                 let mut er = DynamicRow {
                     id: entity_id,
-                    values: Vec::new(),
+                    values: vec![TagValue::BigInt(0)],
                 };
                 let mut lr = DynamicRow {
                     id: entity_id,
@@ -921,9 +978,13 @@ impl<'a> Indexer<'a> {
         let mut new_items_id_q = Query::select();
         new_items_id_q
             .expr_as(
-                Expr::cust_with_exprs("$1 - (row_number() OVER () - 1)", [Expr::val(start_id).into()]),
+                Expr::cust_with_exprs(
+                    "$1 - (row_number() OVER () - 1)",
+                    [Expr::val(start_id).into()]
+                ),
                 Col::Id,
             )
+            .expr_as(Expr::val(0), Col::Rank)
             .column(Col::Kind)
             .column(Col::Content)
             .from(Alias::new("new_items_raw"));
@@ -971,6 +1032,7 @@ impl<'a> Indexer<'a> {
         match target {
             TargetTable::FileEntities => {
                 create.col(SeaColumnDef::new(Col::Id).big_integer());
+                create.col(SeaColumnDef::new(Col::Rank).big_integer());
                 for c in columns
                     .iter()
                     .filter(|c| c.target_table == TargetTable::FileEntities)
@@ -1008,6 +1070,7 @@ impl<'a> Indexer<'a> {
             TargetTable::ItemEntities => {
                 create
                     .col(SeaColumnDef::new(Col::Id).big_integer())
+                    .col(SeaColumnDef::new(Col::Rank).big_integer())
                     .col(SeaColumnDef::new(Col::Kind).string())
                     .col(SeaColumnDef::new(Col::Content).string());
             }

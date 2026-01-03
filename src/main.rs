@@ -57,6 +57,13 @@ enum Commands {
         /// メモの内容
         content: String,
     },
+    /// アイテムに優先度（RANK）を設定します。
+    Rank {
+        /// 対象のパスまたはID
+        item: String,
+        /// 設定する優先度（数値が大きいほど上位に表示）
+        value: i64,
+    },
 }
 
 /// アプリケーションのエントリポイント。
@@ -110,6 +117,10 @@ fn main() -> Result<()> {
         Commands::Note { content } => {
             let id = fm.add_item("note", content)?;
             println!("Created note (ID: {})", id);
+        }
+        Commands::Rank { item, value } => {
+            fm.set_rank(item, *value)?;
+            println!("Set rank of '{}' to {}", item, value);
         }
     }
 
@@ -191,7 +202,10 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
         }
 
         let mut sorted_keys: Vec<String> = Vec::new();
-        let priority_cols = ["filename", "type_from_ext", "size_str", "modified_str", "parentdir", "content"];
+        let priority_cols = [
+            "filename", "rank", "type_from_ext", "size_str", 
+            "modified_str", "parentdir", "content"
+        ];
         let mut temp_keys = keys.clone();
         for col in &priority_cols {
             if temp_keys.contains(*col) {
@@ -239,7 +253,10 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
         
         // 表示順序を再整理（優先順位を適用）
         let mut final_columns = Vec::new();
-        let priority_cols = ["filename", "type_from_ext", "size_str", "modified_str", "parentdir", "content"];
+        let priority_cols = [
+            "filename", "rank", "type_from_ext", "size_str", 
+            "modified_str", "parentdir", "content"
+        ];
         for col in &priority_cols {
             if seen_keys.contains(*col) {
                 final_columns.push(col.to_string());
