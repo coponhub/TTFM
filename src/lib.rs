@@ -192,7 +192,7 @@ impl FunctionRegistry {
                         .column(Col::TargetId)
                         .from(Alias::new(view_name))
                         .and_where(Expr::col(Col::Type).eq("filename"))
-                        .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+                        .and_where(Expr::col(Col::Value).eq(tt.tag.0.clone()));
 
                     let mut q_dir = Query::select();
                     q_dir
@@ -210,7 +210,7 @@ impl FunctionRegistry {
                     .distinct()
                     .from(Alias::new(view_name))
                     .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                    .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+                    .and_where(Expr::col(Col::Value).eq(tt.tag.0.clone()));
                 q
             }
         }
@@ -257,7 +257,7 @@ impl FunctionRegistry {
                         )
                         .and_where(Expr::col(Col::TagType).eq(tt.tagtype.0.clone()))
                         .and_where(
-                            Expr::col(Col::TagValue).ilike(format!("%{}%", tt.tag.0)),
+                            Expr::col(Col::TagValue).eq(tt.tag.0.clone()),
                         )
                         .to_owned();
                     Condition::all().add(Expr::exists(exists))
@@ -699,7 +699,7 @@ mod tests {
         let fm = FileManager::new_with_index_path(&index_path).unwrap();
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-        assert_eq!(fm.search("filename:report").unwrap().len(), 1);
+        assert_eq!(fm.search("filename:report_alpha.pdf").unwrap().len(), 1);
         assert_eq!(fm.search("extension:pdf").unwrap().len(), 1);
         
         assert!(fm.search("report").is_err());

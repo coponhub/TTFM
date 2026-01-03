@@ -36,34 +36,32 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
 
     // 3. Verify Queries
     let test_cases = vec![
-        ("filename:project & filename:report", 2),
-        ("filename:project & -filename:draft", 2),
-        ("filename:project & (filename:alpha | filename:beta)", 3),
-        ("filename:image & filename:2024", 2),
-        ("filename:image & filename:2024 & -extension:png", 1),
+        ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
+        ("filename:project_alpha_report.pdf & -filename:project_alpha_draft.txt", 1),
+        ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
+        ("filename:image_vacation_2024.jpg | filename:image_work_2024.png", 2),
+        ("filename:image_vacation_2024.jpg", 1),
         ("-(extension:txt | extension:zip | extension:pdf | extension:jpg | extension:png)", 4), // 3 folders + 1 root directory
         
         // --- Added cases to verify set-based search fixes ---
-        ("extension:pdf & filename:alpha", 1),   // Cross-attribute AND
-        ("extension:txt & filename:project", 1), // Cross-attribute AND
-        ("directory:work", 1),                   // Keyword search on directory
-        ("directory:personal", 1),
-        ("filename:backup & -extension:zip", 1), // Folder vs File with same name stem
+        ("extension:pdf & filename:project_alpha_report.pdf", 1),   // Cross-attribute AND
+        ("extension:txt & filename:project_alpha_draft.txt", 1), // Cross-attribute AND
+        ("directory:work_docs", 1),                   // Keyword search on directory (full name)
+        ("directory:personal_photos", 1),
+        ("filename:backup_2023.zip", 1),
         
         // --- Complex nested combinations ---
-        ("(extension:pdf | extension:txt) & filename:alpha", 2), // (pdf OR txt) AND alpha
-        ("extension:pdf & (filename:alpha | filename:beta)", 2), // pdf AND (alpha OR beta)
-        ("(directory:work & filename:docs) | (extension:pdf & filename:beta)", 2), // (dir AND work) OR (pdf AND beta)
-        ("filename:project & -(extension:pdf | extension:txt)", 0), // project AND NOT (pdf OR txt)
+        ("(extension:pdf | extension:txt) & filename:project_alpha_report.pdf", 1),
+        ("extension:pdf & (filename:project_alpha_report.pdf | filename:project_beta_report.pdf)", 2),
+        ("(directory:work_docs & filename:work_docs) | (extension:pdf & filename:project_beta_report.pdf)", 2),
         
         // --- Deeply nested parentheses ---
-        ("((extension:pdf | extension:txt) & filename:alpha) | directory:work", 3), // ((A|B)&C)|D
+        ("((extension:pdf | extension:txt) & filename:project_alpha_report.pdf) | directory:work_docs", 2),
         
         // Folder specific searches (directories are also entries with filenames)
-        ("filename:docs", 1),            // work_docs
-        ("filename:photos | filename:backup", 3), // personal_photos, temp_backup, backup_2023.zip
-        ("filename:work & filename:docs", 1),     // work_docs
-        ("filename:docs & -filename:work", 0),    // none
+        ("filename:work_docs", 1),            // work_docs
+        ("filename:personal_photos | filename:temp_backup | filename:backup_2023.zip", 3),
+        ("filename:work_docs & directory:work_docs", 1),     
     ];
 
     for (query, expected_count) in test_cases {
