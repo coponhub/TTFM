@@ -166,9 +166,11 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
     struct DisplayRow {
         id: i64,
         columns: HashMap<String, String>,
+        all_keys: Vec<String>,
     }
 
-    let mut groups: HashMap<Vec<String>, Vec<DisplayRow>> = HashMap::new();
+    let mut groups: HashMap<(String, Vec<String>), Vec<DisplayRow>> = HashMap::new();
+    let term_width = get_terminal_width();
 
     for res in results {
         let mut row_data = HashMap::new();
@@ -190,38 +192,75 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
 
         let mut sorted_keys: Vec<String> = Vec::new();
         let priority_cols = ["filename", "type_from_ext", "size_str", "modified_str", "parentdir", "content"];
+        let mut temp_keys = keys.clone();
         for col in &priority_cols {
-            if keys.contains(*col) {
+            if temp_keys.contains(*col) {
                 sorted_keys.push(col.to_string());
-                keys.remove(*col);
+                temp_keys.remove(*col);
             }
         }
-        let mut others: Vec<String> = keys.into_iter().collect();
+        let mut others: Vec<String> = temp_keys.into_iter().collect();
         others.sort();
         sorted_keys.extend(others);
 
-        groups.entry(sorted_keys).or_default().push(DisplayRow {
+        // 優先カラムの中で、このアイテムが持っているものを抽出してグループキーにする
+        // これにより、基本的な属性が同じアイテム（例：ファイル同士）が同じテーブルにまとまる
+        let priority_intersection: Vec<String> = priority_cols.iter()
+            .filter(|&&c| keys.contains(c))
+            .map(|&c| c.to_string())
+            .collect();
+
+        let group_key = (res.kind.clone(), priority_intersection);
+        
+        groups.entry(group_key).or_default().push(DisplayRow {
             id: res.id,
             columns: row_data,
+            all_keys: sorted_keys, 
         });
     }
 
     let total_results = results.len();
-    let term_width = get_terminal_width();
 
     // グループごとに表示
-    for (columns, rows) in groups {
+    for ((_kind, _visible_keys), rows) in groups {
+        // このグループで表示すべき全カラム（全行のキーの和集合）を決定
+        let mut all_group_keys = Vec::new();
+        let mut seen_keys = HashSet::new();
+        
+        // 順序を維持するために全行を走査
+        for row in &rows {
+            for k in &row.all_keys {
+                if !seen_keys.contains(k) {
+                    all_group_keys.push(k.clone());
+                    seen_keys.insert(k.clone());
+                }
+            }
+        }
+        
+        // 表示順序を再整理（優先順位を適用）
+        let mut final_columns = Vec::new();
+        let priority_cols = ["filename", "type_from_ext", "size_str", "modified_str", "parentdir", "content"];
+        for col in &priority_cols {
+            if seen_keys.contains(*col) {
+                final_columns.push(col.to_string());
+                seen_keys.remove(*col);
+            }
+        }
+        let mut others: Vec<String> = seen_keys.into_iter().collect();
+        others.sort();
+        final_columns.extend(others);
+
         let mut id_width = 4; // "ID"
-        let mut col_widths = vec![0; columns.len()];
+        let mut col_widths = vec![0; final_columns.len()];
 
         for row in &rows {
             id_width = id_width.max(row.id.to_string().len());
-            for (i, col_name) in columns.iter().enumerate() {
+            for (i, col_name) in final_columns.iter().enumerate() {
                 let val_len = row.columns.get(col_name).map(|s| s.chars().count()).unwrap_or(0);
                 col_widths[i] = col_widths[i].max(val_len);
             }
         }
-        for (i, col_name) in columns.iter().enumerate() {
+        for (i, col_name) in final_columns.iter().enumerate() {
             col_widths[i] = col_widths[i].max(col_name.len());
         }
 
@@ -249,8 +288,11 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
             }
             current_width += id_disp.chars().count();
 
-            for (i, col_name) in columns.iter().enumerate() {
-                if current_width + sep_len >= term_width { break; }
+            for (i, col_name) in final_columns.iter().enumerate() {
+                if current_width + sep_len >= term_width { 
+                    print!("...");
+                    break; 
+                }
                 print!("{}", sep);
                 current_width += sep_len;
 
