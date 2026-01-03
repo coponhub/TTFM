@@ -1031,8 +1031,53 @@ mod tests {
                         );
         
                 
-                let count: i64 = fm.conn.query_row(&query_tags, [], |r| r.get(0)).unwrap();
-                assert_eq!(count, 1, "origin:system tag should be attached to system items");
-            }
-        }
-        
+                        let count: i64 = fm.conn.query_row(&query_tags, [], |r| r.get(0)).unwrap();
+                        assert_eq!(count, 1, "origin:system tag should be attached to system items");
+                    }
+                
+                    #[test]
+                    fn test_or_negation_complex_behavior() {
+                        let dir = tempdir().unwrap();
+                        let root = dir.path();
+                        let db_dir = root.join(".ttfm/db");
+                        
+                        // 1. ファイル準備 (.rs と .txt)
+                        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+                        std::fs::write(root.join("readme.txt"), "hello").unwrap();
+                        
+                        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+                        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+                        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+                
+                        // 2. クエリ実行: itemtype:type | -extension:rs
+                        // 期待される結果:
+                        // - itemtype:type のシステムItem (extension, filename など) -> 左辺にマッチ
+                        // - readme.txt -> 右辺 (-extension:rs) にマッチ (extension:txt は extension:rs ではないため)
+                        // - main.rs -> どちらにもマッチしない (左辺はItemのみ、右辺は extension:rs を除外するため)
+                        let query = "itemtype:type | -extension:rs";
+                        let results = fm.search(query).unwrap();
+                
+                        let mut found_type_item = false;
+                        let mut found_txt_file = false;
+                        let mut found_rs_file = false;
+                
+                        for r in results {
+                            if r.kind == "item" && r.tags.iter().any(|(t, v)| t == "itemtype" && v == "type") {
+                                found_type_item = true;
+                            }
+                            if r.kind == "file" {
+                                if r.tags.iter().any(|(t, v)| t == "extension" && v == "txt") {
+                                    found_txt_file = true;
+                                }
+                                if r.tags.iter().any(|(t, v)| t == "extension" && v == "rs") {
+                                    found_rs_file = true;
+                                }
+                            }
+                        }
+                
+                        assert!(found_type_item, "Should have found system items of kind 'type'");
+                        assert!(found_txt_file, "Should have found readme.txt");
+                        assert!(!found_rs_file, "Should NOT have found main.rs");
+                    }
+                }
+                
