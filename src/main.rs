@@ -2,9 +2,11 @@ use clap::{Parser, Subcommand};
 use ttfm::FileManager;
 use ttfm::config::Config;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use terminal_size::{Width, terminal_size};
 
 /// TTFM (Typed Tag File Manager) のメインCLI構造体。
 #[derive(Parser)]
@@ -76,7 +78,7 @@ fn main() -> Result<()> {
             
             let pb = ProgressBar::new_spinner();
             pb.set_style(ProgressStyle::default_spinner()
-                .tick_chars("/|\\- ")
+                .tick_chars("/|\\-")
                 .template("{spinner:.green} {msg}")?);
             pb.set_message("Scanning...");
             pb.enable_steady_tick(Duration::from_millis(100));
@@ -114,6 +116,46 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// 文字列を指定された最大幅で切り詰めます。
+fn truncate_text(text: &str, max_width: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_width {
+        text.to_string()
+    } else {
+        if max_width <= 3 {
+            return "...".chars().take(max_width).collect();
+        }
+        let truncated: String = text.chars().take(max_width - 3).collect();
+        format!("{}\
+...", truncated)
+    }
+}
+
+/// ターミナルの幅を取得します。
+fn get_terminal_width() -> usize {
+    // 環境変数 COLUMNS を最優先（テスト用）
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(width) = cols.parse() {
+            return width;
+        }
+    }
+    
+    if let Some((Width(w), _)) = terminal_size() {
+        w as usize
+    } else {
+        100 // default fallback
+    }
+}
+
+/// パス文字列からファイル名部分を抽出します。
+fn get_filename(path_str: &str) -> String {
+    Path::new(path_str)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path_str)
+        .to_string()
+}
+
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(results: &[ttfm::types::SearchResult]) {
     if results.is_empty() {
@@ -121,22 +163,133 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
         return;
     }
 
-    for res in results {
-        let primary = res.primary_value().unwrap_or("(no primary value)");
-        println!("{} (ID: {}, Kind: {})", primary, res.id, res.kind);
-        
-        // タグの表示（間引きロジック）
-        let mut shown_tags = 0;
-        for (k, v) in &res.tags {
-            if k == "path" || k == "content" || k == "name" || k == "value" { continue; } // メインで表示済み
-            if shown_tags >= 5 {
-                println!("  ... and more");
-                break;
-            }
-            println!("  {}: {}", k, v);
-            shown_tags += 1;
-        }
-        println!();
+    struct DisplayRow {
+        id: i64,
+        columns: HashMap<String, String>,
     }
-    println!("Total: {} results found.", results.len());
+
+    let mut groups: HashMap<Vec<String>, Vec<DisplayRow>> = HashMap::new();
+
+    for res in results {
+        let mut row_data = HashMap::new();
+        let mut keys = HashSet::new();
+
+        if let Some(path) = res.get_tag_value("path") {
+            row_data.insert("filename".to_string(), get_filename(path));
+            keys.insert("filename".to_string());
+        }
+
+        row_data.insert("kind".to_string(), res.kind.clone());
+        keys.insert("kind".to_string());
+
+        for (k, v) in &res.tags {
+            if k == "path" || k == "name" || k == "value" || k == "filename" { continue; }
+            row_data.insert(k.clone(), v.clone());
+            keys.insert(k.clone());
+        }
+
+        let mut sorted_keys: Vec<String> = Vec::new();
+        let priority_cols = ["filename", "kind", "size_str", "modified_str", "parentdir", "content"];
+        for col in &priority_cols {
+            if keys.contains(*col) {
+                sorted_keys.push(col.to_string());
+                keys.remove(*col);
+            }
+        }
+        let mut others: Vec<String> = keys.into_iter().collect();
+        others.sort();
+        sorted_keys.extend(others);
+
+        groups.entry(sorted_keys).or_default().push(DisplayRow {
+            id: res.id,
+            columns: row_data,
+        });
+    }
+
+    let total_results = results.len();
+    let term_width = get_terminal_width();
+
+    // グループごとに表示
+    for (columns, rows) in groups {
+        let mut id_width = 4; // "ID"
+        let mut col_widths = vec![0; columns.len()];
+
+        for row in &rows {
+            id_width = id_width.max(row.id.to_string().len());
+            for (i, col_name) in columns.iter().enumerate() {
+                let val_len = row.columns.get(col_name).map(|s| s.chars().count()).unwrap_or(0);
+                col_widths[i] = col_widths[i].max(val_len);
+            }
+        }
+        for (i, col_name) in columns.iter().enumerate() {
+            col_widths[i] = col_widths[i].max(col_name.len());
+        }
+
+        let print_line = |row_vals: Option<&DisplayRow>| {
+            let mut current_width = 0;
+            let sep = "  "; // 2 spaces
+            let sep_len = sep.len();
+            let is_header = row_vals.is_none();
+
+            // ID
+            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "ID".to_string() };
+            let available_for_id = term_width.saturating_sub(current_width);
+            if available_for_id == 0 { return; }
+            
+            let id_disp = if id_width <= available_for_id {
+                format!("{:<width$}", id_str, width = id_width)
+            } else {
+                truncate_text(&id_str, available_for_id)
+            };
+
+            if is_header {
+                print!("\x1b[1m{}\x1b[0m", id_disp);
+            } else {
+                print!("{}", id_disp);
+            }
+            current_width += id_disp.chars().count();
+
+            for (i, col_name) in columns.iter().enumerate() {
+                if current_width + sep_len >= term_width { break; }
+                print!("{}", sep);
+                current_width += sep_len;
+
+                let val_str = if let Some(r) = row_vals {
+                    r.columns.get(col_name).map(|s| s.as_str()).unwrap_or("")
+                } else {
+                    col_name
+                };
+
+                let available = term_width.saturating_sub(current_width);
+                if available == 0 { break; }
+
+                let target_width = col_widths[i];
+                if target_width <= available {
+                    let val_disp = format!("{:<width$}", val_str, width = target_width);
+                    if is_header {
+                        print!("\x1b[1m{}\x1b[0m", val_disp);
+                    } else {
+                        print!("{}", val_disp);
+                    }
+                    current_width += target_width;
+                } else {
+                    let truncated = truncate_text(val_str, available);
+                    if is_header {
+                        print!("\x1b[1m{}\x1b[0m", truncated);
+                    } else {
+                        print!("{}", truncated);
+                    }
+                    break;
+                }
+            }
+            println!();
+        };
+
+        print_line(None); // Header (Bold)
+        for row in rows {
+            print_line(Some(&row)); // Data
+        }
+        println!(); // 空行を追加
+    }
+    println!("\nTotal: {} results found.", total_results);
 }
