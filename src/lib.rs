@@ -419,6 +419,8 @@ impl FileManager {
             ));
         }
 
+        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
+
         // 1. Get current min ID
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
@@ -431,30 +433,20 @@ impl FileManager {
 
         // 2. Append new row via Temp Table & COPY
         let tmp_path = format!("{}.tmp", path_str);
+        let temp_table = Alias::new("temp_add_item");
 
-        // CREATE TABLE ... AS SELECT ...
-        let sql_create = format!(
-            "CREATE TABLE temp_add_item AS {}",
-            QueryHelper::parquet_query(&path_str).to_string(PostgresQueryBuilder)
-        );
+        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
 
         // INSERT INTO ...
         let sql_insert = Query::insert()
-            .into_table(Alias::new("temp_add_item"))
+            .into_table(temp_table.clone())
             .columns([Alias::new("id"), Alias::new("kind"), Alias::new("content")])
             .values_panic([new_id.into(), kind.into(), content.into()])
             .to_string(PostgresQueryBuilder);
+        self.conn.execute(&sql_insert, [])?;
 
-        // COPY
-        let sql_copy = format!(
-            "COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
-            tmp_path
-        );
-
-        self.conn.execute_batch(&format!(
-            "{}; {}; {}; DROP TABLE temp_add_item;",
-            sql_create, sql_insert, sql_copy
-        ))?;
+        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.drop_table(temp_table)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
 
@@ -538,7 +530,7 @@ impl FileManager {
     fn append_tag_to_parquet(
         &self,
         path: std::path::PathBuf,
-        temp_table: &str,
+        temp_table_name: &str,
         id_col: &str,
         id: i64,
         key: &str,
@@ -546,31 +538,21 @@ impl FileManager {
     ) -> Result<()> {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
+        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
+        let temp_table = Alias::new(temp_table_name);
 
-        // CREATE TABLE ... AS SELECT ...
-        let sql_create = format!(
-            "CREATE TABLE {} AS {}",
-            temp_table,
-            QueryHelper::parquet_query(&path_str).to_string(PostgresQueryBuilder)
-        );
+        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
 
         // INSERT INTO ...
         let sql_insert = Query::insert()
-            .into_table(Alias::new(temp_table))
+            .into_table(temp_table.clone())
             .columns([Alias::new(id_col), Alias::new("tag_type"), Alias::new("tag_value")])
             .values_panic([id.into(), key.into(), value.into()])
             .to_string(PostgresQueryBuilder);
+        self.conn.execute(&sql_insert, [])?;
 
-        // COPY
-        let sql_copy = format!(
-            "COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
-            temp_table, tmp_path
-        );
-
-        self.conn.execute_batch(&format!(
-            "{}; {}; {}; DROP TABLE {};",
-            sql_create, sql_insert, sql_copy, temp_table
-        ))?;
+        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.drop_table(temp_table)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())

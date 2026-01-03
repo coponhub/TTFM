@@ -15,27 +15,29 @@ use rayon::prelude::*;
 // 1. Storage Manager (IndexStore)
 // ========================================================
 
-struct IndexStore<'a> {
+pub(crate) struct IndexStore<'a> {
     conn: &'a Connection,
     db_dir: PathBuf,
 }
 
 impl<'a> IndexStore<'a> {
-    fn new(conn: &'a Connection, db_dir: PathBuf) -> Self {
+    pub(crate) fn new(conn: &'a Connection, db_dir: PathBuf) -> Self {
         Self { conn, db_dir }
     }
 
-    fn file_entities_path(&self) -> PathBuf { self.db_dir.join("file_entities.parquet") }
-    fn locations_path(&self) -> PathBuf { self.db_dir.join("locations.parquet") }
-    fn file_tags_path(&self) -> PathBuf { self.db_dir.join("file_tags.parquet") }
-    fn item_entities_path(&self) -> PathBuf { self.db_dir.join("item_entities.parquet") }
-    fn item_tags_path(&self) -> PathBuf { self.db_dir.join("item_tags.parquet") }
-    fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
+    pub(crate) fn file_entities_path(&self) -> PathBuf { self.db_dir.join("file_entities.parquet") }
+    pub(crate) fn locations_path(&self) -> PathBuf { self.db_dir.join("locations.parquet") }
+    pub(crate) fn file_tags_path(&self) -> PathBuf { self.db_dir.join("file_tags.parquet") }
+    pub(crate) fn item_entities_path(&self) -> PathBuf { self.db_dir.join("item_entities.parquet") }
+    pub(crate) fn item_tags_path(&self) -> PathBuf { self.db_dir.join("item_tags.parquet") }
+    pub(crate) fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
-    fn save_parquet(&self, query: SelectStatement, path: &Path) -> Result<()> {
+    pub(crate) fn save_parquet(&self, query: SelectStatement, path: &Path) -> Result<()> {
         let sql = query.to_string(PostgresQueryBuilder);
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
+        
+        // COPY (SELECT ...) TO 'path' ...
         let copy_sql = format!(
             "COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
             sql, tmp_path
@@ -45,15 +47,50 @@ impl<'a> IndexStore<'a> {
         Ok(())
     }
 
-    fn write_parquet(&self, table_name: &str, path: &Path) -> Result<()> {
+    fn iden_to_sql(&self, iden: impl Iden + 'static) -> String {
+        let sql = Query::select().column(iden).from(Alias::new("x")).to_string(PostgresQueryBuilder);
+        sql.split_whitespace().nth(1).unwrap_or("").to_string()
+    }
+
+    pub(crate) fn write_parquet(&self, table_name: impl Iden + 'static, path: &Path) -> Result<()> {
         let query = Query::select()
             .expr(Expr::cust("*"))
-            .from(Alias::new(table_name))
+            .from(table_name)
             .to_owned();
         self.save_parquet(query, path)
     }
 
-    fn merge_and_save(
+    pub(crate) fn create_table_as(&self, table_name: impl Iden + 'static, query: SelectStatement) -> Result<()> {
+        let quoted_name = self.iden_to_sql(table_name);
+
+        let sql = format!(
+            "CREATE TABLE {} AS {}",
+            quoted_name,
+            query.to_string(PostgresQueryBuilder)
+        );
+        self.conn.execute(&sql, [])?;
+        Ok(())
+    }
+
+    pub(crate) fn create_temp_table_as(&self, table_name: impl Iden + 'static, query: SelectStatement) -> Result<()> {
+        let quoted_name = self.iden_to_sql(table_name);
+
+        let sql = format!(
+            "CREATE TEMP TABLE {} AS {}",
+            quoted_name,
+            query.to_string(PostgresQueryBuilder)
+        );
+        self.conn.execute(&sql, [])?;
+        Ok(())
+    }
+
+    pub(crate) fn drop_table(&self, table_name: impl Iden + 'static) -> Result<()> {
+        let sql = Table::drop().table(table_name).to_string(PostgresQueryBuilder);
+        self.conn.execute(&sql, [])?;
+        Ok(())
+    }
+
+    pub(crate) fn merge_and_save(
         &self,
         path: &Path,
         temp_table: impl Iden + 'static,
@@ -82,9 +119,15 @@ impl<'a> IndexStore<'a> {
         self.save_parquet(query, path)
     }
 
-    fn create_or_replace_view(&self, name: &str, select: SelectStatement) -> Result<()> {
+    pub(crate) fn create_or_replace_view(&self, name: impl Iden + 'static, select: SelectStatement) -> Result<()> {
         let query_sql = select.to_string(PostgresQueryBuilder);
-        let sql = format!("CREATE OR REPLACE VIEW {} AS {}", name, query_sql);
+        let quoted_name = self.iden_to_sql(name);
+
+        let sql = format!(
+            "CREATE OR REPLACE VIEW {} AS {}", 
+            quoted_name, 
+            query_sql
+        );
         self.conn.execute(&sql, [])?;
         Ok(())
     }
@@ -396,7 +439,7 @@ impl<'a> Indexer<'a> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        self.store.write_parquet(&table_name, path)?;
+        self.store.write_parquet(Alias::new(&table_name), path)?;
         self.conn
             .execute(
                 &Table::drop()
@@ -847,10 +890,7 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::EntAlias, Col::Id)).is_null());
 
-        let sql = new_items_q.to_string(PostgresQueryBuilder);
-        self.conn.execute(
-            &format!("CREATE TEMP TABLE new_items_raw AS {}", sql), []
-        )?;
+        self.store.create_temp_table_as(Alias::new("new_items_raw"), new_items_q)?;
 
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
@@ -860,12 +900,7 @@ impl<'a> Indexer<'a> {
             &query_count, [], |r| r.get(0)
         )?;
         if new_count == 0 {
-            self.conn.execute(
-                &Table::drop()
-                    .table(Alias::new("new_items_raw"))
-                    .to_string(PostgresQueryBuilder),
-                [],
-            )?;
+            self.store.drop_table(Alias::new("new_items_raw"))?;
             return Ok(());
         }
 
@@ -893,10 +928,7 @@ impl<'a> Indexer<'a> {
             .column(Col::Content)
             .from(Alias::new("new_items_raw"));
 
-        self.conn.execute_batch(&format!(
-            "CREATE TEMP TABLE new_items_with_id AS {}",
-            new_items_id_q.to_string(PostgresQueryBuilder)
-        ))?;
+        self.store.create_temp_table_as(Alias::new("new_items_with_id"), new_items_id_q)?;
 
         // item_entities 更新
         let mut update_items_q = QueryHelper::parquet_query(items_str);
@@ -923,12 +955,8 @@ impl<'a> Indexer<'a> {
         std::fs::rename(&tmp_items, &items_path)?;
         std::fs::rename(&tmp_itags, &item_tags_path)?;
 
-        let sql_drop = format!(
-            "{}; {}",
-            Table::drop().table(Alias::new("new_items_raw")).to_string(PostgresQueryBuilder),
-            Table::drop().table(Alias::new("new_items_with_id")).to_string(PostgresQueryBuilder),
-        );
-        self.conn.execute_batch(&sql_drop)?;
+        self.store.drop_table(Alias::new("new_items_raw"))?;
+        self.store.drop_table(Alias::new("new_items_with_id"))?;
 
         Ok(())
     }
