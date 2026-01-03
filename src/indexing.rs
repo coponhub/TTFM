@@ -3,52 +3,12 @@ use crate::FunctionRegistry;
 use crate::functions::{
     ScanEntry, ScanRole,
 };
+use crate::db::{Tbl, Col, DuckDbFunc as DBFunc};
 use anyhow::{Result, Context};
 use duckdb::{Connection, ToSql};
-use sea_query::{Query, Expr, Alias, Condition, JoinType, SqliteQueryBuilder, Func, Table, ColumnDef as SeaColumnDef, Iden};
+use sea_query::{Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, Func, Table, ColumnDef as SeaColumnDef};
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
-
-// --- Iden Definitions ---
-
-#[derive(Iden)]
-enum Tbl {
-    TempScan,
-    TempFileEntities,
-    TempLocations,
-    TempFileTags,
-    // 将来的にプラグインなどがインデックス中に Item Entity (Type, Label, Note等) を
-    // 自動生成してマージする場合に備えて定義。
-    #[allow(dead_code)]
-    TempItemEntities,
-    #[allow(dead_code)]
-    TempItemTags,
-    #[iden = "scan"] // Alias for current_scan
-    ScanAlias, 
-    #[iden = "e"]    // Alias for file_entities
-    EntAlias,
-    #[iden = "l"]    // Alias for locations
-    LocAlias,
-    #[iden = "old"]  // Alias for old parquet
-    OldAlias,
-    #[iden = "origin"] // Internal alias for read_parquet subquery
-    OriginAlias,
-}
-
-#[derive(Iden)]
-enum Col {
-    Path,
-    Id,
-    EntityId,
-    TagType,
-    TagValue,
-}
-
-#[derive(Iden)]
-enum DBFunc {
-    ReadParquet,
-    Coalesce,
-}
 
 struct IndexDiff {
     pub to_tag: Vec<ScanEntry>,
@@ -78,7 +38,7 @@ impl<'a> Indexer<'a> {
     /// Helper to execute "COPY (query) TO 'path' (FORMAT 'parquet', COMPRESSION 'zstd')"
     /// Performs an atomic write by using a temporary file.
     fn copy_to_parquet(&self, query: sea_query::SelectStatement, path: &str) -> Result<()> {
-        let sql = query.to_string(SqliteQueryBuilder);
+        let sql = query.to_string(PostgresQueryBuilder);
         let tmp_path = format!("{}.tmp", path);
         
         // Always write to a temporary file first
@@ -178,18 +138,15 @@ impl<'a> Indexer<'a> {
 
         match target {
             TargetTable::FileEntities => {
-                // Should match columns from registry for FileEntities
-                // For now, minimal set to make it work. Ideally get from registry.
-                // But registry columns are dynamic. 
-                // We need at least 'id' for the view.
                  let columns = self.registry.get_all_columns();
                  let cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::FileEntities).collect();
                  
-                 create.col(SeaColumnDef::new(Alias::new("id")).big_integer()); // Base ID
+                 create.col(SeaColumnDef::new(Col::Id).big_integer()); // Base ID
                  for c in cols {
                      let mut def = SeaColumnDef::new(Alias::new(&c.name));
                      match c.sql_type {
                          "BIGINT" => def.big_integer(),
+                         "BOOLEAN" => def.boolean(),
                          _ => def.string(),
                      };
                      create.col(&mut def);
@@ -198,10 +155,10 @@ impl<'a> Indexer<'a> {
             TargetTable::Locations => {
                 let columns = self.registry.get_all_columns();
                 let cols: Vec<_> = columns.iter().filter(|c| c.target_table == TargetTable::Locations).collect();
-                create.col(SeaColumnDef::new(Alias::new("entity_id")).big_integer());
+                create.col(SeaColumnDef::new(Col::EntityId).big_integer());
                 for c in cols {
                      let mut def = SeaColumnDef::new(Alias::new(&c.name));
-                     match c.sql_type { "BIGINT" => def.big_integer(), _ => def.string() };
+                     match c.sql_type { "BIGINT" => def.big_integer(), "BOOLEAN" => def.boolean(), _ => def.string() };
                      create.col(&mut def);
                 }
             },
@@ -211,18 +168,18 @@ impl<'a> Indexer<'a> {
                       .col(SeaColumnDef::new(Col::TagValue).string());
             },
             TargetTable::ItemEntities => {
-                create.col(SeaColumnDef::new(Alias::new("id")).big_integer())
-                      .col(SeaColumnDef::new(Alias::new("kind")).string())
-                      .col(SeaColumnDef::new(Alias::new("content")).string());
+                create.col(SeaColumnDef::new(Col::Id).big_integer())
+                      .col(SeaColumnDef::new(Col::Kind).string())
+                      .col(SeaColumnDef::new(Col::Content).string());
             },
             TargetTable::ItemTags => {
-                create.col(SeaColumnDef::new(Alias::new("item_id")).big_integer())
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer())
                       .col(SeaColumnDef::new(Col::TagType).string())
                       .col(SeaColumnDef::new(Col::TagValue).string());
             },
         }
 
-        let create_sql = create.to_string(SqliteQueryBuilder);
+        let create_sql = create.to_string(PostgresQueryBuilder);
         self.conn.execute(&create_sql, []).context(format!("Failed to create init table {}", table_name))?;
         
         let path_str = path.to_string_lossy();
@@ -235,7 +192,7 @@ impl<'a> Indexer<'a> {
         let copy_sql = format!("COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')", table_name, path_str);
         self.conn.execute(&copy_sql, []).context(format!("Failed to write empty parquet {}", path_str))?;
 
-        let drop_sql = Table::drop().table(Alias::new(&table_name)).to_string(SqliteQueryBuilder);
+        let drop_sql = Table::drop().table(Alias::new(&table_name)).to_string(PostgresQueryBuilder);
         self.conn.execute(&drop_sql, []).ok();
 
         Ok(())
@@ -275,11 +232,11 @@ impl<'a> Indexer<'a> {
                 create_table.col(&mut col);
             }
             
-            let create_sql = create_table.to_string(SqliteQueryBuilder);
+            let create_sql = create_table.to_string(PostgresQueryBuilder);
             self.conn.execute(&create_sql, []).context("Failed to create temp_scan table")?;
             
             // Clear table
-            let delete_sql = sea_query::Query::delete().from_table(Tbl::TempScan).to_string(SqliteQueryBuilder);
+            let delete_sql = sea_query::Query::delete().from_table(Tbl::TempScan).to_string(PostgresQueryBuilder);
             self.conn.execute(&delete_sql, []).context("Failed to clear temp_scan table")?;
         }
 
@@ -344,7 +301,7 @@ impl<'a> Indexer<'a> {
             let query = Query::select().expr(Expr::cust("*")).from(Tbl::TempScan).to_owned();
             self.copy_to_parquet(query, &scan_path)?;
             
-            let drop_sql = Table::drop().table(Tbl::TempScan).to_string(SqliteQueryBuilder);
+            let drop_sql = Table::drop().table(Tbl::TempScan).to_string(PostgresQueryBuilder);
             self.conn.execute(&drop_sql, []).context("Failed to drop temp_scan table")?;
         }
 
@@ -386,7 +343,7 @@ impl<'a> Indexer<'a> {
             let query = Query::select()
                 .columns(col_aliases.clone())
                 .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
-                .to_string(SqliteQueryBuilder);
+                .to_string(PostgresQueryBuilder);
 
             let mut stmt = self.conn.prepare(&query).context("Failed to prepare initial scan query")?;
             let to_tag = stmt.query_map([], |row| {
@@ -408,7 +365,7 @@ impl<'a> Indexer<'a> {
             .columns(col_aliases.iter().map(|a| (Tbl::ScanAlias, a.clone())).collect::<Vec<_>>())
             .from_subquery(self.parquet_query(&scan_path_str), Tbl::ScanAlias)
             .and_where(Expr::exists(subquery_exists).not())
-            .to_string(SqliteQueryBuilder);
+            .to_string(PostgresQueryBuilder);
 
         let to_tag = self.conn.prepare(&query_to_tag)
             .context("Failed to prepare diff query (to_tag)")?
@@ -417,7 +374,6 @@ impl<'a> Indexer<'a> {
             })?.collect::<std::result::Result<Vec<_>, _>>()?;
 
         // 2. moved: Identity match AND Integrity match AND Path mismatch
-        // Path is typically first column (role Location)
         let col_path = col_aliases[0].clone();
         
         let query_moved = Query::select()
@@ -438,7 +394,7 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, col_path.clone()))))
             .cond_where(integrity_match())
-            .to_string(SqliteQueryBuilder);
+            .to_string(PostgresQueryBuilder);
 
         let moved = self.conn.prepare(&query_moved)
             .context("Failed to prepare diff query (moved)")?
@@ -454,8 +410,8 @@ impl<'a> Indexer<'a> {
                 Tbl::ScanAlias,
                 Condition::all().add(identity_match()).add(integrity_match())
             )
-            .and_where(Expr::col((Tbl::ScanAlias, col_path.clone())).is_null()) // Check path null as proxy for record missing
-            .to_string(SqliteQueryBuilder);
+            .and_where(Expr::col((Tbl::ScanAlias, col_path.clone())).is_null())
+            .to_string(PostgresQueryBuilder);
 
         let deleted_ids = self.conn.prepare(&query_deleted)
             .context("Failed to prepare diff query (deleted_ids)")?
@@ -479,7 +435,7 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, col_path.clone()))))
             .cond_where(integrity_match())
-            .to_string(SqliteQueryBuilder);
+            .to_string(PostgresQueryBuilder);
 
         let unchanged_ids = self.conn.prepare(&query_unchanged)
             .context("Failed to prepare diff query (unchanged_ids)")?
@@ -493,11 +449,10 @@ impl<'a> Indexer<'a> {
         let file_entities_path = self.file_entities_path();
                     let max_id: i64 = if file_entities_path.exists() {
                     let entities_str = file_entities_path.to_string_lossy().to_string();
-                    // SELECT COALESCE(MAX(id), 0) FROM read_parquet('...')
                     let query = Query::select()
                         .expr(Func::cust(DBFunc::Coalesce).args([Expr::col(Col::Id).max(), Expr::val(0).into()]))
                         .from_subquery(self.parquet_query(&entities_str), Tbl::EntAlias)
-                        .to_string(SqliteQueryBuilder);
+                        .to_string(PostgresQueryBuilder);
                     self.conn.query_row(&query, [], |r| r.get(0))?
         } else {
             0
@@ -528,7 +483,7 @@ impl<'a> Indexer<'a> {
                             tags.push(TagRow { entity_id, tag_type: col_def.name.clone(), tag_value: val_str });
                         }
                     }
-                    _ => {} // Ignore ItemEntities/ItemTags for file scanning
+                    _ => {}
                 }
             }
             Ok(TaggingResult { entity_row, location_row, tags })
@@ -583,7 +538,7 @@ impl<'a> Indexer<'a> {
                 };
                 create.col(&mut def);
             }
-            create.to_string(SqliteQueryBuilder)
+            create.to_string(PostgresQueryBuilder)
         };
 
         let sql_ents = create_temp_table("temp_file_entities", vec![(Alias::new("id"), "BIGINT")], &entity_cols);
@@ -593,7 +548,7 @@ impl<'a> Indexer<'a> {
             .col(SeaColumnDef::new(Col::EntityId).big_integer())
             .col(SeaColumnDef::new(Col::TagType).string())
             .col(SeaColumnDef::new(Col::TagValue).string())
-            .to_string(SqliteQueryBuilder);
+            .to_string(PostgresQueryBuilder);
 
         self.conn.execute_batch(&format!("{};{};{}", sql_ents, sql_locs, sql_tags))?;
 
@@ -630,8 +585,6 @@ impl<'a> Indexer<'a> {
         let locations_str = self.locations_path().to_string_lossy().to_string();
         let tags_str = self.file_tags_path().to_string_lossy().to_string();
 
-        // Helper to construct Merge Query:
-        // SELECT * FROM read_parquet(old) WHERE filter UNION ALL SELECT * FROM temp_table
         let merge_and_write = |parquet_path: &str, temp_table: &str, filter_cond: Option<Condition>| -> Result<()> {
             let query = if Path::new(parquet_path).exists() {
                 let mut base_query = Query::select();
@@ -656,7 +609,6 @@ impl<'a> Indexer<'a> {
              Some(Condition::all().add(Expr::col(Col::Id).is_not_in(deleted_ids.clone())))
         };
         let unchanged_filter = if unchanged_ids.is_empty() { 
-            // 1=0 (False)
             Some(Condition::all().add(Expr::val(1).eq(0))) 
         } else {
              Some(Condition::all().add(Expr::col(Col::EntityId).is_in(unchanged_ids)))
@@ -672,7 +624,7 @@ impl<'a> Indexer<'a> {
         let drop_sql = Table::drop().table(Tbl::TempFileEntities)
             .table(Tbl::TempLocations)
             .table(Tbl::TempFileTags)
-            .to_string(SqliteQueryBuilder);
+            .to_string(PostgresQueryBuilder);
         self.conn.execute(&drop_sql, []).ok();
         
         std::fs::remove_file(self.temp_scan_path()).ok();
@@ -720,9 +672,8 @@ mod tests {
         assert!(db_dir.join("item_entities.parquet").exists());
         assert!(db_dir.join("item_tags.parquet").exists());
 
-        // View がクエリ可能か確認
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM all_tags", [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 0); // 初期状態は空
+        assert_eq!(count, 0);
     }
 
     #[test]

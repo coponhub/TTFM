@@ -2,8 +2,10 @@ use anyhow::{Result, Context};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local};
+use sea_query::{Expr, SimpleExpr, Alias, extension::postgres::PgExpr};
 use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
+use crate::db::{Tbl, Col};
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
 /// 
@@ -16,7 +18,7 @@ pub trait TagFunction: Send + Sync {
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
     /// 
     /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
-    fn to_sql(&self, tag: &TypedTag) -> Option<String>;
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr>;
 
     /// このタグのスキャンにおける役割を返します。
     fn role(&self) -> ScanRole { ScanRole::Other }
@@ -28,7 +30,7 @@ pub trait TagFunction: Send + Sync {
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
 pub trait TagDefinition {
-    /// タグの識別子名。
+    /// タグ의 識別子名。
     const NAME: &'static str;
     /// スキャンにおける役割。
     const ROLE: ScanRole;
@@ -127,9 +129,9 @@ impl PathFunction {
 
 impl TagFunction for PathFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!("l.{} ILIKE '%{}%'", Self::NAME, escape(&tag.tag.0)));
+            return Some(Expr::col((Tbl::LocAlias, Col::Path)).ilike(format!("%{}%", tag.tag.0)).into());
         }
         None
     }
@@ -179,10 +181,14 @@ impl ParentDirFunction {
 
 impl TagFunction for ParentDirFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = escape(&tag.tag.0);
-            return Some(format!("(l.{} ILIKE '%/{}' OR l.{} = '{}')", Self::NAME, val, Self::NAME, val));
+            let val = &tag.tag.0;
+            return Some(
+                Expr::col((Tbl::LocAlias, Col::ParentDir)).ilike(format!("%/{}", val))
+                    .or(Expr::col((Tbl::LocAlias, Col::ParentDir)).eq(val.clone()))
+                    .into()
+            );
         }
         None
     }
@@ -231,13 +237,22 @@ impl FilenameFunction {
 
 impl TagFunction for FilenameFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = escape(&tag.tag.0);
-            return Some(format!(
-                "(l.{} ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                Self::NAME, val, DirectoryFunction::NAME
-            ));
+            let val = &tag.tag.0;
+            return Some(
+                Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
+                    .and(Expr::exists(
+                        sea_query::Query::select()
+                            .expr(Expr::val(1))
+                            .from(Alias::new("__TAGS_TABLE__"))
+                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                            .and_where(Expr::col(Col::TagType).eq(DirectoryFunction::NAME))
+                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
+                            .to_owned()
+                    ).not())
+                    .into()
+            );
         }
         None
     }
@@ -287,13 +302,22 @@ impl StemFunction {
 
 impl TagFunction for StemFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-             let val = escape(&tag.tag.0);
-             return Some(format!(
-                "(l.{} ILIKE '%{}%' AND NOT EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                FilenameFunction::NAME, val, DirectoryFunction::NAME
-            ));
+             let val = &tag.tag.0;
+             return Some(
+                Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
+                    .and(Expr::exists(
+                        sea_query::Query::select()
+                            .expr(Expr::val(1))
+                            .from(Alias::new("__TAGS_TABLE__"))
+                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                            .and_where(Expr::col(Col::TagType).eq(DirectoryFunction::NAME))
+                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
+                            .to_owned()
+                    ).not())
+                    .into()
+            );
         }
         None
     }
@@ -339,10 +363,9 @@ impl ExtensionFunction {
 
 impl TagFunction for ExtensionFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = escape(&tag.tag.0);
-            return Some(format!("l.{} = '{}'", Self::NAME, val));
+            return Some(Expr::col((Tbl::LocAlias, Col::Extension)).eq(tag.tag.0.clone()).into());
         }
         None
     }
@@ -391,13 +414,22 @@ impl DirectoryFunction {
 
 impl TagFunction for DirectoryFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let val = escape(&tag.tag.0);
-            return Some(format!(
-                "(l.{} ILIKE '%{}%' AND EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value = 'TRUE'))",
-                FilenameFunction::NAME, val, Self::NAME
-            ));
+            let val = &tag.tag.0;
+            return Some(
+                Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
+                    .and(Expr::exists(
+                        sea_query::Query::select()
+                            .expr(Expr::val(1))
+                            .from(Alias::new("__TAGS_TABLE__"))
+                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                            .and_where(Expr::col(Col::TagType).eq(Self::NAME))
+                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
+                            .to_owned()
+                    ))
+                    .into()
+            );
         }
         None
     }
@@ -454,9 +486,9 @@ impl SizeBytesFunction {
 
 impl TagFunction for SizeBytesFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!("e.{} = {}", Self::NAME, escape(&tag.tag.0)));
+            return Some(Expr::col((Tbl::EntAlias, Col::Size)).eq(tag.tag.0.clone()).into());
         }
         None
     }
@@ -518,9 +550,9 @@ impl ModifiedTsFunction {
 
 impl TagFunction for ModifiedTsFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!("e.{} = {}", Self::NAME, escape(&tag.tag.0)));
+            return Some(Expr::col((Tbl::EntAlias, Col::Mtime)).eq(tag.tag.0.clone()).into());
         }
         None
     }
@@ -570,9 +602,9 @@ impl InodeFunction {
 
 impl TagFunction for InodeFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!("e.{} = '{}'", Self::NAME, escape(&tag.tag.0)));
+            return Some(Expr::col((Tbl::EntAlias, Col::Inode)).eq(tag.tag.0.clone()).into());
         }
         None
     }
@@ -631,12 +663,19 @@ impl TypeFromExtFunction {
 
 impl TagFunction for TypeFromExtFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!(
-                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
-                Self::NAME, escape(&tag.tag.0)
-            ));
+            return Some(
+                Expr::exists(
+                    sea_query::Query::select()
+                        .expr(Expr::val(1))
+                        .from(Alias::new("__TAGS_TABLE__"))
+                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
+                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
+                        .to_owned()
+                ).into()
+            );
         }
         None
     }
@@ -672,8 +711,6 @@ impl Tagger for SizeStrTagger {
     }
 }
 
-// ...
-
 impl TagDefinition for SizeStrFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Other;
@@ -706,12 +743,19 @@ impl SizeStrFunction {
 
 impl TagFunction for SizeStrFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!(
-                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
-                Self::NAME, escape(&tag.tag.0)
-            ));
+            return Some(
+                Expr::exists(
+                    sea_query::Query::select()
+                        .expr(Expr::val(1))
+                        .from(Alias::new("__TAGS_TABLE__"))
+                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
+                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
+                        .to_owned()
+                ).into()
+            );
         }
         None
     }
@@ -740,8 +784,6 @@ impl Tagger for ModifiedStrTagger {
         Ok(vec![TagValue::Text(ModifiedStrFunction::generate(path, None)?)])
     }
 }
-
-// ...
 
 impl TagDefinition for ModifiedStrFunction {
     const NAME: &'static str = Self::NAME;
@@ -773,12 +815,19 @@ impl ModifiedStrFunction {
 
 impl TagFunction for ModifiedStrFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(format!(
-                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
-                Self::NAME, escape(&tag.tag.0)
-            ));
+            return Some(
+                Expr::exists(
+                    sea_query::Query::select()
+                        .expr(Expr::val(1))
+                        .from(Alias::new("__TAGS_TABLE__"))
+                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
+                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
+                        .to_owned()
+                ).into()
+            );
         }
         None
     }
@@ -792,6 +841,16 @@ impl TagFunction for ModifiedStrFunction {
 mod tests {
     use super::*;
     use crate::types::{TypedTag, TagType, Tag};
+    use sea_query::{Query, PostgresQueryBuilder};
+
+    // Helper to stringify a SimpleExpr for testing
+    fn to_sql(expr: SimpleExpr) -> String {
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        // "SELECT ..." -> remove "SELECT "
+        sql.strip_prefix("SELECT ").unwrap_or(&sql).to_string()
+    }
 
     // Helper to create a TypedTag
     fn ttag(key: &str, value: &str) -> TypedTag {
@@ -804,31 +863,35 @@ mod tests {
     #[test]
     fn test_path_function() {
         let f = PathFunction::new();
-        let sql = f.to_sql(&ttag(PathFunction::NAME, "foo")).unwrap();
-        assert_eq!(sql, format!("l.{} ILIKE '%foo%'", PathFunction::NAME));
+        let expr = f.to_expr(&ttag(PathFunction::NAME, "foo")).unwrap();
+        let sql = to_sql(expr);
+        assert_eq!(sql, "\"l\".\"path\" ILIKE '%foo%'" );
     }
 
     #[test]
     fn test_filename_function() {
         let f = FilenameFunction::new();
-        let sql = f.to_sql(&ttag(FilenameFunction::NAME, "report")).unwrap();
-        assert!(sql.contains(&format!("l.{} ILIKE '%report%'", FilenameFunction::NAME)));
+        let expr = f.to_expr(&ttag(FilenameFunction::NAME, "report")).unwrap();
+        let sql = to_sql(expr);
+        assert!(sql.contains("\"l\".\"filename\" ILIKE '%report%'" ));
         assert!(sql.contains("NOT EXISTS"));
-        assert!(sql.contains(&format!("tag_type = '{}'", DirectoryFunction::NAME)));
+        assert!(sql.contains("\"tag_type\" = 'directory'"));
     }
 
     #[test]
     fn test_extension_function() {
         let f = ExtensionFunction::new();
-        let sql = f.to_sql(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
-        assert_eq!(sql, format!("l.{} = 'rs'", ExtensionFunction::NAME));
+        let expr = f.to_expr(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
+        let sql = to_sql(expr);
+        assert_eq!(sql, "\"l\".\"extension\" = 'rs'");
     }
 
     #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
-        let sql = f.to_sql(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
-        assert_eq!(sql, format!("e.{} = 123", SizeBytesFunction::NAME));
+        let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
+        let sql = to_sql(expr);
+        assert_eq!(sql, "\"e\".\"size\" = '123'");
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 

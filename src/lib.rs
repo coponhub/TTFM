@@ -7,11 +7,14 @@ use anyhow::{Context, Result};
 use duckdb::Connection;
 use std::path::Path;
 use file_id::get_file_id;
+use sea_query::{Expr, Condition, PostgresQueryBuilder, Alias, Query, extension::postgres::PgExpr};
+use crate::db::{Tbl, Col};
 
 pub mod types;
 pub mod query;
 pub mod plugins;
 pub mod config;
+pub mod db;
 pub mod macros;
 mod taggers;
 mod functions;
@@ -120,47 +123,101 @@ impl FunctionRegistry {
 
     /// クエリツリーを辿って、DuckDBで使用可能なSQL WHERE条件式を生成します。
     pub fn generate_sql(&self, node: &QueryNode, tags_path: &str) -> String {
-        let sql = match node {
-            QueryNode::And(left, right) => format!("({} AND {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
-            QueryNode::Or(left, right) => format!("({} OR {})", self.generate_sql(left, tags_path), self.generate_sql(right, tags_path)),
-            QueryNode::Not(child) => format!("NOT ({})", self.generate_sql(child, tags_path)),
-            QueryNode::TypedTag(tt) => self.tag_to_sql(tt, tags_path),
-        };
-        // プレースホルダを実際のパスに置換（各Function実装がこれを使う）
-        sql.replace("__TAGS_TABLE__", &format!("'{}'", tags_path))
+        let cond = self.generate_condition(node);
+        // Condition を文字列化するためにダミーの SELECT を使用
+        let mut query = Query::select();
+        query.cond_where(cond);
+        let sql = query.to_string(PostgresQueryBuilder);
+        
+        // "SELECT  WHERE ..." -> extract "WHERE ..."
+        let where_clause = sql.split_once("WHERE ").map(|(_, s)| s).unwrap_or("");
+        
+        where_clause.replace("__TAGS_TABLE__", &format!("read_parquet('{}')", tags_path))
+    }
+
+    /// クエリノードを sea-query の Condition に変換します。
+    fn generate_condition(&self, node: &QueryNode) -> Condition {
+        match node {
+            QueryNode::And(left, right) => {
+                Condition::all()
+                    .add(self.generate_condition(left))
+                    .add(self.generate_condition(right))
+            }
+            QueryNode::Or(left, right) => {
+                Condition::any()
+                    .add(self.generate_condition(left))
+                    .add(self.generate_condition(right))
+            }
+            QueryNode::Not(child) => {
+                Condition::all().not().add(self.generate_condition(child))
+            }
+            QueryNode::TypedTag(tt) => {
+                if let Some(expr) = self.tag_to_expr(tt) {
+                    Condition::all().add(expr)
+                } else {
+                    // マッチする機能がない場合は、汎用のタグテーブルを検索
+                    let exists = sea_query::Query::select()
+                        .expr(Expr::val(1))
+                        .from(Alias::new("__TAGS_TABLE__"))
+                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(Expr::col(Col::TagType).eq(tt.tagtype.0.clone()))
+                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tt.tag.0)))
+                        .to_owned();
+                    Condition::all().add(Expr::exists(exists))
+                }
+            }
+        }
     }
 
     /// `all_tags` ビューに対する検索SQL条件を生成します。
     pub fn generate_sql_for_view(&self, node: &QueryNode, view_name: &str) -> String {
+        let cond = self.generate_condition_for_view(node, view_name);
+        let mut query = Query::select();
+        query.cond_where(cond);
+        let sql = query.to_string(PostgresQueryBuilder);
+        
+        sql.split_once("WHERE ").map(|(_, s)| s).unwrap_or("").to_string()
+    }
+
+    fn generate_condition_for_view(&self, node: &QueryNode, view_name: &str) -> Condition {
         match node {
-            QueryNode::And(left, right) => format!("({}) AND ({})", self.generate_sql_for_view(left, view_name), self.generate_sql_for_view(right, view_name)),
-            QueryNode::Or(left, right) => format!("({}) OR ({})", self.generate_sql_for_view(left, view_name), self.generate_sql_for_view(right, view_name)),
+            QueryNode::And(left, right) => {
+                Condition::all()
+                    .add(self.generate_condition_for_view(left, view_name))
+                    .add(self.generate_condition_for_view(right, view_name))
+            }
+            QueryNode::Or(left, right) => {
+                Condition::any()
+                    .add(self.generate_condition_for_view(left, view_name))
+                    .add(self.generate_condition_for_view(right, view_name))
+            }
             QueryNode::Not(child) => {
-                format!("target_id NOT IN (SELECT DISTINCT target_id FROM {} WHERE {})", view_name, self.generate_sql_for_view(child, view_name))
+                // target_id NOT IN (SELECT DISTINCT target_id FROM view WHERE condition)
+                let subquery = sea_query::Query::select()
+                    .column(Col::TargetId)
+                    .distinct()
+                    .from(Alias::new(view_name))
+                    .cond_where(self.generate_condition_for_view(child, view_name))
+                    .to_owned();
+                Condition::all().add(Expr::col(Col::TargetId).not_in_subquery(subquery))
             }
             QueryNode::TypedTag(tt) => {
-                // View 'all_tags' では全てのタグが type, value として統合されているため、
-                // タグの種類によらず一律この形式で検索可能。
-                format!("(type = '{}' AND value ILIKE '%{}%')", escape(&tt.tagtype.0), escape(&tt.tag.0))
+                Condition::all()
+                    .add(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
+                    .add(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)))
             }
         }
     }
 
     /// `TypedTag` を具体的なSQL条件に変換します。
-    fn tag_to_sql(&self, tag: &TypedTag, tags_view: &str) -> String {
+    fn tag_to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
         // 各Functionに問い合わせる
         for func in &self.functions {
-            if let Some(sql) = func.to_sql(tag) {
-                // `to_sql` が __TAGS_TABLE__ プレースホルダを使う前提
-                return sql.replace("__TAGS_TABLE__", tags_view);
+            if let Some(expr) = func.to_expr(tag) {
+                return Some(expr);
             }
         }
-        // マッチする機能がない場合は、汎用のタグテーブルを検索
-        // View 'all_tags' schema: target_id, target_kind, type, value
-        format!(
-            "EXISTS (SELECT 1 FROM {} t WHERE t.target_id = e.id AND t.type = '{}' AND t.value ILIKE '%{}%')",
-            tags_view, escape(&tag.tagtype.0), escape(&tag.tag.0)
-        )
+        None
     }
 }
 
@@ -246,9 +303,6 @@ impl FileManager {
             "1=1".to_string()
         } else {
             let node = QueryParser::parse(query)?;
-            // `e` alias を使わずに、`all_tags` のみで完結するSQLを生成する必要がある。
-            // そのためには、to_sql の実装を見直す必要がある。
-            // ここでは `generate_sql` のフォールバックロジックが `all_tags` を参照することを期待する。
             self.registry.generate_sql_for_view(&node, "all_tags")
         };
 

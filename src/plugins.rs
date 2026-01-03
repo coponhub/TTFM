@@ -7,9 +7,11 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::functions::{TagFunction, escape};
+use crate::functions::TagFunction;
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::types::TypedTag;
+use crate::db::{Tbl, Col};
+use sea_query::{Expr, Alias, Query, extension::postgres::PgExpr};
 
 // WIT定義から自動生成
 bindgen!({
@@ -147,13 +149,19 @@ impl TagFunction for WasmPluginAdapter {
         self
     }
 
-    fn to_sql(&self, tag: &TypedTag) -> Option<String> {
+    fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
         if tag.tagtype.0 == self.name {
-            let val = escape(&tag.tag.0);
-            return Some(format!(
-                "EXISTS (SELECT 1 FROM __TAGS_TABLE__ t WHERE t.entity_id = e.id AND t.tag_type = '{}' AND t.tag_value ILIKE '%{}%')",
-                self.name, val
-            ));
+            return Some(
+                Expr::exists(
+                    Query::select()
+                        .expr(Expr::val(1))
+                        .from(Alias::new("__TAGS_TABLE__"))
+                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(Expr::col(Col::TagType).eq(self.name.clone()))
+                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
+                        .to_owned()
+                ).into()
+            );
         }
         None
     }
