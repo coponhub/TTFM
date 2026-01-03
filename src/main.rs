@@ -99,12 +99,12 @@ fn main() -> Result<()> {
         Commands::Search { query } => {
             println!("Searching for: '{}'", query);
             let results = fm.search(query)?;
-            print_results(&results);
+            print_results(&fm, &results);
         }
         Commands::List => {
             println!("Listing files...");
             let results = fm.search("")?;
-            print_results(&results);
+            print_results(&fm, &results);
         }
         Commands::Clear => {
             fm.clear_index()?;
@@ -168,11 +168,14 @@ fn get_filename(path_str: &str) -> String {
 }
 
 /// 検索結果の一覧を標準出力に表示します。
-fn print_results(results: &[ttfm::types::SearchResult]) {
+fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
     if results.is_empty() {
         println!("No items found.");
         return;
     }
+
+    // データベースからタグ型のランクを取得
+    let type_ranks = fm.get_type_ranks().unwrap_or_default();
 
     struct DisplayRow {
         id: i64,
@@ -196,32 +199,26 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
         keys.insert("kind".to_string());
 
         for (k, v) in &res.tags {
-            if k == "path" || k == "name" || k == "value" || k == "filename" { continue; }
+            if k == "path" || k == "name" || k == "value" || k == "filename" {
+                continue;
+            }
             row_data.insert(k.clone(), v.clone());
             keys.insert(k.clone());
         }
 
-        let mut sorted_keys: Vec<String> = Vec::new();
-        let priority_cols = [
-            "filename", "rank", "type_from_ext", "size_str", 
-            "modified_str", "parentdir", "content"
-        ];
-        let mut temp_keys = keys.clone();
-        for col in &priority_cols {
-            if temp_keys.contains(*col) {
-                sorted_keys.push(col.to_string());
-                temp_keys.remove(*col);
-            }
-        }
-        let mut others: Vec<String> = temp_keys.into_iter().collect();
-        others.sort();
-        sorted_keys.extend(others);
+        // ランクに基づいてキーをソート
+        let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
+        sorted_keys.sort_by(|a, b| {
+            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
+            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            r_b.cmp(&r_a).then_with(|| a.cmp(b))
+        });
 
-        // 優先カラムの中で、このアイテムが持っているものを抽出してグループキーにする
-        // これにより、基本的な属性が同じアイテム（例：ファイル同士）が同じテーブルにまとまる
-        let priority_intersection: Vec<String> = priority_cols.iter()
-            .filter(|&&c| keys.contains(c))
-            .map(|&c| c.to_string())
+        // 優先表示される（ランクが高い）カラムをグループキーの識別に使う
+        let priority_threshold = 1; // ランクが設定されているものを優先
+        let priority_intersection: Vec<String> = sorted_keys.iter()
+            .filter(|&k| type_ranks.get(k).cloned().unwrap_or(0) >= priority_threshold)
+            .cloned()
             .collect();
 
         let group_key = (res.kind.clone(), priority_intersection);
@@ -237,11 +234,9 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
 
     // グループごとに表示
     for ((_kind, _visible_keys), rows) in groups {
-        // このグループで表示すべき全カラム（全行のキーの和集合）を決定
-        let mut all_group_keys = Vec::new();
         let mut seen_keys = HashSet::new();
+        let mut all_group_keys = Vec::new();
         
-        // 順序を維持するために全行を走査
         for row in &rows {
             for k in &row.all_keys {
                 if !seen_keys.contains(k) {
@@ -251,21 +246,14 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
             }
         }
         
-        // 表示順序を再整理（優先順位を適用）
-        let mut final_columns = Vec::new();
-        let priority_cols = [
-            "filename", "rank", "type_from_ext", "size_str", 
-            "modified_str", "parentdir", "content"
-        ];
-        for col in &priority_cols {
-            if seen_keys.contains(*col) {
-                final_columns.push(col.to_string());
-                seen_keys.remove(*col);
-            }
-        }
-        let mut others: Vec<String> = seen_keys.into_iter().collect();
-        others.sort();
-        final_columns.extend(others);
+        // グループ全体のカラムもランク順にソート
+        all_group_keys.sort_by(|a, b| {
+            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
+            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            r_b.cmp(&r_a).then_with(|| a.cmp(b))
+        });
+        
+        let final_columns = all_group_keys;
 
         let mut id_width = 4; // "ID"
         let mut col_widths = vec![0; final_columns.len()];

@@ -1,12 +1,13 @@
 use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::FunctionRegistry;
 use crate::functions::{ScanEntry, ScanRole};
-use crate::db::{Tbl, Col, DuckDbFunc};
+use crate::db::{Tbl, Col, DuckDbFunc, SystemRank};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
     Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, 
-    Func, Table, ColumnDef as SeaColumnDef, Iden, SelectStatement
+    Func, Table, ColumnDef as SeaColumnDef, Iden, SelectStatement,
+    CaseStatement
 };
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
@@ -358,33 +359,6 @@ impl QueryHelper {
                     .eq(Expr::col((Tbl::EntAlias, Col::Id)))
             );
         base.union(sea_query::UnionType::All, itags.to_owned());
-
-        // --- Explicit 'rank' tags ---
-        let mut file_rank_tag = Query::select();
-        file_rank_tag
-            .column(Col::Id)
-            .expr_as(Expr::val("file"), Alias::new("target_kind"))
-            .column(Col::Rank)
-            .expr_as(Expr::val("rank"), Alias::new("tag_type"))
-            .expr_as(
-                Expr::col(Col::Rank).cast_as(Alias::new("VARCHAR")),
-                Alias::new("tag_value")
-            )
-            .from_subquery(Self::parquet_query(ents), Tbl::EntAlias);
-        base.union(sea_query::UnionType::All, file_rank_tag.to_owned());
-
-        let mut item_rank_tag = Query::select();
-        item_rank_tag
-            .column(Col::Id)
-            .expr_as(Expr::val("item"), Alias::new("target_kind"))
-            .column(Col::Rank)
-            .expr_as(Expr::val("rank"), Alias::new("tag_type"))
-            .expr_as(
-                Expr::col(Col::Rank).cast_as(Alias::new("VARCHAR")),
-                Alias::new("tag_value")
-            )
-            .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
-        base.union(sea_query::UnionType::All, item_rank_tag.to_owned());
 
         Query::select()
             .expr_as(Expr::col(Alias::new("entity_id")), Alias::new("target_id"))
@@ -975,8 +949,20 @@ impl<'a> Indexer<'a> {
         let tmp_items = format!("{}.tmp", items_str);
         let tmp_itags = format!("{}.tmp", itags_str);
 
-        let mut new_items_id_q = Query::select();
-        new_items_id_q
+        let inner_case = CaseStatement::new()
+            .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
+            .case(Expr::col(Col::Content).eq("type_from_ext"), i64::from(SystemRank::TypeFromExt))
+            .case(Expr::col(Col::Content).eq("size_str"), i64::from(SystemRank::SizeStr))
+            .case(Expr::col(Col::Content).eq("modified_str"), i64::from(SystemRank::ModifiedStr))
+            .case(Expr::col(Col::Content).eq("parentdir"), i64::from(SystemRank::ParentDir))
+            .case(Expr::col(Col::Content).eq("content"), i64::from(SystemRank::Content))
+            .finally(i64::from(SystemRank::Other));
+
+        let rank_case = CaseStatement::new()
+            .case(Expr::col(Col::Kind).eq("type"), inner_case)
+            .finally(0);
+
+        let new_items_id_q = Query::select()
             .expr_as(
                 Expr::cust_with_exprs(
                     "$1 - (row_number() OVER () - 1)",
@@ -984,10 +970,11 @@ impl<'a> Indexer<'a> {
                 ),
                 Col::Id,
             )
-            .expr_as(Expr::val(0), Col::Rank)
+            .expr_as(rank_case, Col::Rank)
             .column(Col::Kind)
             .column(Col::Content)
-            .from(Alias::new("new_items_raw"));
+            .from(Alias::new("new_items_raw"))
+            .to_owned();
 
         self.store.create_temp_table_as(Alias::new("new_items_with_id"), new_items_id_q)?;
 

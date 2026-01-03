@@ -582,6 +582,32 @@ impl FileManager {
         Ok(())
     }
 
+    /// 全てのタグ型の優先度（RANK）を取得します。
+    pub fn get_type_ranks(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let path = self.item_entities_path();
+        if !path.exists() { return Ok(Default::default()); }
+
+        let query = Query::select()
+            .column(Col::Content)
+            .column(Col::Rank)
+            .from_subquery(
+                QueryHelper::parquet_query(&path.to_string_lossy()),
+                Tbl::EntAlias,
+            )
+            .and_where(Expr::col(Col::Kind).eq("type"))
+            .to_string(PostgresQueryBuilder);
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (name, rank) = row?;
+            map.insert(name, rank);
+        }
+        Ok(map)
+    }
+
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
         let query = Query::select()
