@@ -18,6 +18,34 @@ pub enum QueryNode {
     TypedTag(TypedTag),
 }
 
+impl QueryNode {
+    /// このノードおよび子ノードに含まれるすべてのタグの型（`tagtype`）を収集します。
+    pub fn get_all_types(&self) -> Vec<String> {
+        let mut types = std::collections::HashSet::new();
+        self.collect_types(&mut types);
+        types.into_iter().collect()
+    }
+
+    fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
+        match self {
+            QueryNode::And(l, r) => {
+                l.collect_types(types);
+                r.collect_types(types);
+            }
+            QueryNode::Or(l, r) => {
+                l.collect_types(types);
+                r.collect_types(types);
+            }
+            QueryNode::Not(c) => {
+                c.collect_types(types);
+            }
+            QueryNode::TypedTag(tt) => {
+                types.insert(tt.tagtype.0.clone());
+            }
+        }
+    }
+}
+
 // --- Parsing Logic ---
 
 /// クエリ文字列を解析し、抽象構文木（AST）を構築する再帰下降パーサ。

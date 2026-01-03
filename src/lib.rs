@@ -167,8 +167,13 @@ impl FunctionRegistry {
                 q
             }
             QueryNode::Not(child) => {
+                let types = child.get_all_types();
                 let mut q = Query::select();
                 q.column(Col::TargetId).distinct().from(Alias::new(view_name));
+                
+                if !types.is_empty() {
+                    q.and_where(Expr::col(Col::Type).is_in(types));
+                }
 
                 let mut except_q = Query::select();
                 except_q.column(Col::TargetId).from_subquery(

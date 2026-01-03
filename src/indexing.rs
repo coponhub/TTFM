@@ -338,6 +338,7 @@ impl<'a> Indexer<'a> {
         let diff = self.diff_phase()?;
         let (results, moved) = self.tagging_phase(diff.to_tag, diff.moved)?;
         self.merge_phase(results, moved, diff.deleted_ids, diff.unchanged_ids)?;
+        self.update_system_items()?;
         Ok(count)
     }
 
@@ -764,6 +765,84 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
+    /// システムItem（type, label, typedtag）を一括登録し、
+    /// 'origin: system' タグを付与します。
+    pub fn update_system_items(&self) -> Result<()> {
+        let items_path = self.store.item_entities_path();
+        let item_tags_path = self.store.item_tags_path();
+        let items_path_str = items_path.to_string_lossy();
+        let item_tags_path_str = item_tags_path.to_string_lossy();
+
+        // 1. 新規登録が必要なシステムItemを特定
+        // all_tagsビューから、現在のタグの種類と値を抽出し、未登録のものをリストアップします。
+        self.conn.execute_batch(&format!(r#"
+            CREATE TEMP TABLE candidates AS
+            WITH ut AS (SELECT DISTINCT type, value FROM all_tags)
+            SELECT 'type' as kind, type as content FROM ut
+            UNION
+            SELECT 'label' as kind, value as content FROM ut
+            UNION
+            SELECT 'typedtag' as kind, type || ':' || value as content FROM ut;
+            
+            CREATE TEMP TABLE new_items_raw AS
+            SELECT DISTINCT c.kind, c.content
+            FROM candidates c
+            LEFT JOIN read_parquet('{}') e 
+              ON c.kind = e.kind AND c.content = e.content
+            WHERE e.id IS NULL;
+        "#, items_path_str))?;
+
+        let new_count: i64 = self.conn.query_row("SELECT COUNT(*) FROM new_items_raw", [], |r| r.get(0))?;
+        if new_count == 0 {
+            self.conn.execute_batch("DROP TABLE candidates; DROP TABLE new_items_raw;")?;
+            return Ok(());
+        }
+
+        // 2. IDの割り当てと保存
+        // 既存の最小ID（負の値）を取得し、そこからさらにデクリメントして新しいIDを生成します。
+        let min_id: i64 = self.conn.query_row(&format!("SELECT COALESCE(MIN(id), 0) FROM read_parquet('{}')", items_path_str), [], |r| r.get(0))?;
+        let start_id = if min_id > -1 { -1 } else { min_id - 1 };
+
+        let tmp_items = format!("{}.tmp", items_path_str);
+        let tmp_item_tags = format!("{}.tmp", item_tags_path_str);
+
+        self.conn.execute_batch(&format!(r#"
+            CREATE TEMP TABLE new_items_with_id AS
+            SELECT 
+                {} - (row_number() OVER () - 1) as id,
+                kind,
+                content
+            FROM new_items_raw;
+            
+            -- item_entitiesを更新
+            COPY (
+                SELECT * FROM read_parquet('{}')
+                UNION ALL
+                SELECT * FROM new_items_with_id
+            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
+            
+            -- origin:system タグを付与し、item_tagsを更新
+            COPY (
+                SELECT * FROM read_parquet('{}')
+                UNION ALL
+                SELECT 
+                    id as item_id,
+                    'origin' as tag_type,
+                    'system' as tag_value
+                FROM new_items_with_id
+            ) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
+        "#, start_id, items_path_str, tmp_items, item_tags_path_str, tmp_item_tags))?;
+
+        // 3. ファイルを原子的に置き換え
+        std::fs::rename(&tmp_items, &items_path)?;
+        std::fs::rename(&tmp_item_tags, &item_tags_path)?;
+
+        // クリーンアップ
+        self.conn.execute_batch("DROP TABLE candidates; DROP TABLE new_items_raw; DROP TABLE new_items_with_id;")?;
+
+        Ok(())
+    }
+
     fn build_table_schema(
         &self,
         target: TargetTable,
@@ -879,8 +958,81 @@ mod tests {
         let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
         let count = indexer.run(root, None::<&fn(usize)>, false).unwrap();
         assert!(count >= 1);
-        let results = fm.search("extension:rs").unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].primary_value().unwrap().contains("test.rs"));
-    }
-}
+                let results = fm.search("extension:rs").unwrap();
+                assert_eq!(results.len(), 1);
+                assert!(results[0].primary_value().unwrap().contains("test.rs"));
+            }
+        
+            #[test]
+            fn test_system_items_registration() {
+                let dir = tempdir().unwrap();
+                let root = dir.path();
+                let db_dir = root.join(".ttfm/db");
+                
+                // 拡張子 .txt のファイルを作成
+                std::fs::write(root.join("hello.txt"), "hello").unwrap();
+                
+                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+                indexer.run(root, None::<&fn(usize)>, false).unwrap();
+        
+                        // 1. item_entities に extension:txt 関連のItemがあるか確認
+        
+                        let items_path_buf = fm.item_entities_path();
+        
+                        let items_path = items_path_buf.to_string_lossy();
+        
+                        let query = format!(
+        
+                            "SELECT kind, content FROM read_parquet('{}') WHERE content IN ('extension', 'txt', 'extension:txt')",
+        
+                            items_path
+        
+                        );
+        
+                        let mut stmt = fm.conn.prepare(&query).unwrap();
+        
+                        let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        
+                            .map(|r| r.unwrap()).collect();
+        
+                        
+        
+                        assert!(rows.iter().any(|(k, c)| k == "type" && c == "extension"));
+        
+                        assert!(rows.iter().any(|(k, c)| k == "label" && c == "txt"));
+        
+                        assert!(rows.iter().any(|(k, c)| k == "typedtag" && c == "extension:txt"));
+        
+                
+        
+                        // 2. それらのItemに origin:system タグがあるか確認
+        
+                        let item_tags_path_buf = fm.item_tags_path();
+        
+                        let item_tags_path = item_tags_path_buf.to_string_lossy();
+        
+                        let query_tags = format!(
+        
+                            r#"
+        
+                            SELECT COUNT(*) 
+        
+                            FROM read_parquet('{}') it
+        
+                            JOIN read_parquet('{}') ie ON it.item_id = ie.id
+        
+                            WHERE ie.content = 'extension:txt' AND it.tag_type = 'origin' AND it.tag_value = 'system'
+        
+                            "#,
+        
+                            item_tags_path, items_path
+        
+                        );
+        
+                
+                let count: i64 = fm.conn.query_row(&query_tags, [], |r| r.get(0)).unwrap();
+                assert_eq!(count, 1, "origin:system tag should be attached to system items");
+            }
+        }
+        
