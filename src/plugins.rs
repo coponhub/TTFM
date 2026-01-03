@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::functions::TagFunction;
+use crate::functions::{TagFunction, exists_in_tags};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::types::TypedTag;
-use crate::db::{Tbl, Col};
-use sea_query::{Expr, Alias, Query, extension::postgres::PgExpr};
+use sea_query::SimpleExpr;
 
 // WIT定義から自動生成
 bindgen!({
@@ -151,17 +150,7 @@ impl TagFunction for WasmPluginAdapter {
 
     fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
         if tag.tagtype.0 == self.name {
-            return Some(
-                Expr::exists(
-                    Query::select()
-                        .expr(Expr::val(1))
-                        .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                        .and_where(Expr::col(Col::TagType).eq(self.name.clone()))
-                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
-                        .to_owned()
-                ).into()
-            );
+            return Some(exists_in_tags(&self.name, &tag.tag.0, false));
         }
         None
     }

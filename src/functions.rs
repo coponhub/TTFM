@@ -96,6 +96,28 @@ pub(crate) fn escape(s: &str) -> String {
     s.replace("'", "''")
 }
 
+/// 特定のタグが `file_tags` テーブルに存在するかを確認する EXISTS 式を生成します。
+///
+/// # Arguments
+/// * `tag_type` - タグの種類（例: "directory", "mimetype"）
+/// * `tag_value` - 検索する値
+/// * `exact` - true の場合は完全一致（=）、false の場合は部分一致（ILIKE）を使用します。
+pub(crate) fn exists_in_tags(tag_type: &str, tag_value: &str, exact: bool) -> SimpleExpr {
+    let mut query = sea_query::Query::select();
+    query.expr(Expr::val(1))
+        .from(Alias::new("__TAGS_TABLE__"))
+        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+        .and_where(Expr::col(Col::TagType).eq(tag_type.to_string()));
+
+    if exact {
+        query.and_where(Expr::col(Col::TagValue).eq(tag_value.to_string()));
+    } else {
+        query.and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag_value)));
+    }
+
+    Expr::exists(query.to_owned()).into()
+}
+
 // ========================================================
 // 1. Path Function
 // ========================================================
@@ -242,15 +264,7 @@ impl TagFunction for FilenameFunction {
             let val = &tag.tag.0;
             return Some(
                 Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
-                    .and(Expr::exists(
-                        sea_query::Query::select()
-                            .expr(Expr::val(1))
-                            .from(Alias::new("__TAGS_TABLE__"))
-                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                            .and_where(Expr::col(Col::TagType).eq(DirectoryFunction::NAME))
-                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
-                            .to_owned()
-                    ).not())
+                    .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not())
                     .into()
             );
         }
@@ -307,15 +321,7 @@ impl TagFunction for StemFunction {
              let val = &tag.tag.0;
              return Some(
                 Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
-                    .and(Expr::exists(
-                        sea_query::Query::select()
-                            .expr(Expr::val(1))
-                            .from(Alias::new("__TAGS_TABLE__"))
-                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                            .and_where(Expr::col(Col::TagType).eq(DirectoryFunction::NAME))
-                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
-                            .to_owned()
-                    ).not())
+                    .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not())
                     .into()
             );
         }
@@ -419,15 +425,7 @@ impl TagFunction for DirectoryFunction {
             let val = &tag.tag.0;
             return Some(
                 Expr::col((Tbl::LocAlias, Col::Filename)).ilike(format!("%{}%", val))
-                    .and(Expr::exists(
-                        sea_query::Query::select()
-                            .expr(Expr::val(1))
-                            .from(Alias::new("__TAGS_TABLE__"))
-                            .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                            .and_where(Expr::col(Col::TagType).eq(Self::NAME))
-                            .and_where(Expr::col(Col::TagValue).eq("TRUE"))
-                            .to_owned()
-                    ))
+                    .and(exists_in_tags(Self::NAME, "TRUE", true))
                     .into()
             );
         }
@@ -665,17 +663,7 @@ impl TagFunction for TypeFromExtFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(
-                Expr::exists(
-                    sea_query::Query::select()
-                        .expr(Expr::val(1))
-                        .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
-                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
-                        .to_owned()
-                ).into()
-            );
+            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
         }
         None
     }
@@ -745,17 +733,7 @@ impl TagFunction for SizeStrFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(
-                Expr::exists(
-                    sea_query::Query::select()
-                        .expr(Expr::val(1))
-                        .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
-                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
-                        .to_owned()
-                ).into()
-            );
+            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
         }
         None
     }
@@ -817,17 +795,7 @@ impl TagFunction for ModifiedStrFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            return Some(
-                Expr::exists(
-                    sea_query::Query::select()
-                        .expr(Expr::val(1))
-                        .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-                        .and_where(Expr::col(Col::TagType).eq(Self::NAME))
-                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag.tag.0)))
-                        .to_owned()
-                ).into()
-            );
+            return Some(exists_in_tags(Self::NAME, &tag.tag.0, false));
         }
         None
     }
