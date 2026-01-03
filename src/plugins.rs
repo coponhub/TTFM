@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::functions::{TagFunction, exists_in_tags};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::types::TypedTag;
-use sea_query::SimpleExpr;
 
 // WIT定義から自動生成
 bindgen!({

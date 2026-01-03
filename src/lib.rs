@@ -121,6 +121,76 @@ impl FunctionRegistry {
 
     // --- Search Support ---
 
+    /// `all_tags` ビューに対する検索SQL（IDのリストを返すクエリ）を生成します。
+    pub fn generate_view_query(&self, node: &QueryNode, view_name: &str) -> String {
+        let select = self.build_set_query(node, view_name);
+        select.to_string(PostgresQueryBuilder)
+    }
+
+    /// クエリツリーを集合演算（UNION/INTERSECT/EXCEPT）を用いた SelectStatement に変換します。
+    fn build_set_query(&self, node: &QueryNode, view_name: &str) -> sea_query::SelectStatement {
+        match node {
+            QueryNode::And(left, right) => {
+                let mut q = Query::select();
+                q.column(Col::TargetId)
+                 .from_subquery(self.build_set_query(left, view_name), Alias::new("left_side"));
+                
+                let mut right_q = Query::select();
+                right_q.column(Col::TargetId)
+                       .from_subquery(self.build_set_query(right, view_name), Alias::new("right_side"));
+                
+                q.union(sea_query::UnionType::Intersect, right_q);
+                q
+            }
+            QueryNode::Or(left, right) => {
+                let mut q = Query::select();
+                q.column(Col::TargetId)
+                 .from_subquery(self.build_set_query(left, view_name), Alias::new("left_side"));
+                
+                let mut right_q = Query::select();
+                right_q.column(Col::TargetId)
+                       .from_subquery(self.build_set_query(right, view_name), Alias::new("right_side"));
+                
+                q.union(sea_query::UnionType::Distinct, right_q);
+                q
+            }
+            QueryNode::Not(child) => {
+                let mut q = Query::select();
+                q.column(Col::TargetId).distinct().from(Alias::new(view_name));
+                
+                let mut except_q = Query::select();
+                except_q.column(Col::TargetId)
+                        .from_subquery(self.build_set_query(child, view_name), Alias::new("not_side"));
+                
+                q.union(sea_query::UnionType::Except, except_q);
+                q
+            }
+            QueryNode::TypedTag(tt) => {
+                // 特別なロジックが必要なタグ（directoryなど）の処理
+                if tt.tagtype.0 == "directory" {
+                    let mut q_name = Query::select();
+                    q_name.column(Col::TargetId).from(Alias::new(view_name))
+                          .and_where(Expr::col(Col::Type).eq("filename"))
+                          .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+                    
+                    let mut q_dir = Query::select();
+                    q_dir.column(Col::TargetId).from(Alias::new(view_name))
+                         .and_where(Expr::col(Col::Type).eq("directory"))
+                         .and_where(Expr::col(Col::Value).eq("true"));
+                    
+                    q_name.union(sea_query::UnionType::Intersect, q_dir);
+                    return q_name;
+                }
+
+                let mut q = Query::select();
+                q.column(Col::TargetId).distinct().from(Alias::new(view_name))
+                 .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
+                 .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+                q
+            }
+        }
+    }
+
     /// クエリツリーを辿って、DuckDBで使用可能なSQL WHERE条件式を生成します。
     pub fn generate_sql(&self, node: &QueryNode, tags_path: &str) -> String {
         let cond = self.generate_condition(node);
@@ -169,49 +239,8 @@ impl FunctionRegistry {
         }
     }
 
-    /// `all_tags` ビューに対する検索SQL条件を生成します。
-    pub fn generate_sql_for_view(&self, node: &QueryNode, view_name: &str) -> String {
-        let cond = self.generate_condition_for_view(node, view_name);
-        let mut query = Query::select();
-        query.cond_where(cond);
-        let sql = query.to_string(PostgresQueryBuilder);
-        
-        sql.split_once("WHERE ").map(|(_, s)| s).unwrap_or("").to_string()
-    }
-
-    fn generate_condition_for_view(&self, node: &QueryNode, view_name: &str) -> Condition {
-        match node {
-            QueryNode::And(left, right) => {
-                Condition::all()
-                    .add(self.generate_condition_for_view(left, view_name))
-                    .add(self.generate_condition_for_view(right, view_name))
-            }
-            QueryNode::Or(left, right) => {
-                Condition::any()
-                    .add(self.generate_condition_for_view(left, view_name))
-                    .add(self.generate_condition_for_view(right, view_name))
-            }
-            QueryNode::Not(child) => {
-                // target_id NOT IN (SELECT DISTINCT target_id FROM view WHERE condition)
-                let subquery = sea_query::Query::select()
-                    .column(Col::TargetId)
-                    .distinct()
-                    .from(Alias::new(view_name))
-                    .cond_where(self.generate_condition_for_view(child, view_name))
-                    .to_owned();
-                Condition::all().add(Expr::col(Col::TargetId).not_in_subquery(subquery))
-            }
-            QueryNode::TypedTag(tt) => {
-                Condition::all()
-                    .add(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                    .add(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)))
-            }
-        }
-    }
-
     /// `TypedTag` を具体的なSQL条件に変換します。
     fn tag_to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
-        // 各Functionに問い合わせる
         for func in &self.functions {
             if let Some(expr) = func.to_expr(tag) {
                 return Some(expr);
@@ -294,22 +323,13 @@ impl FileManager {
              return Err(anyhow::anyhow!("Index not found or incomplete. Please run 'index' command first."));
         }
 
-        // 1. 検索条件にマッチするIDを抽出するサブクエリ
-        // generate_sql は __TAGS_TABLE__ のようなプレースホルダを使うが、
-        // to_sql の実装によっては `e.` や `l.` を使うものもあるため、
-        // 検索クエリの組み立てには注意が必要。
-        // ここでは、`all_tags` からIDを絞り込む方針で統一する。
-        let where_clause = if query.trim().is_empty() {
-            "1=1".to_string()
+        // 1. 検索条件にマッチするIDを抽出する集合演算クエリ
+        let id_query = if query.trim().is_empty() {
+            "SELECT DISTINCT target_id FROM all_tags".to_string()
         } else {
             let node = QueryParser::parse(query)?;
-            self.registry.generate_sql_for_view(&node, "all_tags")
+            self.registry.generate_view_query(&node, "all_tags")
         };
-
-        let id_query = format!(
-            "SELECT DISTINCT target_id FROM all_tags WHERE {}", 
-            where_clause
-        );
 
         // 2. マッチしたIDの全タグを取得して集約
         let sql = format!(r#"
