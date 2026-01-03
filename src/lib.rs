@@ -31,7 +31,7 @@ use functions::{
     SizeBytesFunction,
     ModifiedTsFunction,
     InodeFunction,
-    KindFunction,
+    TypeFromExtFunction,
     SizeStrFunction,
     ModifiedStrFunction,
 };
@@ -84,7 +84,7 @@ impl FunctionRegistry {
         reg.register(Box::new(DirectoryFunction::new()));
         reg.register(Box::new(SizeBytesFunction::new()));
         reg.register(Box::new(ModifiedTsFunction::new()));
-        reg.register(Box::new(KindFunction::new()));
+        reg.register(Box::new(TypeFromExtFunction::new()));
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
         reg

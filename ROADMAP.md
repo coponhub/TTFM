@@ -14,7 +14,7 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
   - `filename:` (fuzzy match)
   - `ext:` / `extension:` (exact match, excludes directories)
   - `parent:` (normalized path match)
-  - `kind:Folder` (directory filtering)
+  - `type_from_ext:Folder` (directory filtering)
 - [x] **Plugin System (WebAssembly)**: 
   - **WIT Interface**: Standardized plugin interface for `TagFunction`.
   - **Wasm Runtime**: High-speed plugin execution via `wasmtime`.

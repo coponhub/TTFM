@@ -189,7 +189,7 @@ fn print_results(results: &[ttfm::types::SearchResult]) {
         }
 
         let mut sorted_keys: Vec<String> = Vec::new();
-        let priority_cols = ["filename", "kind", "size_str", "modified_str", "parentdir", "content"];
+        let priority_cols = ["filename", "type_from_ext", "size_str", "modified_str", "parentdir", "content"];
         for col in &priority_cols {
             if keys.contains(*col) {
                 sorted_keys.push(col.to_string());

@@ -589,24 +589,22 @@ impl TagDefinition for InodeFunction {
 }
 
 // ========================================================
-// 10. Kind Function
+// 10. Type From Ext Function
 // ========================================================
 
-struct KindTagger;
+struct TypeFromExtTagger;
 
-impl Tagger for KindTagger {
+impl Tagger for TypeFromExtTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
-        vec![ColumnDef { name: KindFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
+        vec![ColumnDef { name: TypeFromExtFunction::NAME.to_string(), sql_type: "TEXT", target_table: TargetTable::FileTags }]
     }
     /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        Ok(vec![TagValue::Text(KindFunction::generate(path, None)?)])
+        Ok(vec![TagValue::Text(TypeFromExtFunction::generate(path, None)?)])
     }
 }
 
-// ...
-
-impl TagDefinition for KindFunction {
+impl TagDefinition for TypeFromExtFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
@@ -617,21 +615,21 @@ impl TagDefinition for KindFunction {
     }
 }
 
-/// ファイルの種類（`kind`）に関する機能。
+/// ファイルの種類（`type_from_ext`）に関する機能。
 ///
 /// # Examples
-/// - Query: `kind:Folder` -> ディレクトリを検索
-/// - Query: `kind:PDF` -> PDFファイルを検索
-pub struct KindFunction { tagger: KindTagger }
+/// - Query: `type_from_ext:Folder` -> ディレクトリを検索
+/// - Query: `type_from_ext:PDF` -> PDFファイルを検索
+pub struct TypeFromExtFunction { tagger: TypeFromExtTagger }
 
-impl KindFunction {
+impl TypeFromExtFunction {
     /// この機能の識別子名。
-    pub const NAME: &'static str = "kind";
-    /// 新しい `KindFunction` インスタンスを作成します。
-    pub fn new() -> Self { Self { tagger: KindTagger } }
+    pub const NAME: &'static str = "type_from_ext";
+    /// 新しい `TypeFromExtFunction` インスタンスを作成します。
+    pub fn new() -> Self { Self { tagger: TypeFromExtTagger } }
 }
 
-impl TagFunction for KindFunction {
+impl TagFunction for TypeFromExtFunction {
     fn tagger(&self) -> &dyn Tagger { &self.tagger }
     fn to_sql(&self, tag: &TypedTag) -> Option<String> {
         if tag.tagtype.0 == Self::NAME {
