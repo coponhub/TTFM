@@ -88,14 +88,6 @@ crate::define_scan_entry! {
 
 /// SQLインジェクションを防ぐための簡易エスケープ処理。
 /// 文字列内のシングルクォートを2つ重ねてエスケープします。
-///
-/// # Arguments
-///
-/// * `s` - エスケープ対象の文字列
-pub(crate) fn escape(s: &str) -> String {
-    s.replace("'", "''")
-}
-
 /// 特定のタグが `file_tags` テーブルに存在するかを確認する EXISTS 式を生成します。
 ///
 /// # Arguments
@@ -110,7 +102,7 @@ pub(crate) fn exists_in_tags(
     let mut query = sea_query::Query::select();
     query
         .expr(Expr::val(1))
-        .from(Alias::new("__TAGS_TABLE__"))
+        .from(Alias::new("all_tags"))
         .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
         .and_where(Expr::col(Col::TagType).eq(tag_type.to_string()));
 

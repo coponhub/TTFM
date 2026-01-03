@@ -7,8 +7,9 @@ use anyhow::{Context, Result};
 use duckdb::Connection;
 use std::path::Path;
 use file_id::get_file_id;
-use sea_query::{Expr, Condition, PostgresQueryBuilder, Alias, Query, BinOper};
-use crate::db::{Tbl, Col};
+use sea_query::{Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func};
+use crate::db::{Tbl, Col, DuckDbFunc};
+use crate::indexing::QueryHelper;
 
 pub mod types;
 pub mod query;
@@ -38,7 +39,6 @@ use functions::{
     SizeStrFunction,
     ModifiedStrFunction,
 };
-use functions::escape;
 
 /// ファイルの一意識別子を取得し、文字列として返します。
 pub(crate) fn get_inode_string(path: &Path) -> String {
@@ -216,65 +216,6 @@ impl FunctionRegistry {
         }
     }
 
-    /// クエリツリーを辿って、DuckDBで使用可能なSQL WHERE条件式を生成します。
-    pub fn generate_sql(&self, node: &QueryNode, tags_path: &str) -> String {
-        let cond = self.generate_condition(node);
-        // Condition を文字列化するためにダミーの SELECT を使用
-        let mut query = Query::select();
-        query.cond_where(cond);
-        let sql = query.to_string(PostgresQueryBuilder);
-
-        // "SELECT  WHERE ..." -> extract "WHERE ..."
-        let where_clause = sql.split_once("WHERE ").map(|(_, s)| s).unwrap_or("");
-
-        let path_expr = format!("read_parquet('{}')", tags_path);
-        where_clause.replace("__TAGS_TABLE__", &path_expr)
-    }
-
-    /// クエリノードを sea-query の Condition に変換します。
-    fn generate_condition(&self, node: &QueryNode) -> Condition {
-        match node {
-            QueryNode::And(left, right) => Condition::all()
-                .add(self.generate_condition(left))
-                .add(self.generate_condition(right)),
-            QueryNode::Or(left, right) => Condition::any()
-                .add(self.generate_condition(left))
-                .add(self.generate_condition(right)),
-            QueryNode::Not(child) => {
-                Condition::all().not().add(self.generate_condition(child))
-            }
-            QueryNode::TypedTag(tt) => {
-                if let Some(expr) = self.tag_to_expr(tt) {
-                    Condition::all().add(expr)
-                } else {
-                    // マッチする機能がない場合は、汎用のタグテーブルを検索
-                    let exists = sea_query::Query::select()
-                        .expr(Expr::val(1))
-                        .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(
-                            Expr::col(Col::EntityId)
-                                .eq(Expr::col((Tbl::EntAlias, Col::Id))),
-                        )
-                        .and_where(Expr::col(Col::TagType).eq(tt.tagtype.0.clone()))
-                        .and_where(
-                            Expr::col(Col::TagValue).binary(BinOper::Custom("GLOB"), Expr::val(tt.tag.0.clone())),
-                        )
-                        .to_owned();
-                    Condition::all().add(Expr::exists(exists))
-                }
-            }
-        }
-    }
-
-    /// `TypedTag` を具体的なSQL条件に変換します。
-    fn tag_to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
-        for func in &self.functions {
-            if let Some(expr) = func.to_expr(tag) {
-                return Some(expr);
-            }
-        }
-        None
-    }
 }
 
 /// ファイル管理システムのメインインターフェース。
@@ -375,29 +316,39 @@ impl FileManager {
             ));
         }
 
-        // 1. 検索条件にマッチするIDを抽出する集合演算クエリ
-        let id_query = if query.trim().is_empty() {
-            "SELECT DISTINCT target_id FROM all_tags".to_string()
+        // 1. 検索条件にマッチするIDを抽出するクエリ
+        let sub_query = if query.trim().is_empty() {
+            Query::select()
+                .column(Col::TargetId)
+                .distinct()
+                .from(Alias::new("all_tags"))
+                .to_owned()
         } else {
             let node = QueryParser::parse(query)?;
-            self.registry.generate_view_query(&node, "all_tags")
+            self.registry.build_set_query(&node, "all_tags")
         };
 
         // 2. マッチしたIDの全タグを取得して集約
-        let sql = format!(
-            r#"
-            SELECT 
-                t.target_id,
-                t.target_kind,
-                list(t.type) as types,
-                list(t.value) as values
-            FROM all_tags t
-            WHERE t.target_id IN ({})
-            GROUP BY t.target_id, t.target_kind
-            LIMIT 100
-        "#,
-            id_query
-        );
+        // DuckDB の list() 関数を使用
+        let mut sql_query = Query::select();
+        sql_query
+            .column(Col::TargetId)
+            .column(Col::TargetKind)
+            .expr_as(
+                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Type)),
+                Alias::new("types"),
+            )
+            .expr_as(
+                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Value)),
+                Alias::new("values"),
+            )
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::TargetId).in_subquery(sub_query))
+            .group_by_col(Col::TargetId)
+            .group_by_col(Col::TargetKind)
+            .limit(100);
+
+        let sql = sql_query.to_string(PostgresQueryBuilder);
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -469,29 +420,40 @@ impl FileManager {
         }
 
         // 1. Get current min ID
-        let query = format!(
-            "SELECT MIN(id) FROM read_parquet('{}')",
-            path.to_string_lossy()
-        );
-        let min_id: i64 = self.conn.query_row(&query, [], |r| r.get(0)).unwrap_or(0);
+        let path_str = path.to_string_lossy();
+        let query_min = Query::select()
+            .expr(Expr::col(Col::Id).min())
+            .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::EntAlias)
+            .to_string(PostgresQueryBuilder);
+
+        let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0)).unwrap_or(0);
         let new_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         // 2. Append new row via Temp Table & COPY
-        let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
 
-        self.conn.execute_batch(&format!(
-            r#"
-            CREATE TABLE temp_add_item AS SELECT * FROM read_parquet('{}');
-            INSERT INTO temp_add_item (id, kind, content) VALUES ({}, '{}', '{}');
-            COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
-            DROP TABLE temp_add_item;
-        "#,
-            path_str,
-            new_id,
-            kind,
-            escape(content),
+        // CREATE TABLE ... AS SELECT ...
+        let sql_create = format!(
+            "CREATE TABLE temp_add_item AS {}",
+            QueryHelper::parquet_query(&path_str).to_string(PostgresQueryBuilder)
+        );
+
+        // INSERT INTO ...
+        let sql_insert = Query::insert()
+            .into_table(Alias::new("temp_add_item"))
+            .columns([Alias::new("id"), Alias::new("kind"), Alias::new("content")])
+            .values_panic([new_id.into(), kind.into(), content.into()])
+            .to_string(PostgresQueryBuilder);
+
+        // COPY
+        let sql_copy = format!(
+            "COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
             tmp_path
+        );
+
+        self.conn.execute_batch(&format!(
+            "{}; {}; {}; DROP TABLE temp_add_item;",
+            sql_create, sql_insert, sql_copy
         ))?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
@@ -514,11 +476,15 @@ impl FileManager {
             id
         } else {
             // パスとして扱い、file_entities から ID を取得
-            let query = format!(
-                "SELECT entity_id FROM read_parquet('{}') WHERE path = '{}'",
-                self.locations_path().to_string_lossy(),
-                escape(target)
-            );
+            let query = Query::select()
+                .column(Col::EntityId)
+                .from_subquery(
+                    QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
+                    Tbl::LocAlias,
+                )
+                .and_where(Expr::col(Col::Path).eq(target))
+                .to_string(PostgresQueryBuilder);
+
             self.conn
                 .query_row(&query, [], |r| r.get(0))
                 .context(format!("File not found: {}", target))?
@@ -552,12 +518,15 @@ impl FileManager {
 
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
-        let query = format!(
-            "SELECT id FROM read_parquet('{}') WHERE kind = '{}' AND content = '{}'",
-            path.to_string_lossy(),
-            kind,
-            escape(content)
-        );
+        let query = Query::select()
+            .column(Col::Id)
+            .from_subquery(
+                QueryHelper::parquet_query(&path.to_string_lossy()),
+                Tbl::EntAlias,
+            )
+            .and_where(Expr::col(Col::Kind).eq(kind))
+            .and_where(Expr::col(Col::Content).eq(content))
+            .to_string(PostgresQueryBuilder);
 
         if let Ok(id) = self.conn.query_row(&query, [], |r| r.get(0)) {
             Ok(id)
@@ -578,23 +547,29 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
 
+        // CREATE TABLE ... AS SELECT ...
+        let sql_create = format!(
+            "CREATE TABLE {} AS {}",
+            temp_table,
+            QueryHelper::parquet_query(&path_str).to_string(PostgresQueryBuilder)
+        );
+
+        // INSERT INTO ...
+        let sql_insert = Query::insert()
+            .into_table(Alias::new(temp_table))
+            .columns([Alias::new(id_col), Alias::new("tag_type"), Alias::new("tag_value")])
+            .values_panic([id.into(), key.into(), value.into()])
+            .to_string(PostgresQueryBuilder);
+
+        // COPY
+        let sql_copy = format!(
+            "COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
+            temp_table, tmp_path
+        );
+
         self.conn.execute_batch(&format!(
-            r#"
-            CREATE TABLE {} AS SELECT * FROM read_parquet('{}');
-            INSERT INTO {} ({}, tag_type, tag_value) VALUES ({}, '{}', '{}');
-            COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
-            DROP TABLE {};
-        "#,
-            temp_table,
-            path_str,
-            temp_table,
-            id_col,
-            id,
-            escape(key),
-            escape(value),
-            temp_table,
-            tmp_path,
-            temp_table
+            "{}; {}; {}; DROP TABLE {};",
+            sql_create, sql_insert, sql_copy, temp_table
         ))?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
@@ -736,8 +711,15 @@ mod tests {
         assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
         assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
 
-        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE item_id = {}", 
-            fm.item_tags_path().to_string_lossy(), note_id);
+        let query = Query::select()
+            .column(Col::TagValue)
+            .from_subquery(
+                QueryHelper::parquet_query(&fm.item_tags_path().to_string_lossy()),
+                Tbl::TagAlias,
+            )
+            .and_where(Expr::col(Col::ItemId).eq(note_id))
+            .to_string(PostgresQueryBuilder);
+
         let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
         assert_eq!(tag_value, "done");
     }
@@ -756,8 +738,15 @@ mod tests {
         let registered_path = results[0].primary_value().unwrap();
         fm.tag_item(registered_path, "manual:true").unwrap();
 
-        let query = format!("SELECT tag_value FROM read_parquet('{}') WHERE tag_type = 'manual'", 
-            fm.file_tags_path().to_string_lossy());
+        let query = Query::select()
+            .column(Col::TagValue)
+            .from_subquery(
+                QueryHelper::parquet_query(&fm.file_tags_path().to_string_lossy()),
+                Tbl::TagAlias,
+            )
+            .and_where(Expr::col(Col::TagType).eq("manual"))
+            .to_string(PostgresQueryBuilder);
+
         let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
         assert_eq!(tag_value, "true");
     }
