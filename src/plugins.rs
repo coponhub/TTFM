@@ -36,7 +36,8 @@ impl WasiView for WasmStore {
 // スレッドローカルなインスタンスキャッシュ。
 // (Plugin名, (Store, Pluginインスタンス)) の形式で保持します。
 thread_local! {
-    static INSTANCE_CACHE: RefCell<HashMap<String, (Store<WasmStore>, Plugin)>> = RefCell::new(HashMap::new());
+    static INSTANCE_CACHE: RefCell<HashMap<String, (Store<WasmStore>, Plugin)>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Wasmモジュールを保持し、インスタンス化を行う構造体。
@@ -53,32 +54,44 @@ impl WasmPlugin {
         config.wasm_component_model(true);
         let engine = Engine::new(&config)?;
         let component = Component::from_file(&engine, path)?;
-        
+
         let mut linker: Linker<WasmStore> = Linker::new(&engine);
         // WASI (Preview 2) の機能をリンカーに追加
         wasmtime_wasi::add_to_linker_sync(&mut linker)?;
-        
-        Ok(Self { engine, component, linker })
+
+        Ok(Self {
+            engine,
+            component,
+            linker,
+        })
     }
 
     /// プラグインを実行可能なアダプターに変換します。
     pub fn into_adapter(self) -> Result<WasmPluginAdapter> {
         // カラム情報を取得するために一度だけインスタンス化
-        let mut store = self.create_store().context("Failed to create store for introspection")?;
+        let mut store = self
+            .create_store()
+            .context("Failed to create store for introspection")?;
         let plugin = Plugin::instantiate(&mut store, &self.component, &self.linker)
             .context("Failed to instantiate plugin for introspection")?;
-        let info = plugin.ttfm_plugin_core().call_get_info(&mut store)
+        let info = plugin
+            .ttfm_plugin_core()
+            .call_get_info(&mut store)
             .context("Failed to call get_info")?;
-        
+
         let interface = plugin.ttfm_plugin_tag_function();
-        let wasm_cols = interface.call_get_columns(&mut store)
+        let wasm_cols = interface
+            .call_get_columns(&mut store)
             .context("Failed to call get_columns")?;
-        let columns = wasm_cols.into_iter().map(|c| ColumnDef {
-            name: c.name,
-            sql_type: Box::leak(c.sql_type.into_boxed_str()), 
-            target_table: crate::taggers::TargetTable::FileTags,
-        }).collect();
-        
+        let columns = wasm_cols
+            .into_iter()
+            .map(|c| ColumnDef {
+                name: c.name,
+                sql_type: Box::leak(c.sql_type.into_boxed_str()),
+                target_table: crate::taggers::TargetTable::FileTags,
+            })
+            .collect();
+
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),
             name: info.name,
@@ -92,11 +105,22 @@ impl WasmPlugin {
         let wasi_ctx = WasiCtxBuilder::new()
             .inherit_stdout()
             .inherit_stderr()
-            .preopened_dir("/", "/", wasmtime_wasi::DirPerms::READ, wasmtime_wasi::FilePerms::READ)?
+            .preopened_dir(
+                "/",
+                "/",
+                wasmtime_wasi::DirPerms::READ,
+                wasmtime_wasi::FilePerms::READ,
+            )?
             .build();
-            
+
         let resource_table = ResourceTable::new();
-        Ok(Store::new(&self.engine, WasmStore { wasi_ctx, resource_table }))
+        Ok(Store::new(
+            &self.engine,
+            WasmStore {
+                wasi_ctx,
+                resource_table,
+            },
+        ))
     }
 }
 
@@ -117,27 +141,34 @@ impl Tagger for WasmPluginAdapter {
     }
 
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let abs_path =
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let path_str = abs_path.to_string_lossy().to_string();
-        
+
         // スレッドローカルキャッシュからインスタンスを取得、なければ作成
         let results = INSTANCE_CACHE.with(|cache| -> Result<Vec<WasmVal>> {
             let mut cache = cache.borrow_mut();
-            
+
             if !cache.contains_key(&self.name) {
                 let mut store = self.plugin.create_store()?;
-                let plugin = Plugin::instantiate(&mut store, &self.plugin.component, &self.plugin.linker)?;
+                let plugin = Plugin::instantiate(
+                    &mut store,
+                    &self.plugin.component,
+                    &self.plugin.linker,
+                )?;
                 cache.insert(self.name.clone(), (store, plugin));
             }
-            
-            let (store, plugin) = cache.get_mut(&self.name)
-                .ok_or_else(|| anyhow::anyhow!("Plugin instance missing from cache"))?;
+
+            let (store, plugin) = cache.get_mut(&self.name).ok_or_else(|| {
+                anyhow::anyhow!("Plugin instance missing from cache")
+            })?;
             let interface = plugin.ttfm_plugin_tag_function();
-            
-            interface.call_tag_file(store, &path_str)
-                .with_context(|| format!("Wasm execution error for file: {}", path_str))
+
+            interface.call_tag_file(store, &path_str).with_context(|| {
+                format!("Wasm execution error for file: {}", path_str)
+            })
         })?;
-            
+
         Ok(results.into_iter().map(convert_tag_value).collect())
     }
 }

@@ -36,7 +36,8 @@ macro_rules! define_scan_entry {
                     $(
                         $crate::functions::ScanColumn {
                             name: <$func as $crate::functions::TagDefinition>::NAME,
-                            sql_type: <<$func as $crate::functions::TagDefinition>::RustType as $crate::types::DBType>::db_type(),
+                            sql_type: <<$func as $crate::functions::TagDefinition>::RustType 
+                                as $crate::types::DBType>::db_type(),
                             role: <$func as $crate::functions::TagDefinition>::ROLE,
                         },
                     )*
@@ -44,9 +45,19 @@ macro_rules! define_scan_entry {
             }
 
             /// パスとメタデータから `ScanEntry` を生成します。
-            pub fn from_path_metadata(path: &std::path::Path, metadata: &std::fs::Metadata) -> anyhow::Result<Self> {
+            pub fn from_path_metadata(
+                path: &std::path::Path,
+                metadata: &std::fs::Metadata,
+            ) -> anyhow::Result<Self> {
                 Ok(Self {
-                    $( $name: $crate::functions::Field { value: <$func as $crate::functions::TagDefinition>::generate(path, Some(metadata))? }, )*
+                    $(
+                        $name: $crate::functions::Field {
+                            value: <$func as $crate::functions::TagDefinition>::generate(
+                                path,
+                                Some(metadata),
+                            )?
+                        },
+                    )*
                 })
             }
 

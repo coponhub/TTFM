@@ -128,40 +128,54 @@ impl FunctionRegistry {
     }
 
     /// クエリツリーを集合演算（UNION/INTERSECT/EXCEPT）を用いた SelectStatement に変換します。
-    fn build_set_query(&self, node: &QueryNode, view_name: &str) -> sea_query::SelectStatement {
+    fn build_set_query(
+        &self,
+        node: &QueryNode,
+        view_name: &str,
+    ) -> sea_query::SelectStatement {
         match node {
             QueryNode::And(left, right) => {
                 let mut q = Query::select();
-                q.column(Col::TargetId)
-                 .from_subquery(self.build_set_query(left, view_name), Alias::new("left_side"));
-                
+                q.column(Col::TargetId).from_subquery(
+                    self.build_set_query(left, view_name),
+                    Alias::new("left_side"),
+                );
+
                 let mut right_q = Query::select();
-                right_q.column(Col::TargetId)
-                       .from_subquery(self.build_set_query(right, view_name), Alias::new("right_side"));
-                
+                right_q.column(Col::TargetId).from_subquery(
+                    self.build_set_query(right, view_name),
+                    Alias::new("right_side"),
+                );
+
                 q.union(sea_query::UnionType::Intersect, right_q);
                 q
             }
             QueryNode::Or(left, right) => {
                 let mut q = Query::select();
-                q.column(Col::TargetId)
-                 .from_subquery(self.build_set_query(left, view_name), Alias::new("left_side"));
-                
+                q.column(Col::TargetId).from_subquery(
+                    self.build_set_query(left, view_name),
+                    Alias::new("left_side"),
+                );
+
                 let mut right_q = Query::select();
-                right_q.column(Col::TargetId)
-                       .from_subquery(self.build_set_query(right, view_name), Alias::new("right_side"));
-                
+                right_q.column(Col::TargetId).from_subquery(
+                    self.build_set_query(right, view_name),
+                    Alias::new("right_side"),
+                );
+
                 q.union(sea_query::UnionType::Distinct, right_q);
                 q
             }
             QueryNode::Not(child) => {
                 let mut q = Query::select();
                 q.column(Col::TargetId).distinct().from(Alias::new(view_name));
-                
+
                 let mut except_q = Query::select();
-                except_q.column(Col::TargetId)
-                        .from_subquery(self.build_set_query(child, view_name), Alias::new("not_side"));
-                
+                except_q.column(Col::TargetId).from_subquery(
+                    self.build_set_query(child, view_name),
+                    Alias::new("not_side"),
+                );
+
                 q.union(sea_query::UnionType::Except, except_q);
                 q
             }
@@ -169,23 +183,29 @@ impl FunctionRegistry {
                 // 特別なロジックが必要なタグ（directoryなど）の処理
                 if tt.tagtype.0 == "directory" {
                     let mut q_name = Query::select();
-                    q_name.column(Col::TargetId).from(Alias::new(view_name))
-                          .and_where(Expr::col(Col::Type).eq("filename"))
-                          .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
-                    
+                    q_name
+                        .column(Col::TargetId)
+                        .from(Alias::new(view_name))
+                        .and_where(Expr::col(Col::Type).eq("filename"))
+                        .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+
                     let mut q_dir = Query::select();
-                    q_dir.column(Col::TargetId).from(Alias::new(view_name))
-                         .and_where(Expr::col(Col::Type).eq("directory"))
-                         .and_where(Expr::col(Col::Value).eq("true"));
-                    
+                    q_dir
+                        .column(Col::TargetId)
+                        .from(Alias::new(view_name))
+                        .and_where(Expr::col(Col::Type).eq("directory"))
+                        .and_where(Expr::col(Col::Value).eq("true"));
+
                     q_name.union(sea_query::UnionType::Intersect, q_dir);
                     return q_name;
                 }
 
                 let mut q = Query::select();
-                q.column(Col::TargetId).distinct().from(Alias::new(view_name))
-                 .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                 .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
+                q.column(Col::TargetId)
+                    .distinct()
+                    .from(Alias::new(view_name))
+                    .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
+                    .and_where(Expr::col(Col::Value).ilike(format!("%{}%", tt.tag.0)));
                 q
             }
         }
@@ -198,26 +218,23 @@ impl FunctionRegistry {
         let mut query = Query::select();
         query.cond_where(cond);
         let sql = query.to_string(PostgresQueryBuilder);
-        
+
         // "SELECT  WHERE ..." -> extract "WHERE ..."
         let where_clause = sql.split_once("WHERE ").map(|(_, s)| s).unwrap_or("");
-        
-        where_clause.replace("__TAGS_TABLE__", &format!("read_parquet('{}')", tags_path))
+
+        let path_expr = format!("read_parquet('{}')", tags_path);
+        where_clause.replace("__TAGS_TABLE__", &path_expr)
     }
 
     /// クエリノードを sea-query の Condition に変換します。
     fn generate_condition(&self, node: &QueryNode) -> Condition {
         match node {
-            QueryNode::And(left, right) => {
-                Condition::all()
-                    .add(self.generate_condition(left))
-                    .add(self.generate_condition(right))
-            }
-            QueryNode::Or(left, right) => {
-                Condition::any()
-                    .add(self.generate_condition(left))
-                    .add(self.generate_condition(right))
-            }
+            QueryNode::And(left, right) => Condition::all()
+                .add(self.generate_condition(left))
+                .add(self.generate_condition(right)),
+            QueryNode::Or(left, right) => Condition::any()
+                .add(self.generate_condition(left))
+                .add(self.generate_condition(right)),
             QueryNode::Not(child) => {
                 Condition::all().not().add(self.generate_condition(child))
             }
@@ -229,9 +246,14 @@ impl FunctionRegistry {
                     let exists = sea_query::Query::select()
                         .expr(Expr::val(1))
                         .from(Alias::new("__TAGS_TABLE__"))
-                        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+                        .and_where(
+                            Expr::col(Col::EntityId)
+                                .eq(Expr::col((Tbl::EntAlias, Col::Id))),
+                        )
                         .and_where(Expr::col(Col::TagType).eq(tt.tagtype.0.clone()))
-                        .and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tt.tag.0)))
+                        .and_where(
+                            Expr::col(Col::TagValue).ilike(format!("%{}%", tt.tag.0)),
+                        )
                         .to_owned();
                     Condition::all().add(Expr::exists(exists))
                 }
@@ -269,39 +291,53 @@ impl FileManager {
     /// 指定されたデータベースディレクトリで `FileManager` を作成します。
     pub fn new_with_db_dir<P: AsRef<Path>>(db_dir: P) -> Result<Self> {
         let db_dir = db_dir.as_ref().to_path_buf();
-        
+
         // データベースディレクトリを作成（存在しない場合）
         if !db_dir.exists() {
-            std::fs::create_dir_all(&db_dir)
-                .context(format!("Failed to create database directory: {:?}", db_dir))?;
+            std::fs::create_dir_all(&db_dir).context(format!(
+                "Failed to create database directory: {:?}",
+                db_dir
+            ))?;
         }
 
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
-        
+
         let registry = FunctionRegistry::with_standard();
-        
+
         // Initialize tables and views
         let indexer = crate::indexing::Indexer::new(&conn, &registry, db_dir.clone());
-        indexer.initialize_tables().context("Failed to initialize database tables")?;
+        indexer
+            .initialize_tables()
+            .context("Failed to initialize database tables")?;
 
-        Ok(Self { 
+        Ok(Self {
             conn,
             db_dir,
             registry,
         })
     }
-    
+
     // 互換性のためのエイリアス
     pub fn new_with_index_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::new_with_db_dir(path)
     }
 
-    fn file_entities_path(&self) -> std::path::PathBuf { self.db_dir.join("file_entities.parquet") }
-    fn locations_path(&self) -> std::path::PathBuf { self.db_dir.join("locations.parquet") }
-    fn file_tags_path(&self) -> std::path::PathBuf { self.db_dir.join("file_tags.parquet") }
-    fn item_entities_path(&self) -> std::path::PathBuf { self.db_dir.join("item_entities.parquet") }
-    fn item_tags_path(&self) -> std::path::PathBuf { self.db_dir.join("item_tags.parquet") }
+    fn file_entities_path(&self) -> std::path::PathBuf {
+        self.db_dir.join("file_entities.parquet")
+    }
+    fn locations_path(&self) -> std::path::PathBuf {
+        self.db_dir.join("locations.parquet")
+    }
+    fn file_tags_path(&self) -> std::path::PathBuf {
+        self.db_dir.join("file_tags.parquet")
+    }
+    fn item_entities_path(&self) -> std::path::PathBuf {
+        self.db_dir.join("item_entities.parquet")
+    }
+    fn item_tags_path(&self) -> std::path::PathBuf {
+        self.db_dir.join("item_tags.parquet")
+    }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
     pub fn new_in_memory() -> Result<Self> {
@@ -309,18 +345,29 @@ impl FileManager {
     }
 
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
-    pub fn index_directory<P: AsRef<Path>, F>(&self, root_path: P, on_progress: Option<&F>, dry_run: bool) -> Result<usize> 
+    pub fn index_directory<P: AsRef<Path>, F>(
+        &self,
+        root_path: P,
+        on_progress: Option<&F>,
+        dry_run: bool,
+    ) -> Result<usize>
     where
         F: Fn(usize) + Sync + Send,
     {
-        let indexer = crate::indexing::Indexer::new(&self.conn, &self.registry, self.db_dir.clone());
+        let indexer = crate::indexing::Indexer::new(
+            &self.conn,
+            &self.registry,
+            self.db_dir.clone(),
+        );
         indexer.run(root_path, on_progress, dry_run)
     }
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         if !self.file_entities_path().exists() {
-             return Err(anyhow::anyhow!("Index not found or incomplete. Please run 'index' command first."));
+            return Err(anyhow::anyhow!(
+                "Index not found. Please run 'index' command first."
+            ));
         }
 
         // 1. 検索条件にマッチするIDを抽出する集合演算クエリ
@@ -332,7 +379,8 @@ impl FileManager {
         };
 
         // 2. マッチしたIDの全タグを取得して集約
-        let sql = format!(r#"
+        let sql = format!(
+            r#"
             SELECT 
                 t.target_id,
                 t.target_kind,
@@ -342,13 +390,15 @@ impl FileManager {
             WHERE t.target_id IN ({})
             GROUP BY t.target_id, t.target_kind
             LIMIT 100
-        "#, id_query);
+        "#,
+            id_query
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
             let kind: String = row.get(1)?;
-            
+
             use duckdb::types::Value;
             let types_val: Value = row.get(2)?;
             let values_val: Value = row.get(3)?;
@@ -364,14 +414,18 @@ impl FileManager {
 
             let types: Vec<String> = if let Value::List(items) = types_val {
                 items.iter().map(value_to_string).collect()
-            } else { vec![] };
-            
+            } else {
+                vec![]
+            };
+
             let values: Vec<String> = if let Value::List(items) = values_val {
                 items.iter().map(value_to_string).collect()
-            } else { vec![] };
+            } else {
+                vec![]
+            };
 
             let tags = types.into_iter().zip(values.into_iter()).collect();
-            
+
             Ok(SearchResult { id, kind, tags })
         })?;
 
@@ -385,11 +439,18 @@ impl FileManager {
 
     /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
-        if self.file_entities_path().exists() { std::fs::remove_file(self.file_entities_path()).ok(); }
-        if self.locations_path().exists() { std::fs::remove_file(self.locations_path()).ok(); }
-        if self.file_tags_path().exists() { std::fs::remove_file(self.file_tags_path()).ok(); }
-        if self.item_entities_path().exists() { std::fs::remove_file(self.item_entities_path()).ok(); }
-        if self.item_tags_path().exists() { std::fs::remove_file(self.item_tags_path()).ok(); }
+        let paths = [
+            self.file_entities_path(),
+            self.locations_path(),
+            self.file_tags_path(),
+            self.item_entities_path(),
+            self.item_tags_path(),
+        ];
+        for path in paths {
+            if path.exists() {
+                std::fs::remove_file(path).ok();
+            }
+        }
         Ok(())
     }
 
@@ -397,12 +458,14 @@ impl FileManager {
     pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
         if !path.exists() {
-             return Err(anyhow::anyhow!("Item entities table not found. Please run index first or re-initialize."));
+            return Err(anyhow::anyhow!(
+                "Item entities table not found. Please run index first."
+            ));
         }
-        
+
         // 1. Get current min ID
         let query = format!(
-            "SELECT MIN(id) FROM read_parquet('{}')", 
+            "SELECT MIN(id) FROM read_parquet('{}')",
             path.to_string_lossy()
         );
         let min_id: i64 = self.conn.query_row(&query, [], |r| r.get(0)).unwrap_or(0);
@@ -411,13 +474,20 @@ impl FileManager {
         // 2. Append new row via Temp Table & COPY
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
-        
-        self.conn.execute_batch(&format!(r#"
+
+        self.conn.execute_batch(&format!(
+            r#"
             CREATE TABLE temp_add_item AS SELECT * FROM read_parquet('{}');
             INSERT INTO temp_add_item (id, kind, content) VALUES ({}, '{}', '{}');
             COPY temp_add_item TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
             DROP TABLE temp_add_item;
-        "#, path_str, new_id, kind, escape(content), tmp_path))?;
+        "#,
+            path_str,
+            new_id,
+            kind,
+            escape(content),
+            tmp_path
+        ))?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
 
@@ -426,8 +496,8 @@ impl FileManager {
 
     /// アイテム（ファイルまたは Item Entity）にタグを付与します。
     pub fn tag_item(&self, target: &str, tag_str: &str) -> Result<()> {
-        let (key, value) = tag_str.split_once(':')
-            .context("Tag must be in 'key:value' format")?;
+        let (key, value) =
+            tag_str.split_once(':').context("Tag must be in 'key:value' format")?;
 
         // 1. タグ自体の Item Entity が存在することを確認（なければ作成）
         self.get_or_create_item("type", key)?;
@@ -441,19 +511,35 @@ impl FileManager {
             // パスとして扱い、file_entities から ID を取得
             let query = format!(
                 "SELECT entity_id FROM read_parquet('{}') WHERE path = '{}'",
-                self.locations_path().to_string_lossy(), escape(target)
+                self.locations_path().to_string_lossy(),
+                escape(target)
             );
-            self.conn.query_row(&query, [], |r| r.get(0))
+            self.conn
+                .query_row(&query, [], |r| r.get(0))
                 .context(format!("File not found: {}", target))?
         };
 
         // 3. 適切なテーブルにタグを保存
         if target_id >= 0 {
             // File Entity へのタグ付け
-            self.append_tag_to_parquet(self.file_tags_path(), "temp_add_file_tag", "entity_id", target_id, key, value)?;
+            self.append_tag_to_parquet(
+                self.file_tags_path(),
+                "temp_add_file_tag",
+                "entity_id",
+                target_id,
+                key,
+                value,
+            )?;
         } else {
             // Item Entity へのタグ付け
-            self.append_tag_to_parquet(self.item_tags_path(), "temp_add_item_tag", "item_id", target_id, key, value)?;
+            self.append_tag_to_parquet(
+                self.item_tags_path(),
+                "temp_add_item_tag",
+                "item_id",
+                target_id,
+                key,
+                value,
+            )?;
         }
 
         Ok(())
@@ -463,9 +549,11 @@ impl FileManager {
         let path = self.item_entities_path();
         let query = format!(
             "SELECT id FROM read_parquet('{}') WHERE kind = '{}' AND content = '{}'",
-            path.to_string_lossy(), kind, escape(content)
+            path.to_string_lossy(),
+            kind,
+            escape(content)
         );
-        
+
         if let Ok(id) = self.conn.query_row(&query, [], |r| r.get(0)) {
             Ok(id)
         } else {
@@ -473,16 +561,36 @@ impl FileManager {
         }
     }
 
-    fn append_tag_to_parquet(&self, path: std::path::PathBuf, temp_table: &str, id_col: &str, id: i64, key: &str, value: &str) -> Result<()> {
+    fn append_tag_to_parquet(
+        &self,
+        path: std::path::PathBuf,
+        temp_table: &str,
+        id_col: &str,
+        id: i64,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
 
-        self.conn.execute_batch(&format!(r#"
+        self.conn.execute_batch(&format!(
+            r#"
             CREATE TABLE {} AS SELECT * FROM read_parquet('{}');
             INSERT INTO {} ({}, tag_type, tag_value) VALUES ({}, '{}', '{}');
             COPY {} TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd');
             DROP TABLE {};
-        "#, temp_table, path_str, temp_table, id_col, id, escape(key), escape(value), temp_table, tmp_path, temp_table))?;
+        "#,
+            temp_table,
+            path_str,
+            temp_table,
+            id_col,
+            id,
+            escape(key),
+            escape(value),
+            temp_table,
+            tmp_path,
+            temp_table
+        ))?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())
@@ -490,7 +598,11 @@ impl FileManager {
 
     /// 指定されたディレクトリからWasmプラグインをロードし、レジストリに登録します。
     /// ".wasm" 拡張子を持つファイルを対象とします。
-    pub fn load_plugins<P: AsRef<Path>>(&mut self, dir: P, status: &std::collections::HashMap<String, bool>) -> Result<()> {
+    pub fn load_plugins(
+        &mut self,
+        dir: impl AsRef<Path>,
+        status: &std::collections::HashMap<String, bool>,
+    ) -> Result<()> {
         let dir = dir.as_ref();
         if !dir.exists() || !dir.is_dir() {
             return Ok(()); // ディレクトリがない場合は何もしない
@@ -503,16 +615,17 @@ impl FileManager {
                 match crate::plugins::WasmPlugin::new(&path) {
                     Ok(plugin) => {
                         let adapter = plugin.into_adapter()?;
-                        
+
                         // 個別設定のチェック
                         let is_enabled = *status.get(&adapter.name).unwrap_or(&true);
-                        println!("DEBUG: Plugin name='{}', is_enabled={}, config_value={:?}", 
-                                 adapter.name, is_enabled, status.get(&adapter.name));
                         if is_enabled {
                             println!("Loaded plugin: {} from {:?}", adapter.name, path);
                             self.registry.register(Box::new(adapter));
                         } else {
-                            println!("Plugin {} is disabled via config. Skipping.", adapter.name);
+                            println!(
+                                "Plugin {} is disabled via config. Skipping.",
+                                adapter.name
+                            );
                         }
                     }
                     Err(e) => {
