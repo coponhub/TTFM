@@ -1076,8 +1076,38 @@ mod tests {
                         }
                 
                         assert!(found_type_item, "Should have found system items of kind 'type'");
-                        assert!(found_txt_file, "Should have found readme.txt");
-                        assert!(!found_rs_file, "Should NOT have found main.rs");
-                    }
-                }
-                
+                                assert!(found_txt_file, "Should have found readme.txt");
+                                assert!(!found_rs_file, "Should NOT have found main.rs");
+                            }
+                        
+                            #[test]
+                            fn test_glob_search_behavior() {
+                                let dir = tempdir().unwrap();
+                                let root = dir.path();
+                                let db_dir = root.join(".ttfm/db");
+                                
+                                std::fs::write(root.join("project_alpha.pdf"), "").unwrap();
+                                std::fs::write(root.join("project_beta.txt"), "").unwrap();
+                                
+                                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+                                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+                                indexer.run(root, None::<&fn(usize)>, false).unwrap();
+                        
+                                // 1. ワイルドカードによる部分一致
+                                let results = fm.search("filename:*alpha*").unwrap();
+                                assert_eq!(results.len(), 1);
+                                assert!(results[0].primary_value().unwrap().contains("alpha"));
+                        
+                                // 2. 複数のワイルドカード
+                                let results = fm.search("filename:project*").unwrap();
+                                assert_eq!(results.len(), 2);
+                        
+                                // 3. ワイルドカードなし (完全一致として動作)
+                                let results = fm.search("filename:project").unwrap();
+                                assert_eq!(results.len(), 0, "Exact match should fail without wildcard");
+                        
+                                let results = fm.search("filename:project_alpha.pdf").unwrap();
+                                assert_eq!(results.len(), 1, "Exact match should work with full name");
+                            }
+                        }
+                        
