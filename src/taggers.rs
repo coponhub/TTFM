@@ -34,6 +34,18 @@ pub enum TagValue {
     Map(Vec<(String, String)>), 
 }
 
+impl TagValue {
+    /// 値を文字列として取得します。変換できない場合は None を返します。
+    pub fn to_string_lossy(&self) -> Option<String> {
+        match self {
+            TagValue::Text(s) => Some(s.clone()),
+            TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Boolean(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+}
+
 impl ToSql for TagValue {
     fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
         match self {
