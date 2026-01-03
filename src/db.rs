@@ -1,7 +1,7 @@
 use sea_query::Iden;
 
 /// データベースのテーブル名を表す識別子。
-#[derive(Iden)]
+#[derive(Iden, Clone, Copy)]
 pub enum Tbl {
     /// ファイルエンティティ（実体）テーブル
     #[iden = "file_entities"]
@@ -43,7 +43,7 @@ pub enum Tbl {
 }
 
 /// 共通で使用されるカラム名を表す識別子。
-#[derive(Iden)]
+#[derive(Iden, Clone, Copy)]
 pub enum Col {
     Id,
     Path,
@@ -66,7 +66,7 @@ pub enum Col {
 }
 
 /// DuckDB 固有の関数名を表す識別子。
-#[derive(Iden)]
+#[derive(Iden, Clone, Copy)]
 pub enum DuckDbFunc {
     #[iden = "read_parquet"]
     ReadParquet,

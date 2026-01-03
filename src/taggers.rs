@@ -35,7 +35,17 @@ pub enum TagValue {
 }
 
 impl TagValue {
-    /// 値を文字列として取得します。変換できない場合は None を返します。
+    /// 値を文字列として取得します。所有権を移動するため、クローンを避けられます。
+    pub fn into_string(self) -> Option<String> {
+        match self {
+            TagValue::Text(s) => Some(s),
+            TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Boolean(b) => Some(b.to_string()),
+            _ => None,
+        }
+    }
+
+    /// 値を文字列として取得します（クローンが発生します）。
     pub fn to_string_lossy(&self) -> Option<String> {
         match self {
             TagValue::Text(s) => Some(s.clone()),
