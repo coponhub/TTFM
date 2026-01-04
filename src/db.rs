@@ -80,10 +80,12 @@ pub enum Col {
 #[derive(Debug, Clone, Copy)]
 pub enum SystemRank {
     Filename = 7,
+    Name = 7, // filenameと同等
     TypeFromExt = 6,
     SizeStr = 5,
     ModifiedStr = 4,
     ParentDir = 3,
+    Kind = 2,
     Content = 2,
     Other = 1,
 }

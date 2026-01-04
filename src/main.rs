@@ -185,15 +185,8 @@ fn get_terminal_width() -> usize {
     }
 }
 
-/// パス文字列からファイル名部分を抽出します。
-fn get_filename(path_str: &str) -> String {
-    Path::new(path_str)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path_str)
-        .to_string()
-}
-
+/// ターミナルの幅を取得します。
+fn get_terminal_width() -> usize {
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
     if results.is_empty() {
@@ -217,16 +210,15 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         let mut row_data = HashMap::new();
         let mut keys = HashSet::new();
 
-        if let Some(path) = res.get_tag_value("path") {
-            row_data.insert("filename".to_string(), get_filename(path));
-            keys.insert("filename".to_string());
-        }
+        row_data.insert("name".to_string(), res.name.clone());
+        keys.insert("name".to_string());
 
         row_data.insert("kind".to_string(), res.kind.clone());
         keys.insert("kind".to_string());
 
         for (k, v) in &res.tags {
-            if k == "path" || k == "name" || k == "value" || k == "filename" {
+            // 重複表示を避けるためのフィルタリング
+            if k == "path" || k == "name" || k == "value" || k == "filename" || k == "content" {
                 continue;
             }
             row_data.insert(k.clone(), v.clone());

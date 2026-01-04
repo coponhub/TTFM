@@ -410,6 +410,8 @@ impl FileManager {
             use duckdb::types::Value;
             let types_val: Value = row.get(2)?;
             let values_val: Value = row.get(3)?;
+            let rank: i64 = row.get(4)?;
+            let name: String = row.get(5).unwrap_or_default();
 
             fn value_to_string(v: &Value) -> String {
                 match v {
@@ -434,7 +436,7 @@ impl FileManager {
 
             let tags = types.into_iter().zip(values.into_iter()).collect();
 
-            Ok(SearchResult { id, kind, tags })
+            Ok(SearchResult { id, kind, name, rank, tags })
         })?;
 
         let mut results = Vec::new();
