@@ -45,7 +45,7 @@ fn test_integration_tag_tagging() {
     fm.tag_item(&tag_id.to_string(), "priority:high").unwrap();
 
     // 3. 確認
-    // 新設計ではタグ定義自体もヒットするため、item_kind:typedtag で絞り込む
+    // 対象のタグ定義(typedtag)のみを検証するため、item_kindで絞り込む
     let results = fm.search("priority:high & item_kind:typedtag").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, tag_id);
@@ -69,7 +69,7 @@ fn test_integration_note_tagging() {
     fm.tag_item(&note_id.to_string(), "category:meeting").unwrap();
 
     // 3. 検索 (Noteがヒットすることを確認)
-    // category:meeting だけだとタグ定義自体もヒットするため、item_kind:note で絞り込む
+    // Note以外のアイテム（タグ定義など）を除外するため、item_kind:note で絞り込む
     let results = fm.search("category:meeting & item_kind:note").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, note_id);
