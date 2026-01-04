@@ -56,23 +56,23 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ファイルの実体とパス、およびタグを管理する。
 
 **A. `file_entities` テーブル (実体) (.ttfm/db/entities.parquet)**
-- `id`: 内部管理用ユニークID (PRIMARY KEY)
+- `item_id`: 内部管理用ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (BIGINT, DEFAULT 0)
-- `inode`: OSレベルの識別子 (Inode number / File Index)
+- `file_id`: OSレベルの識別子 (Inode number / File Index)
 - `device_id`: デバイス識別子
 - `size`: ファイルサイズ
 - `mtime`: 最終更新日時
 - `hash`: コンテンツハッシュ (オプション)
 
 **B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)**
-- `entity_id`: `file_entities.id` への外部キー
+- `item_id`: `file_entities.item_id` への外部キー
 - `path`: フルパス (UNIQUE)
 - `filename`: ファイル名
 - `parentdir`: 親ディレクトリパス（検索最適化用）
 - `extension`: 拡張子
 
 **C. `file_tags` テーブル (属性) (.ttfm/db/tags.parquet)**
-- `entity_id`: `file_entities.id` への外部キー
+- `item_id`: `file_entities.item_id` への外部キー
 - `tag_type`: タグの種類（例: `mimetype`, `project`）
 - `tag_value`: タグの値
 
@@ -80,20 +80,20 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 タグの定義やメモなどを管理する。
 
 **D. `item_entities` テーブル (.ttfm/db/items.parquet)**
-- `id`: ユニークID (PRIMARY KEY)
+- `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (BIGINT, DEFAULT 0)
 - `kind`: `type`, `typedtag`, `label`, `note` のいずれか
 - `content`: 識別名（Type名等）または Note の本文
 
 **E. `item_tags` テーブル (.ttfm/db/item_tags.parquet)**
-- `item_id`: `item_entities.id` への外部キー
+- `item_id`: `item_entities.item_id` への外部キー
 - `type`: タグの種類
 - `value`: タグの値
 
 #### 3. Unified View (`all_tags`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
-- `target_id`: 対象のID
-- `target_kind`: `file` または `item`
+- `item_id`: 対象のID
+- `item_kind`: `file` または `item`
 - `rank`: 対象の優先度（ソート用）
 - `type`: タグの種類
 - `value`: タグの値
@@ -145,9 +145,9 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
     - **一時保存**: 変更が検知されたエントリのみを `current_scan.parquet` に書き出す。
 
 2.  **Diff Phase (差分分析)**:
-    - DuckDB 上で、`current_scan.parquet` (最新) と既存の Parquet ファイルを Inode をキーにして比較し、以下のカテゴリに分類する。
+    - DuckDB 上で、`current_scan.parquet` (最新) と既存の Parquet ファイルを `FileId` (Inode) をキーにして比較し、以下のカテゴリに分類する。
         - **To Process**: 新規、または Mtime/Size が変化したファイル。
-        - **Moved**: Inode は一致するが、Path が異なるファイル。
+        - **Moved**: `FileId` は一致するが、Path が異なるファイル。
           - アクション: **Location (path, parentdir, filename, extension) の情報を更新する。**
         - **Unchanged**: 全てのメタデータが一致、または上位ディレクトリの `mtime` 判定でスキップされたファイル。
         - **Deleted**: 既存インデックスにあるが、今回の走査で見つからず、かつ親ディレクトリが「不一致 (Modified)」判定されていたファイル。
