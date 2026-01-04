@@ -76,8 +76,8 @@ impl TypedTag {
 pub struct SearchResult {
     /// アイテムの一意なID
     pub id: i64,
-    /// アイテムの種類 ('file' または 'item')
-    pub kind: String,
+    /// アイテムの種類 (file, note, type, label, typedtag)
+    pub item_kind: String,
     /// 解決済みの名称（ユーザ定義名を優先）
     pub name: String,
     /// アイテムの優先度

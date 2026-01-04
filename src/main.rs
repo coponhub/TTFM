@@ -213,11 +213,15 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         keys.insert("name".to_string());
 
         // アイテムの種類
-        row_data.insert("kind".to_string(), res.kind.clone());
-        keys.insert("kind".to_string());
+        row_data.insert("item_kind".to_string(), res.item_kind.clone());
+        keys.insert("item_kind".to_string());
 
         // 全てのタグを表示対象に含める（Rankシステムに表示順序を委ねる）
         for (k, v) in &res.tags {
+            // "name" や "item_kind" は既にセット済みなので、タグリストの中に現れてもスキップする
+            if k == "name" || k == "item_kind" {
+                continue;
+            }
             row_data.insert(k.clone(), v.clone());
             keys.insert(k.clone());
         }
@@ -237,7 +241,7 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             .cloned()
             .collect();
 
-        let group_key = (res.kind.clone(), priority_intersection);
+        let group_key = (res.item_kind.clone(), priority_intersection);
         
         groups.entry(group_key).or_default().push(DisplayRow {
             id: res.id,

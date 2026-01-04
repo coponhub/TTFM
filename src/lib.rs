@@ -215,14 +215,14 @@ impl FunctionRegistry {
                         .column(Col::ItemId)
                         .from(Alias::new(view_name))
                         .and_where(Expr::col(Col::Type).eq("filename"))
-                        .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
+                        .and_where(Expr::col(Col::Label).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
 
                     let mut q_dir = Query::select();
                     q_dir
                         .column(Col::ItemId)
                         .from(Alias::new(view_name))
                         .and_where(Expr::col(Col::Type).eq("directory"))
-                        .and_where(Expr::col(Col::Value).eq("true"));
+                        .and_where(Expr::col(Col::Label).eq("true"));
 
                     q_name.union(sea_query::UnionType::Intersect, q_dir);
                     return q_name;
@@ -233,7 +233,7 @@ impl FunctionRegistry {
                     .distinct()
                     .from(Alias::new(view_name))
                     .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                    .and_where(Expr::col(Col::Value).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
+                    .and_where(Expr::col(Col::Label).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
                 q
             }
         }
@@ -386,11 +386,17 @@ impl FileManager {
                 Alias::new("types"),
             )
             .expr_as(
-                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Value)),
-                Alias::new("values"),
+                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Label)),
+                Alias::new("labels"),
             )
-            .column(Col::Rank)
-            .column(Col::Name)
+            .expr_as(
+                Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
+                Col::Rank,
+            )
+            .expr_as(
+                Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Name).into(), Expr::val("").into()]),
+                Col::Name,
+            )
             .from(Alias::new("all_tags"))
             .and_where(Expr::col(Col::ItemId).in_subquery(sub_query))
             .group_by_col(Col::ItemId)
@@ -405,11 +411,11 @@ impl FileManager {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(0)?;
-            let kind: String = row.get(1)?;
+            let item_kind: String = row.get(1)?;
 
             use duckdb::types::Value;
             let types_val: Value = row.get(2)?;
-            let values_val: Value = row.get(3)?;
+            let labels_val: Value = row.get(3)?;
             let rank: i64 = row.get(4)?;
             let name: String = row.get(5).unwrap_or_default();
 
@@ -428,15 +434,15 @@ impl FileManager {
                 vec![]
             };
 
-            let values: Vec<String> = if let Value::List(items) = values_val {
+            let labels: Vec<String> = if let Value::List(items) = labels_val {
                 items.iter().map(value_to_string).collect()
             } else {
                 vec![]
             };
 
-            let tags = types.into_iter().zip(values.into_iter()).collect();
+            let tags = types.into_iter().zip(labels.into_iter()).collect();
 
-            Ok(SearchResult { id, kind, name, rank, tags })
+            Ok(SearchResult { id, item_kind, name, rank, tags })
         })?;
 
         let mut results = Vec::new();
@@ -495,7 +501,7 @@ impl FileManager {
         // INSERT INTO ...
         let sql_insert = Query::insert()
             .into_table(temp_table.clone())
-            .columns([Alias::new("id"), Alias::new("kind"), Alias::new("content")])
+            .columns([Col::Id, Col::ItemKind, Col::Content])
             .values_panic([new_id.into(), kind.into(), content.into()])
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_insert, [])?;
@@ -522,8 +528,8 @@ impl FileManager {
         let item_id = if let Ok(id) = item.parse::<i64>() {
             id
         } else {
-            // パスとして扱い、file_entities から ID を取得
-            let query = Query::select()
+            // A. パスとして扱い、locations から ID を取得
+            let query_path = Query::select()
                 .column(Col::ItemId)
                 .from_subquery(
                     QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
@@ -532,9 +538,20 @@ impl FileManager {
                 .and_where(Expr::col(Col::Path).eq(item))
                 .to_string(PostgresQueryBuilder);
 
-            self.conn
-                .query_row(&query, [], |r| r.get(0))
-                .context(format!("Item not found: {}", item))?
+            if let Ok(id) = self.conn.query_row(&query_path, [], |r| r.get(0)) {
+                id
+            } else {
+                // B. 名前（抽象化された名称）として扱い、all_tags から ID を取得
+                let query_name = Query::select()
+                    .column(Col::ItemId)
+                    .from(Alias::new("all_tags"))
+                    .and_where(Expr::col(Col::Name).eq(item))
+                    .to_string(PostgresQueryBuilder);
+
+                self.conn
+                    .query_row(&query_name, [], |r| r.get(0))
+                    .context(format!("Item not found by path or name: {}", item))?
+            }
         };
 
         // 3. User Tags テーブルに保存
@@ -553,9 +570,9 @@ impl FileManager {
     /// 検索結果リストに対して優先度を一括設定します。
     pub fn update_ranks(&self, results: &[SearchResult], rank: i64) -> Result<()> {
         let file_ids: Vec<i64> = results.iter()
-            .filter(|r| r.kind == "file").map(|r| r.id).collect();
+            .filter(|r| r.item_kind == "file").map(|r| r.id).collect();
         let item_ids: Vec<i64> = results.iter()
-            .filter(|r| r.kind == "item").map(|r| r.id).collect();
+            .filter(|r| r.item_kind == "item").map(|r| r.id).collect();
 
         if !file_ids.is_empty() {
             self.batch_update_rank(&file_ids, true, rank)?;
@@ -626,7 +643,7 @@ impl FileManager {
                 QueryHelper::parquet_query(&path.to_string_lossy()),
                 Tbl::EntAlias,
             )
-            .and_where(Expr::col(Col::Kind).eq("type"))
+            .and_where(Expr::col(Col::ItemKind).eq("type"))
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self.conn.prepare(&query)?;
@@ -648,7 +665,7 @@ impl FileManager {
                 QueryHelper::parquet_query(&path.to_string_lossy()),
                 Tbl::EntAlias,
             )
-            .and_where(Expr::col(Col::Kind).eq(kind))
+            .and_where(Expr::col(Col::ItemKind).eq(kind))
             .and_where(Expr::col(Col::Content).eq(content))
             .to_string(PostgresQueryBuilder);
 
@@ -675,18 +692,10 @@ impl FileManager {
 
         store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
 
-        // user_tags/system_tags は Type/Value, base_tags は TagType/TagValue
-        let is_base = path.file_name().and_then(|s| s.to_str()) == Some("base_tags.parquet");
-        let (key_col, val_col) = if is_base {
-            (Col::TagType, Col::TagValue)
-        } else {
-            (Col::Type, Col::Value)
-        };
-
         // INSERT INTO ...
         let sql_insert = Query::insert()
             .into_table(temp_table.clone())
-            .columns([id_col, key_col, val_col])
+            .columns([id_col, Col::Type, Col::Label])
             .values_panic([id.into(), key.into(), value.into()])
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_insert, [])?;
@@ -834,7 +843,7 @@ mod tests {
         assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
 
         let query = Query::select()
-            .column(Col::Value)
+            .column(Col::Label)
             .from_subquery(
                 QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
                 Tbl::TagAlias,
@@ -864,7 +873,7 @@ mod tests {
         fm.tag_item(registered_path, "manual:true").unwrap();
 
         let query = Query::select()
-            .column(Col::Value)
+            .column(Col::Label)
             .from_subquery(
                 QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
                 Tbl::TagAlias,

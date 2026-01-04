@@ -110,9 +110,9 @@ pub(crate) fn exists_in_tags(
         .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 
     if exact {
-        query.and_where(Expr::col(Col::Value).eq(tag_value.to_string()));
+        query.and_where(Expr::col(Col::Label).eq(tag_value.to_string()));
     } else {
-        query.and_where(Expr::col(Col::Value).ilike(format!("%{}%", tag_value)));
+        query.and_where(Expr::col(Col::Label).ilike(format!("%{}%", tag_value)));
     }
 
     Expr::exists(query.to_owned()).into()
