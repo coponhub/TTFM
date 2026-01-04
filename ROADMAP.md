@@ -65,14 +65,14 @@ Transition to a robust schema that separates system-generated metadata from user
     - [ ] Switch storage/config location to `~/.ttfm` (Linux) / `%USERPROFILE%\.ttfm` (Windows).
     - [ ] Remove current directory dependency.
 
-- [ ] **Database Schema Migration**:
-    - [ ] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
-    - [ ] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
-    - [ ] Implement `Unified View (all_tags)` with `name` and `origin` resolution logic.
+- [x] **Database Schema Migration**:
+    - [x] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
+    - [x] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
+    - [x] Implement `Unified View (all_tags)` with `name` and `origin` resolution logic.
 
-- [ ] **Item Name Abstraction**:
-    - [ ] Implement `name` tag support in query parser and search results.
-    - [ ] Update UI/CLI to display resolved names instead of raw filenames by default.
+- [x] **Item Name Abstraction**:
+    - [x] Implement `name` tag support in query parser and search results.
+    - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
 - [ ] **Move Detection**: Detect and update `mv` operations by tracking `file_id`.
 
