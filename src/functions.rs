@@ -91,7 +91,7 @@ crate::define_scan_entry! {
 
 /// SQLインジェクションを防ぐための簡易エスケープ処理。
 /// 文字列内のシングルクォートを2つ重ねてエスケープします。
-/// 特定のタグが `file_tags` テーブルに存在するかを確認する EXISTS 式を生成します。
+/// 特定のタグが `all_tags` ビューに存在するかを確認する EXISTS 式を生成します。
 ///
 /// # Arguments
 /// * `tag_type` - タグの種類（例: "directory", "mimetype"）
@@ -106,13 +106,13 @@ pub(crate) fn exists_in_tags(
     query
         .expr(Expr::val(1))
         .from(Alias::new("all_tags"))
-        .and_where(Expr::col(Col::EntityId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
-        .and_where(Expr::col(Col::TagType).eq(tag_type.to_string()));
+        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::EntAlias, Col::ItemId))))
+        .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 
     if exact {
-        query.and_where(Expr::col(Col::TagValue).eq(tag_value.to_string()));
+        query.and_where(Expr::col(Col::Label).eq(tag_value.to_string()));
     } else {
-        query.and_where(Expr::col(Col::TagValue).ilike(format!("%{}%", tag_value)));
+        query.and_where(Expr::col(Col::Label).ilike(format!("%{}%", tag_value)));
     }
 
     Expr::exists(query.to_owned()).into()
@@ -375,7 +375,7 @@ impl Tagger for StemTagger {
         vec![ColumnDef {
             name: StemFunction::NAME.to_string(),
             sql_type: "TEXT",
-            target_table: TargetTable::FileTags,
+            target_table: TargetTable::BaseTags,
         }]
     }
     /// 拡張子を除いたファイル名（ステム）を抽出します。
@@ -535,7 +535,7 @@ impl Tagger for DirectoryTagger {
         vec![ColumnDef {
             name: DirectoryFunction::NAME.to_string(),
             sql_type: "BOOLEAN",
-            target_table: TargetTable::FileTags,
+            target_table: TargetTable::BaseTags,
         }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
@@ -801,7 +801,7 @@ pub struct InodeFunction {
 }
 
 impl InodeFunction {
-    pub const NAME: &'static str = "inode";
+    pub const NAME: &'static str = "file_id";
     pub fn new() -> Self {
         Self {
             tagger: InodeTagger,
@@ -817,9 +817,9 @@ impl TagFunction for InodeFunction {
         &self.tagger
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
+        if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::Inode)).eq(tag.label.0.clone());
+                Expr::col((Tbl::EntAlias, Col::FileId)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -842,7 +842,7 @@ impl TagDefinition for InodeFunction {
 }
 
 // ========================================================
-// 10. Type From Ext Function
+// 11. Type From Ext Function
 // ========================================================
 
 struct TypeFromExtTagger;
@@ -852,7 +852,7 @@ impl Tagger for TypeFromExtTagger {
         vec![ColumnDef {
             name: TypeFromExtFunction::NAME.to_string(),
             sql_type: "TEXT",
-            target_table: TargetTable::FileTags,
+            target_table: TargetTable::BaseTags,
         }]
     }
     /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
@@ -944,7 +944,7 @@ impl Tagger for SizeStrTagger {
         vec![ColumnDef {
             name: SizeStrFunction::NAME.to_string(),
             sql_type: "TEXT",
-            target_table: TargetTable::FileTags,
+            target_table: TargetTable::BaseTags,
         }]
     }
     /// ファイルサイズを読みやすい文字列（例: "1.5 MB"）に変換して抽出します。
@@ -1032,7 +1032,7 @@ impl Tagger for ModifiedStrTagger {
         vec![ColumnDef {
             name: ModifiedStrFunction::NAME.to_string(),
             sql_type: "TEXT",
-            target_table: TargetTable::FileTags,
+            target_table: TargetTable::BaseTags,
         }]
     }
     /// 最終更新日時を読みやすい文字列（例: "2024-01-01 12:00"）に変換して抽出します。
@@ -1136,7 +1136,7 @@ mod tests {
         let sql = to_sql(expr);
         assert!(sql.contains("\"l\".\"filename\" ILIKE '%report%'" ));
         assert!(sql.contains("NOT EXISTS"));
-        assert!(sql.contains("\"tag_type\" = 'directory'"));
+        assert!(sql.contains("\"type\" = 'directory'"));
     }
 
     #[test]
@@ -1160,6 +1160,6 @@ mod tests {
     fn test_inode_function() {
         let f = InodeFunction::new();
         assert_eq!(f.role(), ScanRole::ScanId);
-        assert_eq!(f.tagger().get_columns()[0].name, "inode");
+        assert_eq!(f.tagger().get_columns()[0].name, "file_id");
     }
 }

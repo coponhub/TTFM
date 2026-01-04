@@ -9,23 +9,27 @@ pub enum Tbl {
     /// ファイルパス（場所）テーブル
     #[iden = "locations"]
     Locations,
-    /// ファイルタグテーブル
-    #[iden = "file_tags"]
-    FileTags,
+    /// 基本タグテーブル（自動抽出タグ）
+    #[iden = "base_tags"]
+    BaseTags,
     /// アイテムエンティティテーブル
     #[iden = "item_entities"]
     ItemEntities,
-    /// アイテムタグテーブル
-    #[iden = "item_tags"]
-    ItemTags,
+    /// システム定義アイテム用タグテーブル
+    #[iden = "system_tags"]
+    SystemTags,
+    /// ユーザー定義タグテーブル
+    #[iden = "user_tags"]
+    UserTags,
     
     // --- インデックス処理用テンポラリテーブル ---
     TempScan,
     TempFileEntities,
     TempLocations,
-    TempFileTags,
+    TempBaseTags,
     TempItemEntities,
-    TempItemTags,
+    TempSystemTags,
+    TempUserTags,
 
     // --- エイリアス用 ---
     #[iden = "scan"]
@@ -40,42 +44,73 @@ pub enum Tbl {
     OriginAlias,
     #[iden = "t"]
     TagAlias,
+    #[iden = "u"]
+    UserTagAlias,
+    #[iden = "s"]
+    SysTagAlias,
 }
 
 /// 共通で使用されるカラム名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Col {
-    Id,
+    ItemId,
+    FileId,
     Path,
     ParentDir,
     Filename,
     Extension,
-    EntityId,
-    TagType,
-    TagValue,
-    Inode,
     Size,
     Mtime,
-    TargetId,
-    TargetKind,
+    Hash,
     Type,
-    Value,
-    Kind,
+    Label,
+    ItemKind,
     Content,
-    ItemId,
     Rank,
+    Origin,
+    Name,
 }
 
 /// システムタグの表示優先度（RANK）を定義する列挙型。
 #[derive(Debug, Clone, Copy)]
 pub enum SystemRank {
-    Filename = 7,
-    TypeFromExt = 6,
-    SizeStr = 5,
-    ModifiedStr = 4,
-    ParentDir = 3,
-    Content = 2,
-    Other = 1,
+    /// 解決済みの名称（最優先）
+    Name = 10,
+    /// 拡張子からの種類
+    TypeFromExt = 9,
+    /// サイズ（読みやすい形式）
+    SizeStr = 8,
+    /// 更新日時（読みやすい形式）
+    ModifiedStr = 7,
+    /// 親ディレクトリ
+    ParentDir = 6,
+    /// アイテムの種類 (file/note等)
+    ItemKind = 5,
+    /// コンテンツ（本文など）
+    Content = 4,
+    /// 物理的なファイル名（nameがある場合は優先度を下げる）
+    Filename = 1,
+    /// その他
+    Other = 0,
+    /// フルパス（長いため優先度を極めて低く設定）
+    Path = -1,
+}
+
+impl SystemRank {
+    pub fn get_default_rank(name: &str) -> i64 {
+        match name {
+            "name" => SystemRank::Name as i64,
+            "type_from_ext" => SystemRank::TypeFromExt as i64,
+            "size_str" => SystemRank::SizeStr as i64,
+            "modified_str" => SystemRank::ModifiedStr as i64,
+            "parentdir" => SystemRank::ParentDir as i64,
+            "item_kind" => SystemRank::ItemKind as i64,
+            "content" => SystemRank::Content as i64,
+            "filename" => SystemRank::Filename as i64,
+            "path" => SystemRank::Path as i64,
+            _ => SystemRank::Other as i64,
+        }
+    }
 }
 
 impl From<SystemRank> for i64 {

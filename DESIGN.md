@@ -17,7 +17,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 
 - **File Entity**: ファイルシステム上の実ファイルに基づく実体。InodeおよびDevice IDによって同一性が追跡される。
 - **Item Entity**: ファイル以外の対象に基づく実体。
-    - **Kinds**:
+    - **ItemKinds**:
         - `type`: タグの型（例: `location`）。
         - `typedtag`: 型と値のペア（例: `location:tokyo`）。
         - `label`: タグの値（例: `tokyo`）。
@@ -76,8 +76,8 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 
 **C. `base_tags` テーブル (自動抽出タグ) (.ttfm/db/base_tags.parquet)**
 - `item_id`: `file_entities.item_id` への外部キー
-- `tag_type`: タグの種類（例: `size_str`, `type_from_ext`）
-- `tag_value`: タグの値
+- `type`: タグの種類（例: `size_str`, `type_from_ext`）
+- `label`: タグの値
 - ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
 
 #### 2. Item Store (Definition Registry)
@@ -87,7 +87,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 **D. `item_entities` テーブル (.ttfm/db/items.parquet)**
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
-- `kind`: `type`, `typedtag`, `label`, `note` のいずれか
+- `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
 - `content`: 識別名（Type名等）または Note の本文
 
 #### 3. Tag Store (Relations)
@@ -97,23 +97,23 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 **E. `system_tags` テーブル (System Tags) (.ttfm/db/system_tags.parquet)**
 - `item_id`: `item_entities.item_id` への外部キー
 - `type`: タグの種類
-- `value`: タグの値
+- `label`: タグの値
 - ※ システム定義Item（`filename` Type等）に対してシステムが付与するタグ（例: `origin:system`）。
 
 **F. `user_tags` テーブル (User Tags) (.ttfm/db/user_tags.parquet)**
 - `item_id`: 対象のID (`file_entities` または `item_entities` のいずれか)
 - `type`: タグの種類
-- `value`: タグの値
+- `label`: タグの値
 - ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
 
 #### 4. Unified View (`all_tags`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
-- `item_kind`: `file` または `item`
+- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `typedtag` 等)
 - `rank`: 対象の優先度（ソート用）
 - `origin`: タグの出典 (`system` または `user`)
 - `type`: タグの種類
-- `value`: タグの値
+- `label`: タグの値
 - `name`: アイテムの名称
 
 **Origin & Name Resolution**:
@@ -180,8 +180,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 ### 4.2 検索処理 (`ttfm search`)
 
 1.  **クエリ解析**: 検索クエリをパーサによって AST（抽象構文木）へ変換。
-    - クエリはTypedTag (`key:value`) および論理式 (`&`, `|`, `-`, `()`) を受け付ける。
-    - **Globパターンのサポート**: タグの値（Value）部分には、`*`（任意の文字列）や `?`（任意の1文字）などの Glob パターンを使用できる。
+    - クエリはTypedTag (`key:label`) および論理式 (`&`, `|`, `-`, `()`) を受け付ける。
+    - **Globパターンのサポート**: タグの値（Label）部分には、`*`（任意の文字列）や `?`（任意の1文字）などの Glob パターンを使用できる。
         - 例: `filename:*report*` で「report」を含むファイルにマッチ。
         - 例: `extension:p?g` で `png` や `jpg`（判定ロジックによる）などにマッチ。
 2.  **論理演算の解決**: 各 `TypedTag` ノードについて、対応する `TagFunction` または `all_tags` ビューを用いて SQL 条件式を生成。

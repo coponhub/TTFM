@@ -74,19 +74,29 @@ impl TypedTag {
 /// 検索結果を表す構造体。
 #[derive(Debug, PartialEq, Clone)]
 pub struct SearchResult {
+    /// アイテムの一意なID
     pub id: i64,
-    pub kind: String, // 'file' or 'item'
-    pub tags: Vec<(String, String)>, // (type, value)
+    /// アイテムの種類 (file, note, type, label, typedtag)
+    pub item_kind: String,
+    /// 解決済みの名称（ユーザ定義名を優先）
+    pub name: String,
+    /// アイテムの優先度
+    pub rank: i64,
+    /// アイテムに紐づく全てのタグ (type, value)
+    pub tags: Vec<(String, String)>,
 }
 
 impl SearchResult {
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
     pub fn primary_value(&self) -> Option<&str> {
-        // path, content, name, value の順で探す
+        // 抽象化された名前があればそれを最優先
+        if !self.name.is_empty() {
+            return Some(&self.name);
+        }
+        // フォールバックとしてタグの中を探す
         self.get_tag_value("path")
             .or_else(|| self.get_tag_value("content"))
-            .or_else(|| self.get_tag_value("name"))
             .or_else(|| self.get_tag_value("value"))
             .or_else(|| self.get_tag_value("filename"))
     }

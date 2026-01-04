@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ttfm::FileManager;
 use ttfm::config::Config;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 use std::collections::{HashMap, HashSet};
@@ -12,8 +12,6 @@ use terminal_size::{Width, terminal_size};
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help = true)]
-#[command(help_template = "Usage: file_manager <COMMAND>\n\n{after-help}\n\nOptions:\n{options}")]
-#[command(after_help = "Commands:\n  index <PATH>      Index a directory recursively\n  search <QUERY>    Search for files\n  list              List all files (limited to 100)\n  clear             Clear the entire index")]
 struct Cli {
     /// 実行するサブコマンド
     #[command(subcommand)]
@@ -28,7 +26,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
-    #[command(hide = true)]
     Index {
         /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
         path: PathBuf,
@@ -38,16 +35,13 @@ enum Commands {
         dry_run: bool,
     },
     /// クエリを使用してファイルを検索します。
-    #[command(hide = true)]
     Search {
         /// 検索クエリ文字列。論理演算（&, |, -）や型付きタグ（extension:rs等）が使用可能です。
         query: String,
     },
     /// インデックスからファイルの一覧を表示します（最大100件）。
-    #[command(hide = true)]
     List,
     /// 作成されたインデックスファイルを削除します。
-    #[command(hide = true)]
     Clear,
     /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
     Tag {
@@ -185,15 +179,6 @@ fn get_terminal_width() -> usize {
     }
 }
 
-/// パス文字列からファイル名部分を抽出します。
-fn get_filename(path_str: &str) -> String {
-    Path::new(path_str)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path_str)
-        .to_string()
-}
-
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
     if results.is_empty() {
@@ -217,16 +202,18 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         let mut row_data = HashMap::new();
         let mut keys = HashSet::new();
 
-        if let Some(path) = res.get_tag_value("path") {
-            row_data.insert("filename".to_string(), get_filename(path));
-            keys.insert("filename".to_string());
-        }
+        // 解決済みの名前（最優先列）
+        row_data.insert("name".to_string(), res.name.clone());
+        keys.insert("name".to_string());
 
-        row_data.insert("kind".to_string(), res.kind.clone());
-        keys.insert("kind".to_string());
+        // アイテムの種類
+        row_data.insert("item_kind".to_string(), res.item_kind.clone());
+        keys.insert("item_kind".to_string());
 
+        // 全てのタグを表示対象に含める（Rankシステムに表示順序を委ねる）
         for (k, v) in &res.tags {
-            if k == "path" || k == "name" || k == "value" || k == "filename" {
+            // "name" や "item_kind" は既にセット済みなので、タグリストの中に現れてもスキップする
+            if k == "name" || k == "item_kind" {
                 continue;
             }
             row_data.insert(k.clone(), v.clone());
@@ -236,8 +223,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
-            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
 
@@ -248,7 +235,7 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             .cloned()
             .collect();
 
-        let group_key = (res.kind.clone(), priority_intersection);
+        let group_key = (res.item_kind.clone(), priority_intersection);
         
         groups.entry(group_key).or_default().push(DisplayRow {
             id: res.id,
@@ -275,18 +262,18 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
-            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
         
         let final_columns = all_group_keys;
 
-        let mut id_width = 4; // "ID"
+        let mut item_id_width = 7; // "item_id"
         let mut col_widths = vec![0; final_columns.len()];
 
         for row in &rows {
-            id_width = id_width.max(row.id.to_string().len());
+            item_id_width = item_id_width.max(row.id.to_string().len());
             for (i, col_name) in final_columns.iter().enumerate() {
                 let val_len = row.columns.get(col_name).map(|s| s.chars().count()).unwrap_or(0);
                 col_widths[i] = col_widths[i].max(val_len);
@@ -302,13 +289,13 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             let sep_len = sep.len();
             let is_header = row_vals.is_none();
 
-            // ID
-            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "ID".to_string() };
+            // item_id
+            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "item_id".to_string() };
             let available_for_id = term_width.saturating_sub(current_width);
             if available_for_id == 0 { return; }
             
-            let id_disp = if id_width <= available_for_id {
-                format!("{:<width$}", id_str, width = id_width)
+            let id_disp = if item_id_width <= available_for_id {
+                format!("{:<width$}", id_str, width = item_id_width)
             } else {
                 truncate_text(&id_str, available_for_id)
             };
