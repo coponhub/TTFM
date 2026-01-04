@@ -52,14 +52,14 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ### 3.2 データベース・スキーマ (File & Item Store)
 実体と属性を分離し、移動検知や柔軟な拡張を可能にするため、以下の構成を採用する。
 書き込みは DuckDB を介して Parquet ファイルに対して行われる。
-これらのテーブルは".ttfm/db/"ディレクトリに格納される。
 
-#### 1. File Store (大規模データ用)
-ファイルの実体とパス、およびタグを管理する。
+#### 1. File Store (System / Large Data)
+ファイルの実体とパス、およびスキャンにより自動抽出されたタグを管理する。
+これらのテーブルは `ttfm index` 実行時に更新・洗い替えされる。
 
 **A. `file_entities` テーブル (実体) (.ttfm/db/entities.parquet)**
 - `item_id`: 内部管理用ユニークID (PRIMARY KEY)
-- `rank`: 優先度 (BIGINT, DEFAULT 0)
+- `rank`: 優先度 (DEFAULT 0)
 - `file_id`: OSレベルの識別子 (Inode number / File Index)
 - `device_id`: デバイス識別子
 - `size`: ファイルサイズ
@@ -73,40 +73,51 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - `parentdir`: 親ディレクトリパス（検索最適化用）
 - `extension`: 拡張子
 
-**C. `file_tags` テーブル (属性) (.ttfm/db/tags.parquet)**
+**C. `base_tags` テーブル (自動抽出タグ) (.ttfm/db/base_tags.parquet)**
 - `item_id`: `file_entities.item_id` への外部キー
-- `tag_type`: タグの種類（例: `mimetype`, `project`）
+- `tag_type`: タグの種類（例: `size_str`, `type_from_ext`）
 - `tag_value`: タグの値
+- ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
 
-#### 2. Item Store (定義・仮想データ用)
-タグの定義やメモなどを管理する。
+#### 2. Item Store (Definition Registry)
+タグの型(Type)や値(Label)の定義自体を管理するID台帳。
+システム定義とユーザー定義の両方が混在するが、IDによって管理される。
 
 **D. `item_entities` テーブル (.ttfm/db/items.parquet)**
 - `item_id`: ユニークID (PRIMARY KEY)
-- `rank`: 優先度 (BIGINT, DEFAULT 0)
+- `rank`: 優先度 (DEFAULT 0)
 - `kind`: `type`, `typedtag`, `label`, `note` のいずれか
 - `content`: 識別名（Type名等）または Note の本文
 
-**E. `item_tags` テーブル (.ttfm/db/item_tags.parquet)**
+#### 3. Tag Store (Relations)
+Item（FileおよびDefinition）に対するタグ付けを管理する。
+データの由来（Origin）によってテーブルを分離することで、ユーザーデータを保護しつつ効率的な更新を実現する。
+
+**E. `system_tags` テーブル (System Tags) (.ttfm/db/system_tags.parquet)**
 - `item_id`: `item_entities.item_id` への外部キー
 - `type`: タグの種類
 - `value`: タグの値
+- ※ システム定義Item（`filename` Type等）に対してシステムが付与するタグ（例: `origin:system`）。
 
-#### 3. Unified View (`all_tags`)
+**F. `user_tags` テーブル (User Tags) (.ttfm/db/user_tags.parquet)**
+- `item_id`: 対象のID (`file_entities` または `item_entities` のいずれか)
+- `type`: タグの種類
+- `value`: タグの値
+- ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
+
+#### 4. Unified View (`all_tags`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
 - `item_kind`: `file` または `item`
 - `rank`: 対象の優先度（ソート用）
+- `origin`: タグの出典 (`system` または `user`)
 - `type`: タグの種類
 - `value`: タグの値
 - `name`: アイテムの名称
 
-**Name Tag Resolution**:
-全てのアイテムに対して、仮想的なタグ `name` を解決して提供する。
-1. **User Defined**: `item_tags` テーブルに `tag_type = 'name'` が存在する場合、その値を採用する。
-2. **System Default**: 存在しない場合、`locations` テーブルの `filename` を `name` として採用する。
-
-これにより、検索やソートにおいて `name` タグを指定することで、ユーザー定義名とファイル名を横断して扱うことができる。
+**Origin & Name Resolution**:
+- **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
+- **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
 
 ### 3.3 プラグイン・コンポーネント設計 (TagFunction パターン)
 新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
