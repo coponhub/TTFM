@@ -228,14 +228,36 @@ impl FunctionRegistry {
                     return q_name;
                 }
 
-                // item_kind はカラムを直接検索
-                if tt.tagtype.0 == "item_kind" || tt.tagtype.0 == "itemtype" {
-                    let mut q = Query::select();
-                    q.column(Col::ItemId)
-                        .distinct()
-                        .from(Alias::new(view_name))
-                        .and_where(Expr::col(Col::ItemKind).eq(tt.label.0.clone()));
-                    return q;
+                // カラムを直接検索する特別なタグ
+                let mut q = Query::select();
+                q.column(Col::ItemId).distinct().from(Alias::new(view_name));
+
+                match tt.tagtype.0.as_str() {
+                    "item_kind" | "itemtype" => {
+                        q.and_where(Expr::col(Col::ItemKind).eq(tt.label.0.clone()));
+                        return q;
+                    }
+                    "name" => {
+                        q.and_where(Expr::col(Col::Name).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
+                        return q;
+                    }
+                    "origin" => {
+                        q.and_where(Expr::col(Col::Origin).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
+                        return q;
+                    }
+                    "rank" => {
+                        if let Ok(val) = tt.label.0.parse::<i64>() {
+                            q.and_where(Expr::col(Col::Rank).eq(val));
+                            return q;
+                        }
+                    }
+                    "item_id" | "id" => {
+                        if let Ok(val) = tt.label.0.parse::<i64>() {
+                            q.and_where(Expr::col(Col::ItemId).eq(val));
+                            return q;
+                        }
+                    }
+                    _ => {}
                 }
 
                 let mut q = Query::select();

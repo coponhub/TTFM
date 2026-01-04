@@ -1013,7 +1013,7 @@ impl<'a> Indexer<'a> {
             .case(Expr::col(Col::Content).eq("size_str"), i64::from(SystemRank::SizeStr))
             .case(Expr::col(Col::Content).eq("modified_str"), i64::from(SystemRank::ModifiedStr))
             .case(Expr::col(Col::Content).eq("parentdir"), i64::from(SystemRank::ParentDir))
-            .case(Expr::col(Col::Content).eq("kind"), i64::from(SystemRank::Kind))
+            .case(Expr::col(Col::Content).eq("kind"), i64::from(SystemRank::ItemKind))
             .case(Expr::col(Col::Content).eq("content"), i64::from(SystemRank::Content))
             .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
             .finally(i64::from(SystemRank::Other));

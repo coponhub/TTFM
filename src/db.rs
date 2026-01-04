@@ -56,7 +56,6 @@ pub enum Col {
     Id,
     ItemId,
     FileId,
-    DeviceId,
     Path,
     ParentDir,
     Filename,
@@ -87,7 +86,7 @@ pub enum SystemRank {
     /// 親ディレクトリ
     ParentDir = 6,
     /// アイテムの種類 (file/note等)
-    Kind = 5,
+    ItemKind = 5,
     /// コンテンツ（本文など）
     Content = 4,
     /// 物理的なファイル名（nameがある場合は優先度を下げる）
@@ -106,7 +105,7 @@ impl SystemRank {
             "size_str" => SystemRank::SizeStr as i64,
             "modified_str" => SystemRank::ModifiedStr as i64,
             "parentdir" => SystemRank::ParentDir as i64,
-            "item_kind" => SystemRank::Kind as i64,
+            "item_kind" => SystemRank::ItemKind as i64,
             "content" => SystemRank::Content as i64,
             "filename" => SystemRank::Filename as i64,
             "path" => SystemRank::Path as i64,

@@ -842,7 +842,7 @@ impl TagDefinition for InodeFunction {
 }
 
 // ========================================================
-// 10. Type From Ext Function
+// 11. Type From Ext Function
 // ========================================================
 
 struct TypeFromExtTagger;
