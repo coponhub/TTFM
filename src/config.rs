@@ -51,15 +51,8 @@ impl Config {
 
     /// 指定されたパスまたは標準的な場所から設定ファイルを読み込みます。
     pub fn load() -> Self {
-        // 1. カレントディレクトリの ttfm.toml を探す
-        if let Ok(config) = Self::load_from_file("ttfm.toml") {
-            return config;
-        }
-
-        // 2. ユーザー設定ディレクトリを探す (~/.config/ttfm/ttfm.toml)
-        if let Some(mut config_path) = dirs::config_dir() {
-            config_path.push("ttfm");
-            config_path.push("ttfm.toml");
+        if let Ok(home) = crate::get_ttfm_home() {
+            let config_path = home.join("ttfm.toml");
             if let Ok(config) = Self::load_from_file(&config_path) {
                 return config;
             }

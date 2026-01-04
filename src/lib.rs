@@ -50,8 +50,24 @@ pub(crate) fn get_inode_string(path: &Path) -> String {
     }
 }
 
-/// インデックス（データベース）のデフォルト保存先ディレクトリ。
-const DEFAULT_DB_DIR: &str = ".ttfm/db";
+/// TTFMのホームディレクトリを取得します。
+/// 環境変数 `TTFM_HOME` が設定されていればそれを優先し、
+/// なければ OS 標準のホームディレクトリ下の `.ttfm` を返します。
+pub fn get_ttfm_home() -> Result<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("TTFM_HOME") {
+        return Ok(std::path::PathBuf::from(home));
+    }
+
+    let mut home = dirs::home_dir()
+        .context("Failed to determine home directory")?;
+    home.push(".ttfm");
+    Ok(home)
+}
+
+/// TTFMのプラグインディレクトリを取得します。
+pub fn get_ttfm_plugins_dir() -> Result<std::path::PathBuf> {
+    Ok(get_ttfm_home()?.join("plugins"))
+}
 
 /// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
 pub struct FunctionRegistry {
@@ -72,7 +88,12 @@ impl FunctionRegistry {
     }
 
     /// 新しい機能（`TagFunction`）をレジストリに追加します。
+    /// 同名の機能が既に登録されている場合はスキップします。
     pub fn register(&mut self, func: Box<dyn TagFunction>) {
+        let name = func.name();
+        if self.functions.iter().any(|f| f.name() == name) {
+            return;
+        }
         self.functions.push(func);
     }
 
@@ -233,7 +254,29 @@ pub struct FileManager {
 impl FileManager {
     /// デフォルト設定で `FileManager` を作成します。
     pub fn new() -> Result<Self> {
-        Self::new_with_db_dir(DEFAULT_DB_DIR)
+        let home = get_ttfm_home()?;
+        let plugins_dir = home.join("plugins");
+
+        // ホームディレクトリの準備
+        if !plugins_dir.exists() {
+            std::fs::create_dir_all(&plugins_dir).with_context(|| {
+                format!("Failed to create plugins directory at {:?}", plugins_dir)
+            })?;
+        }
+
+        // デフォルトプラグインの展開
+        let mimetype_path =
+            plugins_dir.join("mimetype_plugin.component.wasm");
+        if !mimetype_path.exists() {
+            let bytes = include_bytes!(
+                "../plugins/mimetype_plugin.component.wasm"
+            );
+            std::fs::write(&mimetype_path, bytes).with_context(|| {
+                format!("Failed to setup default plugin at {:?}", mimetype_path)
+            })?;
+        }
+
+        Self::new_with_db_dir(home.join("db"))
     }
 
     /// 指定されたデータベースディレクトリで `FileManager` を作成します。
@@ -803,8 +846,10 @@ mod tests {
     #[test]
     fn test_tag_file_entity() {
         let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let test_home = dir.path().join("ttfm_home");
+        std::env::set_var("TTFM_HOME", &test_home);
+
+        let fm = FileManager::new().unwrap();
 
         let file_path = dir.path().join("test_file.txt");
         std::fs::write(&file_path, "test content").unwrap();
@@ -825,5 +870,37 @@ mod tests {
 
         let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
         assert_eq!(tag_value, "true");
+
+        std::env::remove_var("TTFM_HOME");
+    }
+
+    #[test]
+    fn test_ttfm_home_and_plugin_extraction() {
+        let temp = tempdir().unwrap();
+        let test_home = temp.path().join("ttfm_test_home");
+        
+        // 環境変数を設定してテスト
+        std::env::set_var("TTFM_HOME", &test_home);
+        
+        // FileManagerを初期化（ここでディレクトリ作成とプラグイン展開が行われるはず）
+        let _fm = FileManager::new().expect("Failed to create FileManager");
+        
+        // 1. ホームディレクトリが作成されているか
+        assert!(test_home.exists());
+        
+        // 2. pluginsディレクトリが作成されているか
+        let plugins_dir = test_home.join("plugins");
+        assert!(plugins_dir.exists());
+        
+        // 3. mimetypeプラグインが展開されているか
+        let mimetype_path = plugins_dir.join("mimetype_plugin.component.wasm");
+        assert!(mimetype_path.exists());
+        assert!(mimetype_path.metadata().unwrap().len() > 0);
+        
+        // 4. DBディレクトリが作成されているか
+        assert!(test_home.join("db").exists());
+
+        // クリーンアップ（環境変数を戻す）
+        std::env::remove_var("TTFM_HOME");
     }
 }

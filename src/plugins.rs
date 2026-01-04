@@ -174,6 +174,10 @@ impl Tagger for WasmPluginAdapter {
 }
 
 impl TagFunction for WasmPluginAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
     fn tagger(&self) -> &dyn Tagger {
         self
     }

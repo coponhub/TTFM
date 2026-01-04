@@ -80,7 +80,8 @@ fn main() -> Result<()> {
 
     // プラグインが有効な場合のみロード
     if config.plugins.enabled {
-        fm.load_plugins("plugins", &config.plugins.status)?;
+        let plugins_dir = ttfm::get_ttfm_plugins_dir()?;
+        fm.load_plugins(plugins_dir, &config.plugins.status)?;
     }
 
     match &cli.command {

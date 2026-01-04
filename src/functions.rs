@@ -12,6 +12,9 @@ use crate::db::{Tbl, Col};
 /// 新しいタグ機能（例：Exif情報、Gitステータスなど）を追加する場合は、
 /// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
 pub trait TagFunction: Send + Sync {
+    /// この機能の識別子名を取得します。
+    fn name(&self) -> &str;
+
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
     fn tagger(&self) -> &dyn Tagger;
 
@@ -158,6 +161,9 @@ impl PathFunction {
 }
 
 impl TagFunction for PathFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -233,6 +239,9 @@ impl ParentDirFunction {
 }
 
 impl TagFunction for ParentDirFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -314,6 +323,9 @@ impl FilenameFunction {
 }
 
 impl TagFunction for FilenameFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -396,6 +408,9 @@ impl StemFunction {
 }
 
 impl TagFunction for StemFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -471,6 +486,9 @@ impl ExtensionFunction {
 }
 
 impl TagFunction for ExtensionFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -545,6 +563,9 @@ impl DirectoryFunction {
 }
 
 impl TagFunction for DirectoryFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -623,6 +644,9 @@ impl SizeBytesFunction {
 }
 
 impl TagFunction for SizeBytesFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -707,6 +731,9 @@ impl ModifiedTsFunction {
 }
 
 impl TagFunction for ModifiedTsFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -783,6 +810,9 @@ impl InodeFunction {
 }
 
 impl TagFunction for InodeFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -875,6 +905,9 @@ impl TypeFromExtFunction {
 }
 
 impl TagFunction for TypeFromExtFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -966,6 +999,9 @@ impl SizeStrFunction {
 }
 
 impl TagFunction for SizeStrFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
@@ -1044,6 +1080,9 @@ impl ModifiedStrFunction {
 }
 
 impl TagFunction for ModifiedStrFunction {
+    fn name(&self) -> &str {
+        Self::NAME
+    }
     fn tagger(&self) -> &dyn Tagger {
         &self.tagger
     }
