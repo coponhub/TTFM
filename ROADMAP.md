@@ -19,18 +19,22 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
   - **WIT Interface**: Standardized plugin interface for `TagFunction`.
   - **Wasm Runtime**: High-speed plugin execution via `wasmtime`.
   - **MIME Type Plugin**: Proof-of-concept plugin with directory detection (`inode/directory`).
+- [x] **User-Defined Tags & Persistence**:
+  - **Table Implementation**: `user_tags` table for persistent storage (item_id, type, value).
+  - **CLI Command**: `tag` command implemented (`ttfm tag <FILE> project:alpha`).
+  - **Search**: Support for searching user tags and filtering.
 - [x] **Cross-Platform**: Path normalization (`\` -> `/`) for Windows/Linux compatibility.
-- [x] **CLI Interface**: Basic `index`, `search`, `list`, `clear` commands.
+- [x] **CLI Interface**: Basic `index`, `search`, `list`, `clear`, `tag`, `note`, `rank` commands.
 
 ---
 
 ## Upcoming Features & Improvements
 
-### 1. User-Defined Tags & Persistence
-Enable users to attach persistent metadata to files and items, protected from re-indexing.
-- [ ] **Table Implementation**: Create `user_tags` table for persistent storage (item_id, type, value).
-- [ ] **CLI Command**: Add `tag` command (e.g., `ttfm tag <FILE> project:alpha`).
-- [ ] **Search**: Enable searching user tags (e.g., `project:alpha`) and filtering by origin (`origin:user`).
+### 1. Query-Based Tagging
+Enable tagging multiple files at once using search queries.
+- [ ] **Feature**: Support `ttfm tag <QUERY> <TAG>`.
+    - Allow the first argument of the `tag` command to be a search query (e.g., `ext:jpg`) instead of just a single file path/ID.
+    - All items matching the query will be tagged with the specified tag.
 
 ### 2. Search Result Control
 Improve flexibility in viewing search results.
