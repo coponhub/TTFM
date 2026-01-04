@@ -79,15 +79,43 @@ pub enum Col {
 /// システムタグの表示優先度（RANK）を定義する列挙型。
 #[derive(Debug, Clone, Copy)]
 pub enum SystemRank {
-    Filename = 7,
-    Name = 7, // filenameと同等
-    TypeFromExt = 6,
-    SizeStr = 5,
-    ModifiedStr = 4,
-    ParentDir = 3,
-    Kind = 2,
-    Content = 2,
-    Other = 1,
+    /// 解決済みの名称（最優先）
+    Name = 10,
+    /// 拡張子からの種類
+    TypeFromExt = 9,
+    /// サイズ（読みやすい形式）
+    SizeStr = 8,
+    /// 更新日時（読みやすい形式）
+    ModifiedStr = 7,
+    /// 親ディレクトリ
+    ParentDir = 6,
+    /// アイテムの種類 (file/note等)
+    Kind = 5,
+    /// コンテンツ（本文など）
+    Content = 4,
+    /// 物理的なファイル名（nameがある場合は優先度を下げる）
+    Filename = 1,
+    /// その他
+    Other = 0,
+    /// フルパス（長いため優先度を極めて低く設定）
+    Path = -1,
+}
+
+impl SystemRank {
+    pub fn get_default_rank(name: &str) -> i64 {
+        match name {
+            "name" => SystemRank::Name as i64,
+            "type_from_ext" => SystemRank::TypeFromExt as i64,
+            "size_str" => SystemRank::SizeStr as i64,
+            "modified_str" => SystemRank::ModifiedStr as i64,
+            "parentdir" => SystemRank::ParentDir as i64,
+            "kind" => SystemRank::Kind as i64,
+            "content" => SystemRank::Content as i64,
+            "filename" => SystemRank::Filename as i64,
+            "path" => SystemRank::Path as i64,
+            _ => SystemRank::Other as i64,
+        }
+    }
 }
 
 impl From<SystemRank> for i64 {

@@ -1078,12 +1078,14 @@ impl<'a> Indexer<'a> {
         let tmp_stags = format!("{}.tmp", stags_str);
 
         let inner_case = CaseStatement::new()
-            .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
+            .case(Expr::col(Col::Content).eq("name"), i64::from(SystemRank::Name))
             .case(Expr::col(Col::Content).eq("type_from_ext"), i64::from(SystemRank::TypeFromExt))
             .case(Expr::col(Col::Content).eq("size_str"), i64::from(SystemRank::SizeStr))
             .case(Expr::col(Col::Content).eq("modified_str"), i64::from(SystemRank::ModifiedStr))
             .case(Expr::col(Col::Content).eq("parentdir"), i64::from(SystemRank::ParentDir))
+            .case(Expr::col(Col::Content).eq("kind"), i64::from(SystemRank::Kind))
             .case(Expr::col(Col::Content).eq("content"), i64::from(SystemRank::Content))
+            .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
             .finally(i64::from(SystemRank::Other));
 
         let rank_case = CaseStatement::new()

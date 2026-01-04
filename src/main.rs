@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ttfm::FileManager;
 use ttfm::config::Config;
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 use std::collections::{HashMap, HashSet};
@@ -185,8 +185,6 @@ fn get_terminal_width() -> usize {
     }
 }
 
-/// ターミナルの幅を取得します。
-fn get_terminal_width() -> usize {
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
     if results.is_empty() {
@@ -210,17 +208,16 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         let mut row_data = HashMap::new();
         let mut keys = HashSet::new();
 
+        // 解決済みの名前（最優先列）
         row_data.insert("name".to_string(), res.name.clone());
         keys.insert("name".to_string());
 
+        // アイテムの種類
         row_data.insert("kind".to_string(), res.kind.clone());
         keys.insert("kind".to_string());
 
+        // 全てのタグを表示対象に含める（Rankシステムに表示順序を委ねる）
         for (k, v) in &res.tags {
-            // 重複表示を避けるためのフィルタリング
-            if k == "path" || k == "name" || k == "value" || k == "filename" || k == "content" {
-                continue;
-            }
             row_data.insert(k.clone(), v.clone());
             keys.insert(k.clone());
         }
@@ -228,8 +225,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
-            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
 
@@ -267,8 +264,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or(0);
-            let r_b = type_ranks.get(b).cloned().unwrap_or(0);
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
         
