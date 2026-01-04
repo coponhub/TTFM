@@ -53,7 +53,6 @@ pub enum Tbl {
 /// 共通で使用されるカラム名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Col {
-    Id,
     ItemId,
     FileId,
     Path,

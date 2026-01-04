@@ -205,7 +205,7 @@ impl QueryHelper {
     ) -> SelectStatement {
         let col_path = Alias::new(ScanEntry::schema()[0].name);
         Query::select()
-            .column((Tbl::EntAlias, Col::Id))
+            .column((Tbl::EntAlias, Col::ItemId))
             .column((Tbl::ScanAlias, col_path.clone()))
             .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
             .join_subquery(
@@ -218,7 +218,7 @@ impl QueryHelper {
                 JoinType::InnerJoin,
                 Self::parquet_query(loc_path),
                 Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::Id))
+                Expr::col((Tbl::EntAlias, Col::ItemId))
                     .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
             )
             .and_where(
@@ -235,7 +235,7 @@ impl QueryHelper {
             .add(Self::integrity_condition(Tbl::EntAlias, Tbl::ScanAlias));
 
         Query::select()
-            .column((Tbl::EntAlias, Col::Id))
+            .column((Tbl::EntAlias, Col::ItemId))
             .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
             .join_subquery(
                 JoinType::LeftJoin,
@@ -254,7 +254,7 @@ impl QueryHelper {
     ) -> SelectStatement {
         let col_path = Alias::new(ScanEntry::schema()[0].name);
         Query::select()
-            .column((Tbl::EntAlias, Col::Id))
+            .column((Tbl::EntAlias, Col::ItemId))
             .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
             .join_subquery(
                 JoinType::InnerJoin,
@@ -266,7 +266,7 @@ impl QueryHelper {
                 JoinType::InnerJoin,
                 Self::parquet_query(loc_path),
                 Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::Id))
+                Expr::col((Tbl::EntAlias, Col::ItemId))
                     .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
             )
             .and_where(
@@ -290,22 +290,22 @@ impl QueryHelper {
         // Base info from files
         let mut file_master = Query::select();
         file_master
-            .column(Col::Id)
-            .column(Col::Rank)
+            .column((Tbl::EntAlias, Col::ItemId))
+            .column((Tbl::EntAlias, Col::Rank))
             .expr_as(Expr::val("file"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Filename), Col::Name)
+            .expr_as(Expr::col((Tbl::LocAlias, Col::Filename)), Col::Name)
             .from_subquery(Self::parquet_query(ents), Tbl::EntAlias)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(locs),
                 Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::ItemId)))
+                Expr::col((Tbl::EntAlias, Col::ItemId)).eq(Expr::col((Tbl::LocAlias, Col::ItemId)))
             );
 
         // Base info from other items
         let mut item_master = Query::select();
         item_master
-            .column(Col::Id)
+            .column(Col::ItemId)
             .column(Col::Rank)
             .column(Col::ItemKind)
             .expr_as(Expr::col(Col::Content), Col::Name)
@@ -324,7 +324,7 @@ impl QueryHelper {
 
         let mut final_master = Query::select();
         final_master
-            .column((Alias::new("m"), Col::Id))
+            .expr_as(Expr::col((Alias::new("m"), Col::ItemId)), Col::ItemId)
             .column((Alias::new("m"), Col::Rank))
             .column((Alias::new("m"), Col::ItemKind))
             .expr_as(
@@ -339,7 +339,7 @@ impl QueryHelper {
                 JoinType::LeftJoin,
                 user_names,
                 Alias::new("u"),
-                Expr::col((Alias::new("m"), Col::Id)).eq(Expr::col((Alias::new("u"), Col::ItemId)))
+                Expr::col((Alias::new("m"), Col::ItemId)).eq(Expr::col((Alias::new("u"), Col::ItemId)))
             );
 
         // --- 2. Unified Tag Sources (item_id, origin, type, label) ---
@@ -374,7 +374,7 @@ impl QueryHelper {
         // C. item_entities (content)
         let mut items_content = Query::select();
         items_content
-            .column(Col::Id)
+            .column(Col::ItemId)
             .expr_as(Expr::val("system"), Col::Origin)
             .expr_as(Expr::val("content"), Col::Type)
             .expr_as(Expr::col(Col::Content), Col::Label)
@@ -416,7 +416,7 @@ impl QueryHelper {
                 JoinType::InnerJoin,
                 final_master,
                 Alias::new("m"),
-                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Alias::new("m"), Col::Id)))
+                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Alias::new("m"), Col::ItemId)))
             )
             .to_owned()
     }
@@ -729,7 +729,7 @@ impl<'a> Indexer<'a> {
             let query = Query::select()
                 .expr(
                     Func::cust(DuckDbFunc::Coalesce)
-                        .args([Expr::col(Col::Id).max(), Expr::val(0).into()]),
+                        .args([Expr::col(Col::ItemId).max(), Expr::val(0).into()]),
                 )
                 .from_subquery(QueryHelper::parquet_query(&entities_str), Tbl::EntAlias)
                 .to_string(PostgresQueryBuilder);
@@ -862,7 +862,7 @@ impl<'a> Indexer<'a> {
             &self.store.file_entities_path(),
             Alias::new("temp_file_entities"),
             (!deleted_ids.is_empty()).then(|| {
-                Condition::all().add(Expr::col(Col::Id).is_not_in(deleted_ids.clone()))
+                Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids.clone()))
             }),
         )?;
         self.store.merge_and_save(
@@ -977,7 +977,7 @@ impl<'a> Indexer<'a> {
                     .add(Expr::col((Alias::new("c"), Col::Content))
                         .eq(Expr::col((Tbl::EntAlias, Col::Content)))),
             )
-            .and_where(Expr::col((Tbl::EntAlias, Col::Id)).is_null());
+            .and_where(Expr::col((Tbl::EntAlias, Col::ItemId)).is_null());
 
         self.store.create_temp_table_as(Alias::new("new_items_raw"), new_items_q)?;
 
@@ -997,7 +997,7 @@ impl<'a> Indexer<'a> {
         let query_min = Query::select()
             .expr(
                 Func::cust(DuckDbFunc::Coalesce)
-                    .args([Expr::col(Col::Id).min(), Expr::val(0).into()]),
+                    .args([Expr::col(Col::ItemId).min(), Expr::val(0).into()]),
             )
             .from_subquery(QueryHelper::parquet_query(items_str), Tbl::EntAlias)
             .to_string(PostgresQueryBuilder);
@@ -1028,7 +1028,7 @@ impl<'a> Indexer<'a> {
                     "$1 - (row_number() OVER () - 1)",
                     [Expr::val(start_id).into()]
                 ),
-                Col::Id,
+                Col::ItemId,
             )
             .expr_as(rank_case, Col::Rank)
             .column(Col::ItemKind)
@@ -1053,7 +1053,7 @@ impl<'a> Indexer<'a> {
         let mut update_tags_q = QueryHelper::parquet_query(stags_str);
         let mut new_tags_q = Query::select();
         new_tags_q
-            .column(Col::Id)
+            .column(Col::ItemId)
             .expr_as(Expr::val("origin"), Col::Type)
             .expr_as(Expr::val("system"), Col::Label)
             .from(Alias::new("new_items_with_id"));
@@ -1078,7 +1078,7 @@ impl<'a> Indexer<'a> {
         let mut create = Table::create().table(name).to_owned();
         match target {
             TargetTable::FileEntities => {
-                create.col(SeaColumnDef::new(Col::Id).big_integer());
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
                 create.col(SeaColumnDef::new(Col::Rank).big_integer());
                 for c in columns
                     .iter()
@@ -1116,7 +1116,7 @@ impl<'a> Indexer<'a> {
             }
             TargetTable::ItemEntities => {
                 create
-                    .col(SeaColumnDef::new(Col::Id).big_integer())
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Rank).big_integer())
                     .col(SeaColumnDef::new(Col::ItemKind).string())
                     .col(SeaColumnDef::new(Col::Content).string());
@@ -1238,7 +1238,7 @@ mod tests {
                 JoinType::InnerJoin,
                 QueryHelper::parquet_query(&items_path),
                 Tbl::EntAlias,
-                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Tbl::EntAlias, Col::Id))),
+                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Tbl::EntAlias, Col::ItemId))),
             )
             .and_where(Expr::col((Tbl::EntAlias, Col::Content)).eq("extension:txt"))
             .and_where(Expr::col((Tbl::TagAlias, Col::Type)).eq("origin"))

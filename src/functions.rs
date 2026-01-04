@@ -106,7 +106,7 @@ pub(crate) fn exists_in_tags(
     query
         .expr(Expr::val(1))
         .from(Alias::new("all_tags"))
-        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::EntAlias, Col::Id))))
+        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::EntAlias, Col::ItemId))))
         .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 
     if exact {

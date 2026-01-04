@@ -275,11 +275,11 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         
         let final_columns = all_group_keys;
 
-        let mut id_width = 4; // "ID"
+        let mut item_id_width = 7; // "item_id"
         let mut col_widths = vec![0; final_columns.len()];
 
         for row in &rows {
-            id_width = id_width.max(row.id.to_string().len());
+            item_id_width = item_id_width.max(row.id.to_string().len());
             for (i, col_name) in final_columns.iter().enumerate() {
                 let val_len = row.columns.get(col_name).map(|s| s.chars().count()).unwrap_or(0);
                 col_widths[i] = col_widths[i].max(val_len);
@@ -295,13 +295,13 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             let sep_len = sep.len();
             let is_header = row_vals.is_none();
 
-            // ID
-            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "ID".to_string() };
+            // item_id
+            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "item_id".to_string() };
             let available_for_id = term_width.saturating_sub(current_width);
             if available_for_id == 0 { return; }
             
-            let id_disp = if id_width <= available_for_id {
-                format!("{:<width$}", id_str, width = id_width)
+            let id_disp = if item_id_width <= available_for_id {
+                format!("{:<width$}", id_str, width = item_id_width)
             } else {
                 truncate_text(&id_str, available_for_id)
             };

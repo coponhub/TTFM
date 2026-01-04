@@ -517,7 +517,7 @@ impl FileManager {
         // 1. Get current min ID
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
-            .expr(Expr::col(Col::Id).min())
+            .expr(Expr::col(Col::ItemId).min())
             .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::EntAlias)
             .to_string(PostgresQueryBuilder);
 
@@ -533,7 +533,7 @@ impl FileManager {
         // INSERT INTO ...
         let sql_insert = Query::insert()
             .into_table(temp_table.clone())
-            .columns([Col::Id, Col::ItemKind, Col::Content])
+            .columns([Col::ItemId, Col::ItemKind, Col::Content])
             .values_panic([new_id.into(), kind.into(), content.into()])
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_insert, [])?;
@@ -692,7 +692,7 @@ impl FileManager {
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.item_entities_path();
         let query = Query::select()
-            .column(Col::Id)
+            .column(Col::ItemId)
             .from_subquery(
                 QueryHelper::parquet_query(&path.to_string_lossy()),
                 Tbl::EntAlias,
