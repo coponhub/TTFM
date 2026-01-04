@@ -12,8 +12,6 @@ use terminal_size::{Width, terminal_size};
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(arg_required_else_help = true)]
-#[command(help_template = "Usage: file_manager <COMMAND>\n\n{after-help}\n\nOptions:\n{options}")]
-#[command(after_help = "Commands:\n  index <PATH>      Index a directory recursively\n  search <QUERY>    Search for files\n  list              List all files (limited to 100)\n  clear             Clear the entire index")]
 struct Cli {
     /// 実行するサブコマンド
     #[command(subcommand)]
@@ -28,7 +26,6 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
-    #[command(hide = true)]
     Index {
         /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
         path: PathBuf,
@@ -38,16 +35,13 @@ enum Commands {
         dry_run: bool,
     },
     /// クエリを使用してファイルを検索します。
-    #[command(hide = true)]
     Search {
         /// 検索クエリ文字列。論理演算（&, |, -）や型付きタグ（extension:rs等）が使用可能です。
         query: String,
     },
     /// インデックスからファイルの一覧を表示します（最大100件）。
-    #[command(hide = true)]
     List,
     /// 作成されたインデックスファイルを削除します。
-    #[command(hide = true)]
     Clear,
     /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
     Tag {

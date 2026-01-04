@@ -604,7 +604,7 @@ impl FileManager {
         let file_ids: Vec<i64> = results.iter()
             .filter(|r| r.item_kind == "file").map(|r| r.id).collect();
         let item_ids: Vec<i64> = results.iter()
-            .filter(|r| r.item_kind == "item").map(|r| r.id).collect();
+            .filter(|r| r.item_kind != "file").map(|r| r.id).collect();
 
         if !file_ids.is_empty() {
             self.batch_update_rank(&file_ids, true, rank)?;
@@ -632,22 +632,11 @@ impl FileManager {
             QueryHelper::parquet_query(&path_str)
         )?;
 
-        let quoted_table = {
-            let sql = Query::select()
-                .column(temp_table.clone())
-                .from(Alias::new("x"))
-                .to_string(PostgresQueryBuilder);
-            sql.split_whitespace().nth(1).unwrap_or("").to_string()
-        };
-
-        let id_list = ids.iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql_update = format!(
-            "UPDATE {} SET rank = {} WHERE id IN ({})",
-            quoted_table, rank, id_list
-        );
+        let sql_update = Query::update()
+            .table(temp_table.clone())
+            .values([(Col::Rank, rank.into())])
+            .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
+            .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_update, [])?;
 
         store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
@@ -918,6 +907,42 @@ mod tests {
         assert_eq!(tag_value, "true");
 
         std::env::remove_var("TTFM_HOME");
+    }
+
+    #[test]
+    fn test_update_ranks_multi_kind() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // 1. 多様な種類のアイテムを作成
+        let note_id = fm.add_item("note", "Test Note").unwrap();
+        let type_id = fm.get_or_create_item("type", "test_type").unwrap();
+        let label_id = fm.get_or_create_item("label", "test_label").unwrap();
+
+        // 2. 検索結果をシミュレート (note, type, label を含む)
+        // searchメソッドを使わず、直接SearchResultを作ってテストする（update_ranksのロジックを叩くため）
+        let results = vec![
+            SearchResult { id: note_id, item_kind: "note".to_string(), name: "n".to_string(), rank: 0, tags: vec![] },
+            SearchResult { id: type_id, item_kind: "type".to_string(), name: "t".to_string(), rank: 0, tags: vec![] },
+            SearchResult { id: label_id, item_kind: "label".to_string(), name: "l".to_string(), rank: 0, tags: vec![] },
+        ];
+
+        // 3. 一括更新実行
+        fm.update_ranks(&results, 777).unwrap();
+
+        // 4. 各アイテムのランクが更新されたか検証
+        for r in results {
+            let path = fm.item_entities_path();
+            let query = Query::select()
+                .column(Col::Rank)
+                .from_subquery(QueryHelper::parquet_query(&path.to_string_lossy()), Tbl::EntAlias)
+                .and_where(Expr::col(Col::ItemId).eq(r.id))
+                .to_string(PostgresQueryBuilder);
+            
+            let actual_rank: i64 = fm.conn.query_row(&query, [], |row| row.get(0)).unwrap();
+            assert_eq!(actual_rank, 777, "Item of kind '{}' was not updated correctly", r.item_kind);
+        }
     }
 
     #[test]
