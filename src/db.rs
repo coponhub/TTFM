@@ -9,23 +9,27 @@ pub enum Tbl {
     /// ファイルパス（場所）テーブル
     #[iden = "locations"]
     Locations,
-    /// ファイルタグテーブル
-    #[iden = "file_tags"]
-    FileTags,
+    /// 基本タグテーブル（自動抽出タグ）
+    #[iden = "base_tags"]
+    BaseTags,
     /// アイテムエンティティテーブル
     #[iden = "item_entities"]
     ItemEntities,
-    /// アイテムタグテーブル
-    #[iden = "item_tags"]
-    ItemTags,
+    /// システム定義アイテム用タグテーブル
+    #[iden = "system_tags"]
+    SystemTags,
+    /// ユーザー定義タグテーブル
+    #[iden = "user_tags"]
+    UserTags,
     
     // --- インデックス処理用テンポラリテーブル ---
     TempScan,
     TempFileEntities,
     TempLocations,
-    TempFileTags,
+    TempBaseTags,
     TempItemEntities,
-    TempItemTags,
+    TempSystemTags,
+    TempUserTags,
 
     // --- エイリアス用 ---
     #[iden = "scan"]
@@ -40,30 +44,36 @@ pub enum Tbl {
     OriginAlias,
     #[iden = "t"]
     TagAlias,
+    #[iden = "u"]
+    UserTagAlias,
+    #[iden = "s"]
+    SysTagAlias,
 }
 
 /// 共通で使用されるカラム名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Col {
     Id,
+    ItemId,
+    FileId,
+    DeviceId,
     Path,
     ParentDir,
     Filename,
     Extension,
-    EntityId,
     TagType,
     TagValue,
-    Inode,
     Size,
     Mtime,
-    TargetId,
-    TargetKind,
+    Hash,
     Type,
     Value,
     Kind,
     Content,
-    ItemId,
     Rank,
+    Origin,
+    Name,
+    ItemKind,
 }
 
 /// システムタグの表示優先度（RANK）を定義する列挙型。

@@ -7,9 +7,10 @@ use duckdb::types::{ToSql, ToSqlOutput, Null};
 pub enum TargetTable {
     FileEntities,
     Locations,
-    FileTags,
+    BaseTags,
     ItemEntities,
-    ItemTags,
+    SystemTags,
+    UserTags,
 }
 
 /// データベースのカラム定義。

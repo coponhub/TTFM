@@ -26,11 +26,12 @@ impl<'a> IndexStore<'a> {
         Self { conn, db_dir }
     }
 
-    pub(crate) fn file_entities_path(&self) -> PathBuf { self.db_dir.join("file_entities.parquet") }
+    pub(crate) fn file_entities_path(&self) -> PathBuf { self.db_dir.join("entities.parquet") }
     pub(crate) fn locations_path(&self) -> PathBuf { self.db_dir.join("locations.parquet") }
-    pub(crate) fn file_tags_path(&self) -> PathBuf { self.db_dir.join("file_tags.parquet") }
-    pub(crate) fn item_entities_path(&self) -> PathBuf { self.db_dir.join("item_entities.parquet") }
-    pub(crate) fn item_tags_path(&self) -> PathBuf { self.db_dir.join("item_tags.parquet") }
+    pub(crate) fn base_tags_path(&self) -> PathBuf { self.db_dir.join("base_tags.parquet") }
+    pub(crate) fn item_entities_path(&self) -> PathBuf { self.db_dir.join("items.parquet") }
+    pub(crate) fn system_tags_path(&self) -> PathBuf { self.db_dir.join("system_tags.parquet") }
+    pub(crate) fn user_tags_path(&self) -> PathBuf { self.db_dir.join("user_tags.parquet") }
     pub(crate) fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
     pub(crate) fn save_parquet(&self, query: SelectStatement, path: &Path) -> Result<()> {
@@ -218,7 +219,7 @@ impl QueryHelper {
                 Self::parquet_query(loc_path),
                 Tbl::LocAlias,
                 Expr::col((Tbl::EntAlias, Col::Id))
-                    .eq(Expr::col((Tbl::LocAlias, Col::EntityId))),
+                    .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
             )
             .and_where(
                 Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, col_path))),
@@ -266,7 +267,7 @@ impl QueryHelper {
                 Self::parquet_query(loc_path),
                 Tbl::LocAlias,
                 Expr::col((Tbl::EntAlias, Col::Id))
-                    .eq(Expr::col((Tbl::LocAlias, Col::EntityId))),
+                    .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
             )
             .and_where(
                 Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, col_path))),
@@ -278,79 +279,91 @@ impl QueryHelper {
     fn build_all_tags_view_query(
         all_columns: &[ColumnDef],
         ents: &str,
-        file_tags: &str,
+        base_tags: &str,
         locs: &str,
         items: &str,
-        item_tags: &str,
+        system_tags: &str,
+        user_tags: &str,
     ) -> SelectStatement {
-        let mut base = Query::select();
-        base.column((Tbl::TagAlias, Col::EntityId))
-            .expr_as(Expr::val("file"), Alias::new("target_kind"))
-            .column((Tbl::EntAlias, Col::Rank))
-            .column((Tbl::TagAlias, Col::TagType))
-            .column((Tbl::TagAlias, Col::TagValue))
-            .from_subquery(Self::parquet_query(file_tags), Tbl::TagAlias)
+        // --- 1. Tag Sources ---
+        
+        // A. base_tags (file, system)
+        let mut base_q = Query::select();
+        base_q.column(Col::ItemId)
+            .expr_as(Expr::val("file"), Col::ItemKind)
+            .column(Col::Rank)
+            .expr_as(Expr::val("system"), Col::Origin)
+            .column(Col::TagType)
+            .column(Col::TagValue)
+            .from_subquery(Self::parquet_query(base_tags), Tbl::TagAlias)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(ents),
                 Tbl::EntAlias,
-                Expr::col((Tbl::TagAlias, Col::EntityId))
+                Expr::col((Tbl::TagAlias, Col::ItemId))
                     .eq(Expr::col((Tbl::EntAlias, Col::Id)))
             );
 
+        // B. locations (file, system)
         for cd in all_columns
             .iter()
             .filter(|c| c.target_table == TargetTable::Locations)
         {
             let mut sub = Query::select();
-            sub.column((Tbl::LocAlias, Col::EntityId))
-                .expr_as(Expr::val("file"), Alias::new("target_kind"))
-                .column((Tbl::EntAlias, Col::Rank))
-                .expr_as(Expr::val(cd.name.clone()), Alias::new("tag_type"))
+            sub.column(Col::ItemId)
+                .expr_as(Expr::val("file"), Col::ItemKind)
+                .column(Col::Rank)
+                .expr_as(Expr::val("system"), Col::Origin)
+                .expr_as(Expr::val(cd.name.clone()), Col::TagType)
                 .expr_as(
                     Expr::col((Tbl::LocAlias, Alias::new(&cd.name)))
                         .cast_as(Alias::new("VARCHAR")),
-                    Alias::new("tag_value"),
+                    Col::TagValue,
                 )
                 .from_subquery(Self::parquet_query(locs), Tbl::LocAlias)
                 .join_subquery(
                     JoinType::InnerJoin,
                     Self::parquet_query(ents),
                     Tbl::EntAlias,
-                    Expr::col((Tbl::LocAlias, Col::EntityId))
+                    Expr::col((Tbl::LocAlias, Col::ItemId))
                         .eq(Expr::col((Tbl::EntAlias, Col::Id)))
                 );
-            base.union(sea_query::UnionType::All, sub.to_owned());
+            base_q.union(sea_query::UnionType::All, sub.to_owned());
         }
 
+        // C. item_entities (item, system) - kind and content
         let mut items_type = Query::select();
         items_type
             .column(Col::Id)
-            .expr_as(Expr::val("item"), Alias::new("target_kind"))
+            .expr_as(Expr::val("item"), Col::ItemKind)
             .column(Col::Rank)
-            .expr_as(Expr::val("itemtype"), Alias::new("tag_type"))
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::val("itemtype"), Col::TagType)
             .column(Col::Kind)
             .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
-        base.union(sea_query::UnionType::All, items_type.to_owned());
+        base_q.union(sea_query::UnionType::All, items_type.to_owned());
 
         let mut items_content = Query::select();
         items_content
             .column(Col::Id)
-            .expr_as(Expr::val("item"), Alias::new("target_kind"))
+            .expr_as(Expr::val("item"), Col::ItemKind)
             .column(Col::Rank)
-            .expr_as(Expr::val("content"), Alias::new("tag_type"))
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::val("content"), Col::TagType)
             .column(Col::Content)
             .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
-        base.union(sea_query::UnionType::All, items_content.to_owned());
+        base_q.union(sea_query::UnionType::All, items_content.to_owned());
 
-        let mut itags = Query::select();
-        itags
-            .column((Tbl::TagAlias, Col::ItemId))
-            .expr_as(Expr::val("item"), Alias::new("target_kind"))
-            .column((Tbl::EntAlias, Col::Rank))
-            .column((Tbl::TagAlias, Col::TagType))
-            .column((Tbl::TagAlias, Col::TagValue))
-            .from_subquery(Self::parquet_query(item_tags), Tbl::TagAlias)
+        // D. system_tags (item, system)
+        let mut stags = Query::select();
+        stags
+            .column(Col::ItemId)
+            .expr_as(Expr::val("item"), Col::ItemKind)
+            .column(Col::Rank)
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::col(Col::Type), Col::TagType)
+            .expr_as(Expr::col(Col::Value), Col::TagValue)
+            .from_subquery(Self::parquet_query(system_tags), Tbl::TagAlias)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(items),
@@ -358,18 +371,127 @@ impl QueryHelper {
                 Expr::col((Tbl::TagAlias, Col::ItemId))
                     .eq(Expr::col((Tbl::EntAlias, Col::Id)))
             );
-        base.union(sea_query::UnionType::All, itags.to_owned());
+        base_q.union(sea_query::UnionType::All, stags.to_owned());
+
+        // E. user_tags (file or item, user)
+        let mut utags = Query::select();
+        utags
+            .column(Col::ItemId)
+            .expr_as(
+                CaseStatement::new()
+                    .case(Expr::col(Col::ItemId).gte(0), "file")
+                    .finally("item"),
+                Col::ItemKind
+            )
+            .expr_as(
+                Func::cust(DuckDbFunc::Coalesce).args([
+                    Expr::col((Tbl::EntAlias, Col::Rank)).into(),
+                    Expr::col((Alias::new("item_alias"), Col::Rank)).into(),
+                    Expr::val(0).into(),
+                ]),
+                Col::Rank
+            )
+            .expr_as(Expr::val("user"), Col::Origin)
+            .expr_as(Expr::col(Col::Type), Col::TagType)
+            .expr_as(Expr::col(Col::Value), Col::TagValue)
+            .from_subquery(Self::parquet_query(user_tags), Tbl::TagAlias)
+            .join_subquery(
+                JoinType::LeftJoin,
+                Self::parquet_query(ents),
+                Tbl::EntAlias,
+                Expr::col((Tbl::TagAlias, Col::ItemId))
+                    .eq(Expr::col((Tbl::EntAlias, Col::Id)))
+            )
+            .join_subquery(
+                JoinType::LeftJoin,
+                Self::parquet_query(items),
+                Alias::new("item_alias"),
+                Expr::col((Tbl::TagAlias, Col::ItemId))
+                    .eq(Expr::col((Alias::new("item_alias"), Col::Id)))
+            );
+        base_q.union(sea_query::UnionType::All, utags.to_owned());
+
+        // --- 2. Name Resolution ---
+        
+        // A base of all IDs to join names against
+        let mut all_ids = Query::select();
+        all_ids.column(Col::Id).from_subquery(Self::parquet_query(ents), Alias::new("e_all"));
+        all_ids.union(
+            sea_query::UnionType::Distinct, 
+            Query::select().column(Col::Id).from_subquery(Self::parquet_query(items), Alias::new("i_all")).to_owned()
+        );
+
+        let mut user_names = Query::select();
+        user_names
+            .column(Col::ItemId)
+            .expr_as(Expr::col(Col::Value), Col::Name)
+            .from_subquery(Self::parquet_query(user_tags), Tbl::TagAlias)
+            .and_where(Expr::col(Col::Type).eq("name"));
+
+        let mut file_names = Query::select();
+        file_names
+            .column(Col::ItemId)
+            .expr_as(Expr::col(Col::Filename), Col::Name)
+            .from_subquery(Self::parquet_query(locs), Tbl::LocAlias);
+
+        let mut item_names = Query::select();
+        item_names
+            .column(Col::Id)
+            .expr_as(Expr::col(Col::Content), Col::Name)
+            .from_subquery(Self::parquet_query(items), Tbl::EntAlias);
+
+        let mut all_names = Query::select();
+        all_names
+            .expr_as(
+                Func::cust(DuckDbFunc::Coalesce).args([
+                    Expr::col((Tbl::UserTagAlias, Col::Name)).into(),
+                    Expr::col((Tbl::LocAlias, Col::Name)).into(),
+                    Expr::col((Tbl::EntAlias, Col::Name)).into(),
+                ]),
+                Col::Name
+            )
+            .expr_as(Expr::col((Alias::new("ids"), Col::Id)), Col::ItemId)
+            .from_subquery(all_ids, Alias::new("ids"))
+            .join_subquery(
+                JoinType::LeftJoin,
+                user_names,
+                Tbl::UserTagAlias,
+                Expr::col((Alias::new("ids"), Col::Id)).eq(Expr::col((Tbl::UserTagAlias, Col::ItemId)))
+            )
+            .join_subquery(
+                JoinType::LeftJoin,
+                file_names,
+                Tbl::LocAlias,
+                Expr::col((Alias::new("ids"), Col::Id)).eq(Expr::col((Tbl::LocAlias, Col::ItemId)))
+            )
+            .join_subquery(
+                JoinType::LeftJoin,
+                item_names,
+                Tbl::EntAlias,
+                Expr::col((Alias::new("ids"), Col::Id)).eq(Expr::col((Tbl::EntAlias, Col::Id)))
+            );
+
+        // --- 3. Final View Assembly ---
 
         Query::select()
-            .expr_as(Expr::col(Alias::new("entity_id")), Alias::new("target_id"))
-            .column(Alias::new("target_kind"))
-            .column(Col::Rank)
-            .expr_as(Expr::col(Alias::new("tag_type")), Alias::new("type"))
-            .expr_as(Expr::col(Alias::new("tag_value")), Alias::new("value"))
-            .from_subquery(base.to_owned(), Alias::new("union_all_tags"))
+            .column((Tbl::TagAlias, Col::ItemId))
+            .column((Tbl::TagAlias, Col::ItemKind))
+            .column((Tbl::TagAlias, Col::Rank))
+            .column((Tbl::TagAlias, Col::Origin))
+            .expr_as(Expr::col((Tbl::TagAlias, Col::TagType)), Col::Type)
+            .expr_as(Expr::col((Tbl::TagAlias, Col::TagValue)), Col::Value)
+            .column((Alias::new("names"), Col::Name))
+            .from_subquery(base_q, Tbl::TagAlias)
+            .join_subquery(
+                JoinType::LeftJoin,
+                all_names,
+                Alias::new("names"),
+                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Alias::new("names"), Col::ItemId)))
+            )
             .to_owned()
     }
 }
+
 
 // ========================================================
 // 3. Main Indexer
@@ -427,8 +549,8 @@ impl<'a> Indexer<'a> {
             &all_cols,
         )?;
         self.ensure_empty_parquet_if_missing(
-            &self.store.file_tags_path(),
-            TargetTable::FileTags,
+            &self.store.base_tags_path(),
+            TargetTable::BaseTags,
             &all_cols,
         )?;
         self.ensure_empty_parquet_if_missing(
@@ -437,18 +559,24 @@ impl<'a> Indexer<'a> {
             &all_cols,
         )?;
         self.ensure_empty_parquet_if_missing(
-            &self.store.item_tags_path(),
-            TargetTable::ItemTags,
+            &self.store.system_tags_path(),
+            TargetTable::SystemTags,
+            &all_cols,
+        )?;
+        self.ensure_empty_parquet_if_missing(
+            &self.store.user_tags_path(),
+            TargetTable::UserTags,
             &all_cols,
         )?;
 
         let q = QueryHelper::build_all_tags_view_query(
             &all_cols,
             &self.store.file_entities_path().to_string_lossy(),
-            &self.store.file_tags_path().to_string_lossy(),
+            &self.store.base_tags_path().to_string_lossy(),
             &self.store.locations_path().to_string_lossy(),
             &self.store.item_entities_path().to_string_lossy(),
-            &self.store.item_tags_path().to_string_lossy(),
+            &self.store.system_tags_path().to_string_lossy(),
+            &self.store.user_tags_path().to_string_lossy(),
         );
         self.store.create_or_replace_view("all_tags", q)?;
         Ok(())
@@ -684,14 +812,14 @@ impl<'a> Indexer<'a> {
             .into_par_iter()
             .enumerate()
             .map(|(i, entry)| {
-                let entity_id = max_id + (i as i64) + 1;
+                let item_id = max_id + (i as i64) + 1;
                 let values = self.registry.process_file(Path::new(&entry.path.value))?;
                 let mut er = DynamicRow {
-                    id: entity_id,
+                    id: item_id,
                     values: vec![TagValue::BigInt(0)],
                 };
                 let mut lr = DynamicRow {
-                    id: entity_id,
+                    id: item_id,
                     values: Vec::new(),
                 };
                 let mut tags = Vec::new();
@@ -699,11 +827,11 @@ impl<'a> Indexer<'a> {
                     match col_def.target_table {
                         TargetTable::FileEntities => er.values.push(val),
                         TargetTable::Locations => lr.values.push(val),
-                        TargetTable::FileTags => {
+                        TargetTable::BaseTags => {
                             if let Some(s) = val.into_string() {
                                 if !s.is_empty() {
                                     tags.push(TagRow {
-                                        entity_id,
+                                        item_id,
                                         tag_type: col_def.name.clone(),
                                         tag_value: s,
                                     });
@@ -766,7 +894,7 @@ impl<'a> Indexer<'a> {
             )
             .to_string(PostgresQueryBuilder);
         let sql_tags = self
-            .build_table_schema(TargetTable::FileTags, Tbl::TempFileTags, &all_cols)
+            .build_table_schema(TargetTable::BaseTags, Tbl::TempBaseTags, &all_cols)
             .to_string(PostgresQueryBuilder);
 
         self.conn
@@ -775,7 +903,7 @@ impl<'a> Indexer<'a> {
         {
             let mut app_ent = self.conn.appender("temp_file_entities")?;
             let mut app_loc = self.conn.appender("temp_locations")?;
-            let mut app_tag = self.conn.appender("temp_file_tags")?;
+            let mut app_tag = self.conn.appender("temp_base_tags")?;
             for res in results {
                 let mut er = vec![&res.entity_row.id as &dyn ToSql];
                 er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
@@ -787,7 +915,7 @@ impl<'a> Indexer<'a> {
 
                 for t in res.tags {
                     app_tag.append_row([
-                        &t.entity_id as &dyn ToSql,
+                        &t.item_id as &dyn ToSql,
                         &t.tag_type,
                         &t.tag_value,
                     ])?;
@@ -813,14 +941,14 @@ impl<'a> Indexer<'a> {
             if unchanged_ids.is_empty() {
                 Some(Condition::all().add(Expr::val(1).eq(0)))
             } else {
-                Some(Condition::all().add(Expr::col(Col::EntityId).is_in(unchanged_ids)))
+                Some(Condition::all().add(Expr::col(Col::ItemId).is_in(unchanged_ids)))
             },
         )?;
         self.store.merge_and_save(
-            &self.store.file_tags_path(),
-            Tbl::TempFileTags,
+            &self.store.base_tags_path(),
+            Tbl::TempBaseTags,
             (!deleted_ids.is_empty()).then(|| {
-                Condition::all().add(Expr::col(Col::EntityId).is_not_in(deleted_ids))
+                Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids))
             }),
         )?;
 
@@ -836,7 +964,7 @@ impl<'a> Indexer<'a> {
             .table(Alias::new("temp_locations"))
             .to_string(PostgresQueryBuilder);
         let drop_tags = Table::drop()
-            .table(Tbl::TempFileTags)
+            .table(Tbl::TempBaseTags)
             .to_string(PostgresQueryBuilder);
         self.conn
             .execute_batch(&format!("{};{};{}", drop_ents, drop_locs, drop_tags))?;
@@ -848,18 +976,18 @@ impl<'a> Indexer<'a> {
     /// システムItemを一括登録します。
     pub fn update_system_items(&self) -> Result<()> {
         let items_path = self.store.item_entities_path();
-        let item_tags_path = self.store.item_tags_path();
+        let system_tags_path = self.store.system_tags_path();
         let items_str_buf = items_path.to_string_lossy();
-        let itags_str_buf = item_tags_path.to_string_lossy();
+        let stags_str_buf = system_tags_path.to_string_lossy();
         let items_str = items_str_buf.as_ref();
-        let itags_str = itags_str_buf.as_ref();
+        let stags_str = stags_str_buf.as_ref();
 
-        // 1. 今回の更新分（temp_file_tags, temp_locations）からタグ情報を抽出
+        // 1. 今回の更新分（temp_base_tags, temp_locations）からタグ情報を抽出
         let mut source_q = Query::select();
         source_q
             .expr_as(Expr::col(Col::TagType), Col::Type)
             .expr_as(Expr::col(Col::TagValue), Col::Value)
-            .from(Tbl::TempFileTags);
+            .from(Tbl::TempBaseTags);
 
         let all_cols = self.registry.get_all_columns();
         for col in all_cols.iter().filter(|c| {
@@ -947,7 +1075,7 @@ impl<'a> Indexer<'a> {
         let start_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         let tmp_items = format!("{}.tmp", items_str);
-        let tmp_itags = format!("{}.tmp", itags_str);
+        let tmp_stags = format!("{}.tmp", stags_str);
 
         let inner_case = CaseStatement::new()
             .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
@@ -989,19 +1117,19 @@ impl<'a> Indexer<'a> {
         );
         self.store.save_parquet(update_items_q, Path::new(&tmp_items))?;
 
-        // item_tags 更新
-        let mut update_tags_q = QueryHelper::parquet_query(itags_str);
+        // system_tags 更新
+        let mut update_tags_q = QueryHelper::parquet_query(stags_str);
         let mut new_tags_q = Query::select();
         new_tags_q
             .column(Col::Id)
-            .expr_as(Expr::val("origin"), Col::TagType)
-            .expr_as(Expr::val("system"), Col::TagValue)
+            .expr_as(Expr::val("origin"), Col::Type)
+            .expr_as(Expr::val("system"), Col::Value)
             .from(Alias::new("new_items_with_id"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_q.to_owned());
-        self.store.save_parquet(update_tags_q, Path::new(&tmp_itags))?;
+        self.store.save_parquet(update_tags_q, Path::new(&tmp_stags))?;
 
         std::fs::rename(&tmp_items, &items_path)?;
-        std::fs::rename(&tmp_itags, &item_tags_path)?;
+        std::fs::rename(&tmp_stags, &system_tags_path)?;
 
         self.store.drop_table(Alias::new("new_items_raw"))?;
         self.store.drop_table(Alias::new("new_items_with_id"))?;
@@ -1034,7 +1162,7 @@ impl<'a> Indexer<'a> {
                 }
             }
             TargetTable::Locations => {
-                create.col(SeaColumnDef::new(Col::EntityId).big_integer());
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
                 for c in columns
                     .iter()
                     .filter(|c| c.target_table == TargetTable::Locations)
@@ -1048,9 +1176,9 @@ impl<'a> Indexer<'a> {
                     create.col(&mut def);
                 }
             }
-            TargetTable::FileTags => {
+            TargetTable::BaseTags => {
                 create
-                    .col(SeaColumnDef::new(Col::EntityId).big_integer())
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::TagType).string())
                     .col(SeaColumnDef::new(Col::TagValue).string());
             }
@@ -1061,11 +1189,11 @@ impl<'a> Indexer<'a> {
                     .col(SeaColumnDef::new(Col::Kind).string())
                     .col(SeaColumnDef::new(Col::Content).string());
             }
-            TargetTable::ItemTags => {
+            TargetTable::SystemTags | TargetTable::UserTags => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::TagType).string())
-                    .col(SeaColumnDef::new(Col::TagValue).string());
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Value).string());
             }
         }
         create
@@ -1092,7 +1220,7 @@ pub struct DynamicRow {
 
 #[derive(Debug, PartialEq)]
 pub struct TagRow {
-    pub entity_id: i64,
+    pub item_id: i64,
     pub tag_type: String,
     pub tag_value: String,
 }
@@ -1111,7 +1239,7 @@ mod tests {
         let registry = FunctionRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir.clone());
         indexer.initialize_tables().unwrap();
-        assert!(db_dir.join("file_entities.parquet").exists());
+        assert!(db_dir.join("entities.parquet").exists());
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
             .from(Alias::new("all_tags"))
@@ -1169,11 +1297,11 @@ mod tests {
         assert!(rows.iter().any(|(k, c)| k == "typedtag" && c == "extension:txt"));
 
         // 2. それらのItemに origin:system タグがあるか確認
-        let item_tags_path_buf = fm.item_tags_path();
-        let item_tags_path = item_tags_path_buf.to_string_lossy();
+        let system_tags_path_buf = fm.system_tags_path();
+        let system_tags_path = system_tags_path_buf.to_string_lossy();
         let query_tags = Query::select()
             .expr(Expr::cust("COUNT(*)"))
-            .from_subquery(QueryHelper::parquet_query(&item_tags_path), Tbl::TagAlias)
+            .from_subquery(QueryHelper::parquet_query(&system_tags_path), Tbl::TagAlias)
             .join_subquery(
                 JoinType::InnerJoin,
                 QueryHelper::parquet_query(&items_path),
@@ -1181,8 +1309,8 @@ mod tests {
                 Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Tbl::EntAlias, Col::Id))),
             )
             .and_where(Expr::col((Tbl::EntAlias, Col::Content)).eq("extension:txt"))
-            .and_where(Expr::col((Tbl::TagAlias, Col::TagType)).eq("origin"))
-            .and_where(Expr::col((Tbl::TagAlias, Col::TagValue)).eq("system"))
+            .and_where(Expr::col((Tbl::TagAlias, Col::Type)).eq("origin"))
+            .and_where(Expr::col((Tbl::TagAlias, Col::Value)).eq("system"))
             .to_string(PostgresQueryBuilder);
 
         let count: i64 = fm.conn
@@ -1264,6 +1392,39 @@ mod tests {
 
         let results = fm.search("filename:project_alpha.pdf").unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_all_tags_view_consistency() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // Noteを作成してタグを付ける
+        let note_id = fm.add_item("note", "Consistency Test Memo").unwrap();
+        fm.tag_item(&note_id.to_string(), "testtag:true").unwrap();
+
+        // all_tags ビューを直接クエリして不整合をチェック
+        // 同じIDなのに異なるNameまたは異なるRankを持つグループがあるか探す
+        let sql = "
+            SELECT item_id 
+            FROM all_tags 
+            GROUP BY item_id 
+            HAVING COUNT(DISTINCT name) > 1 OR COUNT(DISTINCT rank) > 1
+        ";
+        
+        let mut stmt = fm.conn.prepare(sql).unwrap();
+        let inconsistent_ids: Vec<i64> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(
+            inconsistent_ids.is_empty(), 
+            "Inconsistency found in all_tags view for IDs: {:?}. Each item must have exactly one unique Name and Rank across all its tag rows.", 
+            inconsistent_ids
+        );
     }
 }
                         
