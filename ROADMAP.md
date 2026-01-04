@@ -76,6 +76,13 @@ Transition to a robust schema that separates system-generated metadata from user
 
 - [ ] **Move Detection**: Detect and update `mv` operations by tracking `file_id`.
 
+### 7. File Operations
+Directly interact with files from the CLI.
+- [ ] **Feature**: Support `ttfm open <QUERY>`.
+    - Opens the file(s) matching the search query using the system's default application.
+    - If the argument does not contain a colon (`:`), it is treated as a relative path to a local file rather than a query.
+    - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
+
 ---
 
 ## Technical Debt / Refactoring
