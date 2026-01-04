@@ -371,16 +371,7 @@ impl QueryHelper {
             base_q.union(sea_query::UnionType::All, sub.to_owned());
         }
 
-        // C. item_entities (itemtype and content)
-        let mut items_type = Query::select();
-        items_type
-            .column(Col::Id)
-            .expr_as(Expr::val("system"), Col::Origin)
-            .expr_as(Expr::val("itemtype"), Col::Type)
-            .expr_as(Expr::col(Col::ItemKind), Col::Label)
-            .from_subquery(Self::parquet_query(items), Alias::new("it1"));
-        base_q.union(sea_query::UnionType::All, items_type.to_owned());
-
+        // C. item_entities (content)
         let mut items_content = Query::select();
         items_content
             .column(Col::Id)
@@ -1277,8 +1268,8 @@ mod tests {
         let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
         indexer.run(root, None::<&fn(usize)>, false).unwrap();
 
-        // 2. クエリ実行: itemtype:type | -extension:rs
-        let query = "itemtype:type | -extension:rs";
+        // 2. クエリ実行: item_kind:type | -extension:rs
+        let query = "item_kind:type | -extension:rs";
         let results = fm.search(query).unwrap();
 
         let mut found_type_item = false;
@@ -1286,8 +1277,7 @@ mod tests {
         let mut found_rs_file = false;
 
         for r in results {
-            if r.item_kind != "file" && 
-               r.tags.iter().any(|(t, v)| t == "itemtype" && v == "type") {
+            if r.item_kind != "file" && r.item_kind == "type" {
                 found_type_item = true;
             }
             if r.item_kind == "file" {

@@ -208,7 +208,7 @@ impl FunctionRegistry {
                 q
             }
             QueryNode::TypedTag(tt) => {
-                // 特別なロジックが必要なタグ（directoryなど）の処理
+                // 特別なロジックが必要なタグの処理
                 if tt.tagtype.0 == "directory" {
                     let mut q_name = Query::select();
                     q_name
@@ -226,6 +226,16 @@ impl FunctionRegistry {
 
                     q_name.union(sea_query::UnionType::Intersect, q_dir);
                     return q_name;
+                }
+
+                // item_kind はカラムを直接検索
+                if tt.tagtype.0 == "item_kind" || tt.tagtype.0 == "itemtype" {
+                    let mut q = Query::select();
+                    q.column(Col::ItemId)
+                        .distinct()
+                        .from(Alias::new(view_name))
+                        .and_where(Expr::col(Col::ItemKind).eq(tt.label.0.clone()));
+                    return q;
                 }
 
                 let mut q = Query::select();
