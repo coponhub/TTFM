@@ -26,12 +26,11 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
 
 ## Upcoming Features & Improvements
 
-### 1. User-Defined Tags (Metadata)
-Enable users to attach arbitrary key-value metadata to files.
-- [ ] **CLI Command**: Add `tag` command (e.g., `ttfm tag <FILE> key:value`).
-- [ ] **Storage**: Utilize the existing `tags` MAP column in Parquet.
-- [ ] **Re-indexing Strategy**: Update specific rows or merge data without full re-indexing.
-- [ ] **Search**: Enable searching user tags (e.g., `project:alpha`).
+### 1. User-Defined Tags & Persistence
+Enable users to attach persistent metadata to files and items, protected from re-indexing.
+- [ ] **Table Implementation**: Create `user_tags` table for persistent storage (item_id, type, value).
+- [ ] **CLI Command**: Add `tag` command (e.g., `ttfm tag <FILE> project:alpha`).
+- [ ] **Search**: Enable searching user tags (e.g., `project:alpha`) and filtering by origin (`origin:user`).
 
 ### 2. Search Result Control
 Improve flexibility in viewing search results.
@@ -55,13 +54,23 @@ Create a desktop interface for ease of use.
 - [ ] **Incremental Indexing**: Detect changes and update only modified files (watch mode).
 - [ ] **Content Indexing**: (Optional/Future) Index text content within files.
 
-### 6. Entity-Centric Management (v0.2.0)
-Transition to a normalized schema to track file identities and movements.
-- [ ] **Schema Refactoring**: Implement 3-table structure (`entities`, `locations`, `tags`).
-- [ ] **Physical Identification**: Track files via `inode` and `device_id`.
-- [ ] **Incremental Sync**: Skip unchanged files by comparing `mtime` and `inode`.
-- [ ] **Move Detection**: Detect and update `mv` operations without losing tags.
-- [ ] **Content Hashing**: Implement SHA-256 (or BLAKE3) for deduplication and verification.
+### 6. Schema Redesign & Origin Management (v0.2.0)
+Transition to a robust schema that separates system-generated metadata from user-defined tags.
+
+- [ ] **Home Directory Support**:
+    - [ ] Switch storage/config location to `~/.ttfm` (Linux) / `%USERPROFILE%\.ttfm` (Windows).
+    - [ ] Remove current directory dependency.
+
+- [ ] **Database Schema Migration**:
+    - [ ] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
+    - [ ] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
+    - [ ] Implement `Unified View (all_tags)` with `name` and `origin` resolution logic.
+
+- [ ] **Item Name Abstraction**:
+    - [ ] Implement `name` tag support in query parser and search results.
+    - [ ] Update UI/CLI to display resolved names instead of raw filenames by default.
+
+- [ ] **Move Detection**: Detect and update `mv` operations by tracking `file_id`.
 
 ---
 
