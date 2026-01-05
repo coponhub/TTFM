@@ -371,8 +371,7 @@ impl QueryHelper {
             base_q.union(sea_query::UnionType::All, sub.to_owned());
         }
 
-        // C. item_entities (Generic/Self Tags)
-        // 1. content tag (for all items)
+        // C. item_entities (content)
         let mut items_content = Query::select();
         items_content
             .column(Col::ItemId)
@@ -381,50 +380,6 @@ impl QueryHelper {
             .expr_as(Expr::col(Col::Content), Col::Label)
             .from_subquery(Self::parquet_query(items), Alias::new("it2"));
         base_q.union(sea_query::UnionType::All, items_content.to_owned());
-
-        // 2. type: type tag (for item_kind = 'type')
-        // All type definitions belong to the 'type' category.
-        let mut items_type_tag = Query::select();
-        items_type_tag
-            .column(Col::ItemId)
-            .expr_as(Expr::val("system"), Col::Origin)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(Expr::val("type"), Col::Label)
-            .from_subquery(Self::parquet_query(items), Alias::new("it3"))
-            .and_where(Expr::col(Col::ItemKind).eq("type"));
-        base_q.union(sea_query::UnionType::All, items_type_tag.to_owned());
-
-        // 3. Virtual tags for typedtags (e.g., content 'extension:rs' -> type:extension and extension:rs)
-        // type: [prefix]
-        let mut items_tt_type = Query::select();
-        items_tt_type
-            .column(Col::ItemId)
-            .expr_as(Expr::val("system"), Col::Origin)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                Expr::cust_with_exprs("split_part($1, ':', 1)", [Expr::col(Col::Content).into()]),
-                Col::Label
-            )
-            .from_subquery(Self::parquet_query(items), Alias::new("it4"))
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
-        base_q.union(sea_query::UnionType::All, items_tt_type.to_owned());
-
-        // [prefix]: [suffix]
-        let mut items_tt_val = Query::select();
-        items_tt_val
-            .column(Col::ItemId)
-            .expr_as(Expr::val("system"), Col::Origin)
-            .expr_as(
-                Expr::cust_with_exprs("split_part($1, ':', 1)", [Expr::col(Col::Content).into()]),
-                Col::Type
-            )
-            .expr_as(
-                Expr::cust_with_exprs("split_part($1, ':', 2)", [Expr::col(Col::Content).into()]),
-                Col::Label
-            )
-            .from_subquery(Self::parquet_query(items), Alias::new("it5"))
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
-        base_q.union(sea_query::UnionType::All, items_tt_val.to_owned());
 
         // D. system_tags
         let mut stags = Query::select();
@@ -508,10 +463,6 @@ impl<'a> Indexer<'a> {
         let diff = self.diff_phase()?;
         let (results, moved) = self.tagging_phase(diff.to_tag, diff.moved)?;
         self.merge_phase(results, moved, diff.deleted_ids, diff.unchanged_ids)?;
-        
-        // ビューを最新の Parquet ファイルに基づいて再構築
-        self.initialize_tables()?;
-
         Ok(count)
     }
 
