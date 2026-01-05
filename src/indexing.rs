@@ -935,17 +935,22 @@ impl<'a> Indexer<'a> {
             source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
         }
 
-        // 2. 登録候補 (item_kind, content) の生成
+        // 2. 登録候補 (item_kind, content, type, label) の生成
+        // content は結合済み、type/label はメタデータ用に保持
         let mut cand_q = Query::select();
         cand_q
             .expr_as(Expr::val("type"), Col::ItemKind)
             .expr_as(Expr::col(Col::Type), Col::Content)
+            .column(Col::Type)
+            .expr_as(Expr::cust("NULL"), Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
 
         let mut label_q = Query::select();
         label_q
             .expr_as(Expr::val("label"), Col::ItemKind)
             .expr_as(Expr::col(Col::Label), Col::Content)
+            .expr_as(Expr::cust("NULL"), Col::Type)
+            .column(Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
         cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
 
@@ -958,6 +963,8 @@ impl<'a> Indexer<'a> {
                 ]),
                 Col::Content,
             )
+            .column(Col::Type)
+            .column(Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
         cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
 
@@ -966,6 +973,8 @@ impl<'a> Indexer<'a> {
         new_items_q
             .column((Alias::new("c"), Col::ItemKind))
             .column((Alias::new("c"), Col::Content))
+            .column((Alias::new("c"), Col::Type))
+            .column((Alias::new("c"), Col::Label))
             .distinct()
             .from_subquery(cand_q, Alias::new("c"))
             .join_subquery(
@@ -980,7 +989,10 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::EntAlias, Col::ItemId)).is_null());
 
-        self.store.create_temp_table_as(Alias::new("new_items_raw"), new_items_q)?;
+        self.store.create_temp_table_as(
+            Alias::new("new_items_raw"), 
+            new_items_q
+        )?;
 
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
@@ -1009,14 +1021,22 @@ impl<'a> Indexer<'a> {
         let tmp_stags = format!("{}.tmp", stags_str);
 
         let inner_case = CaseStatement::new()
-            .case(Expr::col(Col::Content).eq("name"), i64::from(SystemRank::Name))
-            .case(Expr::col(Col::Content).eq("type_from_ext"), i64::from(SystemRank::TypeFromExt))
-            .case(Expr::col(Col::Content).eq("size_str"), i64::from(SystemRank::SizeStr))
-            .case(Expr::col(Col::Content).eq("modified_str"), i64::from(SystemRank::ModifiedStr))
-            .case(Expr::col(Col::Content).eq("parentdir"), i64::from(SystemRank::ParentDir))
-            .case(Expr::col(Col::Content).eq("kind"), i64::from(SystemRank::ItemKind))
-            .case(Expr::col(Col::Content).eq("content"), i64::from(SystemRank::Content))
-            .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
+            .case(Expr::col(Col::Content).eq("name"), 
+                  i64::from(SystemRank::Name))
+            .case(Expr::col(Col::Content).eq("type_from_ext"), 
+                  i64::from(SystemRank::TypeFromExt))
+            .case(Expr::col(Col::Content).eq("size_str"), 
+                  i64::from(SystemRank::SizeStr))
+            .case(Expr::col(Col::Content).eq("modified_str"), 
+                  i64::from(SystemRank::ModifiedStr))
+            .case(Expr::col(Col::Content).eq("parentdir"), 
+                  i64::from(SystemRank::ParentDir))
+            .case(Expr::col(Col::Content).eq("kind"), 
+                  i64::from(SystemRank::ItemKind))
+            .case(Expr::col(Col::Content).eq("content"), 
+                  i64::from(SystemRank::Content))
+            .case(Expr::col(Col::Content).eq("filename"), 
+                  i64::from(SystemRank::Filename))
             .finally(i64::from(SystemRank::Other));
 
         let rank_case = CaseStatement::new()
@@ -1034,17 +1054,25 @@ impl<'a> Indexer<'a> {
             .expr_as(rank_case, Col::Rank)
             .column(Col::ItemKind)
             .column(Col::Content)
+            .column(Col::Type)
+            .column(Col::Label)
             .from(Alias::new("new_items_raw"))
             .to_owned();
 
-        self.store.create_temp_table_as(Alias::new("new_items_with_id"), new_items_id_q)?;
+        self.store.create_temp_table_as(
+            Alias::new("new_items_with_id"), 
+            new_items_id_q
+        )?;
 
         // item_entities 更新
         let mut update_items_q = QueryHelper::parquet_query(items_str);
         update_items_q.union(
             sea_query::UnionType::All,
             Query::select()
-                .expr(Expr::cust("*"))
+                .column(Col::ItemId)
+                .column(Col::Rank)
+                .column(Col::ItemKind)
+                .column(Col::Content)
                 .from(Alias::new("new_items_with_id"))
                 .to_owned()
         );
@@ -1060,13 +1088,8 @@ impl<'a> Indexer<'a> {
             .expr_as(Expr::val("type"), Col::Type)
             .expr_as(
                 CaseStatement::new()
-                    .case(
-                        Expr::col(Col::ItemKind).eq("typedtag"),
-                        Expr::cust_with_exprs(
-                            "split_part($1, ':', 1)",
-                            [Expr::col(Col::Content).into()]
-                        )
-                    )
+                    .case(Expr::col(Col::ItemKind).eq("typedtag"), 
+                          Expr::col(Col::Type))
                     .finally(Expr::col(Col::ItemKind)),
                 Col::Label
             )
@@ -1078,13 +1101,7 @@ impl<'a> Indexer<'a> {
         new_tags_label
             .column(Col::ItemId)
             .expr_as(Expr::val("label"), Col::Type)
-            .expr_as(
-                Expr::cust_with_exprs(
-                    "split_part($1, ':', 2)",
-                    [Expr::col(Col::Content).into()]
-                ),
-                Col::Label
-            )
+            .column(Col::Label)
             .from(Alias::new("new_items_with_id"))
             .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_label);
