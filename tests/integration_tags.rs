@@ -70,9 +70,40 @@ fn test_integration_note_tagging() {
 
     // 3. 検索 (Noteがヒットすることを確認)
     // Note以外のアイテム（タグ定義など）を除外するため、item_kind:note で絞り込む
-    let results = fm.search("category:meeting & item_kind:note").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, note_id);
-    assert_eq!(results[0].item_kind, "note");
-    assert_eq!(results[0].primary_value().unwrap(), "Meeting Memo");
-}
+        let results = fm.search("category:meeting & item_kind:note").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, note_id);
+        assert_eq!(results[0].item_kind, "note");
+        assert_eq!(results[0].primary_value().unwrap(), "Meeting Memo");
+    }
+    
+    #[test]
+    fn test_system_item_metadata_integration() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    
+        // 1. 拡張子ありとなしのファイルを準備
+        File::create(dir.path().join("test.rs")).unwrap();
+        File::create(dir.path().join("no_ext")).unwrap();
+        
+        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
+    
+        // 2. 拡張子なしファイルによって 'extension:' タグが作られていないことを確認
+        // type:extension 検索に 'extension:' という文字列が含まれないことをチェック
+        let ext_list = fm.search("type:extension").unwrap();
+        assert!(!ext_list.iter().any(|r| r.name == "extension:"), 
+            "Empty extension tag should not exist");
+    
+        // 3. 'extension:rs' という typedtag が 'label:rs' タグを持っていることを確認
+        // item_kind:typedtag と label:rs の AND 検索でヒットするはず
+        let results = fm.search("item_kind:typedtag & label:rs").unwrap();
+        assert!(results.iter().any(|r| r.name == "extension:rs"), 
+            "typedtag should have label metadata tag");
+        
+        // 4. 'label:rs' 自体は冗長な 'label:rs' タグを持っていないことを確認
+        let self_label = fm.search("item_kind:label & label:rs").unwrap();
+        assert!(self_label.is_empty(), 
+            "label item should not have self-referential tag");
+    }
+    

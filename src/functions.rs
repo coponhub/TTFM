@@ -1149,6 +1149,21 @@ mod tests {
     }
 
     #[test]
+    fn test_extension_tagger_logic() {
+        let tagger = ExtensionTagger;
+
+        // 1. 拡張子がある場合
+        let path = Path::new("test.rs");
+        let values = tagger.tag_file(path).unwrap();
+        assert_eq!(values[0], TagValue::Text("rs".to_string()));
+
+        // 2. 拡張子がない場合 (今回の修正ポイント)
+        let path_no_ext = Path::new("no_extension");
+        let values = tagger.tag_file(path_no_ext).unwrap();
+        assert_eq!(values[0], TagValue::Null);
+    }
+
+    #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
         let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
