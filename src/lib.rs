@@ -11,7 +11,6 @@ use sea_query::{
     Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
-use crate::indexing::QueryHelper;
 use crate::util::{ExecuteSql, ParquetExt, IdenExt, SelectExt};
 
 pub mod types;
@@ -564,7 +563,7 @@ impl FileManager {
             let query_path = Query::select()
                 .column(Col::ItemId)
                 .from_subquery(
-                    QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
+                    util::parquet_query(&self.locations_path().to_string_lossy()),
                     Tbl::Locations,
                 )
                 .and_where(Expr::col(Col::Path).eq(item))
@@ -657,7 +656,7 @@ impl FileManager {
             .column(Col::Content)
             .column(Col::Rank)
             .from_subquery(
-                QueryHelper::parquet_query(&path.to_string_lossy()),
+                util::parquet_query(&path.to_string_lossy()),
                 Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))
@@ -679,7 +678,7 @@ impl FileManager {
         let query = Query::select()
             .column(Col::ItemId)
             .from_subquery(
-                QueryHelper::parquet_query(&path.to_string_lossy()),
+                util::parquet_query(&path.to_string_lossy()),
                 Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq(kind))
@@ -860,7 +859,7 @@ mod tests {
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
+                util::parquet_query(&fm.user_tags_path().to_string_lossy()),
                 Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(note_id))
@@ -890,7 +889,7 @@ mod tests {
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
+                util::parquet_query(&fm.user_tags_path().to_string_lossy()),
                 Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(item_id))
@@ -930,7 +929,7 @@ mod tests {
             let path = fm.item_entities_path();
             let query = Query::select()
                 .column(Col::Rank)
-                .from_subquery(QueryHelper::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
+                .from_subquery(util::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
                 .and_where(Expr::col(Col::ItemId).eq(r.id))
                 .to_string(PostgresQueryBuilder);
             
