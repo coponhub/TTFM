@@ -182,6 +182,167 @@ impl QueryHelper {
             .to_owned()
     }
 
+    fn rank_logic() -> CaseStatement {
+        let inner_case = CaseStatement::new()
+            .case(Expr::col(Col::Content).eq("name"), 
+                  i64::from(SystemRank::Name))
+            .case(Expr::col(Col::Content).eq("type_from_ext"), 
+                  i64::from(SystemRank::TypeFromExt))
+            .case(Expr::col(Col::Content).eq("size_str"), 
+                  i64::from(SystemRank::SizeStr))
+            .case(Expr::col(Col::Content).eq("modified_str"), 
+                  i64::from(SystemRank::ModifiedStr))
+            .case(Expr::col(Col::Content).eq("parentdir"), 
+                  i64::from(SystemRank::ParentDir))
+            .case(Expr::col(Col::Content).eq("kind"), 
+                  i64::from(SystemRank::ItemKind))
+            .case(Expr::col(Col::Content).eq("content"), 
+                  i64::from(SystemRank::Content))
+            .case(Expr::col(Col::Content).eq("filename"), 
+                  i64::from(SystemRank::Filename))
+            .finally(i64::from(SystemRank::Other));
+
+        CaseStatement::new()
+            .case(Expr::col(Col::ItemKind).eq("type"), inner_case)
+            .finally(0)
+    }
+
+    /// 差分データから (type, label) のペアを抽出します。
+    fn diff_tags(all_cols: &[ColumnDef]) -> SelectStatement {
+        let mut source_q = Query::select();
+        source_q
+            .expr_as(Expr::col(Col::Type), Col::Type)
+            .expr_as(Expr::col(Col::Label), Col::Label)
+            .from(Tbl::BaseTagsDiff);
+
+        for col in all_cols.iter().filter(|c| {
+            c.target_table == TargetTable::Locations
+        }) {
+            let mut sub = Query::select();
+            let col_iden = Col::from_str(&col.name)
+                .map(|c| c.into_iden())
+                .unwrap_or_else(|| Alias::new(col.name.clone()).into_iden());
+            sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
+                .expr_as(
+                    Expr::col(col_iden.clone()).cast_as(SqlType::VARCHAR),
+                    Col::Label,
+                )
+                .from(Tbl::LocationsDiff)
+                .and_where(Expr::col(col_iden).is_not_null());
+            source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
+        }
+        source_q
+    }
+
+    /// タグのペアから、Itemの3つのバリアント (type, label, typedtag) を生成します。
+    fn expand_variants(tags: SelectStatement) -> SelectStatement {
+        let mut cand_q = Query::select();
+        cand_q
+            .expr_as(Expr::val("type"), Col::ItemKind)
+            .expr_as(Expr::col(Col::Type), Col::Content)
+            .column(Col::Type)
+            .expr_as(Expr::cust("NULL"), Col::Label)
+            .from_subquery(tags.clone(), Tbl::Diff);
+
+        let mut label_q = Query::select();
+        label_q
+            .expr_as(Expr::val("label"), Col::ItemKind)
+            .expr_as(Expr::col(Col::Label), Col::Content)
+            .expr_as(Expr::cust("NULL"), Col::Type)
+            .column(Col::Label)
+            .from_subquery(tags.clone(), Tbl::Diff);
+        cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
+
+        let mut tt_q = Query::select();
+        tt_q.expr_as(Expr::val("typedtag"), Col::ItemKind)
+            .expr_as(
+                Expr::cust_with_exprs("$1 || ':' || $2", [
+                    Expr::col(Col::Type).into(),
+                    Expr::col(Col::Label).into(),
+                ]),
+                Col::Content,
+            )
+            .column(Col::Type)
+            .column(Col::Label)
+            .from_subquery(tags, Tbl::Diff);
+        cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
+
+        cand_q
+    }
+
+    /// 登録候補の中から、既存データにない新規分のみを抽出します。
+    fn filter_new(candidates: SelectStatement, items_path: &str) -> SelectStatement {
+        Query::select()
+            .column((Tbl::Item, Col::ItemKind))
+            .column((Tbl::Item, Col::Content))
+            .column((Tbl::Item, Col::Type))
+            .column((Tbl::Item, Col::Label))
+            .distinct()
+            .from_subquery(candidates, Tbl::Item)
+            .join_subquery(
+                JoinType::LeftJoin,
+                util::parquet_query(items_path),
+                Tbl::ItemEntities,
+                Condition::all()
+                    .add(
+                        Expr::col((Tbl::Item, Col::ItemKind))
+                            .eq(Expr::col((Tbl::ItemEntities, Col::ItemKind))),
+                    )
+                    .add(
+                        Expr::col((Tbl::Item, Col::Content))
+                            .eq(Expr::col((Tbl::ItemEntities, Col::Content))),
+                    ),
+            )
+            .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null())
+            .to_owned()
+    }
+
+    /// 新規アイテムに対し、開始IDからの連番とランクを付与するクエリを構築します。
+    fn assign_ids(start_id: i64) -> SelectStatement {
+        Query::select()
+            .expr_as(
+                Expr::cust_with_exprs(
+                    "$1 - (row_number() OVER () - 1)",
+                    [Expr::val(start_id).into()],
+                ),
+                Col::ItemId,
+            )
+            .expr_as(Self::rank_logic(), Col::Rank)
+            .column(Col::ItemKind)
+            .column(Col::Content)
+            .column(Col::Type)
+            .column(Col::Label)
+            .from(Tbl::Item)
+            .to_owned()
+    }
+
+    /// 新規Item（IdItem）から、そのItem自体を説明するシステムタグを生成します。
+    fn metadata_tags() -> SelectStatement {
+        let mut meta = Query::select();
+        meta.column(Col::ItemId)
+            .expr_as(Expr::val("type"), Col::Type)
+            .expr_as(
+                CaseStatement::new()
+                    .case(
+                        Expr::col(Col::ItemKind).eq("typedtag"),
+                        Expr::col(Col::Type),
+                    )
+                    .finally(Expr::col(Col::ItemKind)),
+                Col::Label,
+            )
+            .from(Tbl::IdItem);
+
+        let mut label = Query::select();
+        label
+            .column(Col::ItemId)
+            .expr_as(Expr::val("label"), Col::Type)
+            .column(Col::Label)
+            .from(Tbl::IdItem)
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
+
+        meta.union(sea_query::UnionType::All, label).to_owned()
+    }
+
     fn build_unchanged_query(
         scan_path: &str,
         entities_path: &str,
@@ -841,209 +1002,88 @@ impl<'a> Indexer<'a> {
     pub fn update_system_items(&self) -> Result<()> {
         let items_path = self.store.item_entities_path();
         let system_tags_path = self.store.system_tags_path();
-        let items_str_buf = items_path.to_string_lossy();
-        let stags_str_buf = system_tags_path.to_string_lossy();
-        let items_str = items_str_buf.as_ref();
-        let stags_str = stags_str_buf.as_ref();
-
-        // 1. 今回の更新分（temp_base_tags, temp_locations）からタグ情報を抽出
-        let mut source_q = Query::select();
-        source_q
-            .expr_as(Expr::col(Col::Type), Col::Type)
-            .expr_as(Expr::col(Col::Label), Col::Label)
-            .from(Tbl::BaseTagsDiff);
-
+        let items_str = items_path.to_string_lossy();
+        let stags_str = system_tags_path.to_string_lossy();
         let all_cols = self.registry.get_all_columns();
-        for col in all_cols.iter().filter(|c| {
-            c.target_table == crate::taggers::TargetTable::Locations
-        }) {
-            let mut sub = Query::select();
-            let col_iden = Col::from_str(&col.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(col.name.clone()).into_iden());
-            sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
-                .expr_as(
-                    Expr::col(col_iden.clone())
-                        .cast_as(SqlType::VARCHAR),
-                    Col::Label,
-                )
-                .from(Tbl::LocationsDiff)
-                .and_where(Expr::col(col_iden).is_not_null());
-            source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
-        }
 
-        // 2. 登録候補 (item_kind, content, type, label) の生成
-        // content は結合済み、type/label はメタデータ用に保持
-        let mut cand_q = Query::select();
-        cand_q
-            .expr_as(Expr::val("type"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Type), Col::Content)
-            .column(Col::Type)
-            .expr_as(Expr::cust("NULL"), Col::Label)
-            .from_subquery(source_q.to_owned(), Tbl::Diff);
+        // 1. 候補の特定 (抽出 -> 展開 -> フィルタ)
+        let tags = QueryHelper::diff_tags(&all_cols);
+        let candidates = QueryHelper::expand_variants(tags);
+        QueryHelper::filter_new(candidates, &items_str)
+            .create_temp_table_as(self.conn, Tbl::Item)?;
 
-        let mut label_q = Query::select();
-        label_q
-            .expr_as(Expr::val("label"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Label), Col::Content)
-            .expr_as(Expr::cust("NULL"), Col::Type)
-            .column(Col::Label)
-            .from_subquery(source_q.to_owned(), Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
-
-        let mut tt_q = Query::select();
-        tt_q.expr_as(Expr::val("typedtag"), Col::ItemKind)
-            .expr_as(
-                Expr::cust_with_exprs("$1 || ':' || $2", [
-                    Expr::col(Col::Type).into(),
-                    Expr::col(Col::Label).into(),
-                ]),
-                Col::Content,
-            )
-            .column(Col::Type)
-            .column(Col::Label)
-            .from_subquery(source_q.to_owned(), Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
-
-        // 3. 未登録のものを特定
-        let mut new_items_q = Query::select();
-        new_items_q
-            .column((Tbl::Item, Col::ItemKind))
-            .column((Tbl::Item, Col::Content))
-            .column((Tbl::Item, Col::Type))
-            .column((Tbl::Item, Col::Label))
-            .distinct()
-            .from_subquery(cand_q, Tbl::Item)
-            .join_subquery(
-                JoinType::LeftJoin,
-                util::parquet_query(items_str),
-                Tbl::ItemEntities,
-                Condition::all()
-                    .add(Expr::col((Tbl::Item, Col::ItemKind))
-                        .eq(Expr::col((Tbl::ItemEntities, Col::ItemKind))))
-                    .add(Expr::col((Tbl::Item, Col::Content))
-                        .eq(Expr::col((Tbl::ItemEntities, Col::Content)))),
-            )
-            .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null());
-
-        new_items_q.create_temp_table_as(self.conn, Tbl::Item)?;
-
-        let query_count = Query::select()
-            .expr(Expr::cust("COUNT(*)"))
-            .from(Tbl::Item)
-            .to_string(PostgresQueryBuilder);
-        let new_count: i64 = self.conn.query_row(
-            &query_count, [], |r| r.get(0)
-        )?;
-        if new_count == 0 {
+        if self.count_table(Tbl::Item)? == 0 {
             Tbl::Item.drop_table(self.conn)?;
             return Ok(());
         }
 
-        // 4. IDの割り当てと保存
+        // 3. IDの割り当て
+        let start_id = self.next_item_id(&items_str)?;
+        let tmp_items = items_path.with_extension("parquet.tmp");
+        let tmp_stags = system_tags_path.with_extension("parquet.tmp");
+
+        QueryHelper::assign_ids(start_id)
+            .create_temp_table_as(self.conn, Tbl::IdItem)?;
+
+        // 4. item_entities 更新
+        util::parquet_query(&items_str)
+            .union(
+                sea_query::UnionType::All,
+                Query::select()
+                    .columns([Col::ItemId, Col::Rank, Col::ItemKind, Col::Content])
+                    .from(Tbl::IdItem)
+                    .to_owned(),
+            )
+            .save_parquet(self.conn, &tmp_items)?;
+
+        // 5. system_tags 更新
+        util::parquet_query(&stags_str)
+            .union(sea_query::UnionType::All, QueryHelper::metadata_tags())
+            .save_parquet(self.conn, &tmp_stags)?;
+
+        // 6. 後片付け
+        self.finalize_updates(
+            &items_path,
+            &system_tags_path,
+            &tmp_items,
+            &tmp_stags,
+        )
+    }
+
+    fn count_table(&self, table: impl Iden + Clone + 'static) -> Result<i64> {
+        let sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from(table)
+            .to_string(PostgresQueryBuilder);
+        self.conn.query_row(&sql, [], |r| r.get(0)).map_err(Into::into)
+    }
+
+    fn finalize_updates(
+        &self,
+        items_path: &Path,
+        stags_path: &Path,
+        tmp_items: &Path,
+        tmp_stags: &Path,
+    ) -> Result<()> {
+        std::fs::rename(tmp_items, items_path)?;
+        std::fs::rename(tmp_stags, stags_path)?;
+        Tbl::Item.drop_table(self.conn)?;
+        Tbl::IdItem.drop_table(self.conn)?;
+        Ok(())
+    }
+
+    /// 既存のアイテムエントリから、次に割り当てるべき開始ID（負の値）を取得します。
+    fn next_item_id(&self, items_path: &str) -> Result<i64> {
         let query_min = Query::select()
             .expr(
                 Func::cust(DuckDbFunc::Coalesce)
                     .args([Expr::col(Col::ItemId).min().into(), Expr::val(0).into()]),
             )
-            .from_subquery(util::parquet_query(items_str), Tbl::ItemEntities)
+            .from_subquery(util::parquet_query(items_path), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
+
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
-        let start_id = if min_id > -1 { -1 } else { min_id - 1 };
-
-        let tmp_items = format!("{}.tmp", items_str);
-        let tmp_stags = format!("{}.tmp", stags_str);
-
-        let inner_case = CaseStatement::new()
-            .case(Expr::col(Col::Content).eq("name"), 
-                  i64::from(SystemRank::Name))
-            .case(Expr::col(Col::Content).eq("type_from_ext"), 
-                  i64::from(SystemRank::TypeFromExt))
-            .case(Expr::col(Col::Content).eq("size_str"), 
-                  i64::from(SystemRank::SizeStr))
-            .case(Expr::col(Col::Content).eq("modified_str"), 
-                  i64::from(SystemRank::ModifiedStr))
-            .case(Expr::col(Col::Content).eq("parentdir"), 
-                  i64::from(SystemRank::ParentDir))
-            .case(Expr::col(Col::Content).eq("kind"), 
-                  i64::from(SystemRank::ItemKind))
-            .case(Expr::col(Col::Content).eq("content"), 
-                  i64::from(SystemRank::Content))
-            .case(Expr::col(Col::Content).eq("filename"), 
-                  i64::from(SystemRank::Filename))
-            .finally(i64::from(SystemRank::Other));
-
-        let rank_case = CaseStatement::new()
-            .case(Expr::col(Col::ItemKind).eq("type"), inner_case)
-            .finally(0);
-
-        let new_items_id_q = Query::select()
-            .expr_as(
-                Expr::cust_with_exprs(
-                    "$1 - (row_number() OVER () - 1)",
-                    [Expr::val(start_id).into()]
-                ),
-                Col::ItemId,
-            )
-            .expr_as(rank_case, Col::Rank)
-            .column(Col::ItemKind)
-            .column(Col::Content)
-            .column(Col::Type)
-            .column(Col::Label)
-            .from(Tbl::Item)
-            .to_owned();
-
-        new_items_id_q.create_temp_table_as(self.conn, Tbl::IdItem)?;
-
-        // item_entities 更新
-        let mut update_items_q = util::parquet_query(items_str);
-        update_items_q.union(
-            sea_query::UnionType::All,
-            Query::select()
-                .column(Col::ItemId)
-                .column(Col::Rank)
-                .column(Col::ItemKind)
-                .column(Col::Content)
-                .from(Tbl::IdItem)
-                .to_owned()
-        );
-        update_items_q.save_parquet(self.conn, Path::new(&tmp_items))?;
-
-        // system_tags 更新
-        let mut update_tags_q = util::parquet_query(stags_str);
-        
-        // type: [meta_info] (メタタグ)
-        let mut new_tags_meta = Query::select();
-        new_tags_meta
-            .column(Col::ItemId)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                CaseStatement::new()
-                    .case(Expr::col(Col::ItemKind).eq("typedtag"), 
-                          Expr::col(Col::Type))
-                    .finally(Expr::col(Col::ItemKind)),
-                Col::Label
-            )
-            .from(Tbl::IdItem);
-        update_tags_q.union(sea_query::UnionType::All, new_tags_meta.to_owned());
-
-        // label: [meta_info] (ラベルタグ)
-        let mut new_tags_label = Query::select();
-        new_tags_label
-            .column(Col::ItemId)
-            .expr_as(Expr::val("label"), Col::Type)
-            .column(Col::Label)
-            .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
-        update_tags_q.union(sea_query::UnionType::All, new_tags_label);
-
-        update_tags_q.save_parquet(self.conn, Path::new(&tmp_stags))?;
-
-        std::fs::rename(&tmp_items, &items_path)?;
-        std::fs::rename(&tmp_stags, &system_tags_path)?;
-
-        Tbl::Item.drop_table(self.conn)?;
-        Tbl::IdItem.drop_table(self.conn)?;
-
-        Ok(())
+        Ok(if min_id > -1 { -1 } else { min_id - 1 })
     }
 
     fn build_table_schema(
