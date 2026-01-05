@@ -896,102 +896,36 @@ impl<'a> Indexer<'a> {
         unchanged_ids: Vec<i64>,
     ) -> Result<()> {
         let has_updates = !results.is_empty() || !moved.is_empty();
-        let all_cols = self.registry.get_all_columns();
-        let sql_ents = self
-            .build_table_schema(
-                TargetTable::FileEntities,
-                Tbl::FileEntitiesDiff,
-                &all_cols,
-            )
-            .to_string(PostgresQueryBuilder);
-        let sql_locs = self
-            .build_table_schema(
-                TargetTable::Locations,
-                Tbl::LocationsDiff,
-                &all_cols,
-            )
-            .to_string(PostgresQueryBuilder);
-        let sql_tags = self
-            .build_table_schema(TargetTable::BaseTags, Tbl::BaseTagsDiff, &all_cols)
-            .to_string(PostgresQueryBuilder);
 
-        self.conn
-            .execute_batch(&format!("{};{};{}", sql_ents, sql_locs, sql_tags))?;
+        // 1. 各カテゴリごとにステージングと同期
+        let ent = self.entities_merger()
+            .prepare()?
+            .ingest(&results)?
+            .sync(&deleted_ids)?;
 
-        {
-            let mut app_ent = self.conn.appender(&Tbl::FileEntitiesDiff.to_string().replace('"', ""))?;
-            let mut app_loc = self.conn.appender(&Tbl::LocationsDiff.to_string().replace('"', ""))?;
-            let mut app_tag = self.conn.appender(&Tbl::BaseTagsDiff.to_string().replace('"', ""))?;
-            for res in results {
-                let mut er = vec![&res.entity_row.id as &dyn ToSql];
-                er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
-                app_ent.append_row(er.as_slice())?;
+        let loc = self.locations_merger()
+            .prepare()?
+            .ingest(&results, &moved)?
+            .sync(&unchanged_ids)?;
 
-                let mut lr = vec![&res.location_row.id as &dyn ToSql];
-                lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
-                app_loc.append_row(lr.as_slice())?;
+        let tag = self.tags_merger()
+            .prepare()?
+            .ingest(&results)?
+            .sync(&deleted_ids)?;
 
-                for t in res.tags {
-                    app_tag.append_row([
-                        &t.item_id as &dyn ToSql,
-                        &t.tag_type,
-                        &t.label,
-                    ])?;
-                }
-            }
-            for row in moved {
-                let mut lr = vec![&row.id as &dyn ToSql];
-                lr.extend(row.values.iter().map(|v| v as &dyn ToSql));
-                app_loc.append_row(lr.as_slice())?;
-            }
-        }
-
-        self.store.merge_and_save(
-            &self.store.file_entities_path(),
-            Tbl::FileEntitiesDiff,
-            (!deleted_ids.is_empty()).then(|| {
-                Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids.clone()))
-            }),
-        )?;
-        self.store.merge_and_save(
-            &self.store.locations_path(),
-            Tbl::LocationsDiff,
-            if unchanged_ids.is_empty() {
-                Some(Condition::all().add(Expr::val(1).eq(0)))
-            } else {
-                Some(Condition::all().add(Expr::col(Col::ItemId).is_in(unchanged_ids)))
-            },
-        )?;
-        self.store.merge_and_save(
-            &self.store.base_tags_path(),
-            Tbl::BaseTagsDiff,
-            (!deleted_ids.is_empty()).then(|| {
-                Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids))
-            }),
-        )?;
-
-        // 更新がある場合のみシステムItemを登録
+        // 2. 更新がある場合のみシステムItemを登録
         if has_updates {
             self.update_system_items()?;
         }
 
-        let drop_ents = Table::drop()
-            .table(Tbl::FileEntitiesDiff)
-            .to_string(PostgresQueryBuilder);
-        let drop_locs = Table::drop()
-            .table(Tbl::LocationsDiff)
-            .to_string(PostgresQueryBuilder);
-        let drop_tags = Table::drop()
-            .table(Tbl::BaseTagsDiff)
-            .to_string(PostgresQueryBuilder);
-        self.conn
-            .execute_batch(&format!("{};{};{}", drop_ents, drop_locs, drop_tags))?;
+        // 3. クリーンアップ
+        ent.cleanup()?;
+        loc.cleanup()?;
+        tag.cleanup()?;
         std::fs::remove_file(self.store.temp_scan_path()).ok();
         Ok(())
     }
 
-    /// 今回の更新で発生したタグ情報（テンポラリテーブル）を元に、
-    /// システムItemを一括登録します。
     pub fn update_system_items(&self) -> Result<()> {
         let items_path = self.store.item_entities_path();
         let system_tags_path = self.store.system_tags_path();
@@ -1063,6 +997,18 @@ impl<'a> Indexer<'a> {
         Tbl::Item.drop_table(self.conn)?;
         Tbl::IdItem.drop_table(self.conn)?;
         Ok(())
+    }
+
+    fn entities_merger(&self) -> FileEntityMerger {
+        FileEntityMerger { indexer: self }
+    }
+
+    fn locations_merger(&self) -> LocationMerger {
+        LocationMerger { indexer: self }
+    }
+
+    fn tags_merger(&self) -> BaseTagMerger {
+        BaseTagMerger { indexer: self }
     }
 
     /// 既存のアイテムエントリから、次に割り当てるべき開始ID（負の値）を取得します。
@@ -1143,6 +1089,169 @@ impl<'a> Indexer<'a> {
         create
     }
 }
+
+// ========================================================
+// 5. Merger Contexts
+// ========================================================
+
+struct FileEntityMerger<'a> {
+    indexer: &'a Indexer<'a>,
+}
+
+impl FileEntityMerger<'_> {
+    fn prepare(self) -> Result<Self> {
+        let all_cols = self.indexer.registry.get_all_columns();
+        self.indexer
+            .build_table_schema(
+                TargetTable::FileEntities,
+                Tbl::FileEntitiesDiff,
+                &all_cols,
+            )
+            .execute(self.indexer.conn)?;
+        Ok(self)
+    }
+
+    fn ingest(self, results: &[TaggingResult]) -> Result<Self> {
+        let mut app = self.indexer.conn.appender(
+            &Tbl::FileEntitiesDiff.to_string().replace('"', ""),
+        )?;
+        for res in results {
+            let mut er = vec![&res.entity_row.id as &dyn ToSql];
+            er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
+            app.append_row(er.as_slice())?;
+        }
+        Ok(self)
+    }
+
+    fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
+        self.indexer.store.merge_and_save(
+            &self.indexer.store.file_entities_path(),
+            Tbl::FileEntitiesDiff,
+            (!deleted_ids.is_empty()).then(|| {
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+            }),
+        )?;
+        Ok(self)
+    }
+
+    fn cleanup(self) -> Result<()> {
+        Tbl::FileEntitiesDiff.drop_table(self.indexer.conn).ok();
+        Ok(())
+    }
+}
+
+
+struct LocationMerger<'a> {
+    indexer: &'a Indexer<'a>,
+}
+
+impl LocationMerger<'_> {
+    fn prepare(self) -> Result<Self> {
+        let all_cols = self.indexer.registry.get_all_columns();
+        self.indexer
+            .build_table_schema(
+                TargetTable::Locations,
+                Tbl::LocationsDiff,
+                &all_cols,
+            )
+            .execute(self.indexer.conn)?;
+        Ok(self)
+    }
+
+    fn ingest(self, results: &[TaggingResult], moved: &[DynamicRow]) -> Result<Self> {
+        let mut app = self.indexer.conn.appender(
+            &Tbl::LocationsDiff.to_string().replace('"', ""),
+        )?;
+        for res in results {
+            let mut lr = vec![&res.location_row.id as &dyn ToSql];
+            lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
+            app.append_row(lr.as_slice())?;
+        }
+        for row in moved {
+            let mut lr = vec![&row.id as &dyn ToSql];
+            lr.extend(row.values.iter().map(|v| v as &dyn ToSql));
+            app.append_row(lr.as_slice())?;
+        }
+        Ok(self)
+    }
+
+    fn sync(self, unchanged_ids: &[i64]) -> Result<Self> {
+        self.indexer.store.merge_and_save(
+            &self.indexer.store.locations_path(),
+            Tbl::LocationsDiff,
+            if unchanged_ids.is_empty() {
+                Some(Condition::all().add(Expr::val(1).eq(0)))
+            } else {
+                Some(
+                    Condition::all()
+                        .add(Expr::col(Col::ItemId).is_in(unchanged_ids.to_vec())),
+                )
+            },
+        )?;
+        Ok(self)
+    }
+
+    fn cleanup(self) -> Result<()> {
+        Tbl::LocationsDiff.drop_table(self.indexer.conn).ok();
+        Ok(())
+    }
+}
+
+
+struct BaseTagMerger<'a> {
+    indexer: &'a Indexer<'a>,
+}
+
+impl BaseTagMerger<'_> {
+    fn prepare(self) -> Result<Self> {
+        let all_cols = self.indexer.registry.get_all_columns();
+        self.indexer
+            .build_table_schema(
+                TargetTable::BaseTags,
+                Tbl::BaseTagsDiff,
+                &all_cols,
+            )
+            .execute(self.indexer.conn)?;
+        Ok(self)
+    }
+
+    fn ingest(self, results: &[TaggingResult]) -> Result<Self> {
+        let mut app = self.indexer.conn.appender(
+            &Tbl::BaseTagsDiff.to_string().replace('"', ""),
+        )?;
+        for res in results {
+            for t in &res.tags {
+                app.append_row([
+                    &t.item_id as &dyn ToSql,
+                    &t.tag_type,
+                    &t.label,
+                ])?;
+            }
+        }
+        Ok(self)
+    }
+
+    fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
+        self.indexer.store.merge_and_save(
+            &self.indexer.store.base_tags_path(),
+            Tbl::BaseTagsDiff,
+            (!deleted_ids.is_empty()).then(|| {
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+            }),
+        )?;
+        Ok(self)
+    }
+
+    fn cleanup(self) -> Result<()> {
+        Tbl::BaseTagsDiff.drop_table(self.indexer.conn).ok();
+        Ok(())
+    }
+}
+
+
+
 
 struct IndexDiff {
     pub to_tag: Vec<ScanEntry>,
@@ -1447,43 +1556,43 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-                assert!(
-                    inconsistent_ids.is_empty(), 
-                    "Inconsistency found in all_tags view for IDs: {:?}. \
-                     Each item must have exactly one unique Name and Rank \
-                     across all its tag rows.", 
-                    inconsistent_ids
-                );
-            }
+        assert!(
+            inconsistent_ids.is_empty(), 
+            "Inconsistency found in all_tags view for IDs: {:?}. \
+             Each item must have exactly one unique Name and Rank \
+             across all its tag rows.", 
+            inconsistent_ids
+        );
+    }
+
+    #[test]
+    fn test_no_empty_extension_system_item() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 拡張子のないファイルを作成
+        std::fs::write(root.join("no_extension"), "test").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // "extension:" という typedtag が存在しないことを確認
+        let items_path = fm.item_entities_path();
+        let items_str = items_path.to_string_lossy().to_string();
         
-            #[test]
-            fn test_no_empty_extension_system_item() {
-                let dir = tempdir().unwrap();
-                let root = dir.path();
-                let db_dir = root.join(".ttfm/db");
-        
-                // 拡張子のないファイルを作成
-                std::fs::write(root.join("no_extension"), "test").unwrap();
-        
-                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
-                indexer.run(root, None::<&fn(usize)>, false).unwrap();
-        
-                // "extension:" という typedtag が存在しないことを確認
-                let items_path = fm.item_entities_path();
-                let items_str = items_path.to_string_lossy().to_string();
-                
-                let sql = Query::select()
-                    .expr(Expr::cust("COUNT(*)"))
-                    .from_subquery(
-                        util::parquet_query(&items_str),
-                        Tbl::ItemEntities
-                    )
-                    .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
-                    .and_where(Expr::col(Col::Content).eq("extension:"))
-                    .to_string(PostgresQueryBuilder);
-        
-                let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
-                assert_eq!(count, 0, "Should NOT register 'extension:' system item");
-            }
-        }                        
+        let sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                util::parquet_query(&items_str),
+                Tbl::ItemEntities
+            )
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+            .and_where(Expr::col(Col::Content).eq("extension:"))
+            .to_string(PostgresQueryBuilder);
+
+        let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "Should NOT register 'extension:' system item");
+    }
+}
