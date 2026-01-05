@@ -930,7 +930,8 @@ impl<'a> Indexer<'a> {
                         .cast_as(Alias::new("VARCHAR")),
                     Alias::new("label"),
                 )
-                .from(Alias::new("temp_locations"));
+                .from(Alias::new("temp_locations"))
+                .and_where(Expr::col(Alias::new(&col.name)).is_not_null());
             source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
         }
 
@@ -1071,6 +1072,22 @@ impl<'a> Indexer<'a> {
             )
             .from(Alias::new("new_items_with_id"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_meta.to_owned());
+
+        // label: [meta_info] (ラベルタグ)
+        let mut new_tags_label = Query::select();
+        new_tags_label
+            .column(Col::ItemId)
+            .expr_as(Expr::val("label"), Col::Type)
+            .expr_as(
+                Expr::cust_with_exprs(
+                    "split_part($1, ':', 2)",
+                    [Expr::col(Col::Content).into()]
+                ),
+                Col::Label
+            )
+            .from(Alias::new("new_items_with_id"))
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
+        update_tags_q.union(sea_query::UnionType::All, new_tags_label);
 
         self.store.save_parquet(update_tags_q, Path::new(&tmp_stags))?;
 
@@ -1258,6 +1275,69 @@ mod tests {
             origin, "system",
             "Item origin should be 'system' via the view"
         );
+
+        // 3. extension:txt が label:txt というタグを持っているか確認
+        let query_label = Query::select()
+            .column(Col::Label)
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension:txt"))
+            .and_where(Expr::col(Col::Type).eq("label"))
+            .to_string(PostgresQueryBuilder);
+
+        let label: String = fm.conn
+            .query_row(&query_label, [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label, "txt");
+
+        // 4. label:txt アイテム自体は label:txt というタグを持っていないことを確認
+        // (type:label というメタタグのみ持っているはず)
+        let query_item_label = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("txt"))
+            .and_where(Expr::col(Col::ItemKind).eq("label"))
+            .and_where(Expr::col(Col::Type).eq("label"))
+            .to_string(PostgresQueryBuilder);
+        let exists_self_label: bool = fm.conn.prepare(&query_item_label).unwrap()
+            .exists([]).unwrap();
+        assert!(!exists_self_label, "Label item should not have self tag");
+
+        // type アイテム (extension) が type:type を持っているか
+        let query_type_type = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension"))
+            .and_where(Expr::col(Col::ItemKind).eq("type"))
+            .and_where(Expr::col(Col::Type).eq("type"))
+            .to_string(PostgresQueryBuilder);
+        let exists_tt: bool = fm.conn.prepare(&query_type_type).unwrap()
+            .exists([]).unwrap();
+        assert!(exists_tt);
+
+        // typedtag アイテム (extension:txt) が type:typedtag を持っていないか
+        let query_tt_tt = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension:txt"))
+            .and_where(Expr::col(Col::Type).eq("typedtag"))
+            .to_string(PostgresQueryBuilder);
+        let exists_tt_tt: bool = fm.conn.prepare(&query_tt_tt).unwrap()
+            .exists([]).unwrap();
+        assert!(!exists_tt_tt);
+
+        // label アイテム (txt) が type:label というタグを持っていか確認
+        // (キーが "type"、値が "label")
+        let query_label_meta = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("txt"))
+            .and_where(Expr::col(Col::ItemKind).eq("label"))
+            .and_where(Expr::col(Col::Type).eq("type"))
+            .and_where(Expr::col(Col::Label).eq("label"))
+            .to_string(PostgresQueryBuilder);
+        let exists_label: bool = fm.conn.prepare(&query_label_meta).unwrap()
+            .exists([]).unwrap();
+        assert!(exists_label);
     }
 
     #[test]
@@ -1388,9 +1468,42 @@ mod tests {
 
         assert!(
             inconsistent_ids.is_empty(), 
-            "Inconsistency found in all_tags view for IDs: {:?}. Each item must have exactly one unique Name and Rank across all its tag rows.", 
+            "Inconsistency found in all_tags view for IDs: {:?}. \
+             Each item must have exactly one unique Name and Rank \
+             across all its tag rows.", 
             inconsistent_ids
         );
+    }
+
+    #[test]
+    fn test_no_empty_extension_system_item() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 拡張子のないファイルを作成
+        std::fs::write(root.join("no_extension"), "test").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // "extension:" という typedtag が存在しないことを確認
+        let items_path = fm.item_entities_path();
+        let items_str = items_path.to_string_lossy().to_string();
+        
+        let sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                QueryHelper::parquet_query(&items_str),
+                Tbl::EntAlias
+            )
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+            .and_where(Expr::col(Col::Content).eq("extension:"))
+            .to_string(PostgresQueryBuilder);
+
+        let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "Should NOT register 'extension:' system item");
     }
 }
                         

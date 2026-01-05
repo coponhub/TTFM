@@ -458,11 +458,11 @@ impl Tagger for ExtensionTagger {
     }
     /// ファイルの拡張子を抽出し、小文字化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string().to_lowercase())
-            .unwrap_or_default();
-        Ok(vec![TagValue::Text(ext)])
+        let ext = path.extension().map(|e| {
+            let s = e.to_string_lossy().to_string().to_lowercase();
+            TagValue::Text(s)
+        }).unwrap_or(TagValue::Null);
+        Ok(vec![ext])
     }
 }
 
@@ -504,7 +504,8 @@ impl TagFunction for ExtensionFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, None).ok().map(TagValue::Text)
+        path.extension()
+            .map(|e| TagValue::Text(e.to_string_lossy().to_string().to_lowercase()))
     }
 }
 
