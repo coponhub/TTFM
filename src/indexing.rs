@@ -1,13 +1,13 @@
 use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::FunctionRegistry;
 use crate::functions::{ScanEntry, ScanRole};
-use crate::db::{Tbl, Col, DuckDbFunc, SystemRank};
+use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
     Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, 
     Func, Table, ColumnDef as SeaColumnDef, Iden, SelectStatement,
-    CaseStatement
+    CaseStatement, IntoIden
 };
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
@@ -50,7 +50,7 @@ impl<'a> IndexStore<'a> {
     }
 
     fn iden_to_sql(&self, iden: impl Iden + 'static) -> String {
-        let sql = Query::select().column(iden).from(Alias::new("x")).to_string(PostgresQueryBuilder);
+        let sql = Query::select().column(iden).from(Tbl::Master).to_string(PostgresQueryBuilder);
         sql.split_whitespace().nth(1).unwrap_or("").to_string()
     }
 
@@ -147,7 +147,7 @@ impl QueryHelper {
             .expr(Expr::cust("*"))
             .from_function(
                 Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(path)),
-                Tbl::OriginAlias,
+                Tbl::Diff,
             )
             .to_owned()
     }
@@ -156,7 +156,7 @@ impl QueryHelper {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::ScanId) {
-                let col = Alias::new(cd.name);
+                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -169,7 +169,7 @@ impl QueryHelper {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::Integrity) {
-                let col = Alias::new(cd.name);
+                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -181,19 +181,22 @@ impl QueryHelper {
     fn build_to_tag_query(scan_path: &str, entities_path: &str) -> SelectStatement {
         let sub_exists = Query::select()
             .expr(Expr::val(1))
-            .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
-            .cond_where(Self::identity_condition(Tbl::EntAlias, Tbl::ScanAlias))
-            .cond_where(Self::integrity_condition(Tbl::EntAlias, Tbl::ScanAlias))
+            .from_subquery(Self::parquet_query(entities_path), Tbl::FileEntities)
+            .cond_where(Self::identity_condition(Tbl::FileEntities, Tbl::Scan))
+            .cond_where(Self::integrity_condition(Tbl::FileEntities, Tbl::Scan))
             .to_owned();
 
         let columns = ScanEntry::schema()
             .iter()
-            .map(|c| (Tbl::ScanAlias, Alias::new(c.name)))
+            .map(|c| {
+                let col = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name).into_iden());
+                (Tbl::Scan, col)
+            })
             .collect::<Vec<_>>();
 
         Query::select()
             .columns(columns)
-            .from_subquery(Self::parquet_query(scan_path), Tbl::ScanAlias)
+            .from_subquery(Self::parquet_query(scan_path), Tbl::Scan)
             .and_where(Expr::exists(sub_exists).not())
             .to_owned()
     }
@@ -203,47 +206,49 @@ impl QueryHelper {
         entities_path: &str,
         loc_path: &str,
     ) -> SelectStatement {
-        let col_path = Alias::new(ScanEntry::schema()[0].name);
+        let path_name = ScanEntry::schema()[0].name;
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
         Query::select()
-            .column((Tbl::EntAlias, Col::ItemId))
-            .column((Tbl::ScanAlias, col_path.clone()))
-            .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
+            .column((Tbl::FileEntities, Col::ItemId))
+            .column((Tbl::Scan, col_path.clone()))
+            .from_subquery(Self::parquet_query(entities_path), Tbl::FileEntities)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(scan_path),
-                Tbl::ScanAlias,
-                Self::identity_condition(Tbl::EntAlias, Tbl::ScanAlias),
+                Tbl::Scan,
+                Self::identity_condition(Tbl::FileEntities, Tbl::Scan),
             )
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(loc_path),
-                Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::ItemId))
-                    .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
+                Tbl::Locations,
+                Expr::col((Tbl::FileEntities, Col::ItemId))
+                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
             )
             .and_where(
-                Expr::col((Tbl::LocAlias, Col::Path)).ne(Expr::col((Tbl::ScanAlias, col_path))),
+                Expr::col((Tbl::Locations, Col::Path)).ne(Expr::col((Tbl::Scan, col_path))),
             )
-            .cond_where(Self::integrity_condition(Tbl::EntAlias, Tbl::ScanAlias))
+            .cond_where(Self::integrity_condition(Tbl::FileEntities, Tbl::Scan))
             .to_owned()
     }
 
     fn build_deleted_query(scan_path: &str, entities_path: &str) -> SelectStatement {
-        let col_path = Alias::new(ScanEntry::schema()[0].name);
+        let path_name = ScanEntry::schema()[0].name;
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
         let join_cond = Condition::all()
-            .add(Self::identity_condition(Tbl::EntAlias, Tbl::ScanAlias))
-            .add(Self::integrity_condition(Tbl::EntAlias, Tbl::ScanAlias));
+            .add(Self::identity_condition(Tbl::FileEntities, Tbl::Scan))
+            .add(Self::integrity_condition(Tbl::FileEntities, Tbl::Scan));
 
         Query::select()
-            .column((Tbl::EntAlias, Col::ItemId))
-            .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
+            .column((Tbl::FileEntities, Col::ItemId))
+            .from_subquery(Self::parquet_query(entities_path), Tbl::FileEntities)
             .join_subquery(
                 JoinType::LeftJoin,
                 Self::parquet_query(scan_path),
-                Tbl::ScanAlias,
+                Tbl::Scan,
                 join_cond,
             )
-            .and_where(Expr::col((Tbl::ScanAlias, col_path)).is_null())
+            .and_where(Expr::col((Tbl::Scan, col_path)).is_null())
             .to_owned()
     }
 
@@ -252,27 +257,28 @@ impl QueryHelper {
         entities_path: &str,
         loc_path: &str,
     ) -> SelectStatement {
-        let col_path = Alias::new(ScanEntry::schema()[0].name);
+        let path_name = ScanEntry::schema()[0].name;
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
         Query::select()
-            .column((Tbl::EntAlias, Col::ItemId))
-            .from_subquery(Self::parquet_query(entities_path), Tbl::EntAlias)
+            .column((Tbl::FileEntities, Col::ItemId))
+            .from_subquery(Self::parquet_query(entities_path), Tbl::FileEntities)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(scan_path),
-                Tbl::ScanAlias,
-                Self::identity_condition(Tbl::EntAlias, Tbl::ScanAlias),
+                Tbl::Scan,
+                Self::identity_condition(Tbl::FileEntities, Tbl::Scan),
             )
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(loc_path),
-                Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::ItemId))
-                    .eq(Expr::col((Tbl::LocAlias, Col::ItemId))),
+                Tbl::Locations,
+                Expr::col((Tbl::FileEntities, Col::ItemId))
+                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
             )
             .and_where(
-                Expr::col((Tbl::LocAlias, Col::Path)).eq(Expr::col((Tbl::ScanAlias, col_path))),
+                Expr::col((Tbl::Locations, Col::Path)).eq(Expr::col((Tbl::Scan, col_path))),
             )
-            .cond_where(Self::integrity_condition(Tbl::EntAlias, Tbl::ScanAlias))
+            .cond_where(Self::integrity_condition(Tbl::FileEntities, Tbl::Scan))
             .to_owned()
     }
 
@@ -290,16 +296,16 @@ impl QueryHelper {
         // Base info from files
         let mut file_master = Query::select();
         file_master
-            .column((Tbl::EntAlias, Col::ItemId))
-            .column((Tbl::EntAlias, Col::Rank))
+            .column((Tbl::FileEntities, Col::ItemId))
+            .column((Tbl::FileEntities, Col::Rank))
             .expr_as(Expr::val("file"), Col::ItemKind)
-            .expr_as(Expr::col((Tbl::LocAlias, Col::Filename)), Col::Name)
-            .from_subquery(Self::parquet_query(ents), Tbl::EntAlias)
+            .expr_as(Expr::col((Tbl::Locations, Col::Filename)), Col::Name)
+            .from_subquery(Self::parquet_query(ents), Tbl::FileEntities)
             .join_subquery(
                 JoinType::InnerJoin,
                 Self::parquet_query(locs),
-                Tbl::LocAlias,
-                Expr::col((Tbl::EntAlias, Col::ItemId)).eq(Expr::col((Tbl::LocAlias, Col::ItemId)))
+                Tbl::Locations,
+                Expr::col((Tbl::FileEntities, Col::ItemId)).eq(Expr::col((Tbl::Locations, Col::ItemId)))
             );
 
         // Base info from other items
@@ -309,7 +315,7 @@ impl QueryHelper {
             .column(Col::Rank)
             .column(Col::ItemKind)
             .expr_as(Expr::col(Col::Content), Col::Name)
-            .from_subquery(Self::parquet_query(items), Alias::new("i_all"));
+            .from_subquery(Self::parquet_query(items), Tbl::Item);
 
         let mut all_master_base = file_master;
         all_master_base.union(sea_query::UnionType::All, item_master.to_owned());
@@ -319,27 +325,27 @@ impl QueryHelper {
         user_names
             .column(Col::ItemId)
             .expr_as(Expr::col(Col::Label), Col::Name)
-            .from_subquery(Self::parquet_query(user_tags), Tbl::TagAlias)
+            .from_subquery(Self::parquet_query(user_tags), Tbl::BaseTags)
             .and_where(Expr::col(Col::Type).eq("name"));
 
         let mut final_master = Query::select();
         final_master
-            .expr_as(Expr::col((Alias::new("m"), Col::ItemId)), Col::ItemId)
-            .column((Alias::new("m"), Col::Rank))
-            .column((Alias::new("m"), Col::ItemKind))
+            .expr_as(Expr::col((Tbl::Master, Col::ItemId)), Col::ItemId)
+            .column((Tbl::Master, Col::Rank))
+            .column((Tbl::Master, Col::ItemKind))
             .expr_as(
                 Func::cust(DuckDbFunc::Coalesce).args([
-                    Expr::col((Alias::new("u"), Col::Name)).into(),
-                    Expr::col((Alias::new("m"), Col::Name)).into(),
+                    Expr::col((Tbl::UserTags, Col::Name)).into(),
+                    Expr::col((Tbl::Master, Col::Name)).into(),
                 ]),
                 Col::Name
             )
-            .from_subquery(all_master_base, Alias::new("m"))
+            .from_subquery(all_master_base, Tbl::Master)
             .join_subquery(
                 JoinType::LeftJoin,
                 user_names,
-                Alias::new("u"),
-                Expr::col((Alias::new("m"), Col::ItemId)).eq(Expr::col((Alias::new("u"), Col::ItemId)))
+                Tbl::UserTags,
+                Expr::col((Tbl::Master, Col::ItemId)).eq(Expr::col((Tbl::UserTags, Col::ItemId)))
             );
 
         // --- 2. Unified Tag Sources (item_id, origin, type, label) ---
@@ -351,7 +357,7 @@ impl QueryHelper {
             .expr_as(Expr::val("system"), Col::Origin)
             .column(Col::Type)
             .column(Col::Label)
-            .from_subquery(Self::parquet_query(base_tags), Tbl::TagAlias);
+            .from_subquery(Self::parquet_query(base_tags), Tbl::BaseTags);
 
         // B. locations
         for cd in all_columns
@@ -359,15 +365,16 @@ impl QueryHelper {
             .filter(|c| c.target_table == TargetTable::Locations)
         {
             let mut sub = Query::select();
+            let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
             sub.column(Col::ItemId)
                 .expr_as(Expr::val("system"), Col::Origin)
-                .expr_as(Expr::val(cd.name.clone()), Col::Type)
+                .expr_as(Expr::val(cd.name.to_string()), Col::Type)
                 .expr_as(
-                    Expr::col((Tbl::LocAlias, Alias::new(&cd.name)))
-                        .cast_as(Alias::new("VARCHAR")),
+                    Expr::col((Tbl::Locations, col_iden))
+                        .cast_as(SqlType::VARCHAR),
                     Col::Label,
                 )
-                .from_subquery(Self::parquet_query(locs), Tbl::LocAlias);
+                .from_subquery(Self::parquet_query(locs), Tbl::Locations);
             base_q.union(sea_query::UnionType::All, sub.to_owned());
         }
 
@@ -378,7 +385,7 @@ impl QueryHelper {
             .expr_as(Expr::val("system"), Col::Origin)
             .expr_as(Expr::val("content"), Col::Type)
             .expr_as(Expr::col(Col::Content), Col::Label)
-            .from_subquery(Self::parquet_query(items), Alias::new("it2"));
+            .from_subquery(Self::parquet_query(items), Tbl::Item);
         base_q.union(sea_query::UnionType::All, items_content.to_owned());
 
         // D. system_tags
@@ -388,7 +395,7 @@ impl QueryHelper {
             .expr_as(Expr::val("system"), Col::Origin)
             .column(Col::Type)
             .column(Col::Label)
-            .from_subquery(Self::parquet_query(system_tags), Tbl::TagAlias);
+            .from_subquery(Self::parquet_query(system_tags), Tbl::BaseTags);
         base_q.union(sea_query::UnionType::All, stags.to_owned());
 
         // E. user_tags
@@ -398,25 +405,25 @@ impl QueryHelper {
             .expr_as(Expr::val("user"), Col::Origin)
             .column(Col::Type)
             .column(Col::Label)
-            .from_subquery(Self::parquet_query(user_tags), Tbl::TagAlias);
+            .from_subquery(Self::parquet_query(user_tags), Tbl::BaseTags);
         base_q.union(sea_query::UnionType::All, utags.to_owned());
 
         // --- 3. Final Assembly (Assemble Tags with Master Info) ---
 
         Query::select()
-            .column((Tbl::TagAlias, Col::ItemId))
-            .column((Alias::new("m"), Col::ItemKind))
-            .column((Alias::new("m"), Col::Rank))
-            .column((Tbl::TagAlias, Col::Origin))
-            .column((Tbl::TagAlias, Col::Type))
-            .column((Tbl::TagAlias, Col::Label))
-            .column((Alias::new("m"), Col::Name))
-            .from_subquery(base_q, Tbl::TagAlias)
+            .column((Tbl::BaseTags, Col::ItemId))
+            .column((Tbl::Master, Col::ItemKind))
+            .column((Tbl::Master, Col::Rank))
+            .column((Tbl::BaseTags, Col::Origin))
+            .column((Tbl::BaseTags, Col::Type))
+            .column((Tbl::BaseTags, Col::Label))
+            .column((Tbl::Master, Col::Name))
+            .from_subquery(base_q, Tbl::BaseTags)
             .join_subquery(
                 JoinType::InnerJoin,
                 final_master,
-                Alias::new("m"),
-                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Alias::new("m"), Col::ItemId)))
+                Tbl::Master,
+                Expr::col((Tbl::BaseTags, Col::ItemId)).eq(Expr::col((Tbl::Master, Col::ItemId)))
             )
             .to_owned()
     }
@@ -508,7 +515,7 @@ impl<'a> Indexer<'a> {
             &self.store.system_tags_path().to_string_lossy(),
             &self.store.user_tags_path().to_string_lossy(),
         );
-        self.store.create_or_replace_view("all_tags", q)?;
+        self.store.create_or_replace_view(Tbl::AllTags, q)?;
         Ok(())
     }
 
@@ -521,18 +528,18 @@ impl<'a> Indexer<'a> {
         if path.exists() {
             return Ok(());
         }
-        let table_name = format!("temp_init_{:?}", target);
-        let create = self.build_table_schema(target, Alias::new(&table_name), columns);
+        let table_name = Tbl::Master; // Safe temp name for initialization
+        let create = self.build_table_schema(target, table_name, columns);
         self.conn
             .execute(&create.to_string(PostgresQueryBuilder), [])?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        self.store.write_parquet(Alias::new(&table_name), path)?;
+        self.store.write_parquet(table_name, path)?;
         self.conn
             .execute(
                 &Table::drop()
-                    .table(Alias::new(&table_name))
+                    .table(table_name)
                     .to_string(PostgresQueryBuilder),
                 [],
             )
@@ -551,9 +558,10 @@ impl<'a> Indexer<'a> {
     {
         if !dry_run {
             let mut create = Table::create();
-            create.table(Tbl::TempScan).if_not_exists();
+            create.table(Tbl::Scan).if_not_exists();
             for cd in ScanEntry::schema() {
-                let mut col = SeaColumnDef::new(Alias::new(cd.name));
+                let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
+                let mut col = SeaColumnDef::new(col_iden);
                 if cd.sql_type == "BIGINT" {
                     col.big_integer();
                 } else {
@@ -565,7 +573,7 @@ impl<'a> Indexer<'a> {
                 .execute(&create.to_string(PostgresQueryBuilder), [])?;
             self.conn.execute(
                 &Query::delete()
-                    .from_table(Tbl::TempScan)
+                    .from_table(Tbl::Scan)
                     .to_string(PostgresQueryBuilder),
                 [],
             )?;
@@ -610,7 +618,8 @@ impl<'a> Indexer<'a> {
 
             let mut current_count = 0;
             let mut appender = if !dry_run {
-                Some(self.conn.appender("temp_scan")?)
+                let table_name = Tbl::Scan.to_string().replace('"', "");
+                Some(self.conn.appender(&table_name)?)
             } else {
                 None
             };
@@ -631,13 +640,13 @@ impl<'a> Indexer<'a> {
         if !dry_run {
             let query = Query::select()
                 .expr(Expr::cust("*"))
-                .from(Tbl::TempScan)
+                .from(Tbl::Scan)
                 .to_owned();
             self.store.save_parquet(query, &self.store.temp_scan_path())?;
             self.conn
                 .execute(
                     &Table::drop()
-                        .table(Tbl::TempScan)
+                        .table(Tbl::Scan)
                         .to_string(PostgresQueryBuilder),
                     [],
                 )
@@ -655,13 +664,13 @@ impl<'a> Indexer<'a> {
         let locations_path = self.store.locations_path().to_string_lossy().to_string();
 
         if !self.store.file_entities_path().exists() {
-            let col_aliases: Vec<Alias> = ScanEntry::schema()
+            let col_aliases: Vec<_> = ScanEntry::schema()
                 .iter()
-                .map(|c| Alias::new(c.name))
+                .map(|c| Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name).into_iden()))
                 .collect();
             let query = Query::select()
                 .columns(col_aliases)
-                .from_subquery(QueryHelper::parquet_query(&scan_path), Tbl::ScanAlias)
+                .from_subquery(QueryHelper::parquet_query(&scan_path), Tbl::Scan)
                 .to_string(PostgresQueryBuilder);
             let to_tag = self
                 .conn
@@ -729,9 +738,9 @@ impl<'a> Indexer<'a> {
             let query = Query::select()
                 .expr(
                     Func::cust(DuckDbFunc::Coalesce)
-                        .args([Expr::col(Col::ItemId).max(), Expr::val(0).into()]),
+                        .args([Expr::col(Col::ItemId).max().into(), Expr::val(0).into()]),
                 )
-                .from_subquery(QueryHelper::parquet_query(&entities_str), Tbl::EntAlias)
+                .from_subquery(QueryHelper::parquet_query(&entities_str), Tbl::FileEntities)
                 .to_string(PostgresQueryBuilder);
             self.conn.query_row(&query, [], |r| r.get(0))?
         } else {
@@ -812,28 +821,28 @@ impl<'a> Indexer<'a> {
         let sql_ents = self
             .build_table_schema(
                 TargetTable::FileEntities,
-                Alias::new("temp_file_entities"),
+                Tbl::FileEntitiesDiff,
                 &all_cols,
             )
             .to_string(PostgresQueryBuilder);
         let sql_locs = self
             .build_table_schema(
                 TargetTable::Locations,
-                Alias::new("temp_locations"),
+                Tbl::LocationsDiff,
                 &all_cols,
             )
             .to_string(PostgresQueryBuilder);
         let sql_tags = self
-            .build_table_schema(TargetTable::BaseTags, Tbl::TempBaseTags, &all_cols)
+            .build_table_schema(TargetTable::BaseTags, Tbl::BaseTagsDiff, &all_cols)
             .to_string(PostgresQueryBuilder);
 
         self.conn
             .execute_batch(&format!("{};{};{}", sql_ents, sql_locs, sql_tags))?;
 
         {
-            let mut app_ent = self.conn.appender("temp_file_entities")?;
-            let mut app_loc = self.conn.appender("temp_locations")?;
-            let mut app_tag = self.conn.appender("temp_base_tags")?;
+            let mut app_ent = self.conn.appender(&Tbl::FileEntitiesDiff.to_string().replace('"', ""))?;
+            let mut app_loc = self.conn.appender(&Tbl::LocationsDiff.to_string().replace('"', ""))?;
+            let mut app_tag = self.conn.appender(&Tbl::BaseTagsDiff.to_string().replace('"', ""))?;
             for res in results {
                 let mut er = vec![&res.entity_row.id as &dyn ToSql];
                 er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
@@ -860,14 +869,14 @@ impl<'a> Indexer<'a> {
 
         self.store.merge_and_save(
             &self.store.file_entities_path(),
-            Alias::new("temp_file_entities"),
+            Tbl::FileEntitiesDiff,
             (!deleted_ids.is_empty()).then(|| {
                 Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids.clone()))
             }),
         )?;
         self.store.merge_and_save(
             &self.store.locations_path(),
-            Alias::new("temp_locations"),
+            Tbl::LocationsDiff,
             if unchanged_ids.is_empty() {
                 Some(Condition::all().add(Expr::val(1).eq(0)))
             } else {
@@ -876,7 +885,7 @@ impl<'a> Indexer<'a> {
         )?;
         self.store.merge_and_save(
             &self.store.base_tags_path(),
-            Tbl::TempBaseTags,
+            Tbl::BaseTagsDiff,
             (!deleted_ids.is_empty()).then(|| {
                 Condition::all().add(Expr::col(Col::ItemId).is_not_in(deleted_ids))
             }),
@@ -888,13 +897,13 @@ impl<'a> Indexer<'a> {
         }
 
         let drop_ents = Table::drop()
-            .table(Alias::new("temp_file_entities"))
+            .table(Tbl::FileEntitiesDiff)
             .to_string(PostgresQueryBuilder);
         let drop_locs = Table::drop()
-            .table(Alias::new("temp_locations"))
+            .table(Tbl::LocationsDiff)
             .to_string(PostgresQueryBuilder);
         let drop_tags = Table::drop()
-            .table(Tbl::TempBaseTags)
+            .table(Tbl::BaseTagsDiff)
             .to_string(PostgresQueryBuilder);
         self.conn
             .execute_batch(&format!("{};{};{}", drop_ents, drop_locs, drop_tags))?;
@@ -917,21 +926,22 @@ impl<'a> Indexer<'a> {
         source_q
             .expr_as(Expr::col(Col::Type), Col::Type)
             .expr_as(Expr::col(Col::Label), Col::Label)
-            .from(Tbl::TempBaseTags);
+            .from(Tbl::BaseTagsDiff);
 
         let all_cols = self.registry.get_all_columns();
         for col in all_cols.iter().filter(|c| {
             c.target_table == crate::taggers::TargetTable::Locations
         }) {
             let mut sub = Query::select();
-            sub.expr_as(Expr::val(col.name.clone()), Alias::new("type"))
+            let col_iden = Col::from_str(&col.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(col.name.clone()).into_iden());
+            sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
                 .expr_as(
-                    Expr::col(Alias::new(&col.name))
-                        .cast_as(Alias::new("VARCHAR")),
-                    Alias::new("label"),
+                    Expr::col(col_iden.clone())
+                        .cast_as(SqlType::VARCHAR),
+                    Col::Label,
                 )
-                .from(Alias::new("temp_locations"))
-                .and_where(Expr::col(Alias::new(&col.name)).is_not_null());
+                .from(Tbl::LocationsDiff)
+                .and_where(Expr::col(col_iden).is_not_null());
             source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
         }
 
@@ -943,7 +953,7 @@ impl<'a> Indexer<'a> {
             .expr_as(Expr::col(Col::Type), Col::Content)
             .column(Col::Type)
             .expr_as(Expr::cust("NULL"), Col::Label)
-            .from_subquery(source_q.to_owned(), Alias::new("st"));
+            .from_subquery(source_q.to_owned(), Tbl::Diff);
 
         let mut label_q = Query::select();
         label_q
@@ -951,7 +961,7 @@ impl<'a> Indexer<'a> {
             .expr_as(Expr::col(Col::Label), Col::Content)
             .expr_as(Expr::cust("NULL"), Col::Type)
             .column(Col::Label)
-            .from_subquery(source_q.to_owned(), Alias::new("st"));
+            .from_subquery(source_q.to_owned(), Tbl::Diff);
         cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
 
         let mut tt_q = Query::select();
@@ -965,44 +975,44 @@ impl<'a> Indexer<'a> {
             )
             .column(Col::Type)
             .column(Col::Label)
-            .from_subquery(source_q.to_owned(), Alias::new("st"));
+            .from_subquery(source_q.to_owned(), Tbl::Diff);
         cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
 
         // 3. 未登録のものを特定
         let mut new_items_q = Query::select();
         new_items_q
-            .column((Alias::new("c"), Col::ItemKind))
-            .column((Alias::new("c"), Col::Content))
-            .column((Alias::new("c"), Col::Type))
-            .column((Alias::new("c"), Col::Label))
+            .column((Tbl::Item, Col::ItemKind))
+            .column((Tbl::Item, Col::Content))
+            .column((Tbl::Item, Col::Type))
+            .column((Tbl::Item, Col::Label))
             .distinct()
-            .from_subquery(cand_q, Alias::new("c"))
+            .from_subquery(cand_q, Tbl::Item)
             .join_subquery(
                 JoinType::LeftJoin,
                 QueryHelper::parquet_query(items_str),
-                Tbl::EntAlias,
+                Tbl::ItemEntities,
                 Condition::all()
-                    .add(Expr::col((Alias::new("c"), Col::ItemKind))
-                        .eq(Expr::col((Tbl::EntAlias, Col::ItemKind))))
-                    .add(Expr::col((Alias::new("c"), Col::Content))
-                        .eq(Expr::col((Tbl::EntAlias, Col::Content)))),
+                    .add(Expr::col((Tbl::Item, Col::ItemKind))
+                        .eq(Expr::col((Tbl::ItemEntities, Col::ItemKind))))
+                    .add(Expr::col((Tbl::Item, Col::Content))
+                        .eq(Expr::col((Tbl::ItemEntities, Col::Content)))),
             )
-            .and_where(Expr::col((Tbl::EntAlias, Col::ItemId)).is_null());
+            .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null());
 
         self.store.create_temp_table_as(
-            Alias::new("new_items_raw"), 
+            Tbl::Item, 
             new_items_q
         )?;
 
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
-            .from(Alias::new("new_items_raw"))
+            .from(Tbl::Item)
             .to_string(PostgresQueryBuilder);
         let new_count: i64 = self.conn.query_row(
             &query_count, [], |r| r.get(0)
         )?;
         if new_count == 0 {
-            self.store.drop_table(Alias::new("new_items_raw"))?;
+            self.store.drop_table(Tbl::Item)?;
             return Ok(());
         }
 
@@ -1010,9 +1020,9 @@ impl<'a> Indexer<'a> {
         let query_min = Query::select()
             .expr(
                 Func::cust(DuckDbFunc::Coalesce)
-                    .args([Expr::col(Col::ItemId).min(), Expr::val(0).into()]),
+                    .args([Expr::col(Col::ItemId).min().into(), Expr::val(0).into()]),
             )
-            .from_subquery(QueryHelper::parquet_query(items_str), Tbl::EntAlias)
+            .from_subquery(QueryHelper::parquet_query(items_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
         let start_id = if min_id > -1 { -1 } else { min_id - 1 };
@@ -1056,11 +1066,11 @@ impl<'a> Indexer<'a> {
             .column(Col::Content)
             .column(Col::Type)
             .column(Col::Label)
-            .from(Alias::new("new_items_raw"))
+            .from(Tbl::Item)
             .to_owned();
 
         self.store.create_temp_table_as(
-            Alias::new("new_items_with_id"), 
+            Tbl::IdItem, 
             new_items_id_q
         )?;
 
@@ -1073,7 +1083,7 @@ impl<'a> Indexer<'a> {
                 .column(Col::Rank)
                 .column(Col::ItemKind)
                 .column(Col::Content)
-                .from(Alias::new("new_items_with_id"))
+                .from(Tbl::IdItem)
                 .to_owned()
         );
         self.store.save_parquet(update_items_q, Path::new(&tmp_items))?;
@@ -1093,7 +1103,7 @@ impl<'a> Indexer<'a> {
                     .finally(Expr::col(Col::ItemKind)),
                 Col::Label
             )
-            .from(Alias::new("new_items_with_id"));
+            .from(Tbl::IdItem);
         update_tags_q.union(sea_query::UnionType::All, new_tags_meta.to_owned());
 
         // label: [meta_info] (ラベルタグ)
@@ -1102,7 +1112,7 @@ impl<'a> Indexer<'a> {
             .column(Col::ItemId)
             .expr_as(Expr::val("label"), Col::Type)
             .column(Col::Label)
-            .from(Alias::new("new_items_with_id"))
+            .from(Tbl::IdItem)
             .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_label);
 
@@ -1111,8 +1121,8 @@ impl<'a> Indexer<'a> {
         std::fs::rename(&tmp_items, &items_path)?;
         std::fs::rename(&tmp_stags, &system_tags_path)?;
 
-        self.store.drop_table(Alias::new("new_items_raw"))?;
-        self.store.drop_table(Alias::new("new_items_with_id"))?;
+        self.store.drop_table(Tbl::Item)?;
+        self.store.drop_table(Tbl::IdItem)?;
 
         Ok(())
     }
@@ -1132,7 +1142,8 @@ impl<'a> Indexer<'a> {
                     .iter()
                     .filter(|c| c.target_table == TargetTable::FileEntities)
                 {
-                    let mut def = SeaColumnDef::new(Alias::new(&c.name));
+                    let col_iden = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name.clone()).into_iden());
+                    let mut def = SeaColumnDef::new(col_iden);
                     match c.sql_type {
                         "BIGINT" => def.big_integer(),
                         "BOOLEAN" => def.boolean(),
@@ -1147,7 +1158,8 @@ impl<'a> Indexer<'a> {
                     .iter()
                     .filter(|c| c.target_table == TargetTable::Locations)
                 {
-                    let mut def = SeaColumnDef::new(Alias::new(&c.name));
+                    let col_iden = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name.clone()).into_iden());
+                    let mut def = SeaColumnDef::new(col_iden);
                     match c.sql_type {
                         "BIGINT" => def.big_integer(),
                         "BOOLEAN" => def.boolean(),
@@ -1222,7 +1234,7 @@ mod tests {
         assert!(db_dir.join("entities.parquet").exists());
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .to_string(PostgresQueryBuilder);
         let count: i64 = conn.query_row(&query_count, [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0);
@@ -1261,7 +1273,7 @@ mod tests {
         let items_path = items_path_buf.to_string_lossy();
         let query = Query::select()
             .columns([Col::ItemKind, Col::Content])
-            .from_subquery(QueryHelper::parquet_query(&items_path), Tbl::EntAlias)
+            .from_subquery(QueryHelper::parquet_query(&items_path), Tbl::ItemEntities)
             .and_where(Expr::col(Col::Content).is_in(["extension", "txt", "extension:txt"]))
             .to_string(PostgresQueryBuilder);
 
@@ -1279,7 +1291,7 @@ mod tests {
         // 2. それらのItemの origin が system であるか確認 (all_tags ビュー経由)
         let query_origin = Query::select()
             .column(Col::Origin)
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("extension:txt"))
             .and_where(Expr::col(Col::Type).eq("type")) // メタタグ
             .to_string(PostgresQueryBuilder);
@@ -1296,7 +1308,7 @@ mod tests {
         // 3. extension:txt が label:txt というタグを持っているか確認
         let query_label = Query::select()
             .column(Col::Label)
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("extension:txt"))
             .and_where(Expr::col(Col::Type).eq("label"))
             .to_string(PostgresQueryBuilder);
@@ -1310,7 +1322,7 @@ mod tests {
         // (type:label というメタタグのみ持っているはず)
         let query_item_label = Query::select()
             .expr(Expr::val(1))
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("txt"))
             .and_where(Expr::col(Col::ItemKind).eq("label"))
             .and_where(Expr::col(Col::Type).eq("label"))
@@ -1322,7 +1334,7 @@ mod tests {
         // type アイテム (extension) が type:type を持っているか
         let query_type_type = Query::select()
             .expr(Expr::val(1))
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("extension"))
             .and_where(Expr::col(Col::ItemKind).eq("type"))
             .and_where(Expr::col(Col::Type).eq("type"))
@@ -1334,7 +1346,7 @@ mod tests {
         // typedtag アイテム (extension:txt) が type:typedtag を持っていないか
         let query_tt_tt = Query::select()
             .expr(Expr::val(1))
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("extension:txt"))
             .and_where(Expr::col(Col::Type).eq("typedtag"))
             .to_string(PostgresQueryBuilder);
@@ -1346,7 +1358,7 @@ mod tests {
         // (キーが "type"、値が "label")
         let query_label_meta = Query::select()
             .expr(Expr::val(1))
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::Name).eq("txt"))
             .and_where(Expr::col(Col::ItemKind).eq("label"))
             .and_where(Expr::col(Col::Type).eq("type"))
@@ -1483,44 +1495,43 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        assert!(
-            inconsistent_ids.is_empty(), 
-            "Inconsistency found in all_tags view for IDs: {:?}. \
-             Each item must have exactly one unique Name and Rank \
-             across all its tag rows.", 
-            inconsistent_ids
-        );
-    }
-
-    #[test]
-    fn test_no_empty_extension_system_item() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let db_dir = root.join(".ttfm/db");
-
-        // 拡張子のないファイルを作成
-        std::fs::write(root.join("no_extension"), "test").unwrap();
-
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
-        indexer.run(root, None::<&fn(usize)>, false).unwrap();
-
-        // "extension:" という typedtag が存在しないことを確認
-        let items_path = fm.item_entities_path();
-        let items_str = items_path.to_string_lossy().to_string();
+                assert!(
+                    inconsistent_ids.is_empty(), 
+                    "Inconsistency found in all_tags view for IDs: {:?}. \
+                     Each item must have exactly one unique Name and Rank \
+                     across all its tag rows.", 
+                    inconsistent_ids
+                );
+            }
         
-        let sql = Query::select()
-            .expr(Expr::cust("COUNT(*)"))
-            .from_subquery(
-                QueryHelper::parquet_query(&items_str),
-                Tbl::EntAlias
-            )
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
-            .and_where(Expr::col(Col::Content).eq("extension:"))
-            .to_string(PostgresQueryBuilder);
-
-        let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 0, "Should NOT register 'extension:' system item");
-    }
-}
-                        
+            #[test]
+            fn test_no_empty_extension_system_item() {
+                let dir = tempdir().unwrap();
+                let root = dir.path();
+                let db_dir = root.join(".ttfm/db");
+        
+                // 拡張子のないファイルを作成
+                std::fs::write(root.join("no_extension"), "test").unwrap();
+        
+                let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+                let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+                indexer.run(root, None::<&fn(usize)>, false).unwrap();
+        
+                // "extension:" という typedtag が存在しないことを確認
+                let items_path = fm.item_entities_path();
+                let items_str = items_path.to_string_lossy().to_string();
+                
+                let sql = Query::select()
+                    .expr(Expr::cust("COUNT(*)"))
+                    .from_subquery(
+                        QueryHelper::parquet_query(&items_str),
+                        Tbl::ItemEntities
+                    )
+                    .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+                    .and_where(Expr::col(Col::Content).eq("extension:"))
+                    .to_string(PostgresQueryBuilder);
+        
+                let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+                assert_eq!(count, 0, "Should NOT register 'extension:' system item");
+            }
+        }                        

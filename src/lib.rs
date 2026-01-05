@@ -161,13 +161,13 @@ impl FunctionRegistry {
                 let mut q = Query::select();
                 q.column(Col::ItemId).from_subquery(
                     self.build_set_query(left, view_name),
-                    Alias::new("left_side"),
+                    Tbl::LeftSide,
                 );
 
                 let mut right_q = Query::select();
                 right_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(right, view_name),
-                    Alias::new("right_side"),
+                    Tbl::RightSide,
                 );
 
                 q.union(sea_query::UnionType::Intersect, right_q);
@@ -177,13 +177,13 @@ impl FunctionRegistry {
                 let mut q = Query::select();
                 q.column(Col::ItemId).from_subquery(
                     self.build_set_query(left, view_name),
-                    Alias::new("left_side"),
+                    Tbl::LeftSide,
                 );
 
                 let mut right_q = Query::select();
                 right_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(right, view_name),
-                    Alias::new("right_side"),
+                    Tbl::RightSide,
                 );
 
                 q.union(sea_query::UnionType::Distinct, right_q);
@@ -201,7 +201,7 @@ impl FunctionRegistry {
                 let mut except_q = Query::select();
                 except_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(child, view_name),
-                    Alias::new("not_side"),
+                    Tbl::NotSide,
                 );
 
                 q.union(sea_query::UnionType::Except, except_q);
@@ -401,7 +401,7 @@ impl FileManager {
             Query::select()
                 .column(Col::ItemId)
                 .distinct()
-                .from(Alias::new("all_tags"))
+                .from(Tbl::AllTags)
                 .to_owned()
         } else {
             let node = QueryParser::parse(query)?;
@@ -415,11 +415,11 @@ impl FileManager {
             .column(Col::ItemKind)
             .expr_as(
                 Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Type)),
-                Alias::new("types"),
+                Col::Types,
             )
             .expr_as(
                 Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Label)),
-                Alias::new("labels"),
+                Col::Labels,
             )
             .expr_as(
                 Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
@@ -429,7 +429,7 @@ impl FileManager {
                 Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Name).into(), Expr::val("").into()]),
                 Col::Name,
             )
-            .from(Alias::new("all_tags"))
+            .from(Tbl::AllTags)
             .and_where(Expr::col(Col::ItemId).in_subquery(sub_query))
             .group_by_col(Col::ItemId)
             .group_by_col(Col::ItemKind)
@@ -518,7 +518,7 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
             .expr(Expr::col(Col::ItemId).min())
-            .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::EntAlias)
+            .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
 
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0)).unwrap_or(0);
@@ -526,19 +526,19 @@ impl FileManager {
 
         // 2. Append new row via Temp Table & COPY
         let tmp_path = format!("{}.tmp", path_str);
-        let temp_table = Alias::new("temp_add_item");
+        let temp_table = Tbl::Item;
 
-        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
+        store.create_table_as(temp_table, QueryHelper::parquet_query(&path_str))?;
 
         // INSERT INTO ...
         let sql_insert = Query::insert()
-            .into_table(temp_table.clone())
+            .into_table(temp_table)
             .columns([Col::ItemId, Col::ItemKind, Col::Content])
             .values_panic([new_id.into(), kind.into(), content.into()])
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_insert, [])?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.write_parquet(temp_table, Path::new(&tmp_path))?;
         store.drop_table(temp_table)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
@@ -565,7 +565,7 @@ impl FileManager {
                 .column(Col::ItemId)
                 .from_subquery(
                     QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
-                    Tbl::LocAlias,
+                    Tbl::Locations,
                 )
                 .and_where(Expr::col(Col::Path).eq(item))
                 .to_string(PostgresQueryBuilder);
@@ -576,7 +576,7 @@ impl FileManager {
                 // B. 名前（抽象化された名称）として扱い、all_tags から ID を取得
                 let query_name = Query::select()
                     .column(Col::ItemId)
-                    .from(Alias::new("all_tags"))
+                    .from(Tbl::AllTags)
                     .and_where(Expr::col(Col::Name).eq(item))
                     .to_string(PostgresQueryBuilder);
 
@@ -589,7 +589,7 @@ impl FileManager {
         // 3. User Tags テーブルに保存
         self.append_tag_to_parquet(
             self.user_tags_path(),
-            "temp_add_user_tag",
+            Tbl::UserTagsDiff,
             Col::ItemId,
             item_id,
             key,
@@ -625,21 +625,21 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
         let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-        let temp_table = Alias::new("temp_batch_rank");
+        let temp_table = Tbl::Target;
 
         store.create_table_as(
-            temp_table.clone(),
+            temp_table,
             QueryHelper::parquet_query(&path_str)
         )?;
 
         let sql_update = Query::update()
-            .table(temp_table.clone())
+            .table(temp_table)
             .values([(Col::Rank, rank.into())])
             .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_update, [])?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.write_parquet(temp_table, Path::new(&tmp_path))?;
         store.drop_table(temp_table)?;
 
         std::fs::rename(&tmp_path, path)
@@ -662,7 +662,7 @@ impl FileManager {
             .column(Col::Rank)
             .from_subquery(
                 QueryHelper::parquet_query(&path.to_string_lossy()),
-                Tbl::EntAlias,
+                Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))
             .to_string(PostgresQueryBuilder);
@@ -684,7 +684,7 @@ impl FileManager {
             .column(Col::ItemId)
             .from_subquery(
                 QueryHelper::parquet_query(&path.to_string_lossy()),
-                Tbl::EntAlias,
+                Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq(kind))
             .and_where(Expr::col(Col::Content).eq(content))
@@ -700,7 +700,7 @@ impl FileManager {
     fn append_tag_to_parquet(
         &self,
         path: std::path::PathBuf,
-        temp_table_name: &str,
+        temp_table: Tbl,
         id_col: Col,
         id: i64,
         key: &str,
@@ -709,19 +709,18 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
         let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-        let temp_table = Alias::new(temp_table_name);
 
-        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
+        store.create_table_as(temp_table, QueryHelper::parquet_query(&path_str))?;
 
         // INSERT INTO ...
         let sql_insert = Query::insert()
-            .into_table(temp_table.clone())
+            .into_table(temp_table)
             .columns([id_col, Col::Type, Col::Label])
             .values_panic([id.into(), key.into(), value.into()])
             .to_string(PostgresQueryBuilder);
         self.conn.execute(&sql_insert, [])?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
+        store.write_parquet(temp_table, Path::new(&tmp_path))?;
         store.drop_table(temp_table)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
@@ -867,7 +866,7 @@ mod tests {
             .column(Col::Label)
             .from_subquery(
                 QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
-                Tbl::TagAlias,
+                Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(note_id))
             .to_string(PostgresQueryBuilder);
@@ -897,7 +896,7 @@ mod tests {
             .column(Col::Label)
             .from_subquery(
                 QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
-                Tbl::TagAlias,
+                Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(item_id))
             .and_where(Expr::col(Col::Type).eq("manual"))
@@ -936,7 +935,7 @@ mod tests {
             let path = fm.item_entities_path();
             let query = Query::select()
                 .column(Col::Rank)
-                .from_subquery(QueryHelper::parquet_query(&path.to_string_lossy()), Tbl::EntAlias)
+                .from_subquery(QueryHelper::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
                 .and_where(Expr::col(Col::ItemId).eq(r.id))
                 .to_string(PostgresQueryBuilder);
             

@@ -65,6 +65,32 @@ pub enum Col {
     Labels, // labels
 }
 
+impl Col {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "item_id" => Some(Col::ItemId),
+            "file_id" => Some(Col::FileId),
+            "path" => Some(Col::Path),
+            "parentdir" => Some(Col::Parentdir),
+            "filename" => Some(Col::Filename),
+            "extension" => Some(Col::Extension),
+            "size" => Some(Col::Size),
+            "mtime" => Some(Col::Mtime),
+            "hash" => Some(Col::Hash),
+            "type" => Some(Col::Type),
+            "label" => Some(Col::Label),
+            "item_kind" => Some(Col::ItemKind),
+            "content" => Some(Col::Content),
+            "rank" => Some(Col::Rank),
+            "origin" => Some(Col::Origin),
+            "name" => Some(Col::Name),
+            "types" => Some(Col::Types),
+            "labels" => Some(Col::Labels),
+            _ => None,
+        }
+    }
+}
+
 /// システムタグの表示優先度（RANK）を定義する列挙型。
 #[derive(Debug, Clone, Copy)]
 pub enum SystemRank {

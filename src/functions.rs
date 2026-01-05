@@ -105,8 +105,8 @@ pub(crate) fn exists_in_tags(
     let mut query = sea_query::Query::select();
     query
         .expr(Expr::val(1))
-        .from(Alias::new("all_tags"))
-        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::EntAlias, Col::ItemId))))
+        .from(Tbl::AllTags)
+        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::FileEntities, Col::ItemId))))
         .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 
     if exact {
@@ -169,7 +169,7 @@ impl TagFunction for PathFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::LocAlias, Col::Path))
+            let expr = Expr::col((Tbl::Locations, Col::Path))
                 .ilike(format!("%{}%", tag.label.0));
             return Some(expr.into());
         }
@@ -248,9 +248,9 @@ impl TagFunction for ParentDirFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::ParentDir))
+            let expr = Expr::col((Tbl::Locations, Col::Parentdir))
                 .ilike(format!("%/{}", val))
-                .or(Expr::col((Tbl::LocAlias, Col::ParentDir)).eq(val.clone()));
+                .or(Expr::col((Tbl::Locations, Col::Parentdir)).eq(val.clone()));
             return Some(expr.into());
         }
         None
@@ -332,7 +332,7 @@ impl TagFunction for FilenameFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
             return Some(expr.into());
@@ -417,7 +417,7 @@ impl TagFunction for StemFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
             return Some(expr.into());
@@ -495,7 +495,7 @@ impl TagFunction for ExtensionFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::LocAlias, Col::Extension)).eq(tag.label.0.clone());
+                Expr::col((Tbl::Locations, Col::Extension)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -573,7 +573,7 @@ impl TagFunction for DirectoryFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(Self::NAME, "TRUE", true));
             return Some(expr.into());
@@ -653,7 +653,7 @@ impl TagFunction for SizeBytesFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::EntAlias, Col::Size)).eq(tag.label.0.clone());
+            let expr = Expr::col((Tbl::FileEntities, Col::Size)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -741,7 +741,7 @@ impl TagFunction for ModifiedTsFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::Mtime)).eq(tag.label.0.clone());
+                Expr::col((Tbl::FileEntities, Col::Mtime)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -820,7 +820,7 @@ impl TagFunction for InodeFunction {
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::FileId)).eq(tag.label.0.clone());
+                Expr::col((Tbl::FileEntities, Col::FileId)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -1127,7 +1127,7 @@ mod tests {
         let f = PathFunction::new();
         let expr = f.to_expr(&ttag(PathFunction::NAME, "foo")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"l\".\"path\" ILIKE '%foo%'" );
+        assert_eq!(sql, "\"locations\".\"path\" ILIKE '%foo%'" );
     }
 
     #[test]
@@ -1135,7 +1135,7 @@ mod tests {
         let f = FilenameFunction::new();
         let expr = f.to_expr(&ttag(FilenameFunction::NAME, "report")).unwrap();
         let sql = to_sql(expr);
-        assert!(sql.contains("\"l\".\"filename\" ILIKE '%report%'" ));
+        assert!(sql.contains("\"locations\".\"filename\" ILIKE '%report%'" ));
         assert!(sql.contains("NOT EXISTS"));
         assert!(sql.contains("\"type\" = 'directory'"));
     }
@@ -1145,7 +1145,7 @@ mod tests {
         let f = ExtensionFunction::new();
         let expr = f.to_expr(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"l\".\"extension\" = 'rs'");
+        assert_eq!(sql, "\"locations\".\"extension\" = 'rs'");
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
         let f = SizeBytesFunction::new();
         let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"e\".\"size\" = '123'");
+        assert_eq!(sql, "\"file_entities\".\"size\" = '123'");
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 
@@ -1196,9 +1196,7 @@ mod tests {
         let sql = to_sql(expr);
         println!("SQL: {}", sql);
         
-        // Assert the CURRENT behavior (which we suspect is buggy PascalCase)
-        // If this passes, it confirms Col::FileId produces "FileId".
-        // After refactoring, this test will fail and should be updated to "file_id".
-        assert!(sql.contains("\"e\".\"FileId\""), "Expected PascalCase FileId (current behavior)");
+        // Assert the behavior (snake_case)
+        assert!(sql.contains("\"file_entities\".\"file_id\""), "Expected snake_case file_id");
     }
 }
