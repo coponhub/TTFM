@@ -2,6 +2,7 @@ use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::FunctionRegistry;
 use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
+use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
@@ -34,73 +35,15 @@ impl<'a> IndexStore<'a> {
     pub(crate) fn user_tags_path(&self) -> PathBuf { self.db_dir.join("user_tags.parquet") }
     pub(crate) fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
 
-    pub(crate) fn save_parquet(&self, query: SelectStatement, path: &Path) -> Result<()> {
-        let sql = query.to_string(PostgresQueryBuilder);
-        let path_str = path.to_string_lossy();
-        let tmp_path = format!("{}.tmp", path_str);
-        
-        // COPY (SELECT ...) TO 'path' ...
-        let copy_sql = format!(
-            "COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
-            sql, tmp_path
-        );
-        self.conn.execute(&copy_sql, [])?;
-        std::fs::rename(&tmp_path, path)?;
-        Ok(())
-    }
-
-    fn iden_to_sql(&self, iden: impl Iden + 'static) -> String {
-        let sql = Query::select().column(iden).from(Tbl::Master).to_string(PostgresQueryBuilder);
-        sql.split_whitespace().nth(1).unwrap_or("").to_string()
-    }
-
-    pub(crate) fn write_parquet(&self, table_name: impl Iden + 'static, path: &Path) -> Result<()> {
-        let query = Query::select()
-            .expr(Expr::cust("*"))
-            .from(table_name)
-            .to_owned();
-        self.save_parquet(query, path)
-    }
-
-    pub(crate) fn create_table_as(&self, table_name: impl Iden + 'static, query: SelectStatement) -> Result<()> {
-        let quoted_name = self.iden_to_sql(table_name);
-
-        let sql = format!(
-            "CREATE TABLE {} AS {}",
-            quoted_name,
-            query.to_string(PostgresQueryBuilder)
-        );
-        self.conn.execute(&sql, [])?;
-        Ok(())
-    }
-
-    pub(crate) fn create_temp_table_as(&self, table_name: impl Iden + 'static, query: SelectStatement) -> Result<()> {
-        let quoted_name = self.iden_to_sql(table_name);
-
-        let sql = format!(
-            "CREATE TEMP TABLE {} AS {}",
-            quoted_name,
-            query.to_string(PostgresQueryBuilder)
-        );
-        self.conn.execute(&sql, [])?;
-        Ok(())
-    }
-
-    pub(crate) fn drop_table(&self, table_name: impl Iden + 'static) -> Result<()> {
-        let sql = Table::drop().table(table_name).to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql, [])?;
-        Ok(())
-    }
-
     pub(crate) fn merge_and_save(
         &self,
         path: &Path,
-        temp_table: impl Iden + 'static,
+        temp_table: impl Iden + Clone + 'static,
         filter: Option<Condition>,
     ) -> Result<()> {
         let query = if path.exists() {
             let path_str = path.to_string_lossy().to_string();
-            let mut base = QueryHelper::parquet_query(&path_str);
+            let mut base = util::parquet_query(&path_str);
             if let Some(cond) = filter {
                 base.cond_where(cond);
             }
@@ -118,20 +61,7 @@ impl<'a> IndexStore<'a> {
                 .from(temp_table)
                 .to_owned()
         };
-        self.save_parquet(query, path)
-    }
-
-    pub(crate) fn create_or_replace_view(&self, name: impl Iden + 'static, select: SelectStatement) -> Result<()> {
-        let query_sql = select.to_string(PostgresQueryBuilder);
-        let quoted_name = self.iden_to_sql(name);
-
-        let sql = format!(
-            "CREATE OR REPLACE VIEW {} AS {}", 
-            quoted_name, 
-            query_sql
-        );
-        self.conn.execute(&sql, [])?;
-        Ok(())
+        query.save_parquet(self.conn, path)
     }
 }
 
@@ -515,7 +445,8 @@ impl<'a> Indexer<'a> {
             &self.store.system_tags_path().to_string_lossy(),
             &self.store.user_tags_path().to_string_lossy(),
         );
-        self.store.create_or_replace_view(Tbl::AllTags, q)?;
+
+        util::create_or_replace_view(self.conn, Tbl::AllTags, q)?;
         Ok(())
     }
 
@@ -528,22 +459,16 @@ impl<'a> Indexer<'a> {
         if path.exists() {
             return Ok(());
         }
-        let table_name = Tbl::Master; // Safe temp name for initialization
-        let create = self.build_table_schema(target, table_name, columns);
-        self.conn
-            .execute(&create.to_string(PostgresQueryBuilder), [])?;
+        let table = Tbl::Master; // Safe temp name for initialization
+        self.build_table_schema(target, table, columns)
+            .execute(self.conn)?;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        self.store.write_parquet(table_name, path)?;
-        self.conn
-            .execute(
-                &Table::drop()
-                    .table(table_name)
-                    .to_string(PostgresQueryBuilder),
-                [],
-            )
-            .ok();
+
+        table.write_parquet(self.conn, path)?;
+        Table::drop().table(table).execute(self.conn).ok();
         Ok(())
     }
 
@@ -642,7 +567,7 @@ impl<'a> Indexer<'a> {
                 .expr(Expr::cust("*"))
                 .from(Tbl::Scan)
                 .to_owned();
-            self.store.save_parquet(query, &self.store.temp_scan_path())?;
+            query.save_parquet(self.conn, &self.store.temp_scan_path())?;
             self.conn
                 .execute(
                     &Table::drop()
@@ -989,7 +914,7 @@ impl<'a> Indexer<'a> {
             .from_subquery(cand_q, Tbl::Item)
             .join_subquery(
                 JoinType::LeftJoin,
-                QueryHelper::parquet_query(items_str),
+                util::parquet_query(items_str),
                 Tbl::ItemEntities,
                 Condition::all()
                     .add(Expr::col((Tbl::Item, Col::ItemKind))
@@ -999,10 +924,7 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null());
 
-        self.store.create_temp_table_as(
-            Tbl::Item, 
-            new_items_q
-        )?;
+        new_items_q.create_temp_table_as(self.conn, Tbl::Item)?;
 
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
@@ -1012,7 +934,7 @@ impl<'a> Indexer<'a> {
             &query_count, [], |r| r.get(0)
         )?;
         if new_count == 0 {
-            self.store.drop_table(Tbl::Item)?;
+            Tbl::Item.drop_table(self.conn)?;
             return Ok(());
         }
 
@@ -1022,7 +944,7 @@ impl<'a> Indexer<'a> {
                 Func::cust(DuckDbFunc::Coalesce)
                     .args([Expr::col(Col::ItemId).min().into(), Expr::val(0).into()]),
             )
-            .from_subquery(QueryHelper::parquet_query(items_str), Tbl::ItemEntities)
+            .from_subquery(util::parquet_query(items_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
         let start_id = if min_id > -1 { -1 } else { min_id - 1 };
@@ -1069,13 +991,10 @@ impl<'a> Indexer<'a> {
             .from(Tbl::Item)
             .to_owned();
 
-        self.store.create_temp_table_as(
-            Tbl::IdItem, 
-            new_items_id_q
-        )?;
+        new_items_id_q.create_temp_table_as(self.conn, Tbl::IdItem)?;
 
         // item_entities 更新
-        let mut update_items_q = QueryHelper::parquet_query(items_str);
+        let mut update_items_q = util::parquet_query(items_str);
         update_items_q.union(
             sea_query::UnionType::All,
             Query::select()
@@ -1086,10 +1005,10 @@ impl<'a> Indexer<'a> {
                 .from(Tbl::IdItem)
                 .to_owned()
         );
-        self.store.save_parquet(update_items_q, Path::new(&tmp_items))?;
+        update_items_q.save_parquet(self.conn, Path::new(&tmp_items))?;
 
         // system_tags 更新
-        let mut update_tags_q = QueryHelper::parquet_query(stags_str);
+        let mut update_tags_q = util::parquet_query(stags_str);
         
         // type: [meta_info] (メタタグ)
         let mut new_tags_meta = Query::select();
@@ -1116,13 +1035,13 @@ impl<'a> Indexer<'a> {
             .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_label);
 
-        self.store.save_parquet(update_tags_q, Path::new(&tmp_stags))?;
+        update_tags_q.save_parquet(self.conn, Path::new(&tmp_stags))?;
 
         std::fs::rename(&tmp_items, &items_path)?;
         std::fs::rename(&tmp_stags, &system_tags_path)?;
 
-        self.store.drop_table(Tbl::Item)?;
-        self.store.drop_table(Tbl::IdItem)?;
+        Tbl::Item.drop_table(self.conn)?;
+        Tbl::IdItem.drop_table(self.conn)?;
 
         Ok(())
     }

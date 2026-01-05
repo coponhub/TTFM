@@ -12,6 +12,7 @@ use sea_query::{
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
 use crate::indexing::QueryHelper;
+use crate::util::{ExecuteSql, ParquetExt, IdenExt, SelectExt};
 
 pub mod types;
 pub mod query;
@@ -22,6 +23,7 @@ pub mod macros;
 mod taggers;
 mod functions;
 pub mod indexing;
+pub mod util;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
@@ -512,13 +514,11 @@ impl FileManager {
             ));
         }
 
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-
         // 1. Get current min ID
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
             .expr(Expr::col(Col::ItemId).min())
-            .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::ItemEntities)
+            .from_subquery(util::parquet_query(&path_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
 
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0)).unwrap_or(0);
@@ -528,18 +528,18 @@ impl FileManager {
         let tmp_path = format!("{}.tmp", path_str);
         let temp_table = Tbl::Item;
 
-        store.create_table_as(temp_table, QueryHelper::parquet_query(&path_str))?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
         // INSERT INTO ...
-        let sql_insert = Query::insert()
+        Query::insert()
             .into_table(temp_table)
             .columns([Col::ItemId, Col::ItemKind, Col::Content])
             .values_panic([new_id.into(), kind.into(), content.into()])
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_insert, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table, Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
+        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.drop_table(&self.conn)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
 
@@ -624,23 +624,19 @@ impl FileManager {
 
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
         let temp_table = Tbl::Target;
 
-        store.create_table_as(
-            temp_table,
-            QueryHelper::parquet_query(&path_str)
-        )?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
-        let sql_update = Query::update()
+        Query::update()
             .table(temp_table)
             .values([(Col::Rank, rank.into())])
             .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_update, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table, Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
+        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.drop_table(&self.conn)?;
 
         std::fs::rename(&tmp_path, path)
             .context("Failed to update rank in parquet")?;
@@ -708,20 +704,19 @@ impl FileManager {
     ) -> Result<()> {
         let path_str = path.to_string_lossy();
         let tmp_path = format!("{}.tmp", path_str);
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
 
-        store.create_table_as(temp_table, QueryHelper::parquet_query(&path_str))?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
         // INSERT INTO ...
-        let sql_insert = Query::insert()
+        Query::insert()
             .into_table(temp_table)
             .columns([id_col, Col::Type, Col::Label])
             .values_panic([id.into(), key.into(), value.into()])
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_insert, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table, Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
+        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.drop_table(&self.conn)?;
 
         std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())
