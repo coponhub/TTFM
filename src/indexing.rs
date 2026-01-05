@@ -930,21 +930,27 @@ impl<'a> Indexer<'a> {
                         .cast_as(Alias::new("VARCHAR")),
                     Alias::new("label"),
                 )
-                .from(Alias::new("temp_locations"));
+                .from(Alias::new("temp_locations"))
+                .and_where(Expr::col(Alias::new(&col.name)).is_not_null());
             source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
         }
 
-        // 2. 登録候補 (item_kind, content) の生成
+        // 2. 登録候補 (item_kind, content, type, label) の生成
+        // content は結合済み、type/label はメタデータ用に保持
         let mut cand_q = Query::select();
         cand_q
             .expr_as(Expr::val("type"), Col::ItemKind)
             .expr_as(Expr::col(Col::Type), Col::Content)
+            .column(Col::Type)
+            .expr_as(Expr::cust("NULL"), Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
 
         let mut label_q = Query::select();
         label_q
             .expr_as(Expr::val("label"), Col::ItemKind)
             .expr_as(Expr::col(Col::Label), Col::Content)
+            .expr_as(Expr::cust("NULL"), Col::Type)
+            .column(Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
         cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
 
@@ -957,6 +963,8 @@ impl<'a> Indexer<'a> {
                 ]),
                 Col::Content,
             )
+            .column(Col::Type)
+            .column(Col::Label)
             .from_subquery(source_q.to_owned(), Alias::new("st"));
         cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
 
@@ -965,6 +973,8 @@ impl<'a> Indexer<'a> {
         new_items_q
             .column((Alias::new("c"), Col::ItemKind))
             .column((Alias::new("c"), Col::Content))
+            .column((Alias::new("c"), Col::Type))
+            .column((Alias::new("c"), Col::Label))
             .distinct()
             .from_subquery(cand_q, Alias::new("c"))
             .join_subquery(
@@ -979,7 +989,10 @@ impl<'a> Indexer<'a> {
             )
             .and_where(Expr::col((Tbl::EntAlias, Col::ItemId)).is_null());
 
-        self.store.create_temp_table_as(Alias::new("new_items_raw"), new_items_q)?;
+        self.store.create_temp_table_as(
+            Alias::new("new_items_raw"), 
+            new_items_q
+        )?;
 
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
@@ -1008,14 +1021,22 @@ impl<'a> Indexer<'a> {
         let tmp_stags = format!("{}.tmp", stags_str);
 
         let inner_case = CaseStatement::new()
-            .case(Expr::col(Col::Content).eq("name"), i64::from(SystemRank::Name))
-            .case(Expr::col(Col::Content).eq("type_from_ext"), i64::from(SystemRank::TypeFromExt))
-            .case(Expr::col(Col::Content).eq("size_str"), i64::from(SystemRank::SizeStr))
-            .case(Expr::col(Col::Content).eq("modified_str"), i64::from(SystemRank::ModifiedStr))
-            .case(Expr::col(Col::Content).eq("parentdir"), i64::from(SystemRank::ParentDir))
-            .case(Expr::col(Col::Content).eq("kind"), i64::from(SystemRank::ItemKind))
-            .case(Expr::col(Col::Content).eq("content"), i64::from(SystemRank::Content))
-            .case(Expr::col(Col::Content).eq("filename"), i64::from(SystemRank::Filename))
+            .case(Expr::col(Col::Content).eq("name"), 
+                  i64::from(SystemRank::Name))
+            .case(Expr::col(Col::Content).eq("type_from_ext"), 
+                  i64::from(SystemRank::TypeFromExt))
+            .case(Expr::col(Col::Content).eq("size_str"), 
+                  i64::from(SystemRank::SizeStr))
+            .case(Expr::col(Col::Content).eq("modified_str"), 
+                  i64::from(SystemRank::ModifiedStr))
+            .case(Expr::col(Col::Content).eq("parentdir"), 
+                  i64::from(SystemRank::ParentDir))
+            .case(Expr::col(Col::Content).eq("kind"), 
+                  i64::from(SystemRank::ItemKind))
+            .case(Expr::col(Col::Content).eq("content"), 
+                  i64::from(SystemRank::Content))
+            .case(Expr::col(Col::Content).eq("filename"), 
+                  i64::from(SystemRank::Filename))
             .finally(i64::from(SystemRank::Other));
 
         let rank_case = CaseStatement::new()
@@ -1033,17 +1054,25 @@ impl<'a> Indexer<'a> {
             .expr_as(rank_case, Col::Rank)
             .column(Col::ItemKind)
             .column(Col::Content)
+            .column(Col::Type)
+            .column(Col::Label)
             .from(Alias::new("new_items_raw"))
             .to_owned();
 
-        self.store.create_temp_table_as(Alias::new("new_items_with_id"), new_items_id_q)?;
+        self.store.create_temp_table_as(
+            Alias::new("new_items_with_id"), 
+            new_items_id_q
+        )?;
 
         // item_entities 更新
         let mut update_items_q = QueryHelper::parquet_query(items_str);
         update_items_q.union(
             sea_query::UnionType::All,
             Query::select()
-                .expr(Expr::cust("*"))
+                .column(Col::ItemId)
+                .column(Col::Rank)
+                .column(Col::ItemKind)
+                .column(Col::Content)
                 .from(Alias::new("new_items_with_id"))
                 .to_owned()
         );
@@ -1059,18 +1088,23 @@ impl<'a> Indexer<'a> {
             .expr_as(Expr::val("type"), Col::Type)
             .expr_as(
                 CaseStatement::new()
-                    .case(
-                        Expr::col(Col::ItemKind).eq("typedtag"),
-                        Expr::cust_with_exprs(
-                            "split_part($1, ':', 1)",
-                            [Expr::col(Col::Content).into()]
-                        )
-                    )
+                    .case(Expr::col(Col::ItemKind).eq("typedtag"), 
+                          Expr::col(Col::Type))
                     .finally(Expr::col(Col::ItemKind)),
                 Col::Label
             )
             .from(Alias::new("new_items_with_id"));
         update_tags_q.union(sea_query::UnionType::All, new_tags_meta.to_owned());
+
+        // label: [meta_info] (ラベルタグ)
+        let mut new_tags_label = Query::select();
+        new_tags_label
+            .column(Col::ItemId)
+            .expr_as(Expr::val("label"), Col::Type)
+            .column(Col::Label)
+            .from(Alias::new("new_items_with_id"))
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
+        update_tags_q.union(sea_query::UnionType::All, new_tags_label);
 
         self.store.save_parquet(update_tags_q, Path::new(&tmp_stags))?;
 
@@ -1258,6 +1292,69 @@ mod tests {
             origin, "system",
             "Item origin should be 'system' via the view"
         );
+
+        // 3. extension:txt が label:txt というタグを持っているか確認
+        let query_label = Query::select()
+            .column(Col::Label)
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension:txt"))
+            .and_where(Expr::col(Col::Type).eq("label"))
+            .to_string(PostgresQueryBuilder);
+
+        let label: String = fm.conn
+            .query_row(&query_label, [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label, "txt");
+
+        // 4. label:txt アイテム自体は label:txt というタグを持っていないことを確認
+        // (type:label というメタタグのみ持っているはず)
+        let query_item_label = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("txt"))
+            .and_where(Expr::col(Col::ItemKind).eq("label"))
+            .and_where(Expr::col(Col::Type).eq("label"))
+            .to_string(PostgresQueryBuilder);
+        let exists_self_label: bool = fm.conn.prepare(&query_item_label).unwrap()
+            .exists([]).unwrap();
+        assert!(!exists_self_label, "Label item should not have self tag");
+
+        // type アイテム (extension) が type:type を持っているか
+        let query_type_type = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension"))
+            .and_where(Expr::col(Col::ItemKind).eq("type"))
+            .and_where(Expr::col(Col::Type).eq("type"))
+            .to_string(PostgresQueryBuilder);
+        let exists_tt: bool = fm.conn.prepare(&query_type_type).unwrap()
+            .exists([]).unwrap();
+        assert!(exists_tt);
+
+        // typedtag アイテム (extension:txt) が type:typedtag を持っていないか
+        let query_tt_tt = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension:txt"))
+            .and_where(Expr::col(Col::Type).eq("typedtag"))
+            .to_string(PostgresQueryBuilder);
+        let exists_tt_tt: bool = fm.conn.prepare(&query_tt_tt).unwrap()
+            .exists([]).unwrap();
+        assert!(!exists_tt_tt);
+
+        // label アイテム (txt) が type:label というタグを持っていか確認
+        // (キーが "type"、値が "label")
+        let query_label_meta = Query::select()
+            .expr(Expr::val(1))
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("txt"))
+            .and_where(Expr::col(Col::ItemKind).eq("label"))
+            .and_where(Expr::col(Col::Type).eq("type"))
+            .and_where(Expr::col(Col::Label).eq("label"))
+            .to_string(PostgresQueryBuilder);
+        let exists_label: bool = fm.conn.prepare(&query_label_meta).unwrap()
+            .exists([]).unwrap();
+        assert!(exists_label);
     }
 
     #[test]
@@ -1388,9 +1485,42 @@ mod tests {
 
         assert!(
             inconsistent_ids.is_empty(), 
-            "Inconsistency found in all_tags view for IDs: {:?}. Each item must have exactly one unique Name and Rank across all its tag rows.", 
+            "Inconsistency found in all_tags view for IDs: {:?}. \
+             Each item must have exactly one unique Name and Rank \
+             across all its tag rows.", 
             inconsistent_ids
         );
+    }
+
+    #[test]
+    fn test_no_empty_extension_system_item() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 拡張子のないファイルを作成
+        std::fs::write(root.join("no_extension"), "test").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // "extension:" という typedtag が存在しないことを確認
+        let items_path = fm.item_entities_path();
+        let items_str = items_path.to_string_lossy().to_string();
+        
+        let sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                QueryHelper::parquet_query(&items_str),
+                Tbl::EntAlias
+            )
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+            .and_where(Expr::col(Col::Content).eq("extension:"))
+            .to_string(PostgresQueryBuilder);
+
+        let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "Should NOT register 'extension:' system item");
     }
 }
                         

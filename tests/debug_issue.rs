@@ -54,17 +54,14 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
         let val = p.primary_value().unwrap_or("");
         val.contains("sub_folder") && !val.ends_with(".rs")
     });
-    if sub_hits {
-        println!("ISSUE REPRODUCED: 'sub_folder' was found in results!");
-    } else {
-        println!("'sub_folder' was correctly filtered out.");
-    }
+    assert!(!sub_hits, "'sub_folder' directory found in results!");
 
     // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
     let strange_hits = results.iter().any(|p| {
         let val = p.primary_value().unwrap_or("");
         val.contains("strange.rs") && !val.ends_with("ignored.txt")
     });
+    assert!(!strange_hits, "'strange.rs' directory found in results!");
 
     Ok(())
 }

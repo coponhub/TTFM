@@ -458,11 +458,11 @@ impl Tagger for ExtensionTagger {
     }
     /// ファイルの拡張子を抽出し、小文字化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_string().to_lowercase())
-            .unwrap_or_default();
-        Ok(vec![TagValue::Text(ext)])
+        let ext = path.extension().map(|e| {
+            let s = e.to_string_lossy().to_string().to_lowercase();
+            TagValue::Text(s)
+        }).unwrap_or(TagValue::Null);
+        Ok(vec![ext])
     }
 }
 
@@ -504,7 +504,8 @@ impl TagFunction for ExtensionFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, None).ok().map(TagValue::Text)
+        path.extension()
+            .map(|e| TagValue::Text(e.to_string_lossy().to_string().to_lowercase()))
     }
 }
 
@@ -1145,6 +1146,21 @@ mod tests {
         let expr = f.to_expr(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
         let sql = to_sql(expr);
         assert_eq!(sql, "\"l\".\"extension\" = 'rs'");
+    }
+
+    #[test]
+    fn test_extension_tagger_logic() {
+        let tagger = ExtensionTagger;
+
+        // 1. 拡張子がある場合
+        let path = Path::new("test.rs");
+        let values = tagger.tag_file(path).unwrap();
+        assert_eq!(values[0], TagValue::Text("rs".to_string()));
+
+        // 2. 拡張子がない場合 (今回の修正ポイント)
+        let path_no_ext = Path::new("no_extension");
+        let values = tagger.tag_file(path_no_ext).unwrap();
+        assert_eq!(values[0], TagValue::Null);
     }
 
     #[test]
