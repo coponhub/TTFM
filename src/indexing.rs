@@ -1051,13 +1051,27 @@ impl<'a> Indexer<'a> {
 
         // system_tags 更新
         let mut update_tags_q = QueryHelper::parquet_query(stags_str);
-        let mut new_tags_q = Query::select();
-        new_tags_q
+        
+        // type: [meta_info] (メタタグ)
+        let mut new_tags_meta = Query::select();
+        new_tags_meta
             .column(Col::ItemId)
-            .expr_as(Expr::val("origin"), Col::Type)
-            .expr_as(Expr::val("system"), Col::Label)
+            .expr_as(Expr::val("type"), Col::Type)
+            .expr_as(
+                CaseStatement::new()
+                    .case(
+                        Expr::col(Col::ItemKind).eq("typedtag"),
+                        Expr::cust_with_exprs(
+                            "split_part($1, ':', 1)",
+                            [Expr::col(Col::Content).into()]
+                        )
+                    )
+                    .finally(Expr::col(Col::ItemKind)),
+                Col::Label
+            )
             .from(Alias::new("new_items_with_id"));
-        update_tags_q.union(sea_query::UnionType::All, new_tags_q.to_owned());
+        update_tags_q.union(sea_query::UnionType::All, new_tags_meta.to_owned());
+
         self.store.save_parquet(update_tags_q, Path::new(&tmp_stags))?;
 
         std::fs::rename(&tmp_items, &items_path)?;
@@ -1228,30 +1242,51 @@ mod tests {
         assert!(rows.iter().any(|(k, c)| k == "label" && c == "txt"));
         assert!(rows.iter().any(|(k, c)| k == "typedtag" && c == "extension:txt"));
 
-        // 2. それらのItemに origin:system タグがあるか確認
-        let system_tags_path_buf = fm.system_tags_path();
-        let system_tags_path = system_tags_path_buf.to_string_lossy();
-        let query_tags = Query::select()
-            .expr(Expr::cust("COUNT(*)"))
-            .from_subquery(QueryHelper::parquet_query(&system_tags_path), Tbl::TagAlias)
-            .join_subquery(
-                JoinType::InnerJoin,
-                QueryHelper::parquet_query(&items_path),
-                Tbl::EntAlias,
-                Expr::col((Tbl::TagAlias, Col::ItemId)).eq(Expr::col((Tbl::EntAlias, Col::ItemId))),
-            )
-            .and_where(Expr::col((Tbl::EntAlias, Col::Content)).eq("extension:txt"))
-            .and_where(Expr::col((Tbl::TagAlias, Col::Type)).eq("origin"))
-            .and_where(Expr::col((Tbl::TagAlias, Col::Label)).eq("system"))
+        // 2. それらのItemの origin が system であるか確認 (all_tags ビュー経由)
+        let query_origin = Query::select()
+            .column(Col::Origin)
+            .from(Alias::new("all_tags"))
+            .and_where(Expr::col(Col::Name).eq("extension:txt"))
+            .and_where(Expr::col(Col::Type).eq("type")) // メタタグ
             .to_string(PostgresQueryBuilder);
 
-        let count: i64 = fm.conn
-            .query_row(&query_tags, [], |r| r.get(0))
+        let origin: String = fm.conn
+            .query_row(&query_origin, [], |r| r.get(0))
             .unwrap();
+        
         assert_eq!(
-            count, 1,
-            "origin:system tag should be attached to system items"
+            origin, "system",
+            "Item origin should be 'system' via the view"
         );
+    }
+
+    #[test]
+    fn test_typedtag_listing_via_type_query() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+
+        // 1. ファイルを準備
+        std::fs::write(root.join("test.txt"), "hello").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // 2. type:extension で検索 -> extension:txt アイテムが見つかるはず
+        let results = fm.search("type:extension").unwrap();
+        let tt_items: Vec<_> = results.iter()
+            .filter(|r| r.item_kind == "typedtag" && r.name == "extension:txt")
+            .collect();
+        assert_eq!(tt_items.len(), 1, "Should find the typedtag item for extension:txt");
+
+        // 3. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
+        let results = fm.search("extension:txt").unwrap();
+        let files: Vec<_> = results.iter().filter(|r| r.item_kind == "file").collect();
+        let tags: Vec<_> = results.iter().filter(|r| r.item_kind == "typedtag").collect();
+        
+        assert_eq!(files.len(), 1, "Should find the file");
+        assert_eq!(tags.len(), 0, "Should NOT find the typedtag item itself as noise");
     }
 
     #[test]
