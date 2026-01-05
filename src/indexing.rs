@@ -510,9 +510,44 @@ impl QueryParts {
     }
 }
 
+// ========================================================
+// 3. Execution Extensions (SelectFetchExt)
+// ========================================================
+
+pub trait SelectFetchExt {
+    fn fetch_entries(&self, conn: &Connection) -> Result<Vec<ScanEntry>>;
+    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<i64>>;
+    fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>>;
+}
+
+impl SelectFetchExt for SelectStatement {
+    fn fetch_entries(&self, conn: &Connection) -> Result<Vec<ScanEntry>> {
+        let sql = self.to_string(PostgresQueryBuilder);
+        conn.prepare(&sql)?
+            .query_map([], |row| ScanEntry::from_row(row))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<i64>> {
+        let sql = self.to_string(PostgresQueryBuilder);
+        conn.prepare(&sql)?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>> {
+        let sql = self.to_string(PostgresQueryBuilder);
+        conn.prepare(&sql)?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+}
 
 // ========================================================
-// 3. Main Indexer
+// 4. Main Indexer
 // ========================================================
 
 pub struct Indexer<'a> {
@@ -735,24 +770,25 @@ impl<'a> Indexer<'a> {
     }
 
     fn diff_phase(&self) -> Result<IndexDiff> {
-        let scan_path = self.store.temp_scan_path().to_string_lossy().to_string();
-        let entities_path = self.store.file_entities_path().to_string_lossy().to_string();
-        let locations_path = self.store.locations_path().to_string_lossy().to_string();
+        let scan = self.store.temp_scan_path().to_string_lossy().into_owned();
+        let ents = self.store.file_entities_path().to_string_lossy().into_owned();
+        let locs = self.store.locations_path().to_string_lossy().into_owned();
 
         if !self.store.file_entities_path().exists() {
             let col_aliases: Vec<_> = ScanEntry::schema()
                 .iter()
-                .map(|c| Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name).into_iden()))
+                .map(|c| {
+                    Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| Alias::new(c.name).into_iden())
+                })
                 .collect();
-            let query = Query::select()
+
+            let to_tag = Query::select()
                 .columns(col_aliases)
-                .from_subquery(util::parquet_query(&scan_path), Tbl::Scan)
-                .to_string(PostgresQueryBuilder);
-            let to_tag = self
-                .conn
-                .prepare(&query)?
-                .query_map([], |row| ScanEntry::from_row(row))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+                .from_subquery(util::parquet_query(&scan), Tbl::Scan)
+                .fetch_entries(self.conn)?;
+
             return Ok(IndexDiff {
                 to_tag,
                 moved: vec![],
@@ -761,45 +797,12 @@ impl<'a> Indexer<'a> {
             });
         }
 
-        let to_tag_sql = QueryParts::to_tag(&scan_path, &entities_path)
-            .to_string(PostgresQueryBuilder);
-        let to_tag = self
-            .conn
-            .prepare(&to_tag_sql)?
-            .query_map([], |row| ScanEntry::from_row(row))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let moved_sql =
-            QueryParts::moved(&scan_path, &entities_path, &locations_path)
-                .to_string(PostgresQueryBuilder);
-        let moved = self
-            .conn
-            .prepare(&moved_sql)?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let deleted_sql = QueryParts::deleted(&scan_path, &entities_path)
-            .to_string(PostgresQueryBuilder);
-        let deleted_ids = self
-            .conn
-            .prepare(&deleted_sql)?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let unchanged_sql =
-            QueryParts::unchanged(&scan_path, &entities_path, &locations_path)
-                .to_string(PostgresQueryBuilder);
-        let unchanged_ids = self
-            .conn
-            .prepare(&unchanged_sql)?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
         Ok(IndexDiff {
-            to_tag,
-            moved,
-            deleted_ids,
-            unchanged_ids,
+            to_tag: QueryParts::to_tag(&scan, &ents).fetch_entries(self.conn)?,
+            moved: QueryParts::moved(&scan, &ents, &locs).fetch_moved(self.conn)?,
+            deleted_ids: QueryParts::deleted(&scan, &ents).fetch_ids(self.conn)?,
+            unchanged_ids: QueryParts::unchanged(&scan, &ents, &locs)
+                .fetch_ids(self.conn)?,
         })
     }
 
