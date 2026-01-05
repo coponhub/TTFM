@@ -79,18 +79,8 @@ impl CustomFunc {
 }
 ```
 
-#### 実装例：明示的なキャスト (Cast)
-DuckDB は型に厳格な場合があるため、必要に応じて `Expr` の `cast_as` メソッドを使用します。
-
-```rust
-use sea_query::{Expr, Alias};
-
-// 生成されるSQLイメージ: CAST("size" AS BIGINT)
-let expr = Expr::col(Alias::new("size")).cast_as(Alias::new("BIGINT"));
-```
-
 ## 2. 実装上の注意点
-- 自前での文字列エスケープ（`replace("'", "''")` 等）は極力避け、Sea-queryの提供する `Expr::val` 等のパラメータバインド機能を利用してください。
+- 自前での文字列エスケープ（`replace("'", "''")` 等）は極力避け、Sea-queryの提供するパラメータバインド機能を利用してください。
 - DuckDBはPostgreSQLに近い方言を持つため、クエリの生成には基本的に `PostgresQueryBuilder` を使用しますが、差異がある場合は必要に応じて調整してください。
 
 ## 3. コードのフォーマットとスタイル

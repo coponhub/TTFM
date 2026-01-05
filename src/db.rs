@@ -3,51 +3,43 @@ use sea_query::Iden;
 /// データベースのテーブル名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Tbl {
-    /// ファイルエンティティ（実体）テーブル
-    #[iden = "file_entities"]
     FileEntities,
-    /// ファイルパス（場所）テーブル
-    #[iden = "locations"]
     Locations,
-    /// 基本タグテーブル（自動抽出タグ）
-    #[iden = "base_tags"]
     BaseTags,
-    /// アイテムエンティティテーブル
-    #[iden = "item_entities"]
     ItemEntities,
-    /// システム定義アイテム用タグテーブル
-    #[iden = "system_tags"]
     SystemTags,
-    /// ユーザー定義タグテーブル
-    #[iden = "user_tags"]
     UserTags,
+    AllTags, // all_tags
     
-    // --- インデックス処理用テンポラリテーブル ---
-    TempScan,
-    TempFileEntities,
-    TempLocations,
-    TempBaseTags,
-    TempItemEntities,
-    TempSystemTags,
-    TempUserTags,
+    // --- Diff Tables ---
+    FileEntitiesDiff, // TempFileEntities
+    LocationsDiff,    // TempLocations
+    BaseTagsDiff,     // TempBaseTags
+    ItemEntitiesDiff, // TempItemEntities
+    SystemTagsDiff,   // TempSystemTags
+    UserTagsDiff,     // TempUserTags
 
-    // --- エイリアス用 ---
-    #[iden = "scan"]
-    ScanAlias, 
-    #[iden = "e"]
-    EntAlias,
-    #[iden = "l"]
-    LocAlias,
-    #[iden = "old"]
-    OldAlias,
-    #[iden = "origin"]
-    OriginAlias,
-    #[iden = "t"]
-    TagAlias,
-    #[iden = "u"]
-    UserTagAlias,
-    #[iden = "s"]
-    SysTagAlias,
+    // --- Work Tables / Aliases ---
+    Scan,   // TempScan / scan
+    Item,   // NewItemsRaw / Candidate (c) / Items (i) / Items2 (it2) / TempAddItem
+    IdItem, // NewItemsWithId
+    Target, // TempBatchRank
+    Diff,   // SourceTable (st)
+    Master, // m
+
+    // --- Set Operation Aliases ---
+    LeftSide,  // left_side
+    RightSide, // right_side
+    NotSide,   // not_side
+}
+
+/// SQL型名（CAST用）。
+#[allow(non_camel_case_types)]
+#[derive(Iden, Clone, Copy)]
+pub enum SqlType {
+    BIGINT,
+    VARCHAR,
+    BOOLEAN,
 }
 
 /// 共通で使用されるカラム名を表す識別子。
@@ -56,7 +48,7 @@ pub enum Col {
     ItemId,
     FileId,
     Path,
-    ParentDir,
+    Parentdir, // parentdir (note: lowercase 'd' for schema matching)
     Filename,
     Extension,
     Size,
@@ -69,6 +61,8 @@ pub enum Col {
     Rank,
     Origin,
     Name,
+    Types,  // types
+    Labels, // labels
 }
 
 /// システムタグの表示優先度（RANK）を定義する列挙型。

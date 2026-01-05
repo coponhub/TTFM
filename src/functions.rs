@@ -1178,4 +1178,27 @@ mod tests {
         assert_eq!(f.role(), ScanRole::ScanId);
         assert_eq!(f.tagger().get_columns()[0].name, "file_id");
     }
+
+    #[test]
+    fn test_col_file_id_direct() {
+        let mut query = Query::select();
+        query.column(Col::FileId);
+        let sql = query.to_string(PostgresQueryBuilder);
+        println!("Direct Col::FileId SQL: {}", sql);
+        assert!(sql.contains("\"file_id\""), "Direct Col::FileId should be snake_case");
+    }
+
+    #[test]
+    fn test_inode_function_to_expr() {
+        let f = InodeFunction::new();
+        // file_id:123
+        let expr = f.to_expr(&ttag(InodeFunction::NAME, "123")).unwrap();
+        let sql = to_sql(expr);
+        println!("SQL: {}", sql);
+        
+        // Assert the CURRENT behavior (which we suspect is buggy PascalCase)
+        // If this passes, it confirms Col::FileId produces "FileId".
+        // After refactoring, this test will fail and should be updated to "file_id".
+        assert!(sql.contains("\"e\".\"FileId\""), "Expected PascalCase FileId (current behavior)");
+    }
 }
