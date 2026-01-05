@@ -156,7 +156,7 @@ impl QueryHelper {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::ScanId) {
-                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
+                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -169,7 +169,7 @@ impl QueryHelper {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::Integrity) {
-                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
+                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -207,7 +207,7 @@ impl QueryHelper {
         loc_path: &str,
     ) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
             .column((Tbl::Scan, col_path.clone()))
@@ -234,7 +234,7 @@ impl QueryHelper {
 
     fn build_deleted_query(scan_path: &str, entities_path: &str) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
         let join_cond = Condition::all()
             .add(Self::identity_condition(Tbl::FileEntities, Tbl::Scan))
             .add(Self::integrity_condition(Tbl::FileEntities, Tbl::Scan));
@@ -258,7 +258,7 @@ impl QueryHelper {
         loc_path: &str,
     ) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name.clone()).into_iden());
+        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
             .from_subquery(Self::parquet_query(entities_path), Tbl::FileEntities)
@@ -560,7 +560,7 @@ impl<'a> Indexer<'a> {
             let mut create = Table::create();
             create.table(Tbl::Scan).if_not_exists();
             for cd in ScanEntry::schema() {
-                let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
+                let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
                 let mut col = SeaColumnDef::new(col_iden);
                 if cd.sql_type == "BIGINT" {
                     col.big_integer();

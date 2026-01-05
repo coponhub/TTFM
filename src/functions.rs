@@ -2,7 +2,7 @@ use anyhow::{Result, Context};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local};
-use sea_query::{Expr, SimpleExpr, Alias, extension::postgres::PgExpr};
+use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
 use crate::db::{Tbl, Col};
