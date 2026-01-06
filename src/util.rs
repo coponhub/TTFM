@@ -3,7 +3,7 @@ use duckdb::Connection;
 use sea_query::{
     PostgresQueryBuilder, SelectStatement, TableCreateStatement, 
     TableDropStatement, DeleteStatement, UpdateStatement, 
-    InsertStatement, Iden, Query, Expr
+    InsertStatement, Iden, Query, Expr, IntoIden, ColumnDef
 };
 use std::path::Path;
 
@@ -130,6 +130,33 @@ impl<T: Iden + Clone + 'static> IdenExt for T {
     fn drop_table(&self, conn: &Connection) -> Result<()> {
         use sea_query::Table;
         Table::drop().table(self.clone()).execute(conn)
+    }
+}
+
+/// テーブル作成の拡張トレイト
+pub trait TableCreateExt {
+    /// イテレータを受け取り、各要素に対してマッパー関数を適用してカラムを追加します。
+    fn add_columns_with<I, F, N, T>(&mut self, iter: I, mapper: F) -> &mut Self
+    where
+        I: IntoIterator,
+        F: Fn(I::Item) -> (N, T),
+        N: IntoIden,
+        T: IntoIden;
+}
+
+impl TableCreateExt for TableCreateStatement {
+    fn add_columns_with<I, F, N, T>(&mut self, iter: I, mapper: F) -> &mut Self
+    where
+        I: IntoIterator,
+        F: Fn(I::Item) -> (N, T),
+        N: IntoIden,
+        T: IntoIden,
+    {
+        for item in iter {
+            let (name, col_type) = mapper(item);
+            self.col(ColumnDef::new(name).custom(col_type));
+        }
+        self
     }
 }
 

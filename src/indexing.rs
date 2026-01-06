@@ -2,7 +2,7 @@ use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::FunctionRegistry;
 use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
-use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt};
+use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
@@ -12,6 +12,166 @@ use sea_query::{
 };
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
+
+// ========================================================
+// 0. File Scanner
+// ========================================================
+
+struct FileScanner<'a> {
+    conn: &'a Connection,
+    db_dir: PathBuf,
+    dry_run: bool,
+    on_progress: Option<&'a (dyn Fn(usize) + Sync + Send)>,
+    walker: Option<ignore::WalkParallel>,
+    tx: Option<std::sync::mpsc::Sender<ScanEntry>>,
+}
+
+impl<'a> FileScanner<'a> {
+    fn new(
+        conn: &'a Connection,
+        root_path: PathBuf,
+        db_dir: PathBuf,
+        dry_run: bool,
+        on_progress: Option<&'a (dyn Fn(usize) + Sync + Send)>,
+    ) -> (Self, std::sync::mpsc::Receiver<ScanEntry>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let walker = ignore::WalkBuilder::new(root_path)
+            .hidden(false)
+            .git_ignore(true)
+            .threads(rayon::current_num_threads())
+            .build_parallel();
+
+        (
+            Self {
+                conn,
+                db_dir,
+                on_progress,
+                dry_run,
+                walker: Some(walker),
+                tx: Some(tx),
+            },
+            rx,
+        )
+    }
+
+    fn prepare_tray(&self) -> Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+
+        Table::create()
+            .table(Tbl::Scan)
+            .temporary()
+            .add_columns_with(ScanEntry::schema(), |cd| {
+                let name = Col::from_str(&cd.name)
+                    .map(|c| c.into_iden())
+                    .unwrap_or_else(|| Alias::new(cd.name).into_iden());
+                let type_def = Alias::new(cd.sql_type);
+                (name, type_def)
+            })
+            .execute(self.conn)
+    }
+
+    fn scan<'s, 'e>(&mut self, s: &'s std::thread::Scope<'s, 'e>) {
+        let walker = self.walker.take().expect("Walker already consumed");
+        let tx = self.tx.take().expect("Sender already consumed");
+        let db_dir = self.db_dir.clone();
+
+        s.spawn(move || {
+            let factory = move || ScanWalker::create(tx.clone(), db_dir.clone());
+            walker.run(factory);
+        });
+    }
+
+    fn write(&self, rx: std::sync::mpsc::Receiver<ScanEntry>) -> Result<usize> {
+        let mut current_count = 0;
+        let mut appender = if !self.dry_run {
+            let table_name = Tbl::Scan.to_string().replace('"', "");
+            Some(self.conn.appender(&table_name)?)
+        } else {
+            None
+        };
+
+        for entry in rx {
+            if let Some(ref mut app) = appender {
+                app.append_row(&*entry.as_params())?;
+            }
+            current_count += 1;
+            if let Some(cb) = self.on_progress {
+                if current_count % 1000 == 0 {
+                    cb(current_count);
+                }
+            }
+        }
+
+        if let Some(cb) = self.on_progress {
+            cb(current_count);
+        }
+
+        Ok(current_count)
+    }
+
+    fn finalize_table(&self, path: &Path) -> Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+
+        Query::select()
+            .expr(Expr::cust("*"))
+            .from(Tbl::Scan)
+            .save_parquet(self.conn, path)?;
+
+        Table::drop().table(Tbl::Scan).execute(self.conn).ok();
+        Ok(())
+    }
+}
+
+// --- Walker Implementation ---
+
+struct ScanWalker {
+    tx: std::sync::mpsc::Sender<ScanEntry>,
+    db_dir: PathBuf,
+}
+
+impl ScanWalker {
+    fn create(
+        tx: std::sync::mpsc::Sender<ScanEntry>,
+        db_dir: PathBuf,
+    ) -> Box<dyn FnMut(Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState + Send> {
+        let mut walker = Self { tx, db_dir };
+        Box::new(move |res| walker.visit(res))
+    }
+
+    fn is_db_dir(&self, path: &Path) -> bool {
+        path.canonicalize()
+            .map(|p| p.starts_with(&self.db_dir))
+            .unwrap_or(false)
+    }
+
+    fn try_create_entry(
+        &self,
+        res: Result<ignore::DirEntry, ignore::Error>,
+    ) -> Option<ScanEntry> {
+        res.ok()
+            .filter(|e| !self.is_db_dir(e.path()))
+            .and_then(|e| {
+                let m = e.metadata().ok()?;
+                ScanEntry::from_path_metadata(e.path(), &m).ok()
+            })
+    }
+
+    fn visit(&mut self, res: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {
+        let Some(entry) = self.try_create_entry(res) else {
+            return ignore::WalkState::Continue;
+        };
+
+        if self.tx.send(entry).is_err() {
+            return ignore::WalkState::Quit;
+        }
+
+        ignore::WalkState::Continue
+    }
+}
 
 // ========================================================
 // 1. Storage Manager (IndexStore)
@@ -667,105 +827,23 @@ impl<'a> Indexer<'a> {
     where
         F: Fn(usize) + Sync + Send,
     {
-        if !dry_run {
-            let mut create = Table::create();
-            create.table(Tbl::Scan).if_not_exists();
-            for cd in ScanEntry::schema() {
-                let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
-                let mut col = SeaColumnDef::new(col_iden);
-                if cd.sql_type == "BIGINT" {
-                    col.big_integer();
-                } else {
-                    col.string();
-                }
-                create.col(&mut col);
-            }
-            self.conn
-                .execute(&create.to_string(PostgresQueryBuilder), [])?;
-            self.conn.execute(
-                &Query::delete()
-                    .from_table(Tbl::Scan)
-                    .to_string(PostgresQueryBuilder),
-                [],
-            )?;
-        }
+        let (mut scanner, rx) = FileScanner::new(
+            self.conn,
+            root_path.to_path_buf(),
+            self.store.db_dir.clone(),
+            dry_run,
+            on_progress.map(|f| f as _),
+        );
 
-        let db_dir_canonical = self
-            .store
-            .db_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.store.db_dir.clone());
-        let (tx, rx) = std::sync::mpsc::channel::<ScanEntry>();
-        let walker = ignore::WalkBuilder::new(root_path)
-            .hidden(false)
-            .git_ignore(true)
-            .threads(rayon::current_num_threads())
-            .build_parallel();
+        scanner.prepare_tray()?;
 
         let count = std::thread::scope(|s| {
-            s.spawn(move || {
-                walker.run(|| {
-                    let tx = tx.clone();
-                    let db_dir_canonical = db_dir_canonical.clone();
-                    Box::new(move |res| {
-                        if let Ok(entry) = res {
-                            if let Ok(p) = entry.path().canonicalize() {
-                                if p.starts_with(&db_dir_canonical) {
-                                    return ignore::WalkState::Continue;
-                                }
-                            }
-                            if let Ok(m) = entry.metadata() {
-                                if let Ok(se) =
-                                    ScanEntry::from_path_metadata(entry.path(), &m)
-                                {
-                                    let _ = tx.send(se);
-                                }
-                            }
-                        }
-                        ignore::WalkState::Continue
-                    })
-                });
-            });
-
-            let mut current_count = 0;
-            let mut appender = if !dry_run {
-                let table_name = Tbl::Scan.to_string().replace('"', "");
-                Some(self.conn.appender(&table_name)?)
-            } else {
-                None
-            };
-            for entry in rx {
-                if let Some(ref mut app) = appender {
-                    app.append_row(&*entry.as_params())?;
-                }
-                current_count += 1;
-                if let Some(cb) = on_progress {
-                    if current_count % 1000 == 0 {
-                        cb(current_count);
-                    }
-                }
-            }
-            Ok::<usize, anyhow::Error>(current_count)
+            scanner.scan(s);
+            scanner.write(rx)
         })?;
 
-        if !dry_run {
-            let query = Query::select()
-                .expr(Expr::cust("*"))
-                .from(Tbl::Scan)
-                .to_owned();
-            query.save_parquet(self.conn, &self.store.temp_scan_path())?;
-            self.conn
-                .execute(
-                    &Table::drop()
-                        .table(Tbl::Scan)
-                        .to_string(PostgresQueryBuilder),
-                    [],
-                )
-                .ok();
-        }
-        if let Some(cb) = on_progress {
-            cb(count);
-        }
+        scanner.finalize_table(&self.store.temp_scan_path())?;
+
         Ok(count)
     }
 
