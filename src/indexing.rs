@@ -41,10 +41,13 @@ impl<'a> FileScanner<'a> {
             .threads(rayon::current_num_threads())
             .build_parallel();
 
+        // 比較を正確にするため、db_dir を正規化しておく
+        let db_dir = db_dir.canonicalize().unwrap_or(db_dir);
+
         (
             Self {
                 conn,
-                db_dir,
+                db_dir: db_dir.clone(),
                 on_progress,
                 dry_run,
                 walker: Some(walker),
@@ -137,6 +140,7 @@ impl ScanWalker {
     }
 
     fn is_db_dir(&self, path: &Path) -> bool {
+        // 対象パスを正規化し、db_dir の配下にあるかチェック
         path.canonicalize()
             .map(|p| p.starts_with(&self.db_dir))
             .unwrap_or(false)
@@ -1691,6 +1695,55 @@ mod tests {
         assert_eq!(values[1], TagValue::Text("/test/dir".into()));
         assert_eq!(values[2], TagValue::Text("file.txt".into()));
         assert_eq!(values[3], TagValue::Text("txt".into()));
+    }
+
+    #[test]
+    fn test_incremental_indexing_full_flow() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let db_dir = base.join("db");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let all_files = "item_kind:file";
+
+        // 1. 初回: a.txt を作成 (root + a.txt = 2)
+        let path_a = root.join("a.txt");
+        std::fs::write(&path_a, "initial content").unwrap();
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 2);
+        assert_eq!(fm.search("filename:a.txt").unwrap().len(), 1);
+
+        // 2. 変更なし: そのまま再スキャン (2)
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 2);
+
+        // 3. 追加: b.rs を作成 (root + a.txt + b.rs = 3)
+        let path_b = root.join("b.rs");
+        std::fs::write(&path_b, "fn main() {}").unwrap();
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 3);
+        assert_eq!(fm.search("filename:b.rs").unwrap().len(), 1);
+
+        // 4. 更新: a.txt のサイズを変更 (3)
+        std::fs::write(&path_a, "updated content with more bytes").unwrap();
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 3);
+
+        // 5. 削除: b.rs を削除 (root + a.txt = 2)
+        std::fs::remove_file(&path_b).unwrap();
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 2);
+        assert_eq!(fm.search("filename:b.rs").unwrap().len(), 0);
+
+        // 6. 移動: a.txt -> c.txt (root + c.txt = 2)
+        let path_c = root.join("c.txt");
+        std::fs::rename(&path_a, &path_c).unwrap();
+        fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
+        assert_eq!(fm.search(all_files).unwrap().len(), 2);
+        assert_eq!(fm.search("filename:a.txt").unwrap().len(), 0);
+        assert_eq!(fm.search("filename:c.txt").unwrap().len(), 1);
     }
 
     #[test]
