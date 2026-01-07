@@ -135,25 +135,22 @@ impl<T: Iden + Clone + 'static> IdenExt for T {
 
 /// テーブル作成の拡張トレイト
 pub trait TableCreateExt {
-    /// イテレータを受け取り、各要素に対してマッパー関数を適用してカラムを追加します。
-    fn add_columns_with<I, F, N, T>(&mut self, iter: I, mapper: F) -> &mut Self
+    /// (名前, 型) のペアのイテレータを受け取り、カラムを追加します。
+    fn add_columns<I, N, T>(&mut self, iter: I) -> &mut Self
     where
-        I: IntoIterator,
-        F: Fn(I::Item) -> (N, T),
+        I: IntoIterator<Item = (N, T)>,
         N: IntoIden,
         T: IntoIden;
 }
 
 impl TableCreateExt for TableCreateStatement {
-    fn add_columns_with<I, F, N, T>(&mut self, iter: I, mapper: F) -> &mut Self
+    fn add_columns<I, N, T>(&mut self, iter: I) -> &mut Self
     where
-        I: IntoIterator,
-        F: Fn(I::Item) -> (N, T),
+        I: IntoIterator<Item = (N, T)>,
         N: IntoIden,
         T: IntoIden,
     {
-        for item in iter {
-            let (name, col_type) = mapper(item);
+        for (name, col_type) in iter {
             self.col(ColumnDef::new(name).custom(col_type));
         }
         self
@@ -184,6 +181,12 @@ pub fn iden_to_sql(iden: impl Iden + 'static) -> String {
         .from(crate::db::Tbl::Master)
         .to_string(PostgresQueryBuilder);
     sql.split_whitespace().nth(1).unwrap_or("").to_string()
+}
+
+/// 文字列から sea_query のエイリアス識別子を作成します。
+pub fn alias_from(s: &str) -> sea_query::DynIden {
+    use sea_query::Alias;
+    Alias::new(s).into_iden()
 }
 
 pub fn parquet_query(path: &str) -> SelectStatement {

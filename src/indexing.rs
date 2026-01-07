@@ -62,13 +62,7 @@ impl<'a> FileScanner<'a> {
         Table::create()
             .table(Tbl::Scan)
             .temporary()
-            .add_columns_with(ScanEntry::schema(), |cd| {
-                let name = Col::from_str(&cd.name)
-                    .map(|c| c.into_iden())
-                    .unwrap_or_else(|| Alias::new(cd.name).into_iden());
-                let type_def = Alias::new(cd.sql_type);
-                (name, type_def)
-            })
+            .add_columns(ScanEntry::columns_with_type())
             .execute(self.conn)
     }
 
@@ -174,7 +168,60 @@ impl ScanWalker {
 }
 
 // ========================================================
-// 1. Storage Manager (IndexStore)
+// 1. Diff Auditor
+// ========================================================
+
+struct DiffAuditor {
+    scan: String,
+    ents: String,
+    locs: String,
+}
+
+impl DiffAuditor {
+    fn new(store: &IndexStore<'_>) -> Self {
+        Self {
+            scan: store.temp_scan_path().to_string_lossy().into_owned(),
+            ents: store.file_entities_path().to_string_lossy().into_owned(),
+            locs: store.locations_path().to_string_lossy().into_owned(),
+        }
+    }
+
+    /// 既存のインデックスが存在しない（初回スキャン）かどうかを判定します。
+    fn is_initial(&self) -> bool {
+        !Path::new(&self.ents).exists()
+    }
+
+    /// 初回スキャン用：全ファイルを「処理対象」として取得するクエリ。
+    fn query_all(&self) -> SelectStatement {
+        Query::select()
+            .columns(ScanEntry::column_idens())
+            .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
+            .to_owned()
+    }
+
+    /// 通常用：新規または内容が変更されたファイルを特定するクエリ。
+    fn query_to_tag(&self) -> SelectStatement {
+        QueryParts::to_tag(&self.scan, &self.ents)
+    }
+
+    /// 通常用：移動（パス変更）されたファイルを特定するクエリ。
+    fn query_moved(&self) -> SelectStatement {
+        QueryParts::moved(&self.scan, &self.ents, &self.locs)
+    }
+
+    /// 通常用：削除されたファイルのIDを特定するクエリ。
+    fn query_deleted(&self) -> SelectStatement {
+        QueryParts::deleted(&self.scan, &self.ents)
+    }
+
+    /// 通常用：変更のないファイルのIDを特定するクエリ。
+    fn query_unchanged(&self) -> SelectStatement {
+        QueryParts::unchanged(&self.scan, &self.ents, &self.locs)
+    }
+}
+
+// ========================================================
+// 2. Storage Manager (IndexStore)
 // ========================================================
 
 pub(crate) struct IndexStore<'a> {
@@ -848,39 +895,22 @@ impl<'a> Indexer<'a> {
     }
 
     fn diff_phase(&self) -> Result<IndexDiff> {
-        let scan = self.store.temp_scan_path().to_string_lossy().into_owned();
-        let ents = self.store.file_entities_path().to_string_lossy().into_owned();
-        let locs = self.store.locations_path().to_string_lossy().into_owned();
+        let diff = DiffAuditor::new(&self.store);
 
-        if !self.store.file_entities_path().exists() {
-            let col_aliases: Vec<_> = ScanEntry::schema()
-                .iter()
-                .map(|c| {
-                    Col::from_str(&c.name)
-                        .map(|c| c.into_iden())
-                        .unwrap_or_else(|| Alias::new(c.name).into_iden())
-                })
-                .collect();
-
-            let to_tag = Query::select()
-                .columns(col_aliases)
-                .from_subquery(util::parquet_query(&scan), Tbl::Scan)
-                .fetch_entries(self.conn)?;
-
+        // 初回スキャンの場合
+        if diff.is_initial() {
             return Ok(IndexDiff {
-                to_tag,
-                moved: vec![],
-                deleted_ids: vec![],
-                unchanged_ids: vec![],
+                to_tag: diff.query_all().fetch_entries(self.conn)?,
+                ..Default::default()
             });
         }
 
+        // 通常の更新の場合
         Ok(IndexDiff {
-            to_tag: QueryParts::to_tag(&scan, &ents).fetch_entries(self.conn)?,
-            moved: QueryParts::moved(&scan, &ents, &locs).fetch_moved(self.conn)?,
-            deleted_ids: QueryParts::deleted(&scan, &ents).fetch_ids(self.conn)?,
-            unchanged_ids: QueryParts::unchanged(&scan, &ents, &locs)
-                .fetch_ids(self.conn)?,
+            to_tag: diff.query_to_tag().fetch_entries(self.conn)?,
+            moved: diff.query_moved().fetch_moved(self.conn)?,
+            deleted_ids: diff.query_deleted().fetch_ids(self.conn)?,
+            unchanged_ids: diff.query_unchanged().fetch_ids(self.conn)?,
         })
     }
 
@@ -1331,6 +1361,7 @@ impl BaseTagMerger<'_> {
 
 
 
+#[derive(Default)]
 struct IndexDiff {
     pub to_tag: Vec<ScanEntry>,
     pub moved: Vec<(i64, String)>,
@@ -1361,6 +1392,29 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use crate::FileManager;
+
+    #[test]
+    fn test_diff_auditor_logic() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let store = IndexStore::new(&conn, db_dir);
+
+        // 1. 初回スキャンのテスト
+        let diff = DiffAuditor::new(&store);
+        assert!(diff.is_initial());
+        // query_all が構文エラーなく生成されるか確認
+        let sql = diff.query_all().to_string(PostgresQueryBuilder);
+        assert!(sql.contains("read_parquet"));
+
+        // 2. 既存DBがある場合のテスト
+        // ダミーのエンティティファイルを作成
+        std::fs::create_dir_all(&store.db_dir).unwrap();
+        std::fs::write(store.file_entities_path(), "").unwrap();
+        let diff2 = DiffAuditor::new(&store);
+        assert!(!diff2.is_initial());
+    }
 
     #[test]
     fn test_initialize_tables() {
