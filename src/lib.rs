@@ -11,7 +11,7 @@ use sea_query::{
     Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
-use crate::util::{ExecuteSql, ParquetExt, IdenExt, SelectExt};
+use crate::util::{ExecuteSql, IdenExt, SelectExt};
 
 pub mod types;
 pub mod query;

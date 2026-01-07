@@ -1,5 +1,5 @@
 use crate::taggers::{TagValue, TargetTable, ColumnDef};
-use crate::FunctionRegistry;
+use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
@@ -7,7 +7,7 @@ use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
     Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, 
-    Func, Table, ColumnDef as SeaColumnDef, Iden, SelectStatement,
+    Func, Table, Iden, SelectStatement,
     CaseStatement, IntoIden
 };
 use std::path::{Path, PathBuf};
@@ -221,7 +221,203 @@ impl DiffAuditor {
 }
 
 // ========================================================
-// 2. Storage Manager (IndexStore)
+// 2. Item Triager
+// ========================================================
+
+/// トリアージの結果、どのバケツに入れるべきかを表す中間型。
+enum TriagePiece {
+    Entity(TagValue),
+    Location(TagValue),
+    Tag(TagRow),
+    None,
+}
+
+/// トリアージされたデータを一時的に蓄積するアキュムレータ。
+struct TriageAccumulator {
+    id: i64,
+    entities: Vec<TagValue>,
+    locations: Vec<TagValue>,
+    tags: Vec<TagRow>,
+}
+
+impl TriageAccumulator {
+    fn new(id: i64) -> Self {
+        Self {
+            id,
+            entities: vec![TagValue::BigInt(0)], // 1列目は Rank(0)
+            locations: Vec::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// ピースを適切なバケツへ振り分けます。
+    fn collect(mut self, piece: TriagePiece) -> Self {
+        match piece {
+            TriagePiece::Entity(v) => self.entities.push(v),
+            TriagePiece::Location(v) => self.locations.push(v),
+            TriagePiece::Tag(t) => self.tags.push(t),
+            TriagePiece::None => {}
+        }
+        self
+    }
+
+    fn finish(self) -> TaggingResult {
+        TaggingResult {
+            entity_row: DynamicRow {
+                id: self.id,
+                values: self.entities,
+            },
+            location_row: DynamicRow {
+                id: self.id,
+                values: self.locations,
+            },
+            tags: self.tags,
+        }
+    }
+}
+
+struct ItemTriager<'a> {
+    conn: &'a Connection,
+    registry: &'a FunctionRegistry,
+    store: &'a IndexStore<'a>,
+}
+
+impl<'a> ItemTriager<'a> {
+    fn new(
+        conn: &'a Connection,
+        reg: &'a FunctionRegistry,
+        store: &'a IndexStore<'a>,
+    ) -> Self {
+        Self {
+            conn,
+            registry: reg,
+            store,
+        }
+    }
+
+    /// 各ファイルから並列で情報を抽出します。
+    fn extract_all(&self, entries: Vec<ScanEntry>) -> Result<Vec<Vec<TagValue>>> {
+        entries
+            .into_par_iter()
+            .map(|e| self.registry.process_file(Path::new(&e.path.value)))
+            .collect()
+    }
+
+    /// 抽出された情報を ID 付与と共にデータベース形式へ選別します。
+    fn assemble_records(
+        &self,
+        all_values: Vec<Vec<TagValue>>,
+    ) -> Result<Vec<TaggingResult>> {
+        let max_id = self.get_max_id()?;
+        let columns = self.registry.get_all_columns();
+
+        all_values
+            .into_iter()
+            .enumerate()
+            .map(|(i, values)| {
+                let id = max_id + (i as i64) + 1;
+                Ok(self.triage_item(id, values, &columns))
+            })
+            .collect()
+    }
+
+    /// 1アイテム分のトリアージを実行するメインパイプライン。
+    fn triage_item(
+        &self,
+        id: i64,
+        values: Vec<TagValue>,
+        cols: &[ColumnDef],
+    ) -> TaggingResult {
+        values
+            .into_iter()
+            .zip(cols)
+            .map(|(v, c)| self.classify(id, v, c))
+            .fold(TriageAccumulator::new(id), |acc, p| acc.collect(p))
+            .finish()
+    }
+
+    /// カラムの TargetTable に基づいて、どのバケツへ振り分けるべきかを決定します。
+    fn classify(&self, id: i64, val: TagValue, col: &ColumnDef) -> TriagePiece {
+        match col.target_table {
+            TargetTable::FileEntities => TriagePiece::Entity(val),
+            TargetTable::Locations => TriagePiece::Location(val),
+            TargetTable::BaseTags => self.triage_base_tag(id, val, &col.name),
+            _ => TriagePiece::None,
+        }
+    }
+
+    /// タグ値が有効（非空）であればタグとして採用し、そうでなければ無視します。
+    fn triage_base_tag(&self, id: i64, val: TagValue, name: &str) -> TriagePiece {
+        val.into_string()
+            .filter(|s| !s.is_empty())
+            .map(|label| {
+                TriagePiece::Tag(TagRow {
+                    item_id: id,
+                    tag_type: name.to_string(),
+                    label,
+                })
+            })
+            .unwrap_or(TriagePiece::None)
+    }
+
+    /// 移動されたファイルに対し、パス情報のみから場所情報を再生成します。
+    fn rebuild_moved_locations(
+        &self,
+        moved: Vec<(i64, String)>,
+    ) -> Result<Vec<DynamicRow>> {
+        let functions = self.registry.all_functions();
+        moved
+            .into_iter()
+            .map(|(id, path)| {
+                let values =
+                    self.rebuild_values_from_path(Path::new(&path), functions);
+                Ok(DynamicRow { id, values })
+            })
+            .collect()
+    }
+
+    /// パス情報から場所関連のタグ値を宣言的に再生成します。
+    fn rebuild_values_from_path(
+        &self,
+        path: &Path,
+        functions: &[Box<dyn TagFunction>],
+    ) -> Vec<TagValue> {
+        functions
+            .iter()
+            .flat_map(|f| {
+                let val = (f.role() == ScanRole::Location)
+                    .then(|| f.generate_from_path(path))
+                    .flatten()
+                    .unwrap_or(TagValue::Null);
+
+                std::iter::repeat(val).take(f.tagger().get_columns().len())
+            })
+            .collect()
+    }
+
+    /// 現在のデータベースにおける最大 ItemID を取得します。
+    fn get_max_id(&self) -> Result<i64> {
+        if !self.store.file_entities_path().exists() {
+            return Ok(0);
+        }
+        let ents_path = self.store.file_entities_path();
+        let ents_str = ents_path.to_string_lossy();
+        let query = Query::select()
+            .expr(Func::cust(DuckDbFunc::Coalesce).args([
+                Expr::col(Col::ItemId).max().into(),
+                Expr::val(0).into(),
+            ]))
+            .from_subquery(util::parquet_query(&ents_str), Tbl::FileEntities)
+            .to_string(PostgresQueryBuilder);
+
+        self.conn
+            .query_row(&query, [], |r| r.get(0))
+            .map_err(Into::into)
+    }
+}
+
+// ========================================================
+// 3. Storage Manager (IndexStore)
 // ========================================================
 
 pub(crate) struct IndexStore<'a> {
@@ -269,6 +465,75 @@ impl<'a> IndexStore<'a> {
                 .to_owned()
         };
         query.save_parquet(self.conn, path)
+    }
+
+    pub(crate) fn build_table_schema(
+        &self,
+        target: TargetTable,
+        name: impl Iden + 'static,
+        columns: &[ColumnDef],
+    ) -> sea_query::TableCreateStatement {
+        use sea_query::{ColumnDef as SeaColumnDef, Table};
+        let mut create = Table::create().table(name).to_owned();
+        match target {
+            TargetTable::FileEntities => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                create.col(SeaColumnDef::new(Col::Rank).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::FileEntities)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::Locations => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::Locations)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::BaseTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string());
+            }
+            TargetTable::ItemEntities => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Rank).big_integer())
+                    .col(SeaColumnDef::new(Col::ItemKind).string())
+                    .col(SeaColumnDef::new(Col::Content).string());
+            }
+            TargetTable::SystemTags | TargetTable::UserTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string());
+            }
+        }
+        create
     }
 }
 
@@ -791,7 +1056,7 @@ impl<'a> Indexer<'a> {
             return Ok(count);
         }
         let diff = self.diff_phase()?;
-        let (results, moved) = self.tagging_phase(diff.to_tag, diff.moved)?;
+        let (results, moved) = self.triage_phase(diff.to_tag, diff.moved)?;
         self.merge_phase(results, moved, diff.deleted_ids, diff.unchanged_ids)?;
         Ok(count)
     }
@@ -853,7 +1118,8 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
         let table = Tbl::Master; // Safe temp name for initialization
-        self.build_table_schema(target, table, columns)
+        self.store
+            .build_table_schema(target, table, columns)
             .execute(self.conn)?;
 
         if let Some(parent) = path.parent() {
@@ -914,85 +1180,22 @@ impl<'a> Indexer<'a> {
         })
     }
 
-    fn tagging_phase(
+    fn triage_phase(
         &self,
         to_tag: Vec<ScanEntry>,
         moved: Vec<(i64, String)>,
     ) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
-        let columns = self.registry.get_all_columns();
-        let max_id: i64 = if self.store.file_entities_path().exists() {
-            let entities_str = self.store.file_entities_path().to_string_lossy().to_string();
-            let query = Query::select()
-                .expr(
-                    Func::cust(DuckDbFunc::Coalesce)
-                        .args([Expr::col(Col::ItemId).max().into(), Expr::val(0).into()]),
-                )
-                .from_subquery(util::parquet_query(&entities_str), Tbl::FileEntities)
-                .to_string(PostgresQueryBuilder);
-            self.conn.query_row(&query, [], |r| r.get(0))?
-        } else {
-            0
-        };
+        let triager = ItemTriager::new(self.conn, self.registry, &self.store);
 
-        let results = to_tag
-            .into_par_iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let item_id = max_id + (i as i64) + 1;
-                let values = self.registry.process_file(Path::new(&entry.path.value))?;
-                let mut er = DynamicRow {
-                    id: item_id,
-                    values: vec![TagValue::BigInt(0)],
-                };
-                let mut lr = DynamicRow {
-                    id: item_id,
-                    values: Vec::new(),
-                };
-                let mut tags = Vec::new();
-                for (col_def, val) in columns.iter().zip(values.into_iter()) {
-                    match col_def.target_table {
-                        TargetTable::FileEntities => er.values.push(val),
-                        TargetTable::Locations => lr.values.push(val),
-                        TargetTable::BaseTags => {
-                            if let Some(s) = val.into_string() {
-                                if !s.is_empty() {
-                                    tags.push(TagRow {
-                                        item_id,
-                                        tag_type: col_def.name.clone(),
-                                        label: s,
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(TaggingResult {
-                    entity_row: er,
-                    location_row: lr,
-                    tags,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // 1. 各ファイルから並列で情報を抽出
+        let raw_values = triager.extract_all(to_tag)?;
 
-        let functions = self.registry.all_functions();
-        let moved_rows = moved
-            .into_iter()
-            .map(|(eid, path_str)| {
-                let p = Path::new(&path_str);
-                let mut values = Vec::new();
-                for func in functions {
-                    for _ in func.tagger().get_columns() {
-                        if func.role() == ScanRole::Location {
-                            values.push(
-                                func.generate_from_path(p).unwrap_or(TagValue::Null),
-                            );
-                        }
-                    }
-                }
-                DynamicRow { id: eid, values }
-            })
-            .collect();
+        // 2. 抽出された情報を ID 付与と共にデータベース形式へ選別
+        let results = triager.assemble_records(raw_values)?;
+
+        // 3. 移動されたファイルに対する場所情報の再生成
+        let moved_rows = triager.rebuild_moved_locations(moved)?;
+
         Ok((results, moved_rows))
     }
 
@@ -1132,70 +1335,6 @@ impl<'a> Indexer<'a> {
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
         Ok(if min_id > -1 { -1 } else { min_id - 1 })
     }
-
-    fn build_table_schema(
-        &self,
-        target: TargetTable,
-        name: impl Iden + 'static,
-        columns: &[ColumnDef],
-    ) -> sea_query::TableCreateStatement {
-        let mut create = Table::create().table(name).to_owned();
-        match target {
-            TargetTable::FileEntities => {
-                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
-                create.col(SeaColumnDef::new(Col::Rank).big_integer());
-                for c in columns
-                    .iter()
-                    .filter(|c| c.target_table == TargetTable::FileEntities)
-                {
-                    let col_iden = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name.clone()).into_iden());
-                    let mut def = SeaColumnDef::new(col_iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
-                    };
-                    create.col(&mut def);
-                }
-            }
-            TargetTable::Locations => {
-                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
-                for c in columns
-                    .iter()
-                    .filter(|c| c.target_table == TargetTable::Locations)
-                {
-                    let col_iden = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name.clone()).into_iden());
-                    let mut def = SeaColumnDef::new(col_iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
-                    };
-                    create.col(&mut def);
-                }
-            }
-            TargetTable::BaseTags => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
-            }
-            TargetTable::ItemEntities => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Rank).big_integer())
-                    .col(SeaColumnDef::new(Col::ItemKind).string())
-                    .col(SeaColumnDef::new(Col::Content).string());
-            }
-            TargetTable::SystemTags | TargetTable::UserTags => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
-            }
-        }
-        create
-    }
 }
 
 // ========================================================
@@ -1210,6 +1349,7 @@ impl FileEntityMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
         self.indexer
+            .store
             .build_table_schema(
                 TargetTable::FileEntities,
                 Tbl::FileEntitiesDiff,
@@ -1258,6 +1398,7 @@ impl LocationMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
         self.indexer
+            .store
             .build_table_schema(
                 TargetTable::Locations,
                 Tbl::LocationsDiff,
@@ -1315,6 +1456,7 @@ impl BaseTagMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
         self.indexer
+            .store
             .build_table_schema(
                 TargetTable::BaseTags,
                 Tbl::BaseTagsDiff,
@@ -1398,7 +1540,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join("db");
         let conn = Connection::open_in_memory().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let dir_path = dir.path().to_path_buf();
         let store = IndexStore::new(&conn, db_dir);
 
         // 1. 初回スキャンのテスト
@@ -1414,6 +1556,132 @@ mod tests {
         std::fs::write(store.file_entities_path(), "").unwrap();
         let diff2 = DiffAuditor::new(&store);
         assert!(!diff2.is_initial());
+    }
+
+    #[test]
+    fn test_triager_base_tag_logic() {
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::new();
+        let dir = tempdir().unwrap();
+        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let triager = ItemTriager::new(&conn, &registry, &store);
+
+        // 1. 有効な値のテスト
+        let val = TagValue::Text("rs".to_string());
+        let piece = triager.triage_base_tag(100, val, "extension");
+        if let TriagePiece::Tag(tag) = piece {
+            assert_eq!(tag.item_id, 100);
+            assert_eq!(tag.tag_type, "extension");
+            assert_eq!(tag.label, "rs");
+        } else {
+            panic!("Should be TriagePiece::Tag");
+        }
+
+        // 2. 空文字のテスト（無視されるべき）
+        let empty_val = TagValue::Text("".to_string());
+        let piece_empty = triager.triage_base_tag(100, empty_val, "extension");
+        assert!(matches!(piece_empty, TriagePiece::None));
+
+        // 3. Nullのテスト（無視されるべき）
+        let piece_null = triager.triage_base_tag(100, TagValue::Null, "extension");
+        assert!(matches!(piece_null, TriagePiece::None));
+    }
+
+    #[test]
+    fn test_triager_classify_logic() {
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::new();
+        let dir = tempdir().unwrap();
+        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let triager = ItemTriager::new(&conn, &registry, &store);
+
+        // 1. FileEntities のテスト
+        let col_ent = ColumnDef {
+            name: "size".to_string(),
+            sql_type: "BIGINT",
+            target_table: TargetTable::FileEntities,
+        };
+        let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
+        assert!(matches!(p_ent, TriagePiece::Entity(TagValue::BigInt(1024))));
+
+        // 2. Locations のテスト
+        let col_loc = ColumnDef {
+            name: "path".to_string(),
+            sql_type: "TEXT",
+            target_table: TargetTable::Locations,
+        };
+        let p_loc = triager.classify(1, TagValue::Text("/a".to_string()), &col_loc);
+        assert!(matches!(p_loc, TriagePiece::Location(TagValue::Text(_))));
+
+        // 3. BaseTags のテスト
+        let col_tag = ColumnDef {
+            name: "ext".to_string(),
+            sql_type: "TEXT",
+            target_table: TargetTable::BaseTags,
+        };
+        let p_tag = triager.classify(1, TagValue::Text("rs".to_string()), &col_tag);
+        assert!(matches!(p_tag, TriagePiece::Tag(_)));
+    }
+
+    #[test]
+    fn test_triager_triage_item_full() {
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::new();
+        let dir = tempdir().unwrap();
+        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let triager = ItemTriager::new(&conn, &registry, &store);
+
+        let cols = vec![
+            ColumnDef { name: "size".into(), sql_type: "BIGINT", target_table: TargetTable::FileEntities },
+            ColumnDef { name: "path".into(), sql_type: "TEXT", target_table: TargetTable::Locations },
+            ColumnDef { name: "ext".into(), sql_type: "TEXT", target_table: TargetTable::BaseTags },
+        ];
+        let vals = vec![
+            TagValue::BigInt(500),
+            TagValue::Text("/foo.rs".into()),
+            TagValue::Text("rs".into()),
+        ];
+
+        let res = triager.triage_item(7, vals, &cols);
+
+        assert_eq!(res.entity_row.id, 7);
+        // Entity: [Rank(0), Size(500)]
+        assert_eq!(res.entity_row.values.len(), 2);
+        assert_eq!(res.entity_row.values[1], TagValue::BigInt(500));
+
+        assert_eq!(res.location_row.id, 7);
+        assert_eq!(res.location_row.values[0], TagValue::Text("/foo.rs".into()));
+
+        assert_eq!(res.tags.len(), 1);
+        assert_eq!(res.tags[0].tag_type, "ext");
+        assert_eq!(res.tags[0].label, "rs");
+    }
+
+    #[test]
+    fn test_triager_rebuild_from_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let dir = tempdir().unwrap();
+        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let triager = ItemTriager::new(&conn, &registry, &store);
+
+        let path = Path::new("/test/dir/file.txt");
+        let functions = registry.all_functions();
+        let values = triager.rebuild_values_from_path(path, functions);
+
+        // registry.with_standard() の順序:
+        // 0: file_id (not location) -> Null
+        // 1: path (location) -> /test/dir/file.txt
+        // 2: parentdir (location) -> /test/dir
+        // 3: filename (location) -> file.txt
+        // 5: extension (location) -> txt
+        // 7: size (not location) -> Null
+        
+        assert_eq!(values[0], TagValue::Null); // file_id
+        assert_eq!(values[1], TagValue::Text("/test/dir/file.txt".into())); // path
+        assert_eq!(values[2], TagValue::Text("/test/dir".into())); // parentdir
+        assert_eq!(values[5], TagValue::Text("txt".into())); // extension
+        assert_eq!(values[7], TagValue::Null); // size (not location role)
     }
 
     #[test]
