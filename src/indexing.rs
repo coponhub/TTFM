@@ -4,7 +4,7 @@ use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
 use anyhow::Result;
-use duckdb::{Connection, ToSql};
+use duckdb::{Connection, ToSql, Appender};
 use sea_query::{
     Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, 
     Func, Table, Iden, SelectStatement,
@@ -79,7 +79,7 @@ impl<'a> FileScanner<'a> {
 
     fn write(&self, rx: std::sync::mpsc::Receiver<ScanEntry>) -> Result<usize> {
         let mut current_count = 0;
-        let mut appender = if !self.dry_run {
+        let mut appender: Option<Appender<'_>> = if !self.dry_run {
             let table_name = Tbl::Scan.to_string().replace('"', "");
             Some(self.conn.appender(&table_name)?)
         } else {
@@ -360,7 +360,6 @@ impl<'a> ItemTriager<'a> {
             .unwrap_or(TriagePiece::None)
     }
 
-    /// 移動されたファイルに対し、パス情報のみから場所情報を再生成します。
     fn rebuild_moved_locations(
         &self,
         moved: Vec<(i64, String)>,
@@ -385,12 +384,14 @@ impl<'a> ItemTriager<'a> {
         functions
             .iter()
             .flat_map(|f| {
-                let val = (f.role() == ScanRole::Location)
-                    .then(|| f.generate_from_path(path))
-                    .flatten()
-                    .unwrap_or(TagValue::Null);
-
-                std::iter::repeat(val).take(f.tagger().get_columns().len())
+                f.tagger()
+                    .get_columns()
+                    .into_iter()
+                    .filter_map(move |col| {
+                        (col.target_table == TargetTable::Locations).then(|| {
+                            f.generate_from_path(path).unwrap_or(TagValue::Null)
+                        })
+                    })
             })
             .collect()
     }
@@ -1206,6 +1207,11 @@ impl<'a> Indexer<'a> {
         deleted_ids: Vec<i64>,
         unchanged_ids: Vec<i64>,
     ) -> Result<()> {
+        // 変更がない場合は更新をスキップ
+        if results.is_empty() && moved.is_empty() && deleted_ids.is_empty() {
+            return Ok(());
+        }
+
         let has_updates = !results.is_empty() || !moved.is_empty();
 
         // 1. 各カテゴリごとにステージングと同期
@@ -1360,6 +1366,9 @@ impl FileEntityMerger<'_> {
     }
 
     fn ingest(self, results: &[TaggingResult]) -> Result<Self> {
+        if results.is_empty() {
+            return Ok(self);
+        }
         let mut app = self.indexer.conn.appender(
             &Tbl::FileEntitiesDiff.to_string().replace('"', ""),
         )?;
@@ -1409,6 +1418,9 @@ impl LocationMerger<'_> {
     }
 
     fn ingest(self, results: &[TaggingResult], moved: &[DynamicRow]) -> Result<Self> {
+        if results.is_empty() && moved.is_empty() {
+            return Ok(self);
+        }
         let mut app = self.indexer.conn.appender(
             &Tbl::LocationsDiff.to_string().replace('"', ""),
         )?;
@@ -1467,6 +1479,9 @@ impl BaseTagMerger<'_> {
     }
 
     fn ingest(self, results: &[TaggingResult]) -> Result<Self> {
+        if results.is_empty() {
+            return Ok(self);
+        }
         let mut app = self.indexer.conn.appender(
             &Tbl::BaseTagsDiff.to_string().replace('"', ""),
         )?;
@@ -1540,7 +1555,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join("db");
         let conn = Connection::open_in_memory().unwrap();
-        let dir_path = dir.path().to_path_buf();
         let store = IndexStore::new(&conn, db_dir);
 
         // 1. 初回スキャンのテスト
@@ -1658,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn test_triager_rebuild_from_path() {
+    fn test_triager_rebuild_from_path_strict() {
         let conn = Connection::open_in_memory().unwrap();
         let registry = FunctionRegistry::with_standard();
         let dir = tempdir().unwrap();
@@ -1669,19 +1683,14 @@ mod tests {
         let functions = registry.all_functions();
         let values = triager.rebuild_values_from_path(path, functions);
 
-        // registry.with_standard() の順序:
-        // 0: file_id (not location) -> Null
-        // 1: path (location) -> /test/dir/file.txt
-        // 2: parentdir (location) -> /test/dir
-        // 3: filename (location) -> file.txt
-        // 5: extension (location) -> txt
-        // 7: size (not location) -> Null
-        
-        assert_eq!(values[0], TagValue::Null); // file_id
-        assert_eq!(values[1], TagValue::Text("/test/dir/file.txt".into())); // path
-        assert_eq!(values[2], TagValue::Text("/test/dir".into())); // parentdir
-        assert_eq!(values[5], TagValue::Text("txt".into())); // extension
-        assert_eq!(values[7], TagValue::Null); // size (not location role)
+        // registry.with_standard() において TargetTable::Locations なのは:
+        // path, parentdir, filename, extension の 4つ。
+        assert_eq!(values.len(), 4, "Should contain exactly 4 columns");
+
+        assert_eq!(values[0], TagValue::Text("/test/dir/file.txt".into()));
+        assert_eq!(values[1], TagValue::Text("/test/dir".into()));
+        assert_eq!(values[2], TagValue::Text("file.txt".into()));
+        assert_eq!(values[3], TagValue::Text("txt".into()));
     }
 
     #[test]
