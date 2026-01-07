@@ -52,33 +52,6 @@ let condition = CustomFunc::regexp_matches(
 );
 ```
 
-#### 実装例：Cast を伴う関数の宣言
-引数に対して特定の型へのキャストを強制するような関数の宣言例です。
-
-```rust
-use sea_query::{Iden, Expr, Func, SimpleExpr, Alias};
-
-#[derive(Iden)]
-enum MyFuncIden {
-    #[iden = "custom_size_logic"]
-    CustomSizeLogic,
-}
-
-impl CustomFunc {
-    /// 引数を BIGINT にキャストしてから関数に渡す宣言
-    pub fn size_logic<E>(expr: E) -> SimpleExpr
-    where
-        E: Into<SimpleExpr>,
-    {
-        // 引数に対して .cast_as() を適用
-        let casted_expr = expr.into().cast_as(Alias::new("BIGINT"));
-
-        Func::cust(MyFuncIden::CustomSizeLogic)
-            .arg(casted_expr)
-    }
-}
-```
-
 ### エイリアスの使用制限
 `sea-query` を用いたクエリ構築において、エイリアスの使用は可読性を損なうため、原則として避けてください。
 
@@ -98,3 +71,9 @@ impl CustomFunc {
 - **1行の長さは最大80文字**としてください。
 - これにより、複数のファイルを並べて表示した際の可読性や、ターミナル上での閲覧性を確保します。
 - Rust標準の `rustfmt` を使用する場合も、可能であればこの設定を尊重するように構成してください。
+
+### ネスト
+- ネストが深くならないように工夫してください
+- 目安としては4段以上になったら解消するようにしてください
+    - どの括弧("()", "{}", "[]" 等)でも単一のカウントとしてください
+        - 例: {do_something(xs.map(|x| {x + 1}))} = 4段
