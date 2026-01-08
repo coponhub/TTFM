@@ -91,7 +91,7 @@ crate::define_scan_entry! {
 
 /// SQLインジェクションを防ぐための簡易エスケープ処理。
 /// 文字列内のシングルクォートを2つ重ねてエスケープします。
-/// 特定のタグが `all_tags` ビューに存在するかを確認する EXISTS 式を生成します。
+/// 特定のタグが `oneview` ビューに存在するかを確認する EXISTS 式を生成します。
 ///
 /// # Arguments
 /// * `tag_type` - タグの種類（例: "directory", "mimetype"）
@@ -105,7 +105,7 @@ pub(crate) fn exists_in_tags(
     let mut query = sea_query::Query::select();
     query
         .expr(Expr::val(1))
-        .from(Tbl::AllTags)
+        .from(Tbl::OneView)
         .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::FileEntities, Col::ItemId))))
         .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 

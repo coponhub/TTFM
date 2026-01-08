@@ -9,7 +9,8 @@ pub enum Tbl {
     ItemEntities,
     SystemTags,
     UserTags,
-    AllTags, // all_tags
+    #[iden = "oneview"]
+    OneView,
     
     // --- Diff Tables ---
     FileEntitiesDiff, // TempFileEntities

@@ -21,6 +21,7 @@ pub mod db;
 pub mod macros;
 mod taggers;
 mod functions;
+pub mod oneview;
 pub mod indexing;
 pub mod util;
 
@@ -402,11 +403,11 @@ impl FileManager {
             Query::select()
                 .column(Col::ItemId)
                 .distinct()
-                .from(Tbl::AllTags)
+                .from(Tbl::OneView)
                 .to_owned()
         } else {
             let node = QueryParser::parse(query)?;
-            self.registry.build_set_query(&node, "all_tags")
+            self.registry.build_set_query(&node, "oneview")
         };
 
         // 2. マッチしたIDの全タグを取得して集約
@@ -430,7 +431,7 @@ impl FileManager {
                 Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Name).into(), Expr::val("").into()]),
                 Col::Name,
             )
-            .from(Tbl::AllTags)
+            .from(Tbl::OneView)
             .and_where(Expr::col(Col::ItemId).in_subquery(sub_query))
             .group_by_col(Col::ItemId)
             .group_by_col(Col::ItemKind)
@@ -575,7 +576,7 @@ impl FileManager {
                 // B. 名前（抽象化された名称）として扱い、all_tags から ID を取得
                 let query_name = Query::select()
                     .column(Col::ItemId)
-                    .from(Tbl::AllTags)
+                    .from(Tbl::OneView)
                     .and_where(Expr::col(Col::Name).eq(item))
                     .to_string(PostgresQueryBuilder);
 
