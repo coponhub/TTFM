@@ -106,7 +106,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `label`: タグの値
 - ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
 
-#### 4. Unified View (`all_tags`)
+#### 4. Unified View (`oneview`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
 - `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `typedtag` 等)
@@ -187,7 +187,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
     - **Globパターンのサポート**: タグの値（Label）部分には、`*`（任意の文字列）や `?`（任意の1文字）などの Glob パターンを使用できる。
         - 例: `filename:*report*` で「report」を含むファイルにマッチ。
         - 例: `extension:p?g` で `png` や `jpg`（判定ロジックによる）などにマッチ。
-2.  **論理演算の解決**: 各 `TypedTag` ノードについて、対応する `TagFunction` または `all_tags` ビューを用いて SQL 条件式を生成。
+2.  **論理演算の解決**: 各 `TypedTag` ノードについて、対応する `TagFunction` または `oneview` ビューを用いて SQL 条件式を生成。
     - **NOT演算 (`-`) の特殊仕様**: ノイズを抑制するため、否定演算の母集団（Universe）は**「そのタグの種類（Type）を保持しているエントリ」**に制限される。
         - 例: `-extension:txt` は「拡張子というタグを持っているが、その値が txt ではないもの」のみにマッチする。拡張子という概念を持たない Item や Note は結果に含まれない。
 3.  **実行**: DuckDB を介して Parquet ファイルに対して SQL クエリを実行し、

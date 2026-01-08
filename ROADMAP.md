@@ -68,7 +68,7 @@ Transition to a robust schema that separates system-generated metadata from user
 - [x] **Database Schema Migration**:
     - [x] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
     - [x] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
-    - [x] Implement `Unified View (all_tags)` with `name` and `origin` resolution logic.
+    - [x] Implement `Unified View (oneview)` with `name` and `origin` resolution logic.
 
 - [x] **Item Name Abstraction**:
     - [x] Implement `name` tag support in query parser and search results.
