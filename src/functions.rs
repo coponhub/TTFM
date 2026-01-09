@@ -6,6 +6,7 @@ use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
 use crate::db::{Tbl, Col};
+use path_slash::PathExt;
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
 /// 
@@ -141,7 +142,7 @@ impl Tagger for PathTagger {
     /// ファイルの絶対パスを抽出し、パスセパレータを正規化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         // Windowsのバックスラッシュをスラッシュに正規化
-        let p = path.to_string_lossy().replace('\\', "/");
+        let p = path.to_slash_lossy().to_string();
         Ok(vec![TagValue::Text(p)])
     }
 }
@@ -184,7 +185,7 @@ impl TagFunction for PathFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        let p = path.to_string_lossy().replace('\\', "/");
+        let p = path.to_slash_lossy().to_string();
         Some(TagValue::Text(p))
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PATH }
@@ -198,7 +199,7 @@ impl TagDefinition for PathFunction {
         path: &Path,
         _metadata: Option<&std::fs::Metadata>,
     ) -> Result<Self::RustType> {
-        Ok(path.to_string_lossy().replace('\\', "/"))
+        Ok(path.to_slash_lossy().to_string())
     }
 }
 
@@ -219,7 +220,7 @@ impl Tagger for ParentDirTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let parent = path
             .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
         Ok(vec![TagValue::Text(parent)])
     }
@@ -280,7 +281,7 @@ impl TagDefinition for ParentDirFunction {
     ) -> Result<Self::RustType> {
         let parent = path
             .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
         Ok(parent)
     }
