@@ -1,7 +1,8 @@
 use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry, ScanRole};
-use crate::db::{Tbl, Col, DuckDbFunc, SystemRank, SqlType};
+use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
+use crate::rank::SystemRank;
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql, Appender};
@@ -389,8 +390,8 @@ impl<'a> ItemTriager<'a> {
             .iter()
             .flat_map(|f| {
                 f.tagger()
-                    .get_columns()
                     .into_iter()
+                    .flat_map(|t| t.get_columns())
                     .filter_map(move |col| {
                         (col.target_table == TargetTable::Locations).then(|| {
                             f.generate_from_path(path).unwrap_or(TagValue::Null)
@@ -649,31 +650,6 @@ impl QueryParts {
             .to_owned()
     }
 
-    fn rank_logic() -> CaseStatement {
-        let inner_case = CaseStatement::new()
-            .case(Expr::col(Col::Content).eq("name"), 
-                  i64::from(SystemRank::Name))
-            .case(Expr::col(Col::Content).eq("type_from_ext"), 
-                  i64::from(SystemRank::TypeFromExt))
-            .case(Expr::col(Col::Content).eq("size_str"), 
-                  i64::from(SystemRank::SizeStr))
-            .case(Expr::col(Col::Content).eq("modified_str"), 
-                  i64::from(SystemRank::ModifiedStr))
-            .case(Expr::col(Col::Content).eq("parentdir"), 
-                  i64::from(SystemRank::ParentDir))
-            .case(Expr::col(Col::Content).eq("kind"), 
-                  i64::from(SystemRank::ItemKind))
-            .case(Expr::col(Col::Content).eq("content"), 
-                  i64::from(SystemRank::Content))
-            .case(Expr::col(Col::Content).eq("filename"), 
-                  i64::from(SystemRank::Filename))
-            .finally(i64::from(SystemRank::Other));
-
-        CaseStatement::new()
-            .case(Expr::col(Col::ItemKind).eq("type"), inner_case)
-            .finally(0)
-    }
-
     /// 差分データから (type, label) のペアを抽出します。
     fn diff_tags(all_cols: &[ColumnDef]) -> SelectStatement {
         let mut source_q = Query::select();
@@ -737,6 +713,37 @@ impl QueryParts {
         cand_q
     }
 
+    /// Registry に登録されている全ての機能名を、Type アイテムの候補として生成します。
+    fn registry_variants(registry: &FunctionRegistry) -> SelectStatement {
+        let funcs = registry.all_functions();
+        if funcs.is_empty() {
+            // 空の場合はダミーの空クエリを返す
+            let mut q = Query::select();
+            q.expr(Expr::val(1)).and_where(Expr::val(1).eq(0));
+            return q;
+        }
+
+        let mut query = Query::select();
+        // 最初の要素で初期化
+        let first = &funcs[0];
+        query
+            .expr_as(Expr::val("type"), Col::ItemKind)
+            .expr_as(Expr::val(first.name()), Col::Content)
+            .expr_as(Expr::val(first.name()), Col::Type)
+            .expr_as(Expr::cust("NULL"), Col::Label);
+
+        // 残りをUNION
+        for func in funcs.iter().skip(1) {
+            let mut sub = Query::select();
+            sub.expr_as(Expr::val("type"), Col::ItemKind)
+                .expr_as(Expr::val(func.name()), Col::Content)
+                .expr_as(Expr::val(func.name()), Col::Type)
+                .expr_as(Expr::cust("NULL"), Col::Label);
+            query.union(sea_query::UnionType::Distinct, sub);
+        }
+        query
+    }
+
     /// 登録候補の中から、既存データにない新規分のみを抽出します。
     fn filter_new(candidates: SelectStatement, items_path: &str) -> SelectStatement {
         Query::select()
@@ -765,7 +772,14 @@ impl QueryParts {
     }
 
     /// 新規アイテムに対し、開始IDからの連番とランクを付与するクエリを構築します。
-    fn assign_ids(start_id: i64) -> SelectStatement {
+    fn assign_ids(start_id: i64, registry: &FunctionRegistry) -> SelectStatement {
+        let rank_expr = crate::rank::build_rank_expr(
+            registry,
+            Condition::all().add(Expr::col(Col::ItemKind).eq("type")), // Guard condition
+            Expr::col(Col::Content),             // Key expression
+            SystemRank::DEFAULT,                 // Default rank
+        );
+
         Query::select()
             .expr_as(
                 Expr::cust_with_exprs(
@@ -774,7 +788,7 @@ impl QueryParts {
                 ),
                 Col::ItemId,
             )
-            .expr_as(Self::rank_logic(), Col::Rank)
+            .expr_as(rank_expr, Col::Rank)
             .column(Col::ItemKind)
             .column(Col::Content)
             .column(Col::Type)
@@ -954,6 +968,9 @@ impl<'a> Indexer<'a> {
         )?;
 
         crate::oneview::OneView::recreate(self.conn, &all_cols, &self.store.db_dir)?;
+        
+        // システム定義アイテム（name, kind等）を先行登録
+        self.update_system_items(None)?;
         Ok(())
     }
 
@@ -1078,9 +1095,11 @@ impl<'a> Indexer<'a> {
             .ingest(&results)?
             .sync(&deleted_ids)?;
 
-        // 2. 更新がある場合のみシステムItemを登録
         if has_updates {
-            self.update_system_items()?;
+            // 候補の特定 (抽出 -> 展開)
+            let tags = QueryParts::diff_tags(&self.registry.get_all_columns());
+            let candidates_data = QueryParts::expand_variants(tags);
+            self.update_system_items(Some(candidates_data))?;
         }
 
         // 3. クリーンアップ
@@ -1091,17 +1110,20 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-    pub fn update_system_items(&self) -> Result<()> {
+    pub fn update_system_items(&self, data_candidates: Option<SelectStatement>) -> Result<()> {
         let items_path = self.store.item_entities_path();
         let system_tags_path = self.store.system_tags_path();
         let items_str = items_path.to_string_lossy();
         let stags_str = system_tags_path.to_string_lossy();
-        let all_cols = self.registry.get_all_columns();
 
-        // 1. 候補の特定 (抽出 -> 展開 -> フィルタ)
-        let tags = QueryParts::diff_tags(&all_cols);
-        let candidates = QueryParts::expand_variants(tags);
-        QueryParts::filter_new(candidates, &items_str)
+        // 1. 候補の結合 (Registry + Data)
+        let mut all_candidates = QueryParts::registry_variants(self.registry);
+        
+        if let Some(data) = data_candidates {
+            all_candidates.union(sea_query::UnionType::Distinct, data);
+        }
+
+        QueryParts::filter_new(all_candidates, &items_str)
             .create_temp_table_as(self.conn, Tbl::Item)?;
 
         if self.count_table(Tbl::Item)? == 0 {
@@ -1114,7 +1136,7 @@ impl<'a> Indexer<'a> {
         let tmp_items = items_path.with_extension("parquet.tmp");
         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
 
-        QueryParts::assign_ids(start_id)
+        QueryParts::assign_ids(start_id, self.registry)
             .create_temp_table_as(self.conn, Tbl::IdItem)?;
 
         // 4. item_entities 更新
@@ -1865,5 +1887,49 @@ mod tests {
 
         let count: i64 = fm.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
         assert_eq!(count, 0, "Should NOT register 'extension:' system item");
+    }
+
+    #[test]
+    fn test_definition_only_items_registration() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let db_dir = root.join(".ttfm/db");
+        
+        // ファイル作成
+        std::fs::write(root.join("test.txt"), "").unwrap();
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let indexer = Indexer::new(&fm.conn, &fm.registry, db_dir);
+        
+        // インデックス実行
+        indexer.run(root, None::<&fn(usize)>, false).unwrap();
+
+        // item_entities に 'name' が登録されているか確認
+        let query = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                util::parquet_query(&indexer.store.item_entities_path().to_string_lossy()),
+                Tbl::ItemEntities
+            )
+            .and_where(Expr::col(Col::ItemKind).eq("type"))
+            .and_where(Expr::col(Col::Content).eq("name"))
+            .to_string(PostgresQueryBuilder);
+
+        let count: i64 = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "Should register 'name' as a type item");
+        
+        // 'kind' も確認
+        let query_kind = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                util::parquet_query(&indexer.store.item_entities_path().to_string_lossy()),
+                Tbl::ItemEntities
+            )
+            .and_where(Expr::col(Col::ItemKind).eq("type"))
+            .and_where(Expr::col(Col::Content).eq("kind"))
+            .to_string(PostgresQueryBuilder);
+            
+        let count_kind: i64 = fm.conn.query_row(&query_kind, [], |r| r.get(0)).unwrap();
+        assert_eq!(count_kind, 1, "Should register 'kind' as a type item");
     }
 }

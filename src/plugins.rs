@@ -178,8 +178,8 @@ impl TagFunction for WasmPluginAdapter {
         &self.name
     }
 
-    fn tagger(&self) -> &dyn Tagger {
-        self
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(self)
     }
 
     fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {

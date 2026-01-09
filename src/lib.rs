@@ -18,6 +18,7 @@ pub mod query;
 pub mod plugins;
 pub mod config;
 pub mod db;
+pub mod rank;
 pub mod macros;
 mod taggers;
 mod functions;
@@ -42,6 +43,9 @@ use functions::{
     TypeFromExtFunction,
     SizeStrFunction,
     ModifiedStrFunction,
+    NameTagFunction,
+    KindTagFunction,
+    ContentTagFunction,
 };
 
 /// ファイルの一意識別子を取得し、文字列として返します。
@@ -115,6 +119,12 @@ impl FunctionRegistry {
         reg.register(Box::new(TypeFromExtFunction::new()));
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
+        
+        // 定義のみの機能（ランク付けや検索用）
+        reg.register(Box::new(NameTagFunction));
+        reg.register(Box::new(KindTagFunction));
+        reg.register(Box::new(ContentTagFunction));
+        
         reg
     }
 
@@ -129,7 +139,9 @@ impl FunctionRegistry {
     pub fn get_all_columns(&self) -> Vec<ColumnDef> {
         let mut cols = Vec::new();
         for func in &self.functions {
-            cols.extend(func.tagger().get_columns());
+            if let Some(tagger) = func.tagger() {
+                cols.extend(tagger.get_columns());
+            }
         }
         cols
     }
@@ -138,8 +150,10 @@ impl FunctionRegistry {
     pub fn process_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let mut row = Vec::new();
         for func in &self.functions {
-            let values = func.tagger().tag_file(path)?;
-            row.extend(values);
+            if let Some(tagger) = func.tagger() {
+                let values = tagger.tag_file(path)?;
+                row.extend(values);
+            }
         }
         Ok(row)
     }
@@ -672,6 +686,11 @@ impl FileManager {
             map.insert(name, rank);
         }
         Ok(map)
+    }
+
+    /// 指定されたタグ名のデフォルトランクを取得します。
+    pub fn get_default_rank(&self, name: &str) -> crate::types::Rank {
+        crate::rank::get_rank_by_name(&self.registry, name)
     }
 
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {

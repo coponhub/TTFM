@@ -16,7 +16,7 @@ pub trait TagFunction: Send + Sync {
     fn name(&self) -> &str;
 
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
-    fn tagger(&self) -> &dyn Tagger;
+    fn tagger(&self) -> Option<&dyn Tagger> { None }
 
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
     /// 
@@ -29,6 +29,9 @@ pub trait TagFunction: Send + Sync {
     /// パスのみから値を生成できる場合、その値を返します。
     /// （移動処理などで、実際にファイルを開かずにタグを更新するために使用）
     fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
+
+    /// このタグのデフォルトのランク値（優先度）を返します。
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::DEFAULT }
 }
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
@@ -72,6 +75,8 @@ pub enum ScanRole {
     ScanId,
     Integrity,
     Other,
+    /// インデックス作成時の抽出対象外（定義とランクのみ提供）
+    DefinitionOnly,
 }
 
 pub struct ScanColumn {
@@ -164,8 +169,8 @@ impl TagFunction for PathFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -182,6 +187,7 @@ impl TagFunction for PathFunction {
         let p = path.to_string_lossy().replace('\\', "/");
         Some(TagValue::Text(p))
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PATH }
 }
 
 impl TagDefinition for PathFunction {
@@ -242,8 +248,8 @@ impl TagFunction for ParentDirFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -261,6 +267,7 @@ impl TagFunction for ParentDirFunction {
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
         Self::generate(path, None).ok().map(TagValue::Text)
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PARENT_DIR }
 }
 
 impl TagDefinition for ParentDirFunction {
@@ -326,8 +333,8 @@ impl TagFunction for FilenameFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -345,6 +352,7 @@ impl TagFunction for FilenameFunction {
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
         Self::generate(path, None).ok().map(TagValue::Text)
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::FILENAME }
 }
 
 impl TagDefinition for FilenameFunction {
@@ -411,8 +419,8 @@ impl TagFunction for StemFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -489,8 +497,8 @@ impl TagFunction for ExtensionFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -567,8 +575,8 @@ impl TagFunction for DirectoryFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -648,8 +656,8 @@ impl TagFunction for SizeBytesFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -735,8 +743,8 @@ impl TagFunction for ModifiedTsFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -814,8 +822,8 @@ impl TagFunction for InodeFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
@@ -909,8 +917,8 @@ impl TagFunction for TypeFromExtFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -918,6 +926,7 @@ impl TagFunction for TypeFromExtFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::TYPE_FROM_EXT }
 }
 
 // ========================================================
@@ -1003,8 +1012,8 @@ impl TagFunction for SizeStrFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -1012,6 +1021,7 @@ impl TagFunction for SizeStrFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::SIZE_STR }
 }
 
 // ========================================================
@@ -1084,8 +1094,8 @@ impl TagFunction for ModifiedStrFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -1093,6 +1103,35 @@ impl TagFunction for ModifiedStrFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::MODIFIED_STR }
+}
+
+// ========================================================
+// 12. Definition Only Functions
+// ========================================================
+
+pub struct NameTagFunction;
+impl TagFunction for NameTagFunction {
+    fn name(&self) -> &str { "name" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::NAME }
+}
+
+pub struct KindTagFunction;
+impl TagFunction for KindTagFunction {
+    fn name(&self) -> &str { "kind" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::ITEM_KIND }
+}
+
+pub struct ContentTagFunction;
+impl TagFunction for ContentTagFunction {
+    fn name(&self) -> &str { "content" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::CONTENT }
 }
 
 // ========================================================
@@ -1176,7 +1215,7 @@ mod tests {
     fn test_inode_function() {
         let f = InodeFunction::new();
         assert_eq!(f.role(), ScanRole::ScanId);
-        assert_eq!(f.tagger().get_columns()[0].name, "file_id");
+        assert_eq!(f.tagger().unwrap().get_columns()[0].name, "file_id");
     }
 
     #[test]
