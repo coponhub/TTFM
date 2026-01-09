@@ -186,7 +186,6 @@ impl OneView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
     use crate::FileManager;
 

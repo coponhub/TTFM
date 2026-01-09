@@ -1,4 +1,5 @@
-use sea_query::Iden;
+use sea_query::{Iden, TableCreateStatement, Table, ColumnDef as SeaColumnDef, IntoIden};
+use crate::taggers::{TargetTable, ColumnDef};
 
 /// データベースのテーブル名を表す識別子。
 #[derive(Iden, Clone, Copy)]
@@ -92,60 +93,6 @@ impl Col {
     }
 }
 
-/// システムタグの表示優先度（RANK）を定義する列挙型。
-#[derive(Debug, Clone, Copy)]
-pub enum SystemRank {
-    /// 解決済みの名称（最優先）
-    Name = 10,
-    /// 拡張子からの種類
-    TypeFromExt = 9,
-    /// サイズ（読みやすい形式）
-    SizeStr = 8,
-    /// 更新日時（読みやすい形式）
-    ModifiedStr = 7,
-    /// 親ディレクトリ
-    ParentDir = 6,
-    /// アイテムの種類 (file/note等)
-    ItemKind = 5,
-    /// コンテンツ（本文など）
-    Content = 4,
-    /// 物理的なファイル名（nameがある場合は優先度を下げる）
-    Filename = 1,
-    /// その他
-    Other = 0,
-    /// フルパス（長いため優先度を極めて低く設定）
-    Path = -1,
-}
-
-impl SystemRank {
-    pub fn get_default_rank(name: &str) -> i64 {
-        match name {
-            "name" => SystemRank::Name as i64,
-            "type_from_ext" => SystemRank::TypeFromExt as i64,
-            "size_str" => SystemRank::SizeStr as i64,
-            "modified_str" => SystemRank::ModifiedStr as i64,
-            "parentdir" => SystemRank::ParentDir as i64,
-            "item_kind" => SystemRank::ItemKind as i64,
-            "content" => SystemRank::Content as i64,
-            "filename" => SystemRank::Filename as i64,
-            "path" => SystemRank::Path as i64,
-            _ => SystemRank::Other as i64,
-        }
-    }
-}
-
-impl From<SystemRank> for i64 {
-    fn from(r: SystemRank) -> Self {
-        r as i64
-    }
-}
-
-impl From<SystemRank> for sea_query::Value {
-    fn from(r: SystemRank) -> Self {
-        sea_query::Value::BigInt(Some(r as i64))
-    }
-}
-
 /// DuckDB 固有の関数名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum DuckDbFunc {
@@ -155,4 +102,78 @@ pub enum DuckDbFunc {
     Coalesce,
     #[iden = "list"]
     List,
+}
+
+/// データベーススキーマ定義（テーブル作成SQL）を提供する構造体。
+pub struct Schema;
+
+impl Schema {
+    pub fn build_table(
+        target: TargetTable,
+        name: impl Iden + 'static,
+        columns: &[ColumnDef],
+    ) -> TableCreateStatement {
+        let mut create = Table::create().table(name).to_owned();
+        match target {
+            TargetTable::FileEntities => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                create.col(SeaColumnDef::new(Col::Rank).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::FileEntities)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::Locations => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::Locations)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::BaseTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string())
+                    // Rankカラムが必要になる可能性があるが、BaseTagsには通常含まれない
+                    ;
+            }
+            TargetTable::ItemEntities => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Rank).big_integer())
+                    .col(SeaColumnDef::new(Col::ItemKind).string())
+                    .col(SeaColumnDef::new(Col::Content).string());
+            }
+            TargetTable::SystemTags | TargetTable::UserTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string());
+            }
+        }
+        create
+    }
 }

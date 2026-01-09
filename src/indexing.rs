@@ -471,75 +471,6 @@ impl<'a> IndexStore<'a> {
         };
         query.save_parquet(self.conn, path)
     }
-
-    pub(crate) fn build_table_schema(
-        &self,
-        target: TargetTable,
-        name: impl Iden + 'static,
-        columns: &[ColumnDef],
-    ) -> sea_query::TableCreateStatement {
-        use sea_query::{ColumnDef as SeaColumnDef, Table};
-        let mut create = Table::create().table(name).to_owned();
-        match target {
-            TargetTable::FileEntities => {
-                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
-                create.col(SeaColumnDef::new(Col::Rank).big_integer());
-                for c in columns
-                    .iter()
-                    .filter(|c| c.target_table == TargetTable::FileEntities)
-                {
-                    let iden = Col::from_str(&c.name)
-                        .map(|c| c.into_iden())
-                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
-                    let mut def = SeaColumnDef::new(iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
-                    };
-                    create.col(&mut def);
-                }
-            }
-            TargetTable::Locations => {
-                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
-                for c in columns
-                    .iter()
-                    .filter(|c| c.target_table == TargetTable::Locations)
-                {
-                    let iden = Col::from_str(&c.name)
-                        .map(|c| c.into_iden())
-                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
-                    let mut def = SeaColumnDef::new(iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
-                    };
-                    create.col(&mut def);
-                }
-            }
-            TargetTable::BaseTags => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
-            }
-            TargetTable::ItemEntities => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Rank).big_integer())
-                    .col(SeaColumnDef::new(Col::ItemKind).string())
-                    .col(SeaColumnDef::new(Col::Content).string());
-            }
-            TargetTable::SystemTags | TargetTable::UserTags => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
-            }
-        }
-        create
-    }
 }
 
 // ========================================================
@@ -982,8 +913,7 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
         let table = Tbl::Master; // Safe temp name for initialization
-        self.store
-            .build_table_schema(target, table, columns)
+        crate::db::Schema::build_table(target, table, columns)
             .execute(self.conn)?;
 
         if let Some(parent) = path.parent() {
@@ -1222,9 +1152,7 @@ struct FileEntityMerger<'a> {
 impl FileEntityMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
-        self.indexer
-            .store
-            .build_table_schema(
+        crate::db::Schema::build_table(
                 TargetTable::FileEntities,
                 Tbl::FileEntitiesDiff,
                 &all_cols,
@@ -1274,9 +1202,7 @@ struct LocationMerger<'a> {
 impl LocationMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
-        self.indexer
-            .store
-            .build_table_schema(
+        crate::db::Schema::build_table(
                 TargetTable::Locations,
                 Tbl::LocationsDiff,
                 &all_cols,
@@ -1335,9 +1261,7 @@ struct BaseTagMerger<'a> {
 impl BaseTagMerger<'_> {
     fn prepare(self) -> Result<Self> {
         let all_cols = self.indexer.registry.get_all_columns();
-        self.indexer
-            .store
-            .build_table_schema(
+        crate::db::Schema::build_table(
                 TargetTable::BaseTags,
                 Tbl::BaseTagsDiff,
                 &all_cols,
