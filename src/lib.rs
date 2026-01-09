@@ -539,7 +539,6 @@ impl FileManager {
         let new_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         // 2. Append new row via Temp Table & COPY
-        let tmp_path = format!("{}.tmp", path_str);
         let temp_table = Tbl::Item;
 
         util::parquet_query(&path_str)
@@ -552,10 +551,8 @@ impl FileManager {
             .values_panic([new_id.into(), kind.into(), content.into()])
             .execute(&self.conn)?;
 
-        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.write_parquet(&self.conn, &path)?;
         temp_table.drop_table(&self.conn)?;
-
-        std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
 
         Ok(new_id)
     }
@@ -637,7 +634,6 @@ impl FileManager {
         };
 
         let path_str = path.to_string_lossy();
-        let tmp_path = format!("{}.tmp", path_str);
         let temp_table = Tbl::Target;
 
         util::parquet_query(&path_str)
@@ -649,11 +645,9 @@ impl FileManager {
             .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
             .execute(&self.conn)?;
 
-        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.write_parquet(&self.conn, &path)?;
         temp_table.drop_table(&self.conn)?;
 
-        std::fs::rename(&tmp_path, path)
-            .context("Failed to update rank in parquet")?;
         Ok(())
     }
 
@@ -722,7 +716,6 @@ impl FileManager {
         value: &str,
     ) -> Result<()> {
         let path_str = path.to_string_lossy();
-        let tmp_path = format!("{}.tmp", path_str);
 
         util::parquet_query(&path_str)
             .create_table_as(&self.conn, temp_table)?;
@@ -734,10 +727,9 @@ impl FileManager {
             .values_panic([id.into(), key.into(), value.into()])
             .execute(&self.conn)?;
 
-        temp_table.write_parquet(&self.conn, Path::new(&tmp_path))?;
+        temp_table.write_parquet(&self.conn, &path)?;
         temp_table.drop_table(&self.conn)?;
 
-        std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())
     }
 
@@ -853,14 +845,15 @@ mod tests {
         let db_dir = dir.path().join(".ttfm/db");
         let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
 
-        let id = fm.add_item("type", "location").unwrap();
-        assert_eq!(id, -1);
+        let id = fm.add_item("type", "my_new_type").unwrap();
+        assert!(id < 0);
 
-        let id2 = fm.get_or_create_item("type", "location").unwrap();
+        let id2 = fm.get_or_create_item("type", "my_new_type").unwrap();
         assert_eq!(id, id2);
 
         let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
-        assert_eq!(id3, -2);
+        assert!(id3 < 0);
+        assert_ne!(id, id3);
     }
 
     #[test]
@@ -872,9 +865,12 @@ mod tests {
         let note_id = fm.add_item("note", "This is a test note").unwrap();
         fm.tag_item(&note_id.to_string(), "status:done").unwrap();
 
-        assert_eq!(fm.get_or_create_item("type", "status").unwrap(), -2);
-        assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
-        assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
+        let type_id = fm.get_or_create_item("type", "status").unwrap();
+        assert!(type_id < 0);
+        let label_id = fm.get_or_create_item("label", "done").unwrap();
+        assert!(label_id < 0);
+        let tt_id = fm.get_or_create_item("typedtag", "status:done").unwrap();
+        assert!(tt_id < 0);
 
         let query = Query::select()
             .column(Col::Label)

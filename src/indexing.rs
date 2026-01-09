@@ -2,7 +2,6 @@ use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
-use crate::rank::SystemRank;
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql, Appender};
@@ -683,6 +682,7 @@ impl QueryParts {
         cand_q
             .expr_as(Expr::val("type"), Col::ItemKind)
             .expr_as(Expr::col(Col::Type), Col::Content)
+            .expr_as(Expr::val(0), Col::Rank)
             .column(Col::Type)
             .expr_as(Expr::cust("NULL"), Col::Label)
             .from_subquery(tags.clone(), Tbl::Diff);
@@ -691,6 +691,7 @@ impl QueryParts {
         label_q
             .expr_as(Expr::val("label"), Col::ItemKind)
             .expr_as(Expr::col(Col::Label), Col::Content)
+            .expr_as(Expr::val(0), Col::Rank)
             .expr_as(Expr::cust("NULL"), Col::Type)
             .column(Col::Label)
             .from_subquery(tags.clone(), Tbl::Diff);
@@ -705,6 +706,7 @@ impl QueryParts {
                 ]),
                 Col::Content,
             )
+            .expr_as(Expr::val(0), Col::Rank)
             .column(Col::Type)
             .column(Col::Label)
             .from_subquery(tags, Tbl::Diff);
@@ -729,6 +731,7 @@ impl QueryParts {
         query
             .expr_as(Expr::val("type"), Col::ItemKind)
             .expr_as(Expr::val(first.name()), Col::Content)
+            .expr_as(Expr::val(first.default_rank()), Col::Rank)
             .expr_as(Expr::val(first.name()), Col::Type)
             .expr_as(Expr::cust("NULL"), Col::Label);
 
@@ -737,6 +740,7 @@ impl QueryParts {
             let mut sub = Query::select();
             sub.expr_as(Expr::val("type"), Col::ItemKind)
                 .expr_as(Expr::val(func.name()), Col::Content)
+                .expr_as(Expr::val(func.default_rank()), Col::Rank)
                 .expr_as(Expr::val(func.name()), Col::Type)
                 .expr_as(Expr::cust("NULL"), Col::Label);
             query.union(sea_query::UnionType::Distinct, sub);
@@ -751,6 +755,7 @@ impl QueryParts {
             .column((Tbl::Item, Col::Content))
             .column((Tbl::Item, Col::Type))
             .column((Tbl::Item, Col::Label))
+            .column((Tbl::Item, Col::Rank))
             .distinct()
             .from_subquery(candidates, Tbl::Item)
             .join_subquery(
@@ -772,23 +777,16 @@ impl QueryParts {
     }
 
     /// 新規アイテムに対し、開始IDからの連番とランクを付与するクエリを構築します。
-    fn assign_ids(start_id: i64, registry: &FunctionRegistry) -> SelectStatement {
-        let rank_expr = crate::rank::build_rank_expr(
-            registry,
-            Condition::all().add(Expr::col(Col::ItemKind).eq("type")), // Guard condition
-            Expr::col(Col::Content),             // Key expression
-            SystemRank::DEFAULT,                 // Default rank
-        );
-
+    fn assign_ids(start_id: i64) -> SelectStatement {
         Query::select()
             .expr_as(
                 Expr::cust_with_exprs(
-                    "$1 - (row_number() OVER () - 1)",
+                    "$1 - (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
                     [Expr::val(start_id).into()],
                 ),
                 Col::ItemId,
             )
-            .expr_as(rank_expr, Col::Rank)
+            .column(Col::Rank)
             .column(Col::ItemKind)
             .column(Col::Content)
             .column(Col::Type)
@@ -1136,7 +1134,7 @@ impl<'a> Indexer<'a> {
         let tmp_items = items_path.with_extension("parquet.tmp");
         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
 
-        QueryParts::assign_ids(start_id, self.registry)
+        QueryParts::assign_ids(start_id)
             .create_temp_table_as(self.conn, Tbl::IdItem)?;
 
         // 4. item_entities 更新
@@ -1626,7 +1624,7 @@ mod tests {
             .from(Tbl::OneView)
             .to_string(PostgresQueryBuilder);
         let count: i64 = conn.query_row(&query_count, [], |r| r.get(0)).unwrap();
-        assert_eq!(count, 0);
+        assert!(count > 0, "Initialization should pre-register system items (got {})", count);
     }
 
     #[test]
