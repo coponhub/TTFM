@@ -1,5 +1,5 @@
 use sea_query::{
-    Query, Expr, JoinType, SelectStatement, Alias, Func, IntoIden
+    Query, Expr, JoinType, SelectStatement, Func
 };
 use std::path::Path;
 use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
@@ -15,21 +15,21 @@ impl OneView {
         all_columns: &[ColumnDef],
         db_dir: &Path,
     ) -> anyhow::Result<()> {
-        let ents = db_dir.join("entities.parquet").to_string_lossy().into_owned();
-        let base_tags = db_dir.join("base_tags.parquet").to_string_lossy().into_owned();
-        let locs = db_dir.join("locations.parquet").to_string_lossy().into_owned();
-        let items = db_dir.join("items.parquet").to_string_lossy().into_owned();
-        let system_tags = db_dir.join("system_tags.parquet").to_string_lossy().into_owned();
-        let user_tags = db_dir.join("user_tags.parquet").to_string_lossy().into_owned();
+        let path = |t| {
+            db_dir
+                .join(format!("{}.parquet", t))
+                .to_string_lossy()
+                .into_owned()
+        };
 
         let q = Self::construct_query(
             all_columns,
-            &ents,
-            &base_tags,
-            &locs,
-            &items,
-            &system_tags,
-            &user_tags,
+            &path(TargetTable::FileEntities),
+            &path(TargetTable::BaseTags),
+            &path(TargetTable::Locations),
+            &path(TargetTable::ItemEntities),
+            &path(TargetTable::SystemTags),
+            &path(TargetTable::UserTags),
         );
 
         util::create_or_replace_view(conn, Tbl::OneView, q)?;
@@ -60,7 +60,8 @@ impl OneView {
                 JoinType::InnerJoin,
                 util::parquet_query(locs),
                 Tbl::Locations,
-                Expr::col((Tbl::FileEntities, Col::ItemId)).eq(Expr::col((Tbl::Locations, Col::ItemId)))
+                Expr::col((Tbl::FileEntities, Col::ItemId))
+                    .eq(Expr::col((Tbl::Locations, Col::ItemId)))
             );
 
         // Base info from other items
@@ -100,7 +101,8 @@ impl OneView {
                 JoinType::LeftJoin,
                 user_names,
                 Tbl::UserTags,
-                Expr::col((Tbl::Master, Col::ItemId)).eq(Expr::col((Tbl::UserTags, Col::ItemId)))
+                Expr::col((Tbl::Master, Col::ItemId))
+                    .eq(Expr::col((Tbl::UserTags, Col::ItemId)))
             );
 
         // --- 2. Unified Tag Sources (item_id, origin, type, label) ---
@@ -120,7 +122,7 @@ impl OneView {
             .filter(|c| c.target_table == TargetTable::Locations)
         {
             let mut sub = Query::select();
-            let col_iden = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name.clone()).into_iden());
+            let col_iden = util::col_to_iden(&cd.name);
             sub.column(Col::ItemId)
                 .expr_as(Expr::val("system"), Col::Origin)
                 .expr_as(Expr::val(cd.name.to_string()), Col::Type)
@@ -178,7 +180,8 @@ impl OneView {
                 JoinType::InnerJoin,
                 final_master,
                 Tbl::Master,
-                Expr::col((Tbl::BaseTags, Col::ItemId)).eq(Expr::col((Tbl::Master, Col::ItemId)))
+                Expr::col((Tbl::BaseTags, Col::ItemId))
+                    .eq(Expr::col((Tbl::Master, Col::ItemId)))
             )
             .to_owned()
     }

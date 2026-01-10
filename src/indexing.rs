@@ -183,10 +183,11 @@ struct DiffAuditor {
 
 impl DiffAuditor {
     fn new(store: &IndexStore<'_>) -> Self {
+        let path = |t| store.path_for_target(t).to_string_lossy().into_owned();
         Self {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
-            ents: store.file_entities_path().to_string_lossy().into_owned(),
-            locs: store.locations_path().to_string_lossy().into_owned(),
+            ents: path(TargetTable::FileEntities),
+            locs: path(TargetTable::Locations),
         }
     }
 
@@ -409,10 +410,10 @@ impl<'a> ItemTriager<'a> {
 
     /// 現在のデータベースにおける最大 ItemID を取得します。
     fn get_max_id(&self) -> Result<i64> {
-        if !self.store.file_entities_path().exists() {
+        let ents_path = self.store.path_for_target(TargetTable::FileEntities);
+        if !ents_path.exists() {
             return Ok(0);
         }
-        let ents_path = self.store.file_entities_path();
         let ents_str = ents_path.to_string_lossy();
         let query = Query::select()
             .expr(Func::cust(DuckDbFunc::Coalesce).args([
@@ -442,13 +443,14 @@ impl<'a> IndexStore<'a> {
         Self { conn, db_dir }
     }
 
-    pub(crate) fn file_entities_path(&self) -> PathBuf { self.db_dir.join("entities.parquet") }
-    pub(crate) fn locations_path(&self) -> PathBuf { self.db_dir.join("locations.parquet") }
-    pub(crate) fn base_tags_path(&self) -> PathBuf { self.db_dir.join("base_tags.parquet") }
-    pub(crate) fn item_entities_path(&self) -> PathBuf { self.db_dir.join("items.parquet") }
-    pub(crate) fn system_tags_path(&self) -> PathBuf { self.db_dir.join("system_tags.parquet") }
-    pub(crate) fn user_tags_path(&self) -> PathBuf { self.db_dir.join("user_tags.parquet") }
-    pub(crate) fn temp_scan_path(&self) -> PathBuf { self.db_dir.join("current_scan.parquet") }
+    /// ターゲットテーブルに対応するパスを生成します。
+    pub(crate) fn path_for_target(&self, target: TargetTable) -> PathBuf {
+        self.db_dir.join(format!("{}.parquet", target))
+    }
+
+    pub(crate) fn temp_scan_path(&self) -> PathBuf {
+        self.db_dir.join("current_scan.parquet")
+    }
 
     pub(crate) fn merge_and_save(
         &self,
@@ -484,38 +486,28 @@ impl<'a> IndexStore<'a> {
 pub(crate) struct QueryParts;
 
 impl QueryParts {
-    fn identity(left: Tbl, right: Tbl) -> Condition {
-        let mut cond = Condition::all();
-        for cd in ScanEntry::schema() {
-            if matches!(cd.role, ScanRole::ScanId) {
-                let col = util::col_to_iden(cd.name);
-                cond = cond.add(
-                    Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
-                );
-            }
-        }
-        cond
+    fn join_by_role(left: Tbl, right: Tbl, role: ScanRole) -> Condition {
+        let col_eq = |col: sea_query::DynIden| {
+            Expr::col((left, col.clone())).eq(Expr::col((right, col)))
+        };
+
+        ScanEntry::schema()
+            .iter()
+            .filter(|cd| cd.role == role)
+            .map(|cd| col_eq(util::col_to_iden(cd.name)))
+            .fold(Condition::all(), Condition::add)
     }
 
-    fn integrity(left: Tbl, right: Tbl) -> Condition {
-        let mut cond = Condition::all();
-        for cd in ScanEntry::schema() {
-            if matches!(cd.role, ScanRole::Integrity) {
-                let col = util::col_to_iden(cd.name);
-                cond = cond.add(
-                    Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
-                );
-            }
-        }
-        cond
+    fn join_ent_scan(role: ScanRole) -> Condition {
+        Self::join_by_role(Tbl::FileEntities, Tbl::Scan, role)
     }
 
     fn to_tag(scan_path: &str, entities_path: &str) -> SelectStatement {
         let sub_exists = Query::select()
             .expr(Expr::val(1))
             .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)
-            .cond_where(Self::identity(Tbl::FileEntities, Tbl::Scan))
-            .cond_where(Self::integrity(Tbl::FileEntities, Tbl::Scan))
+            .cond_where(Self::join_ent_scan(ScanRole::ScanId))
+            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
             .to_owned();
 
         let columns = ScanEntry::schema()
@@ -548,7 +540,7 @@ impl QueryParts {
                 JoinType::InnerJoin,
                 util::parquet_query(scan_path),
                 Tbl::Scan,
-                Self::identity(Tbl::FileEntities, Tbl::Scan),
+                Self::join_ent_scan(ScanRole::ScanId),
             )
             .join_subquery(
                 JoinType::InnerJoin,
@@ -560,7 +552,7 @@ impl QueryParts {
             .and_where(
                 Expr::col((Tbl::Locations, Col::Path)).ne(Expr::col((Tbl::Scan, col_path))),
             )
-            .cond_where(Self::integrity(Tbl::FileEntities, Tbl::Scan))
+            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
             .to_owned()
     }
 
@@ -568,8 +560,8 @@ impl QueryParts {
         let path_name = ScanEntry::schema()[0].name;
         let col_path = util::col_to_iden(path_name);
         let join_cond = Condition::all()
-            .add(Self::identity(Tbl::FileEntities, Tbl::Scan))
-            .add(Self::integrity(Tbl::FileEntities, Tbl::Scan));
+            .add(Self::join_ent_scan(ScanRole::ScanId))
+            .add(Self::join_ent_scan(ScanRole::Integrity));
 
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
@@ -769,7 +761,7 @@ impl QueryParts {
                 JoinType::InnerJoin,
                 util::parquet_query(scan_path),
                 Tbl::Scan,
-                Self::identity(Tbl::FileEntities, Tbl::Scan),
+                Self::join_ent_scan(ScanRole::ScanId),
             )
             .join_subquery(
                 JoinType::InnerJoin,
@@ -781,7 +773,7 @@ impl QueryParts {
             .and_where(
                 Expr::col((Tbl::Locations, Col::Path)).eq(Expr::col((Tbl::Scan, col_path))),
             )
-            .cond_where(Self::integrity(Tbl::FileEntities, Tbl::Scan))
+            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
             .to_owned()
     }
 }
@@ -796,29 +788,32 @@ pub trait SelectFetchExt {
     fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>>;
 }
 
+fn fetch_rows<T, F>(
+    stmt: &SelectStatement,
+    conn: &Connection,
+    mapper: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(&duckdb::Row<'_>) -> duckdb::Result<T>,
+{
+    let sql = stmt.to_string(PostgresQueryBuilder);
+    conn.prepare(&sql)?
+        .query_map([], mapper)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 impl SelectFetchExt for SelectStatement {
     fn fetch_entries(&self, conn: &Connection) -> Result<Vec<ScanEntry>> {
-        let sql = self.to_string(PostgresQueryBuilder);
-        conn.prepare(&sql)?
-            .query_map([], |row| ScanEntry::from_row(row))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        fetch_rows(self, conn, |row| ScanEntry::from_row(row))
     }
 
     fn fetch_ids(&self, conn: &Connection) -> Result<Vec<i64>> {
-        let sql = self.to_string(PostgresQueryBuilder);
-        conn.prepare(&sql)?
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        fetch_rows(self, conn, |row| row.get(0))
     }
 
     fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>> {
-        let sql = self.to_string(PostgresQueryBuilder);
-        conn.prepare(&sql)?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        fetch_rows(self, conn, |row| Ok((row.get(0)?, row.get(1)?)))
     }
 }
 
@@ -867,36 +862,12 @@ impl<'a> Indexer<'a> {
 
     pub fn initialize_tables(&self) -> Result<()> {
         let all_cols = self.registry.get_all_columns();
-        self.ensure_empty_parquet_if_missing(
-            &self.store.file_entities_path(),
-            TargetTable::FileEntities,
-            &all_cols,
-        )?;
-        self.ensure_empty_parquet_if_missing(
-            &self.store.locations_path(),
-            TargetTable::Locations,
-            &all_cols,
-        )?;
-        self.ensure_empty_parquet_if_missing(
-            &self.store.base_tags_path(),
-            TargetTable::BaseTags,
-            &all_cols,
-        )?;
-        self.ensure_empty_parquet_if_missing(
-            &self.store.item_entities_path(),
-            TargetTable::ItemEntities,
-            &all_cols,
-        )?;
-        self.ensure_empty_parquet_if_missing(
-            &self.store.system_tags_path(),
-            TargetTable::SystemTags,
-            &all_cols,
-        )?;
-        self.ensure_empty_parquet_if_missing(
-            &self.store.user_tags_path(),
-            TargetTable::UserTags,
-            &all_cols,
-        )?;
+        use strum::IntoEnumIterator;
+
+        for target in TargetTable::iter() {
+            let path = self.store.path_for_target(target);
+            self.ensure_empty_parquet_if_missing(&path, target, &all_cols)?;
+        }
 
         crate::oneview::OneView::recreate(self.conn, &all_cols, &self.store.db_dir)?;
         
@@ -1041,8 +1012,8 @@ impl<'a> Indexer<'a> {
     }
 
     pub fn update_system_items(&self, data_candidates: Option<SelectStatement>) -> Result<()> {
-        let items_path = self.store.item_entities_path();
-        let system_tags_path = self.store.system_tags_path();
+        let items_path = self.store.path_for_target(TargetTable::ItemEntities);
+        let system_tags_path = self.store.path_for_target(TargetTable::SystemTags);
         let items_str = items_path.to_string_lossy();
         let stags_str = system_tags_path.to_string_lossy();
 
@@ -1180,7 +1151,7 @@ impl FileEntityMerger<'_> {
 
     fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
         self.indexer.store.merge_and_save(
-            &self.indexer.store.file_entities_path(),
+            &self.indexer.store.path_for_target(TargetTable::FileEntities),
             Tbl::FileEntitiesDiff,
             (!deleted_ids.is_empty()).then(|| {
                 Condition::all()
@@ -1235,7 +1206,7 @@ impl LocationMerger<'_> {
 
     fn sync(self, unchanged_ids: &[i64]) -> Result<Self> {
         self.indexer.store.merge_and_save(
-            &self.indexer.store.locations_path(),
+            &self.indexer.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
             if unchanged_ids.is_empty() {
                 Some(Condition::all().add(Expr::val(1).eq(0)))
@@ -1293,7 +1264,7 @@ impl BaseTagMerger<'_> {
 
     fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
         self.indexer.store.merge_and_save(
-            &self.indexer.store.base_tags_path(),
+            &self.indexer.store.path_for_target(TargetTable::BaseTags),
             Tbl::BaseTagsDiff,
             (!deleted_ids.is_empty()).then(|| {
                 Condition::all()
@@ -1361,7 +1332,7 @@ mod tests {
         // 2. 既存DBがある場合のテスト
         // ダミーのエンティティファイルを作成
         std::fs::create_dir_all(&store.db_dir).unwrap();
-        std::fs::write(store.file_entities_path(), "").unwrap();
+        std::fs::write(store.path_for_target(TargetTable::FileEntities), "").unwrap();
         let diff2 = DiffAuditor::new(&store);
         assert!(!diff2.is_initial());
     }
@@ -1544,7 +1515,7 @@ mod tests {
         let registry = FunctionRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir.clone());
         indexer.initialize_tables().unwrap();
-        assert!(db_dir.join("entities.parquet").exists());
+        assert!(db_dir.join("file_entities.parquet").exists());
         let query_count = Query::select()
             .expr(Expr::cust("COUNT(*)"))
             .from(Tbl::OneView)
@@ -1582,7 +1553,7 @@ mod tests {
         indexer.run(root, None::<&fn(usize)>, false).unwrap();
 
         // 1. item_entities に extension:txt 関連のItemがあるか確認
-        let items_path_buf = fm.item_entities_path();
+        let items_path_buf = fm.path_for_target(TargetTable::ItemEntities);
         let items_path = items_path_buf.to_string_lossy();
         let query = Query::select()
             .columns([Col::ItemKind, Col::Content])
@@ -1796,7 +1767,7 @@ mod tests {
         indexer.run(root, None::<&fn(usize)>, false).unwrap();
 
         // "extension:" という typedtag が存在しないことを確認
-        let items_path = fm.item_entities_path();
+        let items_path = fm.path_for_target(TargetTable::ItemEntities);
         let items_str = items_path.to_string_lossy().to_string();
         
         let sql = Query::select()
@@ -1832,7 +1803,7 @@ mod tests {
         let query = Query::select()
             .expr(Expr::cust("COUNT(*)"))
             .from_subquery(
-                util::parquet_query(&indexer.store.item_entities_path().to_string_lossy()),
+                util::parquet_query(&indexer.store.path_for_target(TargetTable::ItemEntities).to_string_lossy()),
                 Tbl::ItemEntities
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))
@@ -1846,7 +1817,7 @@ mod tests {
         let query_kind = Query::select()
             .expr(Expr::cust("COUNT(*)"))
             .from_subquery(
-                util::parquet_query(&indexer.store.item_entities_path().to_string_lossy()),
+                util::parquet_query(&indexer.store.path_for_target(TargetTable::ItemEntities).to_string_lossy()),
                 Tbl::ItemEntities
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))

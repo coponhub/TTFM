@@ -2,8 +2,11 @@ use anyhow::Result;
 use std::path::Path;
 use duckdb::types::{ToSql, ToSqlOutput, Null};
 
+use strum::{EnumIter, Display};
+
 /// カラムが所属すべきテーブル。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display)]
+#[strum(serialize_all = "snake_case")]
 pub enum TargetTable {
     FileEntities,
     Locations,

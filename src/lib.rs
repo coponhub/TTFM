@@ -27,7 +27,7 @@ pub mod indexing;
 pub mod util;
 
 pub use query::{QueryParser, QueryNode};
-pub use taggers::{ColumnDef, TagValue, Tagger};
+pub use taggers::{ColumnDef, TagValue, Tagger, TargetTable};
 pub use types::{SearchResult, TagType, TypedTag, Label};
 use functions::{
     TagFunction,
@@ -362,23 +362,9 @@ impl FileManager {
         Self::new_with_db_dir(path)
     }
 
-    fn file_entities_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("entities.parquet")
-    }
-    fn locations_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("locations.parquet")
-    }
-    fn base_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("base_tags.parquet")
-    }
-    fn item_entities_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("items.parquet")
-    }
-    fn system_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("system_tags.parquet")
-    }
-    fn user_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("user_tags.parquet")
+    /// ターゲットテーブルに対応するパスを生成します。
+    pub fn path_for_target(&self, target: TargetTable) -> std::path::PathBuf {
+        self.db_dir.join(format!("{}.parquet", target))
     }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
@@ -406,7 +392,7 @@ impl FileManager {
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        if !self.file_entities_path().exists() {
+        if !self.path_for_target(TargetTable::FileEntities).exists() {
             return Err(anyhow::anyhow!(
                 "Index not found. Please run 'index' command first."
             ));
@@ -503,15 +489,9 @@ impl FileManager {
 
     /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
-        let paths = [
-            self.file_entities_path(),
-            self.locations_path(),
-            self.base_tags_path(),
-            self.item_entities_path(),
-            self.system_tags_path(),
-            self.user_tags_path(),
-        ];
-        for path in paths {
+        use strum::IntoEnumIterator;
+        for target in TargetTable::iter() {
+            let path = self.path_for_target(target);
             if path.exists() {
                 std::fs::remove_file(path).ok();
             }
@@ -521,7 +501,7 @@ impl FileManager {
 
     /// 新しいアイテム（Type, Label, Note等）をデータベースに追加します。
     pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         if !path.exists() {
             return Err(anyhow::anyhow!(
                 "Item entities table not found. Please run index first."
@@ -575,7 +555,7 @@ impl FileManager {
             let query_path = Query::select()
                 .column(Col::ItemId)
                 .from_subquery(
-                    util::parquet_query(&self.locations_path().to_string_lossy()),
+                    util::parquet_query(&self.path_for_target(TargetTable::Locations).to_string_lossy()),
                     Tbl::Locations,
                 )
                 .and_where(Expr::col(Col::Path).eq(item))
@@ -599,7 +579,7 @@ impl FileManager {
 
         // 3. User Tags テーブルに保存
         self.append_tag_to_parquet(
-            self.user_tags_path(),
+            self.path_for_target(TargetTable::UserTags),
             Tbl::UserTagsDiff,
             Col::ItemId,
             item_id,
@@ -628,9 +608,9 @@ impl FileManager {
 
     fn batch_update_rank(&self, ids: &[i64], is_file: bool, rank: i64) -> Result<()> {
         let path = if is_file {
-            self.file_entities_path()
+            self.path_for_target(TargetTable::FileEntities)
         } else {
-            self.item_entities_path()
+            self.path_for_target(TargetTable::ItemEntities)
         };
 
         let path_str = path.to_string_lossy();
@@ -658,7 +638,7 @@ impl FileManager {
 
     /// 全てのタグ型の優先度（RANK）を取得します。
     pub fn get_type_ranks(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         if !path.exists() { return Ok(Default::default()); }
 
         let query = Query::select()
@@ -688,7 +668,7 @@ impl FileManager {
     }
 
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         let query = Query::select()
             .column(Col::ItemId)
             .from_subquery(
@@ -875,7 +855,7 @@ mod tests {
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                util::parquet_query(&fm.user_tags_path().to_string_lossy()),
+                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
                 Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(note_id))
@@ -905,7 +885,7 @@ mod tests {
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                util::parquet_query(&fm.user_tags_path().to_string_lossy()),
+                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
                 Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(item_id))
@@ -942,7 +922,7 @@ mod tests {
 
         // 4. 各アイテムのランクが更新されたか検証
         for r in results {
-            let path = fm.item_entities_path();
+            let path = fm.path_for_target(TargetTable::ItemEntities);
             let query = Query::select()
                 .column(Col::Rank)
                 .from_subquery(util::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
