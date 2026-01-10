@@ -189,6 +189,18 @@ pub fn alias_from(s: &str) -> sea_query::DynIden {
     Alias::new(s).into_iden()
 }
 
+/// 成功値を Result::Ok に包むための拡張トレイト。
+/// パイプライン風の記述を可能にし、ネストを減らすために使用します。
+pub trait DotOk: Sized {
+    /// 自身を Ok で包んで返します。
+    fn ok<E>(self) -> Result<Self, E> {
+        Ok(self)
+    }
+}
+
+// 全ての型に対して DotOk を実装
+impl<T: Sized> DotOk for T {}
+
 pub fn parquet_query(path: &str) -> SelectStatement {
     use crate::db::{Tbl, DuckDbFunc};
     use sea_query::{Func};
