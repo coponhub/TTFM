@@ -58,7 +58,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ファイルの実体とパス、およびスキャンにより自動抽出されたタグを管理する。
 これらのテーブルは `ttfm index` 実行時に更新・洗い替えされる。
 
-**A. `file_entities` テーブル (実体) (.ttfm/db/entities.parquet)**
+**A. `file_entities` テーブル (実体) (.ttfm/db/file_entities.parquet)**
 - `item_id`: 内部管理用ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `file_id`: OSレベルの識別子 (Inode number / File Index)
@@ -84,7 +84,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 タグの型(Type)や値(Label)の定義自体を管理するID台帳。
 システム定義とユーザー定義の両方が混在するが、IDによって管理される。
 
-**D. `item_entities` テーブル (.ttfm/db/items.parquet)**
+**D. `item_entities` テーブル (.ttfm/db/item_entities.parquet)**
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
