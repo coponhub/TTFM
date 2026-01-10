@@ -27,7 +27,8 @@ pub mod indexing;
 pub mod util;
 
 pub use query::{QueryParser, QueryNode};
-pub use taggers::{ColumnDef, TagValue, Tagger, TargetTable};
+pub use taggers::{ColumnDef, TagValue, Tagger};
+pub use db::TargetTable;
 pub use types::{SearchResult, TagType, TypedTag, Label};
 use functions::{
     TagFunction,

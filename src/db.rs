@@ -1,5 +1,40 @@
 use sea_query::{Iden, TableCreateStatement, Table, ColumnDef as SeaColumnDef, IntoIden};
-use crate::taggers::{TargetTable, ColumnDef};
+use crate::taggers::{ColumnDef};
+use strum::{EnumIter, Display};
+use std::path::{PathBuf};
+
+/// カラムが所属すべきテーブル。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display, Iden)]
+#[strum(serialize_all = "snake_case")]
+pub enum TargetTable {
+    FileEntities,
+    Locations,
+    BaseTags,
+    ItemEntities,
+    SystemTags,
+    UserTags,
+}
+
+/// データベースの物理ストレージ（Parquetファイル）へのパスを管理する構造体。
+pub struct Store {
+    pub db_dir: PathBuf,
+}
+
+impl Store {
+    pub fn new(db_dir: PathBuf) -> Self {
+        Self { db_dir }
+    }
+
+    /// ターゲットテーブルに対応するパスを生成します。
+    pub fn path_for_target(&self, target: TargetTable) -> PathBuf {
+        self.db_dir.join(format!("{}.parquet", target))
+    }
+
+    /// 一時的なスキャン結果の保存先パスを返します。
+    pub fn temp_scan_path(&self) -> PathBuf {
+        self.db_dir.join("current_scan.parquet")
+    }
+}
 
 /// データベースのテーブル名を表す識別子。
 #[derive(Iden, Clone, Copy)]
@@ -14,25 +49,25 @@ pub enum Tbl {
     OneView,
     
     // --- Diff Tables ---
-    FileEntitiesDiff, // TempFileEntities
-    LocationsDiff,    // TempLocations
-    BaseTagsDiff,     // TempBaseTags
-    ItemEntitiesDiff, // TempItemEntities
-    SystemTagsDiff,   // TempSystemTags
-    UserTagsDiff,     // TempUserTags
+    FileEntitiesDiff,
+    LocationsDiff,
+    BaseTagsDiff,
+    ItemEntitiesDiff,
+    SystemTagsDiff,
+    UserTagsDiff,
 
     // --- Work Tables / Aliases ---
-    Scan,   // TempScan / scan
-    Item,   // NewItemsRaw / Candidate (c) / Items (i) / Items2 (it2) / TempAddItem
-    IdItem, // NewItemsWithId
-    Target, // TempBatchRank
-    Diff,   // SourceTable (st)
-    Master, // m
+    Scan,
+    Item,
+    IdItem,
+    Target,
+    Diff,
+    Master,
 
     // --- Set Operation Aliases ---
-    LeftSide,  // left_side
-    RightSide, // right_side
-    NotSide,   // not_side
+    LeftSide,
+    RightSide,
+    NotSide,
 }
 
 /// SQL型名（CAST用）。
@@ -50,7 +85,7 @@ pub enum Col {
     ItemId,
     FileId,
     Path,
-    Parentdir, // parentdir (note: lowercase 'd' for schema matching)
+    Parentdir,
     Filename,
     Extension,
     Size,
@@ -63,8 +98,8 @@ pub enum Col {
     Rank,
     Origin,
     Name,
-    Types,  // types
-    Labels, // labels
+    Types,
+    Labels,
 }
 
 impl Col {
@@ -156,9 +191,7 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string())
-                    // Rankカラムが必要になる可能性があるが、BaseTagsには通常含まれない
-                    ;
+                    .col(SeaColumnDef::new(Col::Label).string());
             }
             TargetTable::ItemEntities => {
                 create

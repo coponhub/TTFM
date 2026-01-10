@@ -89,7 +89,7 @@ impl WasmPlugin {
             .map(|c| ColumnDef {
                 name: c.name,
                 sql_type: Box::leak(c.sql_type.into_boxed_str()),
-                target_table: crate::taggers::TargetTable::BaseTags,
+                target_table: crate::db::TargetTable::BaseTags,
             })
             .collect();
 

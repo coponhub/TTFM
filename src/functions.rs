@@ -4,8 +4,8 @@ use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local};
 use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
-use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
-use crate::db::{Tbl, Col};
+use crate::taggers::{Tagger, ColumnDef, TagValue};
+use crate::db::{Tbl, Col, TargetTable};
 use path_slash::PathExt;
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。

@@ -2,8 +2,8 @@ use sea_query::{
     Query, Expr, JoinType, SelectStatement, Func
 };
 use std::path::Path;
-use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
-use crate::taggers::{ColumnDef, TargetTable};
+use crate::db::{Tbl, Col, DuckDbFunc, SqlType, TargetTable};
+use crate::taggers::{ColumnDef};
 use crate::util;
 
 pub struct OneView;

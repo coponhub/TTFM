@@ -1,7 +1,7 @@
-use crate::taggers::{TagValue, TargetTable, ColumnDef};
+use crate::taggers::{TagValue, ColumnDef};
+use crate::db::{Tbl, Col, DuckDbFunc, SqlType, TargetTable, Store};
 use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry, ScanRole};
-use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt, DotOk};
 use anyhow::Result;
 use duckdb::{Connection, ToSql, Appender};
@@ -182,7 +182,7 @@ struct DiffAuditor {
 }
 
 impl DiffAuditor {
-    fn new(store: &IndexStore<'_>) -> Self {
+    fn new(store: &Store) -> Self {
         let path = |t| store.path_for_target(t).to_string_lossy().into_owned();
         Self {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
@@ -284,14 +284,14 @@ impl TriageAccumulator {
 struct ItemTriager<'a> {
     conn: &'a Connection,
     registry: &'a FunctionRegistry,
-    store: &'a IndexStore<'a>,
+    store: &'a Store,
 }
 
 impl<'a> ItemTriager<'a> {
     fn new(
         conn: &'a Connection,
         reg: &'a FunctionRegistry,
-        store: &'a IndexStore<'a>,
+        store: &'a Store,
     ) -> Self {
         Self {
             conn,
@@ -429,55 +429,6 @@ impl<'a> ItemTriager<'a> {
     }
 }
 
-// ========================================================
-// 3. Storage Manager (IndexStore)
-// ========================================================
-
-pub(crate) struct IndexStore<'a> {
-    conn: &'a Connection,
-    db_dir: PathBuf,
-}
-
-impl<'a> IndexStore<'a> {
-    pub(crate) fn new(conn: &'a Connection, db_dir: PathBuf) -> Self {
-        Self { conn, db_dir }
-    }
-
-    /// ターゲットテーブルに対応するパスを生成します。
-    pub(crate) fn path_for_target(&self, target: TargetTable) -> PathBuf {
-        self.db_dir.join(format!("{}.parquet", target))
-    }
-
-    pub(crate) fn temp_scan_path(&self) -> PathBuf {
-        self.db_dir.join("current_scan.parquet")
-    }
-
-    pub(crate) fn merge_and_save(
-        &self,
-        path: &Path,
-        temp_table: impl Iden + Clone + 'static,
-        filter: Option<Condition>,
-    ) -> Result<()> {
-        let base_query = Query::select()
-            .expr(Expr::cust("*"))
-            .from(temp_table)
-            .to_owned();
-
-        if !path.exists() {
-            return base_query.save_parquet(self.conn, path);
-        }
-
-        let path_str = path.to_string_lossy().to_string();
-        let mut query = util::parquet_query(&path_str);
-        if let Some(cond) = filter {
-            query.cond_where(cond);
-        }
-
-        query
-            .union(sea_query::UnionType::All, base_query)
-            .save_parquet(self.conn, path)
-    }
-}
 
 // ========================================================
 // 2. Query Builder (QueryParts)
@@ -824,7 +775,7 @@ impl SelectFetchExt for SelectStatement {
 pub struct Indexer<'a> {
     conn: &'a Connection,
     registry: &'a FunctionRegistry,
-    store: IndexStore<'a>,
+    store: crate::db::Store,
 }
 
 impl<'a> Indexer<'a> {
@@ -836,8 +787,35 @@ impl<'a> Indexer<'a> {
         Self {
             conn,
             registry,
-            store: IndexStore::new(conn, db_dir),
+            store: crate::db::Store::new(db_dir),
         }
+    }
+
+    /// インデックス作成専用の書き込みマージロジック
+    pub(crate) fn merge_and_save(
+        &self,
+        path: &Path,
+        temp_table: impl Iden + Clone + 'static,
+        filter: Option<Condition>,
+    ) -> Result<()> {
+        let base_query = Query::select()
+            .expr(Expr::cust("*"))
+            .from(temp_table)
+            .to_owned();
+
+        if !path.exists() {
+            return base_query.save_parquet(self.conn, path);
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let mut query = util::parquet_query(&path_str);
+        if let Some(cond) = filter {
+            query.cond_where(cond);
+        }
+
+        query
+            .union(sea_query::UnionType::All, base_query)
+            .save_parquet(self.conn, path)
     }
 
     pub fn run<P, F>(
@@ -1150,7 +1128,7 @@ impl FileEntityMerger<'_> {
     }
 
     fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
-        self.indexer.store.merge_and_save(
+        self.indexer.merge_and_save(
             &self.indexer.store.path_for_target(TargetTable::FileEntities),
             Tbl::FileEntitiesDiff,
             (!deleted_ids.is_empty()).then(|| {
@@ -1205,7 +1183,7 @@ impl LocationMerger<'_> {
     }
 
     fn sync(self, unchanged_ids: &[i64]) -> Result<Self> {
-        self.indexer.store.merge_and_save(
+        self.indexer.merge_and_save(
             &self.indexer.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
             if unchanged_ids.is_empty() {
@@ -1263,7 +1241,7 @@ impl BaseTagMerger<'_> {
     }
 
     fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
-        self.indexer.store.merge_and_save(
+        self.indexer.merge_and_save(
             &self.indexer.store.path_for_target(TargetTable::BaseTags),
             Tbl::BaseTagsDiff,
             (!deleted_ids.is_empty()).then(|| {
@@ -1319,8 +1297,8 @@ mod tests {
     fn test_diff_auditor_logic() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join("db");
-        let conn = Connection::open_in_memory().unwrap();
-        let store = IndexStore::new(&conn, db_dir);
+        let _conn = Connection::open_in_memory().unwrap();
+        let store = Store::new(db_dir);
 
         // 1. 初回スキャンのテスト
         let diff = DiffAuditor::new(&store);
@@ -1342,7 +1320,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let registry = FunctionRegistry::new();
         let dir = tempdir().unwrap();
-        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let store = Store::new(dir.path().to_path_buf());
         let triager = ItemTriager::new(&conn, &registry, &store);
 
         // 1. 有効な値のテスト
@@ -1371,7 +1349,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let registry = FunctionRegistry::new();
         let dir = tempdir().unwrap();
-        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let store = Store::new(dir.path().to_path_buf());
         let triager = ItemTriager::new(&conn, &registry, &store);
 
         // 1. FileEntities のテスト
@@ -1407,7 +1385,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let registry = FunctionRegistry::new();
         let dir = tempdir().unwrap();
-        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let store = Store::new(dir.path().to_path_buf());
         let triager = ItemTriager::new(&conn, &registry, &store);
 
         let cols = vec![
@@ -1441,7 +1419,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         let registry = FunctionRegistry::with_standard();
         let dir = tempdir().unwrap();
-        let store = IndexStore::new(&conn, dir.path().to_path_buf());
+        let store = Store::new(dir.path().to_path_buf());
         let triager = ItemTriager::new(&conn, &registry, &store);
 
         let path = Path::new("/test/dir/file.txt");
