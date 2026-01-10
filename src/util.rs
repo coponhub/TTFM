@@ -193,7 +193,7 @@ pub fn alias_from(s: &str) -> sea_query::DynIden {
 /// パイプライン風の記述を可能にし、ネストを減らすために使用します。
 pub trait DotOk: Sized {
     /// 自身を Ok で包んで返します。
-    fn ok<E>(self) -> Result<Self, E> {
+    fn to_ok<E>(self) -> Result<Self, E> {
         Ok(self)
     }
 }

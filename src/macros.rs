@@ -109,7 +109,7 @@ macro_rules! define_scan_entry {
 
                 $( let $name = $crate::macros::generate_field::<$func>(path, metadata)?; )*
 
-                Self { $( $name ),* }.ok()
+                Self { $( $name ),* }.to_ok()
             }
 
             /// DuckDBの行(`row`)から `ScanEntry` を生成します。
@@ -120,7 +120,7 @@ macro_rules! define_scan_entry {
 
                 $( let $name = $crate::macros::read_next_field::<$func>(row, &mut _idx)?; )*
 
-                Self { $( $name ),* }.ok()
+                Self { $( $name ),* }.to_ok()
             }
 
             /// DuckDBのクエリパラメータとして使用できる形式(`Vec<&dyn ToSql>`)でフィールド値を返します。

@@ -2,6 +2,7 @@ use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
 use anyhow::{Result, Context};
+use crate::util::DotOk;
 use std::path::Path;
 use std::sync::Arc;
 use std::cell::RefCell;
@@ -169,7 +170,11 @@ impl Tagger for WasmPluginAdapter {
             })
         })?;
 
-        Ok(results.into_iter().map(convert_tag_value).collect())
+        results
+            .into_iter()
+            .map(convert_tag_value)
+            .collect::<Vec<_>>()
+            .to_ok()
     }
 }
 

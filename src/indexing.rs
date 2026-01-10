@@ -2,7 +2,7 @@ use crate::taggers::{TagValue, TargetTable, ColumnDef};
 use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry, ScanRole};
 use crate::db::{Tbl, Col, DuckDbFunc, SqlType};
-use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt};
+use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateExt, DotOk};
 use anyhow::Result;
 use duckdb::{Connection, ToSql, Appender};
 use sea_query::{
@@ -990,7 +990,7 @@ impl<'a> Indexer<'a> {
         // 3. 移動されたファイルに対する場所情報の再生成
         let moved_rows = triager.rebuild_moved_locations(moved)?;
 
-        Ok((results, moved_rows))
+        (results, moved_rows).to_ok()
     }
 
     fn merge_phase(

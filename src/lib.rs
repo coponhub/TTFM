@@ -11,7 +11,7 @@ use sea_query::{
     Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
-use crate::util::{ExecuteSql, IdenExt, SelectExt};
+use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 
 pub mod types;
 pub mod query;
@@ -490,7 +490,7 @@ impl FileManager {
 
             let tags = types.into_iter().zip(labels.into_iter()).collect();
 
-            Ok(SearchResult { id, item_kind, name, rank, tags })
+            SearchResult { id, item_kind, name, rank, tags }.to_ok()
         })?;
 
         let mut results = Vec::new();
@@ -498,7 +498,7 @@ impl FileManager {
             results.push(row?);
         }
 
-        Ok(results)
+        results.to_ok()
     }
 
     /// インデックスファイル（Parquet）を削除します。
