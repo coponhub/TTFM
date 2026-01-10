@@ -223,8 +223,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
-            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| fm.get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| fm.get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
 
@@ -262,8 +262,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(a));
-            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| ttfm::db::SystemRank::get_default_rank(b));
+            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| fm.get_default_rank(a));
+            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| fm.get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
         

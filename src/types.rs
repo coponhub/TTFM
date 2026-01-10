@@ -1,5 +1,8 @@
 use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
 
+/// アイテムの優先度を表す型。
+pub type Rank = i64;
+
 /// データベース上の型名を取得するためのトレイト。
 pub trait DBType {
     /// 対応する SQL の型名（例: "VARCHAR", "BIGINT"）を返します。
@@ -81,7 +84,7 @@ pub struct SearchResult {
     /// 解決済みの名称（ユーザ定義名を優先）
     pub name: String,
     /// アイテムの優先度
-    pub rank: i64,
+    pub rank: Rank,
     /// アイテムに紐づく全てのタグ (type, value)
     pub tags: Vec<(String, String)>,
 }

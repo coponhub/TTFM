@@ -2,6 +2,7 @@ use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
 use anyhow::{Result, Context};
+use crate::util::DotOk;
 use std::path::Path;
 use std::sync::Arc;
 use std::cell::RefCell;
@@ -88,7 +89,7 @@ impl WasmPlugin {
             .map(|c| ColumnDef {
                 name: c.name,
                 sql_type: Box::leak(c.sql_type.into_boxed_str()),
-                target_table: crate::taggers::TargetTable::BaseTags,
+                target_table: crate::db::TargetTable::BaseTags,
             })
             .collect();
 
@@ -169,7 +170,11 @@ impl Tagger for WasmPluginAdapter {
             })
         })?;
 
-        Ok(results.into_iter().map(convert_tag_value).collect())
+        results
+            .into_iter()
+            .map(convert_tag_value)
+            .collect::<Vec<_>>()
+            .to_ok()
     }
 }
 
@@ -178,8 +183,8 @@ impl TagFunction for WasmPluginAdapter {
         &self.name
     }
 
-    fn tagger(&self) -> &dyn Tagger {
-        self
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(self)
     }
 
     fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {

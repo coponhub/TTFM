@@ -2,10 +2,11 @@ use anyhow::{Result, Context};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local};
-use sea_query::{Expr, SimpleExpr, Alias, extension::postgres::PgExpr};
+use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
-use crate::taggers::{Tagger, ColumnDef, TagValue, TargetTable};
-use crate::db::{Tbl, Col};
+use crate::taggers::{Tagger, ColumnDef, TagValue};
+use crate::db::{Tbl, Col, TargetTable};
+use path_slash::PathExt;
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
 /// 
@@ -16,7 +17,7 @@ pub trait TagFunction: Send + Sync {
     fn name(&self) -> &str;
 
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
-    fn tagger(&self) -> &dyn Tagger;
+    fn tagger(&self) -> Option<&dyn Tagger> { None }
 
     /// 指定された `TypedTag` に対する検索SQL条件を生成します。
     /// 
@@ -29,6 +30,9 @@ pub trait TagFunction: Send + Sync {
     /// パスのみから値を生成できる場合、その値を返します。
     /// （移動処理などで、実際にファイルを開かずにタグを更新するために使用）
     fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
+
+    /// このタグのデフォルトのランク値（優先度）を返します。
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::DEFAULT }
 }
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
@@ -72,6 +76,8 @@ pub enum ScanRole {
     ScanId,
     Integrity,
     Other,
+    /// インデックス作成時の抽出対象外（定義とランクのみ提供）
+    DefinitionOnly,
 }
 
 pub struct ScanColumn {
@@ -91,7 +97,7 @@ crate::define_scan_entry! {
 
 /// SQLインジェクションを防ぐための簡易エスケープ処理。
 /// 文字列内のシングルクォートを2つ重ねてエスケープします。
-/// 特定のタグが `all_tags` ビューに存在するかを確認する EXISTS 式を生成します。
+/// 特定のタグが `oneview` ビューに存在するかを確認する EXISTS 式を生成します。
 ///
 /// # Arguments
 /// * `tag_type` - タグの種類（例: "directory", "mimetype"）
@@ -105,8 +111,8 @@ pub(crate) fn exists_in_tags(
     let mut query = sea_query::Query::select();
     query
         .expr(Expr::val(1))
-        .from(Alias::new("all_tags"))
-        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::EntAlias, Col::ItemId))))
+        .from(Tbl::OneView)
+        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::FileEntities, Col::ItemId))))
         .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
 
     if exact {
@@ -136,7 +142,7 @@ impl Tagger for PathTagger {
     /// ファイルの絶対パスを抽出し、パスセパレータを正規化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         // Windowsのバックスラッシュをスラッシュに正規化
-        let p = path.to_string_lossy().replace('\\', "/");
+        let p = path.to_slash_lossy().to_string();
         Ok(vec![TagValue::Text(p)])
     }
 }
@@ -164,12 +170,12 @@ impl TagFunction for PathFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::LocAlias, Col::Path))
+            let expr = Expr::col((Tbl::Locations, Col::Path))
                 .ilike(format!("%{}%", tag.label.0));
             return Some(expr.into());
         }
@@ -179,9 +185,10 @@ impl TagFunction for PathFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        let p = path.to_string_lossy().replace('\\', "/");
+        let p = path.to_slash_lossy().to_string();
         Some(TagValue::Text(p))
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PATH }
 }
 
 impl TagDefinition for PathFunction {
@@ -192,7 +199,7 @@ impl TagDefinition for PathFunction {
         path: &Path,
         _metadata: Option<&std::fs::Metadata>,
     ) -> Result<Self::RustType> {
-        Ok(path.to_string_lossy().replace('\\', "/"))
+        Ok(path.to_slash_lossy().to_string())
     }
 }
 
@@ -213,7 +220,7 @@ impl Tagger for ParentDirTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let parent = path
             .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
         Ok(vec![TagValue::Text(parent)])
     }
@@ -242,15 +249,15 @@ impl TagFunction for ParentDirFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::ParentDir))
+            let expr = Expr::col((Tbl::Locations, Col::Parentdir))
                 .ilike(format!("%/{}", val))
-                .or(Expr::col((Tbl::LocAlias, Col::ParentDir)).eq(val.clone()));
+                .or(Expr::col((Tbl::Locations, Col::Parentdir)).eq(val.clone()));
             return Some(expr.into());
         }
         None
@@ -261,6 +268,7 @@ impl TagFunction for ParentDirFunction {
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
         Self::generate(path, None).ok().map(TagValue::Text)
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PARENT_DIR }
 }
 
 impl TagDefinition for ParentDirFunction {
@@ -273,7 +281,7 @@ impl TagDefinition for ParentDirFunction {
     ) -> Result<Self::RustType> {
         let parent = path
             .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
         Ok(parent)
     }
@@ -326,13 +334,13 @@ impl TagFunction for FilenameFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
             return Some(expr.into());
@@ -345,6 +353,7 @@ impl TagFunction for FilenameFunction {
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
         Self::generate(path, None).ok().map(TagValue::Text)
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::FILENAME }
 }
 
 impl TagDefinition for FilenameFunction {
@@ -411,13 +420,13 @@ impl TagFunction for StemFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
             return Some(expr.into());
@@ -489,13 +498,13 @@ impl TagFunction for ExtensionFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::LocAlias, Col::Extension)).eq(tag.label.0.clone());
+                Expr::col((Tbl::Locations, Col::Extension)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -567,13 +576,13 @@ impl TagFunction for DirectoryFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let val = &tag.label.0;
-            let expr = Expr::col((Tbl::LocAlias, Col::Filename))
+            let expr = Expr::col((Tbl::Locations, Col::Filename))
                 .ilike(format!("%{}%", val))
                 .and(exists_in_tags(Self::NAME, "TRUE", true));
             return Some(expr.into());
@@ -648,12 +657,12 @@ impl TagFunction for SizeBytesFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::EntAlias, Col::Size)).eq(tag.label.0.clone());
+            let expr = Expr::col((Tbl::FileEntities, Col::Size)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -735,13 +744,13 @@ impl TagFunction for ModifiedTsFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::Mtime)).eq(tag.label.0.clone());
+                Expr::col((Tbl::FileEntities, Col::Mtime)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -814,13 +823,13 @@ impl TagFunction for InodeFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
             let expr =
-                Expr::col((Tbl::EntAlias, Col::FileId)).eq(tag.label.0.clone());
+                Expr::col((Tbl::FileEntities, Col::FileId)).eq(tag.label.0.clone());
             return Some(expr.into());
         }
         None
@@ -909,8 +918,8 @@ impl TagFunction for TypeFromExtFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -918,6 +927,7 @@ impl TagFunction for TypeFromExtFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::TYPE_FROM_EXT }
 }
 
 // ========================================================
@@ -1003,8 +1013,8 @@ impl TagFunction for SizeStrFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -1012,6 +1022,7 @@ impl TagFunction for SizeStrFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::SIZE_STR }
 }
 
 // ========================================================
@@ -1084,8 +1095,8 @@ impl TagFunction for ModifiedStrFunction {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn tagger(&self) -> &dyn Tagger {
-        &self.tagger
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        Some(&self.tagger)
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME {
@@ -1093,6 +1104,35 @@ impl TagFunction for ModifiedStrFunction {
         }
         None
     }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::MODIFIED_STR }
+}
+
+// ========================================================
+// 12. Definition Only Functions
+// ========================================================
+
+pub struct NameTagFunction;
+impl TagFunction for NameTagFunction {
+    fn name(&self) -> &str { "name" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::NAME }
+}
+
+pub struct KindTagFunction;
+impl TagFunction for KindTagFunction {
+    fn name(&self) -> &str { "kind" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::ITEM_KIND }
+}
+
+pub struct ContentTagFunction;
+impl TagFunction for ContentTagFunction {
+    fn name(&self) -> &str { "content" }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
+    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
+    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::CONTENT }
 }
 
 // ========================================================
@@ -1127,7 +1167,7 @@ mod tests {
         let f = PathFunction::new();
         let expr = f.to_expr(&ttag(PathFunction::NAME, "foo")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"l\".\"path\" ILIKE '%foo%'" );
+        assert_eq!(sql, "\"locations\".\"path\" ILIKE '%foo%'" );
     }
 
     #[test]
@@ -1135,7 +1175,7 @@ mod tests {
         let f = FilenameFunction::new();
         let expr = f.to_expr(&ttag(FilenameFunction::NAME, "report")).unwrap();
         let sql = to_sql(expr);
-        assert!(sql.contains("\"l\".\"filename\" ILIKE '%report%'" ));
+        assert!(sql.contains("\"locations\".\"filename\" ILIKE '%report%'" ));
         assert!(sql.contains("NOT EXISTS"));
         assert!(sql.contains("\"type\" = 'directory'"));
     }
@@ -1145,7 +1185,7 @@ mod tests {
         let f = ExtensionFunction::new();
         let expr = f.to_expr(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"l\".\"extension\" = 'rs'");
+        assert_eq!(sql, "\"locations\".\"extension\" = 'rs'");
     }
 
     #[test]
@@ -1168,7 +1208,7 @@ mod tests {
         let f = SizeBytesFunction::new();
         let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
         let sql = to_sql(expr);
-        assert_eq!(sql, "\"e\".\"size\" = '123'");
+        assert_eq!(sql, "\"file_entities\".\"size\" = '123'");
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 
@@ -1176,6 +1216,27 @@ mod tests {
     fn test_inode_function() {
         let f = InodeFunction::new();
         assert_eq!(f.role(), ScanRole::ScanId);
-        assert_eq!(f.tagger().get_columns()[0].name, "file_id");
+        assert_eq!(f.tagger().unwrap().get_columns()[0].name, "file_id");
+    }
+
+    #[test]
+    fn test_col_file_id_direct() {
+        let mut query = Query::select();
+        query.column(Col::FileId);
+        let sql = query.to_string(PostgresQueryBuilder);
+        println!("Direct Col::FileId SQL: {}", sql);
+        assert!(sql.contains("\"file_id\""), "Direct Col::FileId should be snake_case");
+    }
+
+    #[test]
+    fn test_inode_function_to_expr() {
+        let f = InodeFunction::new();
+        // file_id:123
+        let expr = f.to_expr(&ttag(InodeFunction::NAME, "123")).unwrap();
+        let sql = to_sql(expr);
+        println!("SQL: {}", sql);
+        
+        // Assert the behavior (snake_case)
+        assert!(sql.contains("\"file_entities\".\"file_id\""), "Expected snake_case file_id");
     }
 }

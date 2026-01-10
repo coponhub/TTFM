@@ -64,20 +64,176 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         ("filename:work_docs & directory:work_docs", 1),     
     ];
 
-    for (query, expected_count) in test_cases {
-        print!("Query: '{:<25}' -> ", query);
-        let results = fm.search(query).unwrap_or_default();
-        
-        if results.len() == expected_count {
-            println!("OK ({} hits)", results.len());
-        } else {
-            println!("FAIL (Expected {}, got {})", expected_count, results.len());
-            for r in &results {
-                println!(" - Found: {:?}", r);
+        for (query, expected_count) in test_cases {
+
+            print!("Query: '{:<25}' -> ", query);
+
+            let results = fm.search(query).unwrap_or_default();
+
+            
+
+            if results.len() == expected_count {
+
+                println!("OK ({} hits)", results.len());
+
+            } else {
+
+                println!("FAIL (Expected {}, got {})", expected_count, results.len());
+
+                for r in &results {
+
+                    println!(" - Found: {:?}", r);
+
+                }
+
+                panic!("Test failed for query: '{}'", query);
+
             }
-            panic!("Test failed for query: '{}'", query);
+
         }
+
+    
+
+        Ok(())
+
     }
 
-    Ok(())
-}
+    
+
+    #[test]
+
+    fn test_or_negation_complex_behavior() {
+
+        let dir = tempdir().unwrap();
+
+        let root = dir.path();
+
+        let db_dir = root.join(".ttfm/db");
+
+    
+
+        // 1. ファイル準備 (.rs と .txt)
+
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        std::fs::write(root.join("readme.txt"), "hello").unwrap();
+
+    
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    
+
+        // 2. クエリ実行: item_kind:type | -extension:rs
+
+        let query = "item_kind:type | -extension:rs";
+
+        let results = fm.search(query).unwrap();
+
+    
+
+        let mut found_type_item = false;
+
+        let mut found_txt_file = false;
+
+        let mut found_rs_file = false;
+
+    
+
+        for r in results {
+
+            if r.item_kind != "file" && r.item_kind == "type" {
+
+                found_type_item = true;
+
+            }
+
+            if r.item_kind == "file" {
+
+                if r.tags.iter().any(|(t, v)| t == "extension" && v == "txt") {
+
+                    found_txt_file = true;
+
+                }
+
+                if r.tags.iter().any(|(t, v)| t == "extension" && v == "rs") {
+
+                    found_rs_file = true;
+
+                }
+
+            }
+
+        }
+
+    
+
+        assert!(found_type_item, "Should find system items");
+
+        assert!(found_txt_file, "Should find readme.txt");
+
+        assert!(!found_rs_file, "Should NOT find main.rs");
+
+    }
+
+    
+
+    #[test]
+
+    fn test_glob_search_behavior() {
+
+        let dir = tempdir().unwrap();
+
+        let root = dir.path();
+
+        let db_dir = root.join(".ttfm/db");
+
+    
+
+        std::fs::write(root.join("project_alpha.pdf"), "").unwrap();
+
+        std::fs::write(root.join("project_beta.txt"), "").unwrap();
+
+    
+
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    
+
+        // 1. ワイルドカードによる部分一致
+
+        let results = fm.search("filename:*alpha*").unwrap();
+
+        assert_eq!(results.len(), 1);
+
+        assert!(results[0].primary_value().unwrap().contains("alpha"));
+
+    
+
+        // 2. 複数のワイルドカード
+
+        let results = fm.search("filename:project*").unwrap();
+
+        assert_eq!(results.len(), 2);
+
+    
+
+        // 3. ワイルドカードなし (完全一致として動作)
+
+        let results = fm.search("filename:project").unwrap();
+
+        assert_eq!(results.len(), 0);
+
+    
+
+        let results = fm.search("filename:project_alpha.pdf").unwrap();
+
+        assert_eq!(results.len(), 1);
+
+    }
+
+    

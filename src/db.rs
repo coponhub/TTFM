@@ -1,53 +1,82 @@
-use sea_query::Iden;
+use sea_query::{Iden, TableCreateStatement, Table, ColumnDef as SeaColumnDef, IntoIden};
+use crate::taggers::{ColumnDef};
+use strum::{EnumIter, Display};
+use std::path::{PathBuf};
+
+/// カラムが所属すべきテーブル。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display, Iden)]
+#[strum(serialize_all = "snake_case")]
+pub enum TargetTable {
+    FileEntities,
+    Locations,
+    BaseTags,
+    ItemEntities,
+    SystemTags,
+    UserTags,
+}
+
+/// データベースの物理ストレージ（Parquetファイル）へのパスを管理する構造体。
+pub struct Store {
+    pub db_dir: PathBuf,
+}
+
+impl Store {
+    pub fn new(db_dir: PathBuf) -> Self {
+        Self { db_dir }
+    }
+
+    /// ターゲットテーブルに対応するパスを生成します。
+    pub fn path_for_target(&self, target: TargetTable) -> PathBuf {
+        self.db_dir.join(format!("{}.parquet", target))
+    }
+
+    /// 一時的なスキャン結果の保存先パスを返します。
+    pub fn temp_scan_path(&self) -> PathBuf {
+        self.db_dir.join("current_scan.parquet")
+    }
+}
 
 /// データベースのテーブル名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Tbl {
-    /// ファイルエンティティ（実体）テーブル
-    #[iden = "file_entities"]
     FileEntities,
-    /// ファイルパス（場所）テーブル
-    #[iden = "locations"]
     Locations,
-    /// 基本タグテーブル（自動抽出タグ）
-    #[iden = "base_tags"]
     BaseTags,
-    /// アイテムエンティティテーブル
-    #[iden = "item_entities"]
     ItemEntities,
-    /// システム定義アイテム用タグテーブル
-    #[iden = "system_tags"]
     SystemTags,
-    /// ユーザー定義タグテーブル
-    #[iden = "user_tags"]
     UserTags,
+    #[iden = "oneview"]
+    OneView,
     
-    // --- インデックス処理用テンポラリテーブル ---
-    TempScan,
-    TempFileEntities,
-    TempLocations,
-    TempBaseTags,
-    TempItemEntities,
-    TempSystemTags,
-    TempUserTags,
+    // --- Diff Tables ---
+    FileEntitiesDiff,
+    LocationsDiff,
+    BaseTagsDiff,
+    ItemEntitiesDiff,
+    SystemTagsDiff,
+    UserTagsDiff,
 
-    // --- エイリアス用 ---
-    #[iden = "scan"]
-    ScanAlias, 
-    #[iden = "e"]
-    EntAlias,
-    #[iden = "l"]
-    LocAlias,
-    #[iden = "old"]
-    OldAlias,
-    #[iden = "origin"]
-    OriginAlias,
-    #[iden = "t"]
-    TagAlias,
-    #[iden = "u"]
-    UserTagAlias,
-    #[iden = "s"]
-    SysTagAlias,
+    // --- Work Tables / Aliases ---
+    Scan,
+    Item,
+    IdItem,
+    Target,
+    Diff,
+    Master,
+
+    // --- Set Operation Aliases ---
+    LeftSide,
+    RightSide,
+    NotSide,
+}
+
+/// SQL型名（CAST用）。
+#[allow(non_camel_case_types)]
+#[derive(Iden, Clone, Copy)]
+pub enum SqlType {
+    BIGINT,
+    VARCHAR,
+    BOOLEAN,
 }
 
 /// 共通で使用されるカラム名を表す識別子。
@@ -56,7 +85,7 @@ pub enum Col {
     ItemId,
     FileId,
     Path,
-    ParentDir,
+    Parentdir,
     Filename,
     Extension,
     Size,
@@ -69,59 +98,33 @@ pub enum Col {
     Rank,
     Origin,
     Name,
+    Types,
+    Labels,
 }
 
-/// システムタグの表示優先度（RANK）を定義する列挙型。
-#[derive(Debug, Clone, Copy)]
-pub enum SystemRank {
-    /// 解決済みの名称（最優先）
-    Name = 10,
-    /// 拡張子からの種類
-    TypeFromExt = 9,
-    /// サイズ（読みやすい形式）
-    SizeStr = 8,
-    /// 更新日時（読みやすい形式）
-    ModifiedStr = 7,
-    /// 親ディレクトリ
-    ParentDir = 6,
-    /// アイテムの種類 (file/note等)
-    ItemKind = 5,
-    /// コンテンツ（本文など）
-    Content = 4,
-    /// 物理的なファイル名（nameがある場合は優先度を下げる）
-    Filename = 1,
-    /// その他
-    Other = 0,
-    /// フルパス（長いため優先度を極めて低く設定）
-    Path = -1,
-}
-
-impl SystemRank {
-    pub fn get_default_rank(name: &str) -> i64 {
-        match name {
-            "name" => SystemRank::Name as i64,
-            "type_from_ext" => SystemRank::TypeFromExt as i64,
-            "size_str" => SystemRank::SizeStr as i64,
-            "modified_str" => SystemRank::ModifiedStr as i64,
-            "parentdir" => SystemRank::ParentDir as i64,
-            "item_kind" => SystemRank::ItemKind as i64,
-            "content" => SystemRank::Content as i64,
-            "filename" => SystemRank::Filename as i64,
-            "path" => SystemRank::Path as i64,
-            _ => SystemRank::Other as i64,
+impl Col {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "item_id" => Some(Col::ItemId),
+            "file_id" => Some(Col::FileId),
+            "path" => Some(Col::Path),
+            "parentdir" => Some(Col::Parentdir),
+            "filename" => Some(Col::Filename),
+            "extension" => Some(Col::Extension),
+            "size" => Some(Col::Size),
+            "mtime" => Some(Col::Mtime),
+            "hash" => Some(Col::Hash),
+            "type" => Some(Col::Type),
+            "label" => Some(Col::Label),
+            "item_kind" => Some(Col::ItemKind),
+            "content" => Some(Col::Content),
+            "rank" => Some(Col::Rank),
+            "origin" => Some(Col::Origin),
+            "name" => Some(Col::Name),
+            "types" => Some(Col::Types),
+            "labels" => Some(Col::Labels),
+            _ => None,
         }
-    }
-}
-
-impl From<SystemRank> for i64 {
-    fn from(r: SystemRank) -> Self {
-        r as i64
-    }
-}
-
-impl From<SystemRank> for sea_query::Value {
-    fn from(r: SystemRank) -> Self {
-        sea_query::Value::BigInt(Some(r as i64))
     }
 }
 
@@ -134,4 +137,76 @@ pub enum DuckDbFunc {
     Coalesce,
     #[iden = "list"]
     List,
+}
+
+/// データベーススキーマ定義（テーブル作成SQL）を提供する構造体。
+pub struct Schema;
+
+impl Schema {
+    pub fn build_table(
+        target: TargetTable,
+        name: impl Iden + 'static,
+        columns: &[ColumnDef],
+    ) -> TableCreateStatement {
+        let mut create = Table::create().table(name).to_owned();
+        match target {
+            TargetTable::FileEntities => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                create.col(SeaColumnDef::new(Col::Rank).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::FileEntities)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::Locations => {
+                create.col(SeaColumnDef::new(Col::ItemId).big_integer());
+                for c in columns
+                    .iter()
+                    .filter(|c| c.target_table == TargetTable::Locations)
+                {
+                    let iden = Col::from_str(&c.name)
+                        .map(|c| c.into_iden())
+                        .unwrap_or_else(|| crate::util::alias_from(&c.name));
+                    let mut def = SeaColumnDef::new(iden);
+                    match c.sql_type {
+                        "BIGINT" => def.big_integer(),
+                        "BOOLEAN" => def.boolean(),
+                        _ => def.string(),
+                    };
+                    create.col(&mut def);
+                }
+            }
+            TargetTable::BaseTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string());
+            }
+            TargetTable::ItemEntities => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Rank).big_integer())
+                    .col(SeaColumnDef::new(Col::ItemKind).string())
+                    .col(SeaColumnDef::new(Col::Content).string());
+            }
+            TargetTable::SystemTags | TargetTable::UserTags => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::Label).string());
+            }
+        }
+        create
+    }
 }

@@ -58,7 +58,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ファイルの実体とパス、およびスキャンにより自動抽出されたタグを管理する。
 これらのテーブルは `ttfm index` 実行時に更新・洗い替えされる。
 
-**A. `file_entities` テーブル (実体) (.ttfm/db/entities.parquet)**
+**A. `file_entities` テーブル (実体) (.ttfm/db/file_entities.parquet)**
 - `item_id`: 内部管理用ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `file_id`: OSレベルの識別子 (Inode number / File Index)
@@ -84,7 +84,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 タグの型(Type)や値(Label)の定義自体を管理するID台帳。
 システム定義とユーザー定義の両方が混在するが、IDによって管理される。
 
-**D. `item_entities` テーブル (.ttfm/db/items.parquet)**
+**D. `item_entities` テーブル (.ttfm/db/item_entities.parquet)**
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
@@ -106,7 +106,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `label`: タグの値
 - ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
 
-#### 4. Unified View (`all_tags`)
+#### 4. Unified View (`oneview`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
 - `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `typedtag` 等)
@@ -158,18 +158,21 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
             - その直下の全てのファイルおよびディレクトリに対して `stat` を行い、最新のメタデータを取得する。
     - **一時保存**: 変更が検知されたエントリのみを `current_scan.parquet` に書き出す。
 
-2.  **Diff Phase (差分分析)**:
-    - DuckDB 上で、`current_scan.parquet` (最新) と既存の Parquet ファイルを `FileId` (Inode) をキーにして比較し、以下のカテゴリに分類する。
+2.  **Diff Phase (Auditing)**:
+    - **DiffAuditor** を用いて、`current_scan.parquet` (最新) と既存の Parquet ファイルを比較し、以下のカテゴリに分類する。
         - **To Process**: 新規、または Mtime/Size が変化したファイル。
         - **Moved**: `FileId` は一致するが、Path が異なるファイル。
-          - アクション: **Location (path, parentdir, filename, extension) の情報を更新する。**
+          - アクション: **Location (path, parentdir, filename, extension) の情報を再生成する。**
         - **Unchanged**: 全てのメタデータが一致、または上位ディレクトリの `mtime` 判定でスキップされたファイル。
         - **Deleted**: 既存インデックスにあるが、今回の走査で見つからず、かつ親ディレクトリが「不一致 (Modified)」判定されていたファイル。
 
-3.  **Tagging Phase (実行)**:
-    - **To Process** のリストに対してのみ `Tagger` を実行し、メタデータを抽出する。
+3.  **Triage Phase (Selection & Assembly)**:
+    - **ItemTriager** を実行し、抽出されたメタデータを各テーブルへ振り分ける。
+    - **Extraction**: **To Process** のリストに対して並列で `Tagger` を実行し、メタデータを抽出する。
+    - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/Tags）へ選別（トリアージ）する。
+    - **Reconstruction**: **Moved** のリストに対し、ファイルを開かずにパス情報から場所情報を再構築する。
 
-4.  **Merge Phase (統合)**:
+4.  **Merge Phase (Integration)**:
     - 既存データ、新規抽出分、および更新された Location 情報を DuckDB 上で統合し、最終的な `file_entities`, `locations`, `file_tags` Parquet ファイルを更新・保存する。
     - 読み込み中のファイル破壊を防ぐため、一旦 `.tmp` ファイルに書き出し、完了後にリネームを行う。
 
@@ -184,7 +187,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
     - **Globパターンのサポート**: タグの値（Label）部分には、`*`（任意の文字列）や `?`（任意の1文字）などの Glob パターンを使用できる。
         - 例: `filename:*report*` で「report」を含むファイルにマッチ。
         - 例: `extension:p?g` で `png` や `jpg`（判定ロジックによる）などにマッチ。
-2.  **論理演算の解決**: 各 `TypedTag` ノードについて、対応する `TagFunction` または `all_tags` ビューを用いて SQL 条件式を生成。
+2.  **論理演算の解決**: 各 `TypedTag` ノードについて、対応する `TagFunction` または `oneview` ビューを用いて SQL 条件式を生成。
     - **NOT演算 (`-`) の特殊仕様**: ノイズを抑制するため、否定演算の母集団（Universe）は**「そのタグの種類（Type）を保持しているエントリ」**に制限される。
         - 例: `-extension:txt` は「拡張子というタグを持っているが、その値が txt ではないもの」のみにマッチする。拡張子という概念を持たない Item や Note は結果に含まれない。
 3.  **実行**: DuckDB を介して Parquet ファイルに対して SQL クエリを実行し、

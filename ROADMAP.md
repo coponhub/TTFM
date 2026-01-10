@@ -68,13 +68,13 @@ Transition to a robust schema that separates system-generated metadata from user
 - [x] **Database Schema Migration**:
     - [x] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
     - [x] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
-    - [x] Implement `Unified View (all_tags)` with `name` and `origin` resolution logic.
+    - [x] Implement `Unified View (oneview)` with `name` and `origin` resolution logic.
 
 - [x] **Item Name Abstraction**:
     - [x] Implement `name` tag support in query parser and search results.
     - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
-- [ ] **Move Detection**: Detect and update `mv` operations by tracking `file_id`.
+- [ ] **Entity-Based Location Management**: Support multiple locations per item (e.g., hard links) and replace "move detection" with robust location synchronization.
 
 ### 7. File Operations
 Directly interact with files from the CLI.
@@ -108,6 +108,12 @@ Directly interact with files from the CLI.
   - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
 
   - [ ] Standardize error messages for invalid queries.
+
+- [ ] **Identity & Location Management**:
+  - [ ] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.
+  - [ ] **Multi-Layer Identity Verification**: Support identity matching using FileID, Hash (MD5/SHA256), or Name+Size+Mtime heuristics.
+  - [ ] **Online File Support**: Integrate `RemoteID` (ETag/VersionID) into the location identity model.
+  - [ ] **Split & Merge Commands**: Implement `ttfm split` to separate multi-location items and `ttfm merge` to combine identical entities.
 
 - [ ] **Benchmark**: Validate performance on extreme datasets (1M+ files).
 

@@ -11,20 +11,24 @@ use sea_query::{
     Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
-use crate::indexing::QueryHelper;
+use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 
 pub mod types;
 pub mod query;
 pub mod plugins;
 pub mod config;
 pub mod db;
+pub mod rank;
 pub mod macros;
 mod taggers;
 mod functions;
+pub mod oneview;
 pub mod indexing;
+pub mod util;
 
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
+pub use db::TargetTable;
 pub use types::{SearchResult, TagType, TypedTag, Label};
 use functions::{
     TagFunction,
@@ -40,6 +44,9 @@ use functions::{
     TypeFromExtFunction,
     SizeStrFunction,
     ModifiedStrFunction,
+    NameTagFunction,
+    KindTagFunction,
+    ContentTagFunction,
 };
 
 /// ファイルの一意識別子を取得し、文字列として返します。
@@ -113,6 +120,12 @@ impl FunctionRegistry {
         reg.register(Box::new(TypeFromExtFunction::new()));
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
+        
+        // 定義のみの機能（ランク付けや検索用）
+        reg.register(Box::new(NameTagFunction));
+        reg.register(Box::new(KindTagFunction));
+        reg.register(Box::new(ContentTagFunction));
+        
         reg
     }
 
@@ -127,7 +140,9 @@ impl FunctionRegistry {
     pub fn get_all_columns(&self) -> Vec<ColumnDef> {
         let mut cols = Vec::new();
         for func in &self.functions {
-            cols.extend(func.tagger().get_columns());
+            if let Some(tagger) = func.tagger() {
+                cols.extend(tagger.get_columns());
+            }
         }
         cols
     }
@@ -136,8 +151,10 @@ impl FunctionRegistry {
     pub fn process_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let mut row = Vec::new();
         for func in &self.functions {
-            let values = func.tagger().tag_file(path)?;
-            row.extend(values);
+            if let Some(tagger) = func.tagger() {
+                let values = tagger.tag_file(path)?;
+                row.extend(values);
+            }
         }
         Ok(row)
     }
@@ -161,13 +178,13 @@ impl FunctionRegistry {
                 let mut q = Query::select();
                 q.column(Col::ItemId).from_subquery(
                     self.build_set_query(left, view_name),
-                    Alias::new("left_side"),
+                    Tbl::LeftSide,
                 );
 
                 let mut right_q = Query::select();
                 right_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(right, view_name),
-                    Alias::new("right_side"),
+                    Tbl::RightSide,
                 );
 
                 q.union(sea_query::UnionType::Intersect, right_q);
@@ -177,13 +194,13 @@ impl FunctionRegistry {
                 let mut q = Query::select();
                 q.column(Col::ItemId).from_subquery(
                     self.build_set_query(left, view_name),
-                    Alias::new("left_side"),
+                    Tbl::LeftSide,
                 );
 
                 let mut right_q = Query::select();
                 right_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(right, view_name),
-                    Alias::new("right_side"),
+                    Tbl::RightSide,
                 );
 
                 q.union(sea_query::UnionType::Distinct, right_q);
@@ -201,7 +218,7 @@ impl FunctionRegistry {
                 let mut except_q = Query::select();
                 except_q.column(Col::ItemId).from_subquery(
                     self.build_set_query(child, view_name),
-                    Alias::new("not_side"),
+                    Tbl::NotSide,
                 );
 
                 q.union(sea_query::UnionType::Except, except_q);
@@ -346,23 +363,9 @@ impl FileManager {
         Self::new_with_db_dir(path)
     }
 
-    fn file_entities_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("entities.parquet")
-    }
-    fn locations_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("locations.parquet")
-    }
-    fn base_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("base_tags.parquet")
-    }
-    fn item_entities_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("items.parquet")
-    }
-    fn system_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("system_tags.parquet")
-    }
-    fn user_tags_path(&self) -> std::path::PathBuf {
-        self.db_dir.join("user_tags.parquet")
+    /// ターゲットテーブルに対応するパスを生成します。
+    pub fn path_for_target(&self, target: TargetTable) -> std::path::PathBuf {
+        self.db_dir.join(format!("{}.parquet", target))
     }
 
     /// テストなどの用途向けにインメモリでのみ動作する `FileManager` を作成します。
@@ -390,7 +393,7 @@ impl FileManager {
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        if !self.file_entities_path().exists() {
+        if !self.path_for_target(TargetTable::FileEntities).exists() {
             return Err(anyhow::anyhow!(
                 "Index not found. Please run 'index' command first."
             ));
@@ -401,11 +404,11 @@ impl FileManager {
             Query::select()
                 .column(Col::ItemId)
                 .distinct()
-                .from(Alias::new("all_tags"))
+                .from(Tbl::OneView)
                 .to_owned()
         } else {
             let node = QueryParser::parse(query)?;
-            self.registry.build_set_query(&node, "all_tags")
+            self.registry.build_set_query(&node, "oneview")
         };
 
         // 2. マッチしたIDの全タグを取得して集約
@@ -415,11 +418,11 @@ impl FileManager {
             .column(Col::ItemKind)
             .expr_as(
                 Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Type)),
-                Alias::new("types"),
+                Col::Types,
             )
             .expr_as(
                 Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Label)),
-                Alias::new("labels"),
+                Col::Labels,
             )
             .expr_as(
                 Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
@@ -429,7 +432,7 @@ impl FileManager {
                 Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Name).into(), Expr::val("").into()]),
                 Col::Name,
             )
-            .from(Alias::new("all_tags"))
+            .from(Tbl::OneView)
             .and_where(Expr::col(Col::ItemId).in_subquery(sub_query))
             .group_by_col(Col::ItemId)
             .group_by_col(Col::ItemKind)
@@ -474,7 +477,7 @@ impl FileManager {
 
             let tags = types.into_iter().zip(labels.into_iter()).collect();
 
-            Ok(SearchResult { id, item_kind, name, rank, tags })
+            SearchResult { id, item_kind, name, rank, tags }.to_ok()
         })?;
 
         let mut results = Vec::new();
@@ -482,20 +485,14 @@ impl FileManager {
             results.push(row?);
         }
 
-        Ok(results)
+        results.to_ok()
     }
 
     /// インデックスファイル（Parquet）を削除します。
     pub fn clear_index(&self) -> Result<()> {
-        let paths = [
-            self.file_entities_path(),
-            self.locations_path(),
-            self.base_tags_path(),
-            self.item_entities_path(),
-            self.system_tags_path(),
-            self.user_tags_path(),
-        ];
-        for path in paths {
+        use strum::IntoEnumIterator;
+        for target in TargetTable::iter() {
+            let path = self.path_for_target(target);
             if path.exists() {
                 std::fs::remove_file(path).ok();
             }
@@ -505,43 +502,38 @@ impl FileManager {
 
     /// 新しいアイテム（Type, Label, Note等）をデータベースに追加します。
     pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         if !path.exists() {
             return Err(anyhow::anyhow!(
                 "Item entities table not found. Please run index first."
             ));
         }
 
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-
         // 1. Get current min ID
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
             .expr(Expr::col(Col::ItemId).min())
-            .from_subquery(QueryHelper::parquet_query(&path_str), Tbl::EntAlias)
+            .from_subquery(util::parquet_query(&path_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
 
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0)).unwrap_or(0);
         let new_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         // 2. Append new row via Temp Table & COPY
-        let tmp_path = format!("{}.tmp", path_str);
-        let temp_table = Alias::new("temp_add_item");
+        let temp_table = Tbl::Item;
 
-        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
         // INSERT INTO ...
-        let sql_insert = Query::insert()
-            .into_table(temp_table.clone())
+        Query::insert()
+            .into_table(temp_table)
             .columns([Col::ItemId, Col::ItemKind, Col::Content])
             .values_panic([new_id.into(), kind.into(), content.into()])
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_insert, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
-
-        std::fs::rename(&tmp_path, path).context("Failed to update item_entities.parquet")?;
+        temp_table.write_parquet(&self.conn, &path)?;
+        temp_table.drop_table(&self.conn)?;
 
         Ok(new_id)
     }
@@ -564,8 +556,8 @@ impl FileManager {
             let query_path = Query::select()
                 .column(Col::ItemId)
                 .from_subquery(
-                    QueryHelper::parquet_query(&self.locations_path().to_string_lossy()),
-                    Tbl::LocAlias,
+                    util::parquet_query(&self.path_for_target(TargetTable::Locations).to_string_lossy()),
+                    Tbl::Locations,
                 )
                 .and_where(Expr::col(Col::Path).eq(item))
                 .to_string(PostgresQueryBuilder);
@@ -576,7 +568,7 @@ impl FileManager {
                 // B. 名前（抽象化された名称）として扱い、all_tags から ID を取得
                 let query_name = Query::select()
                     .column(Col::ItemId)
-                    .from(Alias::new("all_tags"))
+                    .from(Tbl::OneView)
                     .and_where(Expr::col(Col::Name).eq(item))
                     .to_string(PostgresQueryBuilder);
 
@@ -588,8 +580,8 @@ impl FileManager {
 
         // 3. User Tags テーブルに保存
         self.append_tag_to_parquet(
-            self.user_tags_path(),
-            "temp_add_user_tag",
+            self.path_for_target(TargetTable::UserTags),
+            Tbl::UserTagsDiff,
             Col::ItemId,
             item_id,
             key,
@@ -617,33 +609,26 @@ impl FileManager {
 
     fn batch_update_rank(&self, ids: &[i64], is_file: bool, rank: i64) -> Result<()> {
         let path = if is_file {
-            self.file_entities_path()
+            self.path_for_target(TargetTable::FileEntities)
         } else {
-            self.item_entities_path()
+            self.path_for_target(TargetTable::ItemEntities)
         };
 
         let path_str = path.to_string_lossy();
-        let tmp_path = format!("{}.tmp", path_str);
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-        let temp_table = Alias::new("temp_batch_rank");
+        let temp_table = Tbl::Target;
 
-        store.create_table_as(
-            temp_table.clone(),
-            QueryHelper::parquet_query(&path_str)
-        )?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
-        let sql_update = Query::update()
-            .table(temp_table.clone())
+        Query::update()
+            .table(temp_table)
             .values([(Col::Rank, rank.into())])
             .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_update, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
+        temp_table.write_parquet(&self.conn, &path)?;
+        temp_table.drop_table(&self.conn)?;
 
-        std::fs::rename(&tmp_path, path)
-            .context("Failed to update rank in parquet")?;
         Ok(())
     }
 
@@ -654,15 +639,15 @@ impl FileManager {
 
     /// 全てのタグ型の優先度（RANK）を取得します。
     pub fn get_type_ranks(&self) -> Result<std::collections::HashMap<String, i64>> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         if !path.exists() { return Ok(Default::default()); }
 
         let query = Query::select()
             .column(Col::Content)
             .column(Col::Rank)
             .from_subquery(
-                QueryHelper::parquet_query(&path.to_string_lossy()),
-                Tbl::EntAlias,
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))
             .to_string(PostgresQueryBuilder);
@@ -678,13 +663,18 @@ impl FileManager {
         Ok(map)
     }
 
+    /// 指定されたタグ名のデフォルトランクを取得します。
+    pub fn get_default_rank(&self, name: &str) -> crate::types::Rank {
+        crate::rank::get_rank_by_name(&self.registry, name)
+    }
+
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.item_entities_path();
+        let path = self.path_for_target(TargetTable::ItemEntities);
         let query = Query::select()
             .column(Col::ItemId)
             .from_subquery(
-                QueryHelper::parquet_query(&path.to_string_lossy()),
-                Tbl::EntAlias,
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::ItemEntities,
             )
             .and_where(Expr::col(Col::ItemKind).eq(kind))
             .and_where(Expr::col(Col::Content).eq(content))
@@ -700,31 +690,27 @@ impl FileManager {
     fn append_tag_to_parquet(
         &self,
         path: std::path::PathBuf,
-        temp_table_name: &str,
+        temp_table: Tbl,
         id_col: Col,
         id: i64,
         key: &str,
         value: &str,
     ) -> Result<()> {
         let path_str = path.to_string_lossy();
-        let tmp_path = format!("{}.tmp", path_str);
-        let store = crate::indexing::IndexStore::new(&self.conn, self.db_dir.clone());
-        let temp_table = Alias::new(temp_table_name);
 
-        store.create_table_as(temp_table.clone(), QueryHelper::parquet_query(&path_str))?;
+        util::parquet_query(&path_str)
+            .create_table_as(&self.conn, temp_table)?;
 
         // INSERT INTO ...
-        let sql_insert = Query::insert()
-            .into_table(temp_table.clone())
+        Query::insert()
+            .into_table(temp_table)
             .columns([id_col, Col::Type, Col::Label])
             .values_panic([id.into(), key.into(), value.into()])
-            .to_string(PostgresQueryBuilder);
-        self.conn.execute(&sql_insert, [])?;
+            .execute(&self.conn)?;
 
-        store.write_parquet(temp_table.clone(), Path::new(&tmp_path))?;
-        store.drop_table(temp_table)?;
+        temp_table.write_parquet(&self.conn, &path)?;
+        temp_table.drop_table(&self.conn)?;
 
-        std::fs::rename(&tmp_path, path).context("Failed to update parquet")?;
         Ok(())
     }
 
@@ -840,14 +826,15 @@ mod tests {
         let db_dir = dir.path().join(".ttfm/db");
         let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
 
-        let id = fm.add_item("type", "location").unwrap();
-        assert_eq!(id, -1);
+        let id = fm.add_item("type", "my_new_type").unwrap();
+        assert!(id < 0);
 
-        let id2 = fm.get_or_create_item("type", "location").unwrap();
+        let id2 = fm.get_or_create_item("type", "my_new_type").unwrap();
         assert_eq!(id, id2);
 
         let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
-        assert_eq!(id3, -2);
+        assert!(id3 < 0);
+        assert_ne!(id, id3);
     }
 
     #[test]
@@ -859,15 +846,18 @@ mod tests {
         let note_id = fm.add_item("note", "This is a test note").unwrap();
         fm.tag_item(&note_id.to_string(), "status:done").unwrap();
 
-        assert_eq!(fm.get_or_create_item("type", "status").unwrap(), -2);
-        assert_eq!(fm.get_or_create_item("label", "done").unwrap(), -3);
-        assert_eq!(fm.get_or_create_item("typedtag", "status:done").unwrap(), -4);
+        let type_id = fm.get_or_create_item("type", "status").unwrap();
+        assert!(type_id < 0);
+        let label_id = fm.get_or_create_item("label", "done").unwrap();
+        assert!(label_id < 0);
+        let tt_id = fm.get_or_create_item("typedtag", "status:done").unwrap();
+        assert!(tt_id < 0);
 
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
-                Tbl::TagAlias,
+                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
+                Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(note_id))
             .to_string(PostgresQueryBuilder);
@@ -896,8 +886,8 @@ mod tests {
         let query = Query::select()
             .column(Col::Label)
             .from_subquery(
-                QueryHelper::parquet_query(&fm.user_tags_path().to_string_lossy()),
-                Tbl::TagAlias,
+                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
+                Tbl::UserTags,
             )
             .and_where(Expr::col(Col::ItemId).eq(item_id))
             .and_where(Expr::col(Col::Type).eq("manual"))
@@ -933,10 +923,10 @@ mod tests {
 
         // 4. 各アイテムのランクが更新されたか検証
         for r in results {
-            let path = fm.item_entities_path();
+            let path = fm.path_for_target(TargetTable::ItemEntities);
             let query = Query::select()
                 .column(Col::Rank)
-                .from_subquery(QueryHelper::parquet_query(&path.to_string_lossy()), Tbl::EntAlias)
+                .from_subquery(util::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
                 .and_where(Expr::col(Col::ItemId).eq(r.id))
                 .to_string(PostgresQueryBuilder);
             

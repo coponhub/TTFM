@@ -2,16 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use duckdb::types::{ToSql, ToSqlOutput, Null};
 
-/// カラムが所属すべきテーブル。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetTable {
-    FileEntities,
-    Locations,
-    BaseTags,
-    ItemEntities,
-    SystemTags,
-    UserTags,
-}
+use crate::db::TargetTable;
 
 /// データベースのカラム定義。
 #[derive(Debug, Clone)]

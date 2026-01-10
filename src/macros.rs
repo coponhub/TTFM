@@ -1,3 +1,47 @@
+use crate::functions::{Field, ScanColumn, TagDefinition};
+use crate::types::DBType;
+use crate::util::alias_from;
+use anyhow::Result;
+use duckdb::types::FromSql;
+use sea_query::IntoIden;
+use std::fs::Metadata;
+use std::path::Path;
+use crate::db::Col;
+
+/// 名称（またはエイリアス）から sea-query の識別子（Iden）を生成します。
+pub fn name_to_iden(name: &str) -> sea_query::DynIden {
+    Col::from_str(name)
+        .map(|c| c.into_iden())
+        .unwrap_or_else(|| alias_from(name))
+}
+
+/// TagDefinition から ScanColumn 情報を取得します。
+pub fn get_column_def<F: TagDefinition>() -> ScanColumn {
+    ScanColumn {
+        name: F::NAME,
+        sql_type: <<F as TagDefinition>::RustType as DBType>::db_type(),
+        role: F::ROLE,
+    }
+}
+
+/// パスとメタデータから Field を生成します。
+pub fn generate_field<F: TagDefinition>(path: &Path, metadata: &Metadata) -> Result<Field<F>> {
+    Ok(Field {
+        value: F::generate(path, Some(metadata))?,
+    })
+}
+
+/// DuckDB の Row からフィールドを順次読み込み、インデックスを更新します。
+/// マクロ内での初期化をフラットにするためのヘルパーです。
+pub fn read_next_field<F: TagDefinition>(row: &duckdb::Row, idx: &mut usize) -> duckdb::Result<Field<F>> 
+where 
+    <F as TagDefinition>::RustType: FromSql 
+{
+    let val = row.get(*idx)?;
+    *idx += 1;
+    Ok(Field { value: val })
+}
+
 /// ScanEntry構造体とそのスキーマ、およびDuckDBの行からの変換ロジックを定義するマクロ。
 #[macro_export]
 macro_rules! define_scan_entry {
@@ -30,18 +74,29 @@ macro_rules! define_scan_entry {
         }
 
         impl ScanEntry {
+            /// 名称（またはエイリアス）から識別子を生成する内部ヘルパー。
+            fn name_to_iden(name: &str) -> sea_query::DynIden {
+                $crate::macros::name_to_iden(name)
+            }
+
+            /// 全てのカラムの識別子（Iden）を取得します。
+            pub fn column_idens() -> Vec<sea_query::DynIden> {
+                Self::schema().into_iter().map(|cd| Self::name_to_iden(&cd.name)).collect()
+            }
+
+            /// カラム名と型のペアの識別子リストを取得します。
+            pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)> {
+                Self::schema().into_iter().map(|cd| {
+                    (
+                        Self::name_to_iden(&cd.name),
+                        $crate::util::alias_from(cd.sql_type),
+                    )
+                }).collect()
+            }
+
             /// スキャン時に作成される `temp_scan` テーブルのカラム構成を定義します。
             pub fn schema() -> Vec<$crate::functions::ScanColumn> {
-                vec![
-                    $(
-                        $crate::functions::ScanColumn {
-                            name: <$func as $crate::functions::TagDefinition>::NAME,
-                            sql_type: <<$func as $crate::functions::TagDefinition>::RustType 
-                                as $crate::types::DBType>::db_type(),
-                            role: <$func as $crate::functions::TagDefinition>::ROLE,
-                        },
-                    )*
-                ]
+                vec![ $( $crate::macros::get_column_def::<$func>() ),* ]
             }
 
             /// パスとメタデータから `ScanEntry` を生成します。
@@ -49,62 +104,30 @@ macro_rules! define_scan_entry {
                 path: &std::path::Path,
                 metadata: &std::fs::Metadata,
             ) -> anyhow::Result<Self> {
-                Ok(Self {
-                    $(
-                        $name: $crate::functions::Field {
-                            value: <$func as $crate::functions::TagDefinition>::generate(
-                                path,
-                                Some(metadata),
-                            )?
-                        },
-                    )*
-                })
+                #[allow(unused_imports)]
+                use $crate::util::DotOk;
+
+                $( let $name = $crate::macros::generate_field::<$func>(path, metadata)?; )*
+
+                Self { $( $name ),* }.to_ok()
             }
 
-                        /// DuckDBの行(`row`)から `ScanEntry` を生成します。
+            /// DuckDBの行(`row`)から `ScanEntry` を生成します。
+            pub fn from_row(row: &duckdb::Row) -> duckdb::Result<Self> {
+                #[allow(unused_imports)]
+                use $crate::util::DotOk;
+                let mut _idx = 0;
 
-                        /// 定義されたフィールド順序に従って `row.get(i)` を実行します。
+                $( let $name = $crate::macros::read_next_field::<$func>(row, &mut _idx)?; )*
 
-                        pub fn from_row(row: &duckdb::Row) -> duckdb::Result<Self> {
-
-                            let mut _idx = 0;
-
-                            Ok(Self {
-
-                                $(
-
-                                    $name: $crate::functions::Field {
-
-                                        value: row.get({ let i = _idx; _idx += 1; i })?
-
-                                    },
-
-                                )*
-
-                            })
-
-                        }
-
-            
-
-                        /// DuckDBのクエリパラメータとして使用できる形式(`Vec<&dyn ToSql>`)でフィールド値を返します。
-
-                        /// Appender等で使用します。
-
-                        pub fn as_params(&self) -> Vec<&dyn duckdb::ToSql> {
-
-                            vec![
-
-                                $( &self.$name.value, )*
-
-                            ]
-
-                        }
-
-                    }
-
-                };
-
+                Self { $( $name ),* }.to_ok()
             }
 
-            
+            /// DuckDBのクエリパラメータとして使用できる形式(`Vec<&dyn ToSql>`)でフィールド値を返します。
+            /// Appender等で使用します。
+            pub fn as_params(&self) -> Vec<&dyn duckdb::ToSql> {
+                vec![ $( &self.$name.value ),* ]
+            }
+        }
+    };
+}
