@@ -6,9 +6,9 @@ use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt, TableCreateE
 use anyhow::Result;
 use duckdb::{Connection, ToSql, Appender};
 use sea_query::{
-    Query, Expr, Alias, Condition, JoinType, PostgresQueryBuilder, 
+    Query, Expr, Condition, JoinType, PostgresQueryBuilder, 
     Func, Table, Iden, SelectStatement,
-    CaseStatement, IntoIden
+    CaseStatement
 };
 use std::path::{Path, PathBuf};
 use rayon::prelude::*;
@@ -387,15 +387,22 @@ impl<'a> ItemTriager<'a> {
     ) -> Vec<TagValue> {
         functions
             .iter()
-            .flat_map(|f| {
-                f.tagger()
-                    .into_iter()
-                    .flat_map(|t| t.get_columns())
-                    .filter_map(move |col| {
-                        (col.target_table == TargetTable::Locations).then(|| {
-                            f.generate_from_path(path).unwrap_or(TagValue::Null)
-                        })
-                    })
+            .flat_map(|f| self.rebuild_values_for_function(path, f.as_ref()))
+            .collect()
+    }
+
+    /// 単一の TagFunction から場所関連の値を抽出します。
+    fn rebuild_values_for_function(
+        &self,
+        path: &Path,
+        func: &dyn TagFunction,
+    ) -> Vec<TagValue> {
+        func.tagger()
+            .into_iter()
+            .flat_map(|t| t.get_columns())
+            .filter_map(|col| {
+                (col.target_table == TargetTable::Locations)
+                    .then(|| func.generate_from_path(path).unwrap_or(TagValue::Null))
             })
             .collect()
     }
@@ -449,27 +456,24 @@ impl<'a> IndexStore<'a> {
         temp_table: impl Iden + Clone + 'static,
         filter: Option<Condition>,
     ) -> Result<()> {
-        let query = if path.exists() {
-            let path_str = path.to_string_lossy().to_string();
-            let mut base = util::parquet_query(&path_str);
-            if let Some(cond) = filter {
-                base.cond_where(cond);
-            }
-            base.union(
-                sea_query::UnionType::All,
-                Query::select()
-                    .expr(Expr::cust("*"))
-                    .from(temp_table)
-                    .to_owned(),
-            )
-            .to_owned()
-        } else {
-            Query::select()
-                .expr(Expr::cust("*"))
-                .from(temp_table)
-                .to_owned()
-        };
-        query.save_parquet(self.conn, path)
+        let base_query = Query::select()
+            .expr(Expr::cust("*"))
+            .from(temp_table)
+            .to_owned();
+
+        if !path.exists() {
+            return base_query.save_parquet(self.conn, path);
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let mut query = util::parquet_query(&path_str);
+        if let Some(cond) = filter {
+            query.cond_where(cond);
+        }
+
+        query
+            .union(sea_query::UnionType::All, base_query)
+            .save_parquet(self.conn, path)
     }
 }
 
@@ -484,7 +488,7 @@ impl QueryParts {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::ScanId) {
-                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
+                let col = util::col_to_iden(cd.name);
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -497,7 +501,7 @@ impl QueryParts {
         let mut cond = Condition::all();
         for cd in ScanEntry::schema() {
             if matches!(cd.role, ScanRole::Integrity) {
-                let col = Col::from_str(&cd.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(cd.name).into_iden());
+                let col = util::col_to_iden(cd.name);
                 cond = cond.add(
                     Expr::col((left, col.clone())).eq(Expr::col((right, col.clone()))),
                 );
@@ -517,7 +521,7 @@ impl QueryParts {
         let columns = ScanEntry::schema()
             .iter()
             .map(|c| {
-                let col = Col::from_str(&c.name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(c.name).into_iden());
+                let col = util::col_to_iden(c.name);
                 (Tbl::Scan, col)
             })
             .collect::<Vec<_>>();
@@ -535,7 +539,7 @@ impl QueryParts {
         loc_path: &str,
     ) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
+        let col_path = util::col_to_iden(path_name);
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
             .column((Tbl::Scan, col_path.clone()))
@@ -562,7 +566,7 @@ impl QueryParts {
 
     fn deleted(scan_path: &str, entities_path: &str) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
+        let col_path = util::col_to_iden(path_name);
         let join_cond = Condition::all()
             .add(Self::identity(Tbl::FileEntities, Tbl::Scan))
             .add(Self::integrity(Tbl::FileEntities, Tbl::Scan));
@@ -592,9 +596,7 @@ impl QueryParts {
             c.target_table == TargetTable::Locations
         }) {
             let mut sub = Query::select();
-            let col_iden = Col::from_str(&col.name)
-                .map(|c| c.into_iden())
-                .unwrap_or_else(|| Alias::new(col.name.clone()).into_iden());
+            let col_iden = util::col_to_iden(&col.name);
             sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
                 .expr_as(
                     Expr::col(col_iden.clone()).cast_as(SqlType::VARCHAR),
@@ -759,7 +761,7 @@ impl QueryParts {
         loc_path: &str,
     ) -> SelectStatement {
         let path_name = ScanEntry::schema()[0].name;
-        let col_path = Col::from_str(path_name).map(|c| c.into_iden()).unwrap_or_else(|| Alias::new(path_name).into_iden());
+        let col_path = util::col_to_iden(path_name);
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
             .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)

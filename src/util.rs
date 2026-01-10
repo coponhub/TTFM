@@ -189,6 +189,16 @@ pub fn alias_from(s: &str) -> sea_query::DynIden {
     Alias::new(s).into_iden()
 }
 
+/// 文字列から Col または Alias への識別子変換を行います。
+pub fn col_to_iden(name: &str) -> sea_query::DynIden {
+    use crate::db::Col;
+    use sea_query::{Alias, IntoIden};
+
+    Col::from_str(name)
+        .map(|c| c.into_iden())
+        .unwrap_or_else(|| Alias::new(name).into_iden())
+}
+
 /// 成功値を Result::Ok に包むための拡張トレイト。
 /// パイプライン風の記述を可能にし、ネストを減らすために使用します。
 pub trait DotOk: Sized {
