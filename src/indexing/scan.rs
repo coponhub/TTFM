@@ -1,6 +1,6 @@
 use crate::db::{Tbl};
 use crate::functions::{ScanEntry};
-use crate::util::{ExecuteSql, ParquetExt, TableCreateExt};
+use crate::util::{ExecuteSql, ParquetExt, TableCreateExt, SafeMetadata};
 use anyhow::Result;
 use duckdb::{Connection, Appender};
 use sea_query::{Query, Expr, Table, Iden};
@@ -176,12 +176,18 @@ impl ScanWalker {
         &self,
         res: Result<ignore::DirEntry, ignore::Error>,
     ) -> Option<ScanEntry> {
-        res.ok()
-            .filter(|e| !self.is_db_dir(e.path()))
-            .and_then(|e| {
-                let m = e.metadata().ok()?;
-                ScanEntry::from_path_metadata(e.path(), &m).ok()
-            })
+        let e = res.ok()?;
+        if self.is_db_dir(e.path()) {
+            return None;
+        }
+
+        let m = match e.metadata() {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(err) if crate::util::is_not_found_err(&err) => return None,
+            Err(_) => SafeMetadata::recovered(),
+        };
+
+        ScanEntry::from_path_metadata(e.path(), &m).ok()
     }
 
     fn visit(&mut self, res: Result<ignore::DirEntry, ignore::Error>) -> ignore::WalkState {

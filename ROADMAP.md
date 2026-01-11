@@ -97,6 +97,9 @@ Directly interact with files from the CLI.
 
   - [x] Generalized file move detection logic to be implementation-agnostic.
 
+- [ ] **Phase 1.5: Indexing Optimization & Robustness**:
+  - [ ] **Avoid redundant metadata calls**: Update `FunctionRegistry::process_file` and `Tagger::tag_file` to accept optional metadata. Pass `ScanEntry` metadata from `ItemTriager` to prevent redundant `fs::metadata` calls and "file not found" errors during indexing.
+
 - [ ] **Phase 2: Plugin System Optimization**:
 
   - [ ] Optimize WASM instance management to prevent initialization bottlenecks during parallel indexing.

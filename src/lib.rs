@@ -936,6 +936,30 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_size() {
+        use std::fs::write;
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join(".ttfm/db");
+        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+        // 1. サイズの異なるファイルを作成
+        write(dir.path().join("empty.txt"), "").unwrap(); // 0 bytes
+        write(dir.path().join("small.txt"), "hi").unwrap(); // 2 bytes
+        
+        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
+
+        // 2. size:0 で検索
+        let res = fm.search("size:0").expect("Search for size:0 should succeed");
+        assert_eq!(res.len(), 1, "Should find 1 empty file");
+        assert!(res[0].name.contains("empty.txt"));
+
+        // 3. size:2 で検索
+        let res2 = fm.search("size:2").expect("Search for size:2 should succeed");
+        assert_eq!(res2.len(), 1, "Should find 1 file with size 2");
+        assert!(res2[0].name.contains("small.txt"));
+    }
+
+    #[test]
     fn test_ttfm_home_and_plugin_extraction() {
         let temp = tempdir().unwrap();
         let test_home = temp.path().join("ttfm_test_home");
