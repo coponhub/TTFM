@@ -116,7 +116,26 @@ impl OneView {
             .column(Col::Label)
             .from_subquery(util::parquet_query(base_tags), Tbl::BaseTags);
 
-        // B. locations
+        // B. file_entities (size, mtime, file_id)
+        for cd in all_columns
+            .iter()
+            .filter(|c| c.target_table == TargetTable::FileEntities)
+        {
+            let mut sub = Query::select();
+            let col_iden = util::col_to_iden(&cd.name);
+            sub.column(Col::ItemId)
+                .expr_as(Expr::val("system"), Col::Origin)
+                .expr_as(Expr::val(cd.name.to_string()), Col::Type)
+                .expr_as(
+                    Expr::col((Tbl::FileEntities, col_iden))
+                        .cast_as(SqlType::VARCHAR),
+                    Col::Label,
+                )
+                .from_subquery(util::parquet_query(ents), Tbl::FileEntities);
+            base_q.union(sea_query::UnionType::All, sub.to_owned());
+        }
+
+        // C. locations
         for cd in all_columns
             .iter()
             .filter(|c| c.target_table == TargetTable::Locations)

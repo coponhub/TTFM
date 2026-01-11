@@ -1,10 +1,5 @@
-use ttfm::FileManager;
-use ttfm::db::TargetTable;
-use std::path::Path;
+use ttfm::{FileManager, TargetTable};
 use tempfile::tempdir;
-use sea_query::{Query, Expr, PostgresQueryBuilder};
-use ttfm::db::{Col, Tbl};
-use ttfm::util;
 
 #[test]
 fn test_incremental_indexing_full_flow() {
@@ -67,13 +62,7 @@ fn test_system_items_registration() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
-    let items_path_buf = fm.path_for_target(TargetTable::ItemEntities);
-    let items_path = items_path_buf.to_string_lossy();
-    let query = Query::select()
-        .columns([Col::ItemKind, Col::Content])
-        .from_subquery(util::parquet_query(&items_path), Tbl::ItemEntities)
-        .and_where(Expr::col(Col::Content).is_in(["extension", "txt", "extension:txt"]))
-        .to_string(PostgresQueryBuilder);
+    let _items_path_buf = fm.path_for_target(TargetTable::ItemEntities);
 
     // 内部DB接続へのアクセスが必要なため、 search 等で代用するか、
     // オリジナルのテストが意図していた「システムへの登録確認」を search で行う。

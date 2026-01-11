@@ -1,5 +1,8 @@
 use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
 
+/// メタデータ取得に失敗した際のデフォルト値。
+pub const METADATA_ERROR: i64 = -1;
+
 /// アイテムの優先度を表す型。
 pub type Rank = i64;
 

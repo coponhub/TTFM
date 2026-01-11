@@ -4,7 +4,6 @@ use crate::util::alias_from;
 use anyhow::Result;
 use duckdb::types::FromSql;
 use sea_query::IntoIden;
-use std::fs::Metadata;
 use std::path::Path;
 use crate::db::Col;
 
@@ -25,9 +24,9 @@ pub fn get_column_def<F: TagDefinition>() -> ScanColumn {
 }
 
 /// パスとメタデータから Field を生成します。
-pub fn generate_field<F: TagDefinition>(path: &Path, metadata: &Metadata) -> Result<Field<F>> {
+pub fn generate_field<F: TagDefinition>(path: &Path, metadata: &crate::util::SafeMetadata) -> Result<Field<F>> {
     Ok(Field {
-        value: F::generate(path, Some(metadata))?,
+        value: F::generate(path, metadata)?,
     })
 }
 
@@ -102,7 +101,7 @@ macro_rules! define_scan_entry {
             /// パスとメタデータから `ScanEntry` を生成します。
             pub fn from_path_metadata(
                 path: &std::path::Path,
-                metadata: &std::fs::Metadata,
+                metadata: &$crate::util::SafeMetadata,
             ) -> anyhow::Result<Self> {
                 #[allow(unused_imports)]
                 use $crate::util::DotOk;

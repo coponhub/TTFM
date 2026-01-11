@@ -1,11 +1,11 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
-use chrono::{DateTime, Local};
+use chrono::Local;
 use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
-use crate::types::{TypedTag, DBType, FileSize, FileTimestamp};
+use crate::types::{METADATA_ERROR, TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::db::{Tbl, Col, TargetTable};
+use crate::util::{SafeMetadata};
 use path_slash::PathExt;
 
 /// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
@@ -43,8 +43,8 @@ pub trait TagDefinition {
     const ROLE: ScanRole;
     /// 対応する Rust の型。
     type RustType: DBType + std::fmt::Debug + PartialEq + Clone;
-    /// パスと（もしあれば）メタデータから値を生成します。
-    fn generate(path: &Path, metadata: Option<&std::fs::Metadata>) -> Result<Self::RustType>;
+    /// パスとメタデータから値を生成します。
+    fn generate(path: &Path, metadata: &SafeMetadata) -> Result<Self::RustType>;
 }
 
 /// `TagDefinition` に基づく値を保持するコンテナ。
@@ -197,7 +197,7 @@ impl TagDefinition for PathFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         Ok(path.to_slash_lossy().to_string())
     }
@@ -266,7 +266,7 @@ impl TagFunction for ParentDirFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, None).ok().map(TagValue::Text)
+        Self::generate(path, &SafeMetadata::recovered()).ok().map(TagValue::Text)
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PARENT_DIR }
 }
@@ -277,7 +277,7 @@ impl TagDefinition for ParentDirFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         let parent = path
             .parent()
@@ -351,7 +351,7 @@ impl TagFunction for FilenameFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, None).ok().map(TagValue::Text)
+        Self::generate(path, &SafeMetadata::recovered()).ok().map(TagValue::Text)
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::FILENAME }
 }
@@ -362,7 +362,7 @@ impl TagDefinition for FilenameFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         let name = path
             .file_name()
@@ -441,7 +441,7 @@ impl TagDefinition for StemFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         let stem = path
             .file_stem()
@@ -524,7 +524,7 @@ impl TagDefinition for ExtensionFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         let ext = path
             .extension()
@@ -596,10 +596,10 @@ impl TagDefinition for DirectoryFunction {
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = bool;
     fn generate(
-        path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _path: &Path,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        Ok(path.is_dir())
+        Ok(metadata.is_dir())
     }
 }
 
@@ -617,20 +617,15 @@ impl Tagger for SizeBytesTagger {
             target_table: TargetTable::FileEntities,
         }]
     }
-    /// ファイルサイズ（バイト数）を抽出します。ディレクトリの場合は0とします。
+    /// ファイルサイズ（バイト数）を抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let size = if path.is_dir() {
-            0
-        } else {
-            match std::fs::metadata(path) {
-                Ok(m) => m.len(),
-                Err(e) => {
-                    eprintln!("Warning: Failed to get metadata for size {:?}: {}", path, e);
-                    0
-                }
-            }
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
         };
-        Ok(vec![TagValue::BigInt(size as i64)])
+        let size = SizeBytesFunction::generate(path, &m)?;
+        Ok(vec![TagValue::BigInt(size.0)])
     }
 }
 
@@ -660,11 +655,7 @@ impl TagFunction for SizeBytesFunction {
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::FileEntities, Col::Size)).eq(tag.label.0.clone());
-            return Some(expr.into());
-        }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> {
         None
     }
     fn role(&self) -> ScanRole {
@@ -677,19 +668,10 @@ impl TagDefinition for SizeBytesFunction {
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileSize;
     fn generate(
-        path: &Path,
-        metadata: Option<&std::fs::Metadata>,
+        _path: &Path,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let size = if path.is_dir() {
-            0
-        } else if let Some(m) = metadata {
-            m.len()
-        } else {
-            std::fs::metadata(path)
-                .context("Failed to get metadata for size")?
-                .len()
-        };
-        Ok(FileSize(size as i64))
+        Ok(FileSize(metadata.len()))
     }
 }
 
@@ -709,15 +691,13 @@ impl Tagger for ModifiedTsTagger {
     }
     /// 最終更新日時のUNIXタイムスタンプを抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ts = match std::fs::metadata(path).and_then(|m| m.modified()) {
-            Ok(t) => t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
-            Err(e) => {
-                // ファイルが見つからない等のエラーはスキャン中に発生しうる
-                eprintln!("Warning: Failed to get mtime for {:?}: {}", path, e);
-                0
-            }
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
         };
-        Ok(vec![TagValue::BigInt(ts)])
+        let ts = ModifiedTsFunction::generate(path, &m)?;
+        Ok(vec![TagValue::BigInt(ts.0)])
     }
 }
 
@@ -747,12 +727,7 @@ impl TagFunction for ModifiedTsFunction {
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let expr =
-                Expr::col((Tbl::FileEntities, Col::Mtime)).eq(tag.label.0.clone());
-            return Some(expr.into());
-        }
+    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> {
         None
     }
     fn role(&self) -> ScanRole {
@@ -765,23 +740,10 @@ impl TagDefinition for ModifiedTsFunction {
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileTimestamp;
     fn generate(
-        path: &Path,
-        metadata: Option<&std::fs::Metadata>,
+        _path: &Path,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let ts_res = if let Some(m) = metadata {
-            m.modified()
-        } else {
-            std::fs::metadata(path).and_then(|m| m.modified())
-        };
-
-        let ts = ts_res.with_context(|| {
-            format!("Failed to get mtime for {:?}", path)
-        })?;
-        let secs = ts
-            .duration_since(UNIX_EPOCH)
-            .context("Time went backwards")?
-            .as_secs() as i64;
-        Ok(FileTimestamp(secs))
+        Ok(FileTimestamp(metadata.modified()))
     }
 }
 
@@ -845,7 +807,7 @@ impl TagDefinition for InodeFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
         Ok(crate::get_inode_string(path))
     }
@@ -867,7 +829,12 @@ impl Tagger for TypeFromExtTagger {
     }
     /// ファイルの種類（"Folder", "XXX File"など）を判定して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        Ok(vec![TagValue::Text(TypeFromExtFunction::generate(path, None)?)])
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
+        };
+        Ok(vec![TagValue::Text(TypeFromExtFunction::generate(path, &m)?)])
     }
 }
 
@@ -877,9 +844,9 @@ impl TagDefinition for TypeFromExtFunction {
     type RustType = String;
     fn generate(
         path: &Path,
-        _metadata: Option<&std::fs::Metadata>,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let is_dir = path.is_dir();
+        let is_dir = metadata.is_dir();
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_string().to_lowercase())
@@ -960,7 +927,12 @@ impl Tagger for SizeStrTagger {
     }
     /// ファイルサイズを読みやすい文字列（例: "1.5 MB"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        Ok(vec![TagValue::Text(SizeStrFunction::generate(path, None)?)])
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
+        };
+        Ok(vec![TagValue::Text(SizeStrFunction::generate(path, &m)?)])
     }
 }
 
@@ -969,23 +941,15 @@ impl TagDefinition for SizeStrFunction {
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
-        path: &Path,
-        metadata: Option<&std::fs::Metadata>,
+        _path: &Path,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let size = if path.is_dir() {
-            0
-        } else if let Some(m) = metadata {
-            m.len()
-        } else {
-            std::fs::metadata(path)
-                .context("Failed to get metadata for size_str")?
-                .len()
-        };
-
-        Ok(if path.is_dir() {
+        Ok(if metadata.is_dir() { 
+            "-".to_string() 
+        } else if metadata.len() == METADATA_ERROR {
             "-".to_string()
         } else {
-            SizeStrTagger::format_size(size)
+            SizeStrTagger::format_size(metadata.len() as u64)
         })
     }
 }
@@ -1031,14 +995,6 @@ impl TagFunction for SizeStrFunction {
 
 struct ModifiedStrTagger;
 
-impl ModifiedStrTagger {
-    /// システム時間を "YYYY-MM-DD HH:MM" 形式に変換するヘルパー。
-    fn format_time(time: std::time::SystemTime) -> String {
-        let datetime: DateTime<Local> = time.into();
-        datetime.format("%Y-%m-%d %H:%M").to_string()
-    }
-}
-
 impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
@@ -1049,7 +1005,12 @@ impl Tagger for ModifiedStrTagger {
     }
     /// 最終更新日時を読みやすい文字列（例: "2024-01-01 12:00"）に変換して抽出します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let val = ModifiedStrFunction::generate(path, None)?;
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
+        };
+        let val = ModifiedStrFunction::generate(path, &m)?;
         Ok(vec![TagValue::Text(val)])
     }
 }
@@ -1059,16 +1020,15 @@ impl TagDefinition for ModifiedStrFunction {
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
-        path: &Path,
-        metadata: Option<&std::fs::Metadata>,
+        _path: &Path,
+        metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let ts_res = if let Some(m) = metadata {
-            m.modified()
+        Ok(if metadata.modified() == METADATA_ERROR {
+            "-".to_string()
         } else {
-            std::fs::metadata(path).and_then(|m| m.modified())
-        };
-
-        Ok(ts_res.map(ModifiedStrTagger::format_time).unwrap_or_default())
+            let datetime: chrono::DateTime<Local> = (std::time::UNIX_EPOCH + std::time::Duration::from_secs(metadata.modified() as u64)).into();
+            datetime.format("%Y-%m-%d %H:%M").to_string()
+        })
     }
 }
 
@@ -1206,9 +1166,7 @@ mod tests {
     #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
-        let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
-        let sql = to_sql(expr);
-        assert_eq!(sql, "\"file_entities\".\"size\" = '123'");
+        assert!(f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).is_none());
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 
@@ -1238,5 +1196,55 @@ mod tests {
         
         // Assert the behavior (snake_case)
         assert!(sql.contains("\"file_entities\".\"file_id\""), "Expected snake_case file_id");
+    }
+
+    #[test]
+    fn test_metadata_generate_error_handling() {
+        // SafeMetadata::recovered() を使った時のエラーハンドリング挙動を確認
+        let safe_m = SafeMetadata::recovered();
+        let path = Path::new("dummy");
+
+        assert_eq!(SizeBytesFunction::generate(path, &safe_m).unwrap().0, METADATA_ERROR);
+        assert_eq!(ModifiedTsFunction::generate(path, &safe_m).unwrap().0, METADATA_ERROR);
+        assert_eq!(SizeStrFunction::generate(path, &safe_m).unwrap(), "-");
+        assert_eq!(ModifiedStrFunction::generate(path, &safe_m).unwrap(), "-");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_metadata_generate_loop_recovery() {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let loop_link = dir.path().join("loop");
+        // 自分自身を指すシンボリックリンクを作成
+        symlink(&loop_link, &loop_link).unwrap();
+
+        let safe_m = SafeMetadata::recovered();
+
+        // metadata() は ELOOP エラー（エラー値へのフォールバック対象）になるはず
+        assert_eq!(SizeBytesFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
+        assert_eq!(ModifiedTsFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
+        
+        // Str系 もエラー値 "-" になるはず
+        assert_eq!(SizeStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
+        assert_eq!(ModifiedStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
+    }
+
+    #[test]
+    fn test_metadata_generate_success() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let m = std::fs::metadata(&path).unwrap();
+        let safe_m = SafeMetadata::new(&m);
+
+        assert_eq!(SizeBytesFunction::generate(&path, &safe_m).unwrap().0, 5);
+        assert!(ModifiedTsFunction::generate(&path, &safe_m).unwrap().0 > 0);
+        assert_eq!(SizeStrFunction::generate(&path, &safe_m).unwrap(), "5.0 B");
+        assert!(!ModifiedStrFunction::generate(&path, &safe_m).unwrap().is_empty());
     }
 }

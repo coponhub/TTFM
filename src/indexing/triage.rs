@@ -7,6 +7,12 @@ use anyhow::Result;
 use std::path::{Path};
 use rayon::prelude::*;
 
+/// 指定されたエラーが「ファイルが見つからない」ことに起因するか判定します。
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .map_or(false, |io_e| io_e.kind() == std::io::ErrorKind::NotFound)
+}
+
 // ========================================================
 // Triage Phase Orchestrator
 // ========================================================
@@ -45,10 +51,29 @@ impl<'a> ItemTriager<'a> {
     }
 
     pub(crate) fn extract_all(&self, entries: Vec<ScanEntry>) -> Result<Vec<Vec<TagValue>>> {
-        entries
+        let results: Result<Vec<Option<Vec<TagValue>>>> = entries
             .into_par_iter()
-            .map(|e| self.registry.process_file(Path::new(&e.path.value)))
-            .collect()
+            .map(|e| self.extract_single_file(&e.path.value))
+            .collect();
+
+        Ok(results?.into_iter().flatten().collect())
+    }
+
+    /// 1つのファイルに対してタグ抽出を試みます。
+    /// ファイル消失 (NotFound) の場合は Ok(None) を返し、スキップを通知します。
+    fn extract_single_file(&self, path_str: &str) -> Result<Option<Vec<TagValue>>> {
+        let res = self.registry.process_file(Path::new(path_str));
+
+        if let Ok(values) = res {
+            return Ok(Some(values));
+        }
+
+        let err = res.unwrap_err();
+        if is_not_found(&err) {
+            Ok(None)
+        } else {
+            Err(err)
+        }
     }
 
     pub(crate) fn assemble_records(
@@ -207,6 +232,7 @@ impl TriageAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::SafeMetadata;
 
     #[test]
     fn test_triage_accumulator_logic() {
@@ -295,5 +321,69 @@ mod tests {
         let functions = registry.all_functions();
         let values = triager.rebuild_values_from_path(path, functions);
         assert_eq!(values.len(), 4);
+    }
+
+    #[test]
+    fn test_is_not_found_helper() {
+        use std::io::{Error, ErrorKind};
+        let io_err = Error::new(ErrorKind::NotFound, "missing");
+        let anyhow_err = anyhow::Error::from(io_err);
+        assert!(is_not_found(&anyhow_err));
+
+        let io_err_other = Error::new(ErrorKind::PermissionDenied, "denied");
+        let anyhow_err_other = anyhow::Error::from(io_err_other);
+        assert!(!is_not_found(&anyhow_err_other));
+    }
+
+    #[test]
+    fn test_triager_extract_skip_missing() {
+        let registry = FunctionRegistry::with_standard();
+        let triager = ItemTriager::new(&registry);
+
+        // 存在しないパス
+        let res = triager.extract_single_file("non_existent_file_12345");
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_none(), "Should return None (skip) for missing file");
+    }
+
+    #[test]
+    fn test_extract_all_with_race_condition() {
+        use tempfile::tempdir;
+        use std::fs::File;
+
+        let dir = tempdir().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let triager = ItemTriager::new(&registry);
+
+        // 1. ファイルをいくつか作成
+        let paths = vec![
+            dir.path().join("file1.txt"),
+            dir.path().join("file2.txt"),
+            dir.path().join("file3.txt"),
+        ];
+        for p in &paths {
+            File::create(p).unwrap();
+        }
+
+        // 2. ScanEntry を作成 (この時点では全ファイル存在)
+        let entries: Vec<ScanEntry> = paths
+            .iter()
+            .map(|p| {
+                let metadata = std::fs::metadata(p).unwrap();
+                ScanEntry::from_path_metadata(p, &SafeMetadata::new(&metadata))
+                    .unwrap()
+            })
+            .collect();
+
+        // 3. 1つだけファイルを削除して、今回の不具合状況（競合）を再現
+        std::fs::remove_file(&paths[1]).unwrap();
+
+        // 4. 実行: 修正前なら Err になっていたはず
+        let res = triager
+            .extract_all(entries)
+            .expect("Should not fail even if file is missing during extraction");
+
+        // 5. 検証: 2つだけ成功し、1つは安全にスキップされているはず
+        assert_eq!(res.len(), 2, "Expected 2 files to be processed, 1 skipped");
     }
 }
