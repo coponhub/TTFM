@@ -1,7 +1,6 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
-use chrono::{DateTime, Local};
+use chrono::Local;
 use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{METADATA_ERROR, TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
@@ -996,14 +995,6 @@ impl TagFunction for SizeStrFunction {
 
 struct ModifiedStrTagger;
 
-impl ModifiedStrTagger {
-    /// システム時間を "YYYY-MM-DD HH:MM" 形式に変換するヘルパー。
-    fn format_time(time: std::time::SystemTime) -> String {
-        let datetime: DateTime<Local> = time.into();
-        datetime.format("%Y-%m-%d %H:%M").to_string()
-    }
-}
-
 impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
@@ -1175,9 +1166,7 @@ mod tests {
     #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
-        let expr = f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).unwrap();
-        let sql = to_sql(expr);
-        assert_eq!(sql, "\"file_entities\".\"size\" = '123'");
+        assert!(f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).is_none());
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 
@@ -1211,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_metadata_generate_error_handling() {
-        // SafeMetadata::recovered() を使った時の救済挙動を確認
+        // SafeMetadata::recovered() を使った時のエラーハンドリング挙動を確認
         let safe_m = SafeMetadata::recovered();
         let path = Path::new("dummy");
 
@@ -1222,9 +1211,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_metadata_generate_loop_recovery() {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let loop_link = dir.path().join("loop");
+        // 自分自身を指すシンボリックリンクを作成
+        symlink(&loop_link, &loop_link).unwrap();
+
+        let safe_m = SafeMetadata::recovered();
+
+        // metadata() は ELOOP エラー（エラー値へのフォールバック対象）になるはず
+        assert_eq!(SizeBytesFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
+        assert_eq!(ModifiedTsFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
+        
+        // Str系 もエラー値 "-" になるはず
+        assert_eq!(SizeStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
+        assert_eq!(ModifiedStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
+    }
+
+    #[test]
     fn test_metadata_generate_success() {
         use tempfile::tempdir;
-        use std::fs::File;
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();

@@ -2,7 +2,6 @@ use crate::taggers::{TagValue, ColumnDef};
 use crate::db::{TargetTable};
 use crate::{FunctionRegistry, TagFunction};
 use crate::functions::{ScanEntry};
-use crate::util::{SafeMetadata};
 use crate::indexing::indexer::{TaggingResult, DynamicRow, TagRow};
 use anyhow::Result;
 use std::path::{Path};
@@ -233,6 +232,7 @@ impl TriageAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::SafeMetadata;
 
     #[test]
     fn test_triage_accumulator_logic() {

@@ -184,7 +184,7 @@ impl ScanWalker {
         let m = match e.metadata() {
             Ok(real_m) => SafeMetadata::new(&real_m),
             Err(err) if crate::util::is_not_found_err(&err) => return None,
-            Err(_) => SafeMetadata::recovered(),
+            Err(_) => SafeMetadata::recovered(), // それ以外はエラー値を使用
         };
 
         ScanEntry::from_path_metadata(e.path(), &m).ok()

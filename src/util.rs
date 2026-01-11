@@ -223,7 +223,7 @@ pub fn parquet_query(path: &str) -> SelectStatement {
         .to_owned()
 }
 
-/// 救済値を保持し、Metadata の代役を務める型。
+/// メタデータ取得エラー時にエラー値を返すためのラッパー。
 pub struct SafeMetadata {
     len: i64,
     modified: i64,
@@ -246,7 +246,7 @@ impl SafeMetadata {
         }
     }
 
-    /// エラー時の救済値（-1）で作成します。
+    /// メタデータ取得に失敗した場合のエラー値（-1等）で作成します。
     pub fn recovered() -> Self {
         Self {
             len: crate::types::METADATA_ERROR,
@@ -280,12 +280,10 @@ pub fn is_not_found_err(err: &ignore::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Error, ErrorKind};
 
     #[test]
     fn test_safe_metadata_real() {
         use tempfile::tempdir;
-        use std::fs::File;
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
@@ -304,15 +302,5 @@ mod tests {
         assert_eq!(safe_m.len(), crate::types::METADATA_ERROR);
         assert_eq!(safe_m.modified(), crate::types::METADATA_ERROR);
         assert!(!safe_m.is_dir());
-    }
-
-    #[test]
-    fn test_is_not_found_err() {
-        // ignore::Error は直接作りにくいため、io::Error からの変換を確認
-        // 実際の実装に基づき、io_error() が取れるケースを想定
-        let io_err = Error::new(ErrorKind::NotFound, "missing");
-        // ignore::Error::from(io_err) はできないが、
-        // 内部的に io_error() を持つエラーをシミュレート
-        // ここでは実装のロジックが正しいことを確認
     }
 }
