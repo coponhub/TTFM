@@ -2,7 +2,7 @@ use sea_query::{
     Query, Expr, JoinType, SelectStatement, Func
 };
 use std::path::Path;
-use crate::db::{Tbl, Col, DuckDbFunc, SqlType, TargetTable};
+use crate::db::{Tbl, Col, DuckDbFunc, TargetTable};
 use crate::taggers::{ColumnDef};
 use crate::util;
 
@@ -116,38 +116,56 @@ impl OneView {
             .column(Col::Label)
             .from_subquery(util::parquet_query(base_tags), Tbl::BaseTags);
 
-        // B. file_entities (size, mtime, file_id)
+        // B. file_entities (file_id)
         for cd in all_columns
             .iter()
             .filter(|c| c.target_table == TargetTable::FileEntities)
         {
             let mut sub = Query::select();
-            let col_iden = util::col_to_iden(&cd.name);
+            let col_iden = crate::macros::name_to_iden(&cd.name);
             sub.column(Col::ItemId)
                 .expr_as(Expr::val("system"), Col::Origin)
                 .expr_as(Expr::val(cd.name.to_string()), Col::Type)
                 .expr_as(
-                    Expr::col((Tbl::FileEntities, col_iden))
-                        .cast_as(SqlType::VARCHAR),
+                    if cd.name == "file_id" {
+                        Expr::cust_with_exprs(
+                            "printf('%032x', $1::UUID)",
+                            [Expr::col((Tbl::FileEntities, col_iden)).into()],
+                        )
+                    } else {
+                        Expr::cust_with_exprs(
+                            "CAST($1 AS VARCHAR)",
+                            [Expr::col((Tbl::FileEntities, col_iden)).into()],
+                        )
+                    },
                     Col::Label,
                 )
                 .from_subquery(util::parquet_query(ents), Tbl::FileEntities);
             base_q.union(sea_query::UnionType::All, sub.to_owned());
         }
 
-        // C. locations
+        // C. locations (size, mtime, path, etc.)
         for cd in all_columns
             .iter()
             .filter(|c| c.target_table == TargetTable::Locations)
         {
             let mut sub = Query::select();
-            let col_iden = util::col_to_iden(&cd.name);
+            let col_iden = crate::macros::name_to_iden(&cd.name);
             sub.column(Col::ItemId)
                 .expr_as(Expr::val("system"), Col::Origin)
                 .expr_as(Expr::val(cd.name.to_string()), Col::Type)
                 .expr_as(
-                    Expr::col((Tbl::Locations, col_iden))
-                        .cast_as(SqlType::VARCHAR),
+                    if cd.name == "file_id" {
+                        Expr::cust_with_exprs(
+                            "printf('%032x', $1::UUID)",
+                            [Expr::col((Tbl::Locations, col_iden)).into()],
+                        )
+                    } else {
+                        Expr::cust_with_exprs(
+                            "CAST($1 AS VARCHAR)",
+                            [Expr::col((Tbl::Locations, col_iden)).into()],
+                        )
+                    },
                     Col::Label,
                 )
                 .from_subquery(util::parquet_query(locs), Tbl::Locations);
@@ -246,3 +264,5 @@ mod tests {
         );
     }
 }
+
+        

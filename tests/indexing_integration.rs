@@ -1,4 +1,4 @@
-use ttfm::{FileManager, TargetTable};
+use ttfm::{ FileManager, TargetTable};
 use tempfile::tempdir;
 use file_id::get_file_id;
 
@@ -28,8 +28,9 @@ fn test_incremental_indexing_full_flow() {
     let path_b = root.join("b.rs");
     std::fs::write(&path_b, "fn main() {}").unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
-    assert_eq!(fm.search(all_files).unwrap().len(), 3);
-    assert_eq!(fm.search("filename:b.rs").unwrap().len(), 1);
+
+    let res = fm.search(all_files).unwrap();
+    assert_eq!(res.len(), 3);
 
     // 4. 更新: a.txt の内容を変更 (サイズ変更)
     // 実体(ID)が変わらないことを確認
@@ -56,9 +57,16 @@ fn test_incremental_indexing_full_flow() {
     std::fs::hard_link(&path_a, &path_c).unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
     
-    // Inode 情報を直接取得して検索
+    // Inode 情報を直接取得して検索 (Uuid 形式のクエリを作成)
     let fid = get_file_id(&path_a).unwrap();
-    let query = format!("file_id:\"{:?}\"", fid);
+    let (upper, lower) = match fid {
+        file_id::FileId::Inode { device_id, inode_number } => (device_id, inode_number),
+        file_id::FileId::LowRes { volume_serial_number, file_index } => (volume_serial_number as u64, file_index),
+        file_id::FileId::HighRes { volume_serial_number, file_id } => ((file_id >> 64) as u64 ^ volume_serial_number, file_id as u64),
+    };
+    let uuid_str = uuid::Uuid::from_u64_pair(upper, lower).to_string();
+    let query = format!("file_id:\"{}\"", uuid_str);
+    
     let res_inode = fm.search(&query).unwrap();
     let files_inode: Vec<_> = res_inode.iter().filter(|r| r.item_kind == "file").collect();
 

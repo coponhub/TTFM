@@ -4,7 +4,7 @@ use chrono::Local;
 use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
 use crate::types::{METADATA_ERROR, TypedTag, DBType, FileSize, FileTimestamp};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
-use crate::db::{Tbl, Col, TargetTable};
+use crate::db::{Tbl, Col, TargetTable, SqlType};
 use crate::util::{SafeMetadata};
 use path_slash::PathExt;
 
@@ -82,7 +82,7 @@ pub enum ScanRole {
 
 pub struct ScanColumn {
     pub name: &'static str,
-    pub sql_type: &'static str,
+    pub sql_type: SqlType,
     pub role: ScanRole,
 }
 
@@ -135,7 +135,7 @@ impl Tagger for PathTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: PathFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
     }
@@ -213,7 +213,7 @@ impl Tagger for ParentDirTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: ParentDirFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
     }
@@ -297,7 +297,7 @@ impl Tagger for FilenameTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: FilenameFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
     }
@@ -383,7 +383,7 @@ impl Tagger for StemTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: StemFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
     }
@@ -461,7 +461,7 @@ impl Tagger for ExtensionTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: ExtensionFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
     }
@@ -544,7 +544,7 @@ impl Tagger for DirectoryTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: DirectoryFunction::NAME.to_string(),
-            sql_type: "BOOLEAN",
+            sql_type: SqlType::BOOLEAN,
             target_table: TargetTable::BaseTags,
         }]
     }
@@ -613,8 +613,8 @@ impl Tagger for SizeBytesTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: SizeBytesFunction::NAME.to_string(),
-            sql_type: "BIGINT",
-            target_table: TargetTable::FileEntities,
+            sql_type: SqlType::BIGINT,
+            target_table: TargetTable::Locations,
         }]
     }
     /// ファイルサイズ（バイト数）を抽出します。
@@ -685,8 +685,8 @@ impl Tagger for ModifiedTsTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: ModifiedTsFunction::NAME.to_string(),
-            sql_type: "BIGINT",
-            target_table: TargetTable::FileEntities,
+            sql_type: SqlType::BIGINT,
+            target_table: TargetTable::Locations,
         }]
     }
     /// 最終更新日時のUNIXタイムスタンプを抽出します。
@@ -757,13 +757,13 @@ impl Tagger for InodeTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: InodeFunction::NAME.to_string(),
-            sql_type: "VARCHAR",
+            sql_type: SqlType::UUID,
             target_table: TargetTable::FileEntities,
         }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let inode = crate::get_inode_string(path);
-        Ok(vec![TagValue::Text(inode)])
+        let file_ref = crate::get_file_ref(path)?;
+        Ok(vec![TagValue::Uuid(file_ref)])
     }
 }
 
@@ -790,9 +790,12 @@ impl TagFunction for InodeFunction {
     }
     fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
         if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
-            let expr =
-                Expr::col((Tbl::FileEntities, Col::FileId)).eq(tag.label.0.clone());
-            return Some(expr.into());
+            // UUID形式の文字列をパースして数値比較を行う
+            if let Ok(val) = uuid::Uuid::parse_str(&tag.label.0) {
+                let expr =
+                    Expr::col((Tbl::FileEntities, Col::FileId)).eq(val.to_string());
+                return Some(expr.into());
+            }
         }
         None
     }
@@ -804,12 +807,12 @@ impl TagFunction for InodeFunction {
 impl TagDefinition for InodeFunction {
     const NAME: &'static str = Self::NAME;
     const ROLE: ScanRole = ScanRole::ScanId;
-    type RustType = String;
+    type RustType = crate::types::FileRef;
     fn generate(
         path: &Path,
         _metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        Ok(crate::get_inode_string(path))
+        crate::get_file_ref(path)
     }
 }
 
@@ -823,7 +826,7 @@ impl Tagger for TypeFromExtTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: TypeFromExtFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
     }
@@ -921,7 +924,7 @@ impl Tagger for SizeStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: SizeStrFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
     }
@@ -999,7 +1002,7 @@ impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
             name: ModifiedStrFunction::NAME.to_string(),
-            sql_type: "TEXT",
+            sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
     }
@@ -1182,20 +1185,20 @@ mod tests {
         let mut query = Query::select();
         query.column(Col::FileId);
         let sql = query.to_string(PostgresQueryBuilder);
-        println!("Direct Col::FileId SQL: {}", sql);
         assert!(sql.contains("\"file_id\""), "Direct Col::FileId should be snake_case");
     }
 
     #[test]
     fn test_inode_function_to_expr() {
         let f = InodeFunction::new();
-        // file_id:123
-        let expr = f.to_expr(&ttag(InodeFunction::NAME, "123")).unwrap();
+        // 有効な UUID 文字列を渡す
+        let test_uuid = uuid::Uuid::nil().to_string();
+        let expr = f.to_expr(&ttag(InodeFunction::NAME, &test_uuid)).unwrap();
         let sql = to_sql(expr);
         println!("SQL: {}", sql);
         
-        // Assert the behavior (snake_case)
-        assert!(sql.contains("\"file_entities\".\"file_id\""), "Expected snake_case file_id");
+        // UUID 文字列として比較が行われていることを確認
+        assert!(sql.contains(&format!("\"file_id\" = '{}'", test_uuid)), "Expected UUID comparison");
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use crate::taggers::{TagValue, ColumnDef};
 use crate::db::{TargetTable};
-use crate::{FunctionRegistry, TagFunction};
-use crate::functions::{ScanEntry};
+use crate::{FunctionRegistry};
 use crate::indexing::indexer::{
     TaggingResult, DynamicRow, TagRow, TempScanEntry, ScanHash
 };
@@ -223,6 +222,7 @@ mod tests {
     use crate::util::SafeMetadata;
     use crate::functions::ScanEntry;
     use crate::indexing::indexer::calc_scanhash;
+    use crate::db::SqlType;
 
     #[test]
     fn test_triage_accumulator_logic() {
@@ -242,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn test_triager_classify_logic() {
+        let registry = FunctionRegistry::new();
+        let triager = ItemTriager::new(&registry);
+
+        let col_ent = ColumnDef {
+            name: "size".to_string(),
+            sql_type: SqlType::BIGINT,
+            target_table: TargetTable::FileEntities,
+        };
+        let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
+        assert!(matches!(p_ent, TriagePiece::Entity(TagValue::BigInt(1024))));
+    }
+
+    #[test]
     fn test_triager_triage_item_full() {
         let registry = FunctionRegistry::new();
         let triager = ItemTriager::new(&registry);
@@ -249,17 +263,17 @@ mod tests {
         let cols = vec![
             ColumnDef { 
                 name: "size".into(), 
-                sql_type: "BIGINT", 
+                sql_type: SqlType::BIGINT, 
                 target_table: TargetTable::FileEntities 
             },
             ColumnDef { 
                 name: "path".into(), 
-                sql_type: "TEXT", 
+                sql_type: SqlType::VARCHAR, 
                 target_table: TargetTable::Locations 
             },
             ColumnDef { 
                 name: "ext".into(), 
-                sql_type: "TEXT", 
+                sql_type: SqlType::VARCHAR, 
                 target_table: TargetTable::BaseTags 
             },
         ];

@@ -74,13 +74,21 @@ impl DiffAuditor {
     pub(crate) fn query_with_existing_ids(&self) -> SelectStatement {
         let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
         
+        // Inode ごとに最小 ID を 1つ選ぶユニーク名簿
+        let distinct_ents = Query::select()
+            .expr(crate::util::CustomExpr::distinct_on_all(Col::FileId))
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
+            .order_by(Col::FileId, sea_query::Order::Asc)
+            .order_by(Col::ItemId, sea_query::Order::Asc)
+            .to_owned();
+
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
             .columns(TempScanEntry::columns_with_type().into_iter().map(|(c, _)| (Tbl::Scan, c)))
             .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
             .join_subquery(
                 JoinType::LeftJoin,
-                util::parquet_query(&self.ents),
+                distinct_ents,
                 Tbl::FileEntities,
                 Expr::col((Tbl::Scan, col_file_id.clone())).eq(Expr::col((Tbl::FileEntities, col_file_id)))
             )

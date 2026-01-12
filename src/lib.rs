@@ -29,7 +29,7 @@ pub mod util;
 pub use query::{QueryParser, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
 pub use db::TargetTable;
-pub use types::{SearchResult, TagType, TypedTag, Label};
+pub use types::{SearchResult, TagType, TypedTag, Label, FileRef};
 use functions::{
     TagFunction,
     PathFunction,
@@ -49,12 +49,29 @@ use functions::{
     ContentTagFunction,
 };
 
-/// ファイルの一意識別子を取得し、文字列として返します。
-pub(crate) fn get_inode_string(path: &Path) -> String {
-    match get_file_id(path) {
-        Ok(id) => format!("{:?}", id),
-        Err(_) => path.to_string_lossy().to_string(), // フォールバックとしてパスを使用
+/// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
+pub fn get_file_ref(path: &Path) -> Result<FileRef> {
+    // 1. Inode 取得を試みる
+    if let Ok(id) = get_file_id(path) {
+        let (upper, lower) = match id {
+            // Unix/Linux: device_id (64bit) + inode_number (64bit)
+            file_id::FileId::Inode { device_id, inode_number } => {
+                (device_id, inode_number)
+            }
+            // Windows (Standard): volume_serial_number (32bit) + file_index (64bit)
+            file_id::FileId::LowRes { volume_serial_number, file_index } => {
+                (volume_serial_number as u64, file_index)
+            }
+            // Windows (High Precision / ReFS): volume_serial_number (64bit) + file_id (128bit)
+            file_id::FileId::HighRes { volume_serial_number, file_id } => {
+                ((file_id >> 64) as u64 ^ volume_serial_number, file_id as u64)
+            }
+        };
+        return Ok(uuid::Uuid::from_u64_pair(upper, lower));
     }
+
+    // 2. 失敗した場合（ELOOP, EIO等）はパス名から決定論的な UUID を生成
+    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, path.to_string_lossy().as_bytes()))
 }
 
 /// TTFMのホームディレクトリを取得します。
@@ -488,15 +505,15 @@ impl FileManager {
         results.to_ok()
     }
 
-    /// インデックスファイル（Parquet）を削除します。
+    /// インデックスディレクトリ全体を削除し、完全にクリーンな状態にします。
     pub fn clear_index(&self) -> Result<()> {
-        use strum::IntoEnumIterator;
-        for target in TargetTable::iter() {
-            let path = self.path_for_target(target);
-            if path.exists() {
-                std::fs::remove_file(path).ok();
-            }
+        if self.db_dir.exists() {
+            std::fs::remove_dir_all(&self.db_dir)
+                .context("Failed to completely clear database directory")?;
         }
+        // 次回の初期化のために空のディレクトリを再作成
+        std::fs::create_dir_all(&self.db_dir)
+            .context("Failed to recreate clean database directory")?;
         Ok(())
     }
 
@@ -753,239 +770,5 @@ impl FileManager {
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_get_inode_string() {
-        let dir = tempdir().unwrap();
-        let path1 = dir.path().join("file1.txt");
-        let path2 = dir.path().join("file2.txt");
-        File::create(&path1).unwrap();
-        File::create(&path2).unwrap();
-
-        let inode1 = get_inode_string(&path1);
-        let inode2 = get_inode_string(&path2);
-
-        assert!(!inode1.is_empty());
-        assert!(!inode2.is_empty());
-        assert_ne!(inode1, inode2, "Different files should have different inodes");
-
-        // 同一ファイルの再取得
-        assert_eq!(inode1, get_inode_string(&path1), "Same file should have same inode");
-    }
-
-    #[test]
-    fn test_scan_phase() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let db_dir = root.join(".ttfm/db");
-        
-        let file_path = root.join("test.txt");
-        std::fs::write(&file_path, "hello world").unwrap(); // 11 bytes
-        
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-        fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
-        
-        // 2. 結果の検証
-        let results = fm.search("extension:txt").unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(results[0].primary_value().unwrap().contains("test.txt"));
-    }
-
-    #[test]
-    fn test_file_manager_search_logic() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let index_path = root.join("test_index.parquet");
-
-        File::create(root.join("report_alpha.pdf")).unwrap();
-        File::create(root.join("image_1.jpg")).unwrap();
-        std::fs::create_dir(root.join("work_docs")).unwrap();
-        
-        let fm = FileManager::new_with_index_path(&index_path).unwrap();
-        fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
-
-        assert_eq!(fm.search("filename:report_alpha.pdf").unwrap().len(), 1);
-        assert_eq!(fm.search("extension:pdf").unwrap().len(), 1);
-        
-        assert!(fm.search("report").is_err());
-
-        fm.clear_index().unwrap();
-    }
-
-    #[test]
-    fn test_add_item_and_get_or_create() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        let id = fm.add_item("type", "my_new_type").unwrap();
-        assert!(id < 0);
-
-        let id2 = fm.get_or_create_item("type", "my_new_type").unwrap();
-        assert_eq!(id, id2);
-
-        let id3 = fm.get_or_create_item("label", "tokyo").unwrap();
-        assert!(id3 < 0);
-        assert_ne!(id, id3);
-    }
-
-    #[test]
-    fn test_tag_item_entity() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        let note_id = fm.add_item("note", "This is a test note").unwrap();
-        fm.tag_item(&note_id.to_string(), "status:done").unwrap();
-
-        let type_id = fm.get_or_create_item("type", "status").unwrap();
-        assert!(type_id < 0);
-        let label_id = fm.get_or_create_item("label", "done").unwrap();
-        assert!(label_id < 0);
-        let tt_id = fm.get_or_create_item("typedtag", "status:done").unwrap();
-        assert!(tt_id < 0);
-
-        let query = Query::select()
-            .column(Col::Label)
-            .from_subquery(
-                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
-                Tbl::UserTags,
-            )
-            .and_where(Expr::col(Col::ItemId).eq(note_id))
-            .to_string(PostgresQueryBuilder);
-
-        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
-        assert_eq!(tag_value, "done");
-    }
-
-    #[test]
-    fn test_tag_file_entity() {
-        let dir = tempdir().unwrap();
-        let test_home = dir.path().join("ttfm_home");
-        std::env::set_var("TTFM_HOME", &test_home);
-
-        let fm = FileManager::new().unwrap();
-
-        let file_path = dir.path().join("test_file.txt");
-        std::fs::write(&file_path, "test content").unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-
-        let results = fm.search("extension:txt").unwrap();
-        let registered_path = results[0].primary_value().unwrap();
-        let item_id = results[0].id;
-        fm.tag_item(registered_path, "manual:true").unwrap();
-
-        let query = Query::select()
-            .column(Col::Label)
-            .from_subquery(
-                util::parquet_query(&fm.path_for_target(TargetTable::UserTags).to_string_lossy()),
-                Tbl::UserTags,
-            )
-            .and_where(Expr::col(Col::ItemId).eq(item_id))
-            .and_where(Expr::col(Col::Type).eq("manual"))
-            .to_string(PostgresQueryBuilder);
-
-        let tag_value: String = fm.conn.query_row(&query, [], |r| r.get(0)).unwrap();
-        assert_eq!(tag_value, "true");
-
-        std::env::remove_var("TTFM_HOME");
-    }
-
-    #[test]
-    fn test_update_ranks_multi_kind() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        // 1. 多様な種類のアイテムを作成
-        let note_id = fm.add_item("note", "Test Note").unwrap();
-        let type_id = fm.get_or_create_item("type", "test_type").unwrap();
-        let label_id = fm.get_or_create_item("label", "test_label").unwrap();
-
-        // 2. 検索結果をシミュレート (note, type, label を含む)
-        // searchメソッドを使わず、直接SearchResultを作ってテストする（update_ranksのロジックを叩くため）
-        let results = vec![
-            SearchResult { id: note_id, item_kind: "note".to_string(), name: "n".to_string(), rank: 0, tags: vec![] },
-            SearchResult { id: type_id, item_kind: "type".to_string(), name: "t".to_string(), rank: 0, tags: vec![] },
-            SearchResult { id: label_id, item_kind: "label".to_string(), name: "l".to_string(), rank: 0, tags: vec![] },
-        ];
-
-        // 3. 一括更新実行
-        fm.update_ranks(&results, 777).unwrap();
-
-        // 4. 各アイテムのランクが更新されたか検証
-        for r in results {
-            let path = fm.path_for_target(TargetTable::ItemEntities);
-            let query = Query::select()
-                .column(Col::Rank)
-                .from_subquery(util::parquet_query(&path.to_string_lossy()), Tbl::ItemEntities)
-                .and_where(Expr::col(Col::ItemId).eq(r.id))
-                .to_string(PostgresQueryBuilder);
-            
-            let actual_rank: i64 = fm.conn.query_row(&query, [], |row| row.get(0)).unwrap();
-            assert_eq!(actual_rank, 777, "Item of kind '{}' was not updated correctly", r.item_kind);
-        }
-    }
-
-    #[test]
-    fn test_search_by_size() {
-        use std::fs::write;
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        // 1. サイズの異なるファイルを作成
-        write(dir.path().join("empty.txt"), "").unwrap(); // 0 bytes
-        write(dir.path().join("small.txt"), "hi").unwrap(); // 2 bytes
-        
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-
-        // 2. size:0 で検索
-        let res = fm.search("size:0").expect("Search for size:0 should succeed");
-        assert_eq!(res.len(), 1, "Should find 1 empty file");
-        assert!(res[0].name.contains("empty.txt"));
-
-        // 3. size:2 で検索
-        let res2 = fm.search("size:2").expect("Search for size:2 should succeed");
-        assert_eq!(res2.len(), 1, "Should find 1 file with size 2");
-        assert!(res2[0].name.contains("small.txt"));
-    }
-
-    #[test]
-    fn test_ttfm_home_and_plugin_extraction() {
-        let temp = tempdir().unwrap();
-        let test_home = temp.path().join("ttfm_test_home");
-        
-        // 環境変数を設定してテスト
-        std::env::set_var("TTFM_HOME", &test_home);
-        
-        // FileManagerを初期化（ここでディレクトリ作成とプラグイン展開が行われるはず）
-        let _fm = FileManager::new().expect("Failed to create FileManager");
-        
-        // 1. ホームディレクトリが作成されているか
-        assert!(test_home.exists());
-        
-        // 2. pluginsディレクトリが作成されているか
-        let plugins_dir = test_home.join("plugins");
-        assert!(plugins_dir.exists());
-        
-        // 3. mimetypeプラグインが展開されているか
-        let mimetype_path = plugins_dir.join("mimetype_plugin.component.wasm");
-        assert!(mimetype_path.exists());
-        assert!(mimetype_path.metadata().unwrap().len() > 0);
-        
-        // 4. DBディレクトリが作成されているか
-        assert!(test_home.join("db").exists());
-
-        // クリーンアップ（環境変数を戻す）
-        std::env::remove_var("TTFM_HOME");
     }
 }

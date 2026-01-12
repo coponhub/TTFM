@@ -78,11 +78,25 @@ pub enum Tbl {
 
 /// SQL型名（CAST用）。
 #[allow(non_camel_case_types)]
-#[derive(Iden, Clone, Copy)]
+#[derive(Clone, Debug)]
 pub enum SqlType {
     BIGINT,
     VARCHAR,
     BOOLEAN,
+    UUID,
+    Other(String),
+}
+
+impl Iden for SqlType {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        match self {
+            SqlType::BIGINT => write!(s, "BIGINT").unwrap(),
+            SqlType::VARCHAR => write!(s, "VARCHAR").unwrap(),
+            SqlType::BOOLEAN => write!(s, "BOOLEAN").unwrap(),
+            SqlType::UUID => write!(s, "UUID").unwrap(),
+            SqlType::Other(custom) => write!(s, "{}", custom).unwrap(),
+        }
+    }
 }
 
 /// 共通で使用されるカラム名を表す識別子。
@@ -147,6 +161,12 @@ pub enum DuckDbFunc {
     List,
 }
 
+#[derive(Iden, Clone, Copy)]
+pub enum DuckDbKeyword {
+    #[iden = "DISTINCT ON"]
+    DistinctOn,
+}
+
 /// データベーススキーマ定義（テーブル作成SQL）を提供する構造体。
 pub struct Schema;
 
@@ -169,14 +189,15 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
+                    match &c.sql_type {
+                        SqlType::BIGINT => def.big_integer(),
+                        SqlType::UUID => def.custom(SqlType::UUID),
+                        SqlType::BOOLEAN => def.boolean(),
+                        SqlType::VARCHAR => def.string(),
+                        SqlType::Other(custom) => def.custom(crate::util::alias_from(custom)),
                     };
                     create.col(&mut def);
                 }
-                create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
             }
             TargetTable::Locations => {
                 create.col(SeaColumnDef::new(Col::ItemId).big_integer());
@@ -188,13 +209,16 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    match c.sql_type {
-                        "BIGINT" => def.big_integer(),
-                        "BOOLEAN" => def.boolean(),
-                        _ => def.string(),
+                    match &c.sql_type {
+                        SqlType::BIGINT => def.big_integer(),
+                        SqlType::UUID => def.custom(SqlType::UUID),
+                        SqlType::BOOLEAN => def.boolean(),
+                        SqlType::VARCHAR => def.string(),
+                        SqlType::Other(custom) => def.custom(crate::util::alias_from(custom)),
                     };
                     create.col(&mut def);
                 }
+                create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
             }
             TargetTable::BaseTags => {
                 create

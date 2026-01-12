@@ -1,4 +1,6 @@
+use crate::db::SqlType;
 use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
+use uuid::Uuid;
 
 /// メタデータ取得に失敗した際のデフォルト値。
 pub const METADATA_ERROR: i64 = -1;
@@ -9,20 +11,24 @@ pub type Rank = i64;
 /// アイテムの一意なID。
 pub type ItemId = i64;
 
+/// ファイルの実体（Inode/FileID）を一意に表す 128ビット識別子。
+pub type FileRef = Uuid;
+
 /// データベース上の型名を取得するためのトレイト。
 pub trait DBType {
-    /// 対応する SQL の型名（例: "VARCHAR", "BIGINT"）を返します。
-    fn db_type() -> &'static str;
+    /// 対応する SQL の型を返します。
+    fn db_type() -> SqlType;
 }
 
-impl DBType for String { fn db_type() -> &'static str { "VARCHAR" } }
-impl DBType for i64 { fn db_type() -> &'static str { "BIGINT" } }
-impl DBType for bool { fn db_type() -> &'static str { "BOOLEAN" } }
+impl DBType for String { fn db_type() -> SqlType { SqlType::VARCHAR } }
+impl DBType for i64 { fn db_type() -> SqlType { SqlType::BIGINT } }
+impl DBType for Uuid { fn db_type() -> SqlType { SqlType::UUID } }
+impl DBType for bool { fn db_type() -> SqlType { SqlType::BOOLEAN } }
 
 /// ファイルサイズ（バイト単位）を表す型。
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileSize(pub i64);
-impl DBType for FileSize { fn db_type() -> &'static str { "BIGINT" } }
+impl DBType for FileSize { fn db_type() -> SqlType { SqlType::BIGINT } }
 
 impl FromSql for FileSize {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -39,7 +45,7 @@ impl ToSql for FileSize {
 /// UNIXタイムスタンプ（秒単位）を表す型。
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileTimestamp(pub i64);
-impl DBType for FileTimestamp { fn db_type() -> &'static str { "BIGINT" } }
+impl DBType for FileTimestamp { fn db_type() -> SqlType { SqlType::BIGINT } }
 
 impl FromSql for FileTimestamp {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {

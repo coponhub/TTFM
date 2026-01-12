@@ -85,10 +85,11 @@ macro_rules! define_scan_entry {
 
             /// カラム名と型のペアの識別子リストを取得します。
             pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)> {
+                use sea_query::IntoIden;
                 Self::schema().into_iter().map(|cd| {
                     (
                         Self::name_to_iden(&cd.name),
-                        $crate::util::alias_from(cd.sql_type),
+                        cd.sql_type.into_iden(),
                     )
                 }).collect()
             }

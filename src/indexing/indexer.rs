@@ -123,18 +123,18 @@ impl<'a> Indexer<'a> {
 
     /// 既存のインデックスから変更検知用のメタデータ・キャッシュをロードします。
     pub fn load_metadata_cache(&self) -> Result<FxHashMap<ScanHash, ItemId>> {
-        let ents_path = self.store.path_for_target(TargetTable::FileEntities);
-        if !ents_path.exists() {
+        let locs_path = self.store.path_for_target(TargetTable::Locations);
+        if !locs_path.exists() {
             return Ok(FxHashMap::default());
         }
 
-        let ents_str = ents_path.to_string_lossy();
+        let locs_str = locs_path.to_string_lossy();
         
         // item_id と scan_hash カラムを取得
         let sql = Query::select()
             .column(Col::ItemId)
             .column(Col::ScanHash)
-            .from_subquery(util::parquet_query(&ents_str), Tbl::FileEntities)
+            .from_subquery(util::parquet_query(&locs_str), Tbl::Locations)
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self.conn.prepare(&sql)
@@ -446,13 +446,13 @@ mod tests {
         // 1. テーブルを初期化
         indexer.initialize_tables().unwrap();
 
-        // 2. ダミーデータを直接 file_entities に書き込む (scan_hash 込み)
+        // 2. ダミーデータを直接 locations に書き込む (scan_hash 込み)
         let hash_val = ScanHash(123456789);
         let item_id: ItemId = 1;
-        let ents_path = indexer.store.path_for_target(TargetTable::FileEntities);
+        let locs_path = indexer.store.path_for_target(TargetTable::Locations);
         
-        conn.execute("CREATE TABLE temp_ents AS SELECT ? as item_id, 0 as rank, ? as scan_hash", [item_id, hash_val.0]).unwrap();
-        conn.execute(&format!("COPY temp_ents TO '{}' (FORMAT PARQUET)", ents_path.to_string_lossy()), []).unwrap();
+        conn.execute("CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash", [item_id, hash_val.0]).unwrap();
+        conn.execute(&format!("COPY temp_locs TO '{}' (FORMAT PARQUET)", locs_path.to_string_lossy()), []).unwrap();
 
         // 3. ロードして検証
         let cache = indexer.load_metadata_cache().unwrap();
