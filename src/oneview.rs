@@ -116,60 +116,36 @@ impl OneView {
             .column(Col::Label)
             .from_subquery(util::parquet_query(base_tags), Tbl::BaseTags);
 
-        // B. file_entities (file_id)
-        for cd in all_columns
-            .iter()
-            .filter(|c| c.target_table == TargetTable::FileEntities)
-        {
-            let mut sub = Query::select();
-            let col_iden = crate::macros::name_to_iden(&cd.name);
-            sub.column(Col::ItemId)
-                .expr_as(Expr::val("system"), Col::Origin)
-                .expr_as(Expr::val(cd.name.to_string()), Col::Type)
-                .expr_as(
-                    if cd.name == "file_id" {
-                        Expr::cust_with_exprs(
-                            "printf('%032x', $1::UUID)",
-                            [Expr::col((Tbl::FileEntities, col_iden)).into()],
-                        )
-                    } else {
-                        Expr::cust_with_exprs(
-                            "CAST($1 AS VARCHAR)",
-                            [Expr::col((Tbl::FileEntities, col_iden)).into()],
-                        )
-                    },
-                    Col::Label,
-                )
-                .from_subquery(util::parquet_query(ents), Tbl::FileEntities);
-            base_q.union(sea_query::UnionType::All, sub.to_owned());
-        }
+        // B. Column-based system tags (file_entities & locations)
+        for target in [TargetTable::FileEntities, TargetTable::Locations] {
+            let table_iden = match target {
+                TargetTable::FileEntities => Tbl::FileEntities,
+                TargetTable::Locations => Tbl::Locations,
+                _ => unreachable!(),
+            };
+            let parquet_path = match target {
+                TargetTable::FileEntities => ents,
+                TargetTable::Locations => locs,
+                _ => unreachable!(),
+            };
 
-        // C. locations (size, mtime, path, etc.)
-        for cd in all_columns
-            .iter()
-            .filter(|c| c.target_table == TargetTable::Locations)
-        {
-            let mut sub = Query::select();
-            let col_iden = crate::macros::name_to_iden(&cd.name);
-            sub.column(Col::ItemId)
-                .expr_as(Expr::val("system"), Col::Origin)
-                .expr_as(Expr::val(cd.name.to_string()), Col::Type)
-                .expr_as(
-                    if cd.name == "file_id" {
-                        Expr::cust_with_exprs(
-                            "printf('%032x', $1::UUID)",
-                            [Expr::col((Tbl::Locations, col_iden)).into()],
-                        )
-                    } else {
+            for cd in all_columns.iter().filter(|c| c.target_table == target) {
+                let col_iden = crate::macros::name_to_iden(&cd.name);
+                let sub = Query::select()
+                    .column(Col::ItemId)
+                    .expr_as(Expr::val("system"), Col::Origin)
+                    .expr_as(Expr::val(cd.name.to_string()), Col::Type)
+                    .expr_as(
                         Expr::cust_with_exprs(
                             "CAST($1 AS VARCHAR)",
-                            [Expr::col((Tbl::Locations, col_iden)).into()],
-                        )
-                    },
-                    Col::Label,
-                )
-                .from_subquery(util::parquet_query(locs), Tbl::Locations);
-            base_q.union(sea_query::UnionType::All, sub.to_owned());
+                            [Expr::col((table_iden, col_iden)).into()],
+                        ),
+                        Col::Label,
+                    )
+                    .from_subquery(util::parquet_query(parquet_path), table_iden)
+                    .to_owned();
+                base_q.union(sea_query::UnionType::All, sub);
+            }
         }
 
         // C. item_entities (content)
