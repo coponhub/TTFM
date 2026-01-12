@@ -49,32 +49,12 @@ impl QueryNode {
 // --- Parsing Logic ---
 
 /// クエリ文字列を解析し、抽象構文木（AST）を構築する再帰下降パーサ。
-///
-/// # 演算子の優先順位（高い順）
-/// 1. 括弧 `()`
-/// 2. NOT `-`
-/// 3. AND `&` (または空白)
-/// 4. OR `|`
 pub struct QueryParser<'a> {
     chars: Peekable<Chars<'a>>,
 }
 
 impl<'a> QueryParser<'a> {
     /// 検索クエリ文字列を解析して `QueryNode` を返します。
-    ///
-    /// # 構文
-    /// - `&` (AND), `|` (OR), `-` (NOT) の論理演算子をサポート
-    /// - `()` によるグループ化が可能
-    /// - `key:value` 形式の型付き検索をサポート
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use ttfm::{QueryParser, QueryNode};
-    /// 
-    /// // 拡張子が "rs" かつ ("project" または "report" タグを持つ)
-    /// let node = QueryParser::parse("extension:rs & (tag:project | tag:report)").unwrap();
-    /// ```
     pub fn parse(input: &'a str) -> Result<QueryNode> {
         let mut parser = QueryParser {
             chars: input.chars().peekable(),
@@ -92,13 +72,13 @@ impl<'a> QueryParser<'a> {
         let mut left = self.parse_and_term()?;
         loop {
             self.skip_whitespace();
-            if let Some(&c) = self.chars.peek() {
-                if c == '|' {
-                    self.chars.next();
-                    let right = self.parse_and_term()?;
-                    left = QueryNode::Or(Box::new(left), Box::new(right));
-                } else { break; }
-            } else { break; }
+            if let Some(&'|') = self.chars.peek() {
+                self.chars.next();
+                let right = self.parse_and_term()?;
+                left = QueryNode::Or(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
         }
         Ok(left)
     }
@@ -114,35 +94,17 @@ impl<'a> QueryParser<'a> {
                     self.chars.next();
                     let right = self.parse_factor()?;
                     left = QueryNode::And(Box::new(left), Box::new(right));
-                } else if c == '(' || c == '-' {
-                    // 括弧やマイナスの前のみ、暗黙のANDとして扱う
-                    let right = self.parse_factor()?;
-                    left = QueryNode::And(Box::new(left), Box::new(right));
                 } else {
-                    // ここに到達するのは、次の単語が続く場合など
-                    // しかし、parse_factorで単語を処理するので、
-                    // 明示的な演算子がなくても連続するタームはANDとして扱う必要があるかもしれない。
-                    // 現状のロジックでは Term がなくなったので、
-                    // "key:val key2:val2" のようなケースをどう扱うか。
-                    // 以前は Term で処理されていたが、ここでは parse_factor が呼ばれるはず。
-                    
-                    // 試しに parse_factor を呼んでみて、成功すれば AND として繋ぐ
-                    // ただし、もし parse_factor が失敗するならループを抜けるべき。
-                    // 現状の parse_factor は "term" が ":" を含まないとエラーになる。
-                    
-                    // 以前のロジック:
-                    // } else { break; } 
-                    // だった。
-                    
-                    // "key:val key2:val2" をパースする場合、
-                    // 1. parse_factor -> key:val
-                    // 2. loop -> peek は 'k'
-                    // 3. else -> parse_factor -> key2:val2 (成功) -> AND
-                    
-                    let right = self.parse_factor()?;
-                    left = QueryNode::And(Box::new(left), Box::new(right));
+                    // 暗黙の AND (スペース等)
+                    if let Ok(right) = self.parse_factor() {
+                        left = QueryNode::And(Box::new(left), Box::new(right));
+                    } else {
+                        break;
+                    }
                 }
-            } else { break; }
+            } else {
+                break;
+            }
         }
         Ok(left)
     }
@@ -168,42 +130,75 @@ impl<'a> QueryParser<'a> {
                 Ok(QueryNode::Not(Box::new(node)))
             },
             Some(_) => {
-                let term = self.read_term()?;
-                if let Some((key, value)) = term.split_once(':') {
-                    if !key.is_empty() && !value.is_empty() {
-                        Ok(QueryNode::TypedTag(self.create_typed_tag(key, value)))
-                    } else {
-                         // "key:" or ":val" case
-                         Err(anyhow::anyhow!("Invalid tag format. Use 'key:value'. Found: '{}'", term))
-                    }
+                // key:value 形式の解析
+                let key = self.read_string_until(':')?;
+                if self.chars.peek() == Some(&':') {
+                    self.chars.next();
+                    let value = self.read_value()?;
+                    Ok(QueryNode::TypedTag(self.create_typed_tag(&key, &value)))
                 } else {
-                    Err(anyhow::anyhow!("Missing tag type. Use 'key:value' format. Found: '{}'", term))
+                    Err(anyhow::anyhow!("Expected ':' after tag key '{}'", key))
                 }
             },
             None => Err(anyhow::anyhow!("Unexpected end of input")),
         }
     }
 
-    /// 文字列リテラルを読み込みます。
-    fn read_term(&mut self) -> Result<String> {
+    /// 通常の文字列、またはクォートされた文字列を読み込みます。
+    fn read_value(&mut self) -> Result<String> {
         self.skip_whitespace();
-        let mut term = String::new();
-        while let Some(&c) = self.chars.peek() {
-            if c == '&' || c == '|' || c == '(' || c == ')' || c.is_whitespace() { break; }
-            term.push(c);
+        if let Some(&'"') = self.chars.peek() {
             self.chars.next();
+            let mut s = String::new();
+            while let Some(&c) = self.chars.peek() {
+                if c == '"' {
+                    self.chars.next();
+                    return Ok(s);
+                }
+                s.push(c);
+                self.chars.next();
+            }
+            Err(anyhow::anyhow!("Unclosed double quote"))
+        } else {
+            let mut s = String::new();
+            while let Some(&c) = self.chars.peek() {
+                if c == '&' || c == '|' || c == '(' || c == ')' || c.is_whitespace() {
+                    break;
+                }
+                s.push(c);
+                self.chars.next();
+            }
+            if s.is_empty() {
+                Err(anyhow::anyhow!("Empty value"))
+            } else {
+                Ok(s)
+            }
         }
-        if term.is_empty() { Err(anyhow::anyhow!("Empty term")) } else { Ok(term) }
     }
 
-    /// 空白文字をスキップします。
+    /// 指定された文字が現れるまで文字列を読み込みます（キーの解析用）。
+    fn read_string_until(&mut self, delimiter: char) -> Result<String> {
+        let mut s = String::new();
+        while let Some(&c) = self.chars.peek() {
+            if c == delimiter || c == '&' || c == '|' || c == '(' || c == ')' || c.is_whitespace() {
+                break;
+            }
+            s.push(c);
+            self.chars.next();
+        }
+        if s.is_empty() {
+            Err(anyhow::anyhow!("Empty identifier"))
+        } else {
+            Ok(s)
+        }
+    }
+
     fn skip_whitespace(&mut self) {
         while let Some(&c) = self.chars.peek() {
             if c.is_whitespace() { self.chars.next(); } else { break; }
         }
     }
 
-    /// キーと値から `TypedTag` を生成し、正規化を行います。
     fn create_typed_tag(&self, key: &str, value: &str) -> TypedTag {
         let key_str = key.to_lowercase();
         let mut val_str = value.to_string();
@@ -215,68 +210,47 @@ impl<'a> QueryParser<'a> {
             val_str = val_str.replace('\\', "/");
         }
 
-                TypedTag {
-
-                    tagtype: TagType(key_str),
-
-                    label: Label(val_str),
-
-                }
-
-            }
-
+        TypedTag {
+            tagtype: TagType(key_str),
+            label: Label(val_str),
         }
+    }
+}
 
-        
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        #[cfg(test)]
+    #[test]
+    fn test_query_types() {
+        let tt = TypedTag {
+            tagtype: TagType("extension".into()),
+            label: Label("rs".into()),
+        };
+        assert_eq!(tt.tagtype.0, "extension");
+        assert_eq!(tt.label.0, "rs");
+    }
 
-        mod tests {
-
-            use super::*;
-
-        
-
-            #[test]
-
-            fn test_query_types() {
-
-                let tt = TypedTag {
-
-                    tagtype: TagType(ExtensionFunction::NAME.to_string()),
-
-                    label: Label("rs".to_string()),
-
-                };
-
-                assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
-
-                assert_eq!(tt.label.0, "rs");
-
-            }
-
-        
-
-            #[test]
-
-            fn test_normalization_parse() {
-
-                let node = QueryParser::parse("EXTENSION:RS").unwrap();
-
-                if let QueryNode::TypedTag(tt) = node {
-
-                    assert_eq!(tt.tagtype.0, ExtensionFunction::NAME);
-
-                    assert_eq!(tt.label.0, "rs");
-
-                } else {
-
-                    panic!("Should be a TypedTag");
-
-                }
-
-            }
-
+    #[test]
+    fn test_normalization_parse() {
+        let node = QueryParser::parse("EXTENSION:RS").unwrap();
+        if let QueryNode::TypedTag(tt) = node {
+            assert_eq!(tt.tagtype.0, "extension");
+            assert_eq!(tt.label.0, "rs");
+        } else {
+            panic!("Should be a TypedTag");
         }
+    }
 
-        
+    #[test]
+    fn test_quoted_value_with_special_chars() {
+        let input = "file_id:\"Inode { device_id: 2096 }\"";
+        let node = QueryParser::parse(input).unwrap();
+        if let QueryNode::TypedTag(tt) = node {
+            assert_eq!(tt.tagtype.0, "file_id");
+            assert_eq!(tt.label.0, "Inode { device_id: 2096 }");
+        } else {
+            panic!("Should be a TypedTag");
+        }
+    }
+}

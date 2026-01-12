@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use crate::functions::{TagFunction, exists_in_tags};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
+use crate::db::{TargetTable, SqlType};
 use crate::types::TypedTag;
 
 // WIT定義から自動生成
@@ -84,14 +85,23 @@ impl WasmPlugin {
         let wasm_cols = interface
             .call_get_columns(&mut store)
             .context("Failed to call get_columns")?;
-        let columns = wasm_cols
-            .into_iter()
-            .map(|c| ColumnDef {
+
+        let mut columns = Vec::new();
+        for c in wasm_cols {
+            let sql_type = match c.sql_type.to_uppercase().as_str() {
+                "BIGINT" => SqlType::BIGINT,
+                "HUGEINT" | "UUID" => SqlType::UUID,
+                "BOOLEAN" => SqlType::BOOLEAN,
+                "VARCHAR" | "TEXT" => SqlType::VARCHAR,
+                other => SqlType::Other(other.to_string()),
+            };
+
+            columns.push(ColumnDef {
                 name: c.name,
-                sql_type: Box::leak(c.sql_type.into_boxed_str()),
-                target_table: crate::db::TargetTable::BaseTags,
-            })
-            .collect();
+                sql_type,
+                target_table: TargetTable::BaseTags,
+            });
+        }
 
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),

@@ -277,6 +277,25 @@ pub fn is_not_found_err(err: &ignore::Error) -> bool {
         .map_or(false, |io_e| io_e.kind() == std::io::ErrorKind::NotFound)
 }
 
+pub struct CustomExpr;
+
+impl CustomExpr {
+    /// DuckDB の `DISTINCT ON (col) *` 構文を構築します。
+    pub fn distinct_on_all<I>(col: I) -> sea_query::SimpleExpr
+    where
+        I: IntoIden + 'static,
+    {
+        sea_query::Expr::cust_with_exprs(
+            "DISTINCT ON ($1) *",
+            [sea_query::Expr::col(col).into()]
+        )
+    }
+}
+
+// ========================================================
+// Tests
+// ========================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;

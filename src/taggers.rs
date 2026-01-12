@@ -2,15 +2,15 @@ use anyhow::Result;
 use std::path::Path;
 use duckdb::types::{ToSql, ToSqlOutput, Null};
 
-use crate::db::TargetTable;
+use crate::db::{TargetTable, SqlType};
 
 /// データベースのカラム定義。
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     /// カラム名（例: "filename"）
     pub name: String,
-    /// SQLのデータ型（例: "TEXT", "BIGINT"）
-    pub sql_type: &'static str,
+    /// SQLのデータ型
+    pub sql_type: SqlType,
     /// 所属テーブル
     pub target_table: TargetTable,
 }
@@ -20,6 +20,7 @@ pub struct ColumnDef {
 pub enum TagValue {
     Text(String),
     BigInt(i64),
+    Uuid(uuid::Uuid),
     Boolean(bool),
     Null,
     #[allow(dead_code)]
@@ -32,6 +33,7 @@ impl TagValue {
         match self {
             TagValue::Text(s) => Some(s),
             TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Uuid(u) => Some(u.to_string()),
             TagValue::Boolean(b) => Some(b.to_string()),
             _ => None,
         }
@@ -42,6 +44,7 @@ impl TagValue {
         match self {
             TagValue::Text(s) => Some(s.clone()),
             TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Uuid(u) => Some(u.to_string()),
             TagValue::Boolean(b) => Some(b.to_string()),
             _ => None,
         }
@@ -53,6 +56,7 @@ impl ToSql for TagValue {
         match self {
             TagValue::Text(s) => Ok(ToSqlOutput::from(s.as_str())),
             TagValue::BigInt(i) => Ok(ToSqlOutput::from(*i)),
+            TagValue::Uuid(u) => Ok(ToSqlOutput::from(*u)),
             TagValue::Boolean(b) => Ok(ToSqlOutput::from(*b)),
             TagValue::Null => Ok(ToSqlOutput::from(Null)),
             TagValue::Map(_) => Ok(ToSqlOutput::from(Null)),

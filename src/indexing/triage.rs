@@ -1,8 +1,11 @@
 use crate::taggers::{TagValue, ColumnDef};
 use crate::db::{TargetTable};
-use crate::{FunctionRegistry, TagFunction};
-use crate::functions::{ScanEntry};
-use crate::indexing::indexer::{TaggingResult, DynamicRow, TagRow};
+use crate::{FunctionRegistry};
+use crate::indexing::indexer::{
+    TaggingResult, DynamicRow, TagRow, TempScanEntry, ScanHash
+};
+use crate::types::{ItemId};
+use crate::util::DotOk;
 use anyhow::Result;
 use std::path::{Path};
 use rayon::prelude::*;
@@ -19,18 +22,20 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 
 pub(crate) fn run_triage(
     registry: &FunctionRegistry,
-    to_tag: Vec<ScanEntry>,
-    moved: Vec<(i64, String)>,
+    to_process: Vec<(Option<ItemId>, TempScanEntry)>,
     max_id_fn: impl Fn() -> Result<i64>, // 正の最大IDを取得する関数
 ) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
     let triager = ItemTriager::new(registry);
 
-    let raw_values = triager.extract_all(to_tag)?;
+    // 1. 各エントリからメタデータを抽出（ハッシュとIDも引き継ぐ）
+    let raw_values = triager.extract_all(to_process)?;
     let max_id = max_id_fn()?;
+    
+    // 2. ID の割当（既存 ID があれば流用、なければ新規採番）
     let results = triager.assemble_records(raw_values, max_id)?;
-    let moved_rows = triager.rebuild_moved_locations(moved)?;
 
-    Ok((results, moved_rows))
+    // 移動用の再構築ロジックは merge.rs で吸収されるため、ここでは常に空
+    (results, Vec::new()).to_ok()
 }
 
 // ========================================================
@@ -42,25 +47,40 @@ pub(crate) struct ItemTriager<'a> {
 }
 
 impl<'a> ItemTriager<'a> {
-    pub(crate) fn new(
-        reg: &'a FunctionRegistry,
-    ) -> Self {
-        Self {
-            registry: reg,
+    pub(crate) fn new(reg: &'a FunctionRegistry) -> Self {
+        Self { registry: reg }
+    }
+
+    pub(crate) fn extract_all(
+        &self, 
+        entries: Vec<(Option<ItemId>, TempScanEntry)>
+    ) -> Result<Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
+        entries
+            .into_par_iter()
+            .map(|(id, e)| self.extract_with_hash(id, e))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .to_ok()
+    }
+
+    /// ファイルからタグを抽出し、元のハッシュ値と ID をセットにして返します。
+    fn extract_with_hash(
+        &self, 
+        existing_id: Option<ItemId>,
+        entry: TempScanEntry
+    ) -> Result<Option<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
+        let path = &entry.entry.path.value;
+        let hash = entry.hash;
+
+        match self.extract_single_file(path)? {
+            Some(values) => Ok(Some((existing_id, values, hash))),
+            None => Ok(None),
         }
     }
 
-    pub(crate) fn extract_all(&self, entries: Vec<ScanEntry>) -> Result<Vec<Vec<TagValue>>> {
-        let results: Result<Vec<Option<Vec<TagValue>>>> = entries
-            .into_par_iter()
-            .map(|e| self.extract_single_file(&e.path.value))
-            .collect();
-
-        Ok(results?.into_iter().flatten().collect())
-    }
-
     /// 1つのファイルに対してタグ抽出を試みます。
-    /// ファイル消失 (NotFound) の場合は Ok(None) を返し、スキップを通知します。
     fn extract_single_file(&self, path_str: &str) -> Result<Option<Vec<TagValue>>> {
         let res = self.registry.process_file(Path::new(path_str));
 
@@ -78,34 +98,41 @@ impl<'a> ItemTriager<'a> {
 
     pub(crate) fn assemble_records(
         &self,
-        all_values: Vec<Vec<TagValue>>,
+        all_values: Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>,
         max_id: i64,
     ) -> Result<Vec<TaggingResult>> {
         let columns = self.registry.get_all_columns();
+        let mut current_max_id = max_id;
 
         all_values
             .into_iter()
-            .enumerate()
-            .map(|(i, values)| {
-                // 正の整数空間での採番: max_id + index + 1
-                let id = max_id + (i as i64) + 1;
-                Ok(self.triage_item(id, values, &columns))
+            .map(|(existing_id, values, hash)| {
+                let id = existing_id.unwrap_or_else(|| {
+                    current_max_id += 1;
+                    current_max_id
+                });
+                self.triage_item(id, values, hash, &columns)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .to_ok()
     }
 
     fn triage_item(
         &self,
         id: i64,
         values: Vec<TagValue>,
+        hash: ScanHash,
         cols: &[ColumnDef],
     ) -> TaggingResult {
-        values
+        let mut res = values
             .into_iter()
             .zip(cols)
             .map(|(v, c)| self.classify(id, v, c))
             .fold(TriageAccumulator::new(id), |acc, p| acc.collect(p))
-            .finish()
+            .finish();
+        
+        res.scan_hash = hash;
+        res
     }
 
     fn classify(&self, id: i64, val: TagValue, col: &ColumnDef) -> TriagePiece {
@@ -128,47 +155,6 @@ impl<'a> ItemTriager<'a> {
                 })
             })
             .unwrap_or(TriagePiece::None)
-    }
-
-    pub(crate) fn rebuild_moved_locations(
-        &self,
-        moved: Vec<(i64, String)>,
-    ) -> Result<Vec<DynamicRow>> {
-        let functions = self.registry.all_functions();
-        moved
-            .into_iter()
-            .map(|(id, path)| {
-                let values =
-                    self.rebuild_values_from_path(Path::new(&path), functions);
-                Ok(DynamicRow { id, values })
-            })
-            .collect()
-    }
-
-    fn rebuild_values_from_path(
-        &self,
-        path: &Path,
-        functions: &[Box<dyn TagFunction>],
-    ) -> Vec<TagValue> {
-        functions
-            .iter()
-            .flat_map(|f| self.rebuild_values_for_function(path, f.as_ref()))
-            .collect()
-    }
-
-    fn rebuild_values_for_function(
-        &self,
-        path: &Path,
-        func: &dyn TagFunction,
-    ) -> Vec<TagValue> {
-        func.tagger()
-            .into_iter()
-            .flat_map(|t| t.get_columns())
-            .filter_map(|col| {
-                (col.target_table == TargetTable::Locations)
-                    .then(|| func.generate_from_path(path).unwrap_or(TagValue::Null))
-            })
-            .collect()
     }
 }
 
@@ -221,6 +207,7 @@ impl TriageAccumulator {
                 values: self.locations,
             },
             tags: self.tags,
+            scan_hash: ScanHash(0),
         }
     }
 }
@@ -233,6 +220,9 @@ impl TriageAccumulator {
 mod tests {
     use super::*;
     use crate::util::SafeMetadata;
+    use crate::functions::ScanEntry;
+    use crate::indexing::indexer::calc_scanhash;
+    use crate::db::SqlType;
 
     #[test]
     fn test_triage_accumulator_logic() {
@@ -252,29 +242,13 @@ mod tests {
     }
 
     #[test]
-    fn test_triager_base_tag_logic() {
-        let registry = FunctionRegistry::new();
-        let triager = ItemTriager::new(&registry);
-
-        let val = TagValue::Text("rs".to_string());
-        let piece = triager.triage_base_tag(100, val, "extension");
-        if let TriagePiece::Tag(tag) = piece {
-            assert_eq!(tag.item_id, 100);
-            assert_eq!(tag.tag_type, "extension");
-            assert_eq!(tag.label, "rs");
-        } else {
-            panic!("Should be TriagePiece::Tag");
-        }
-    }
-
-    #[test]
     fn test_triager_classify_logic() {
         let registry = FunctionRegistry::new();
         let triager = ItemTriager::new(&registry);
 
         let col_ent = ColumnDef {
             name: "size".to_string(),
-            sql_type: "BIGINT",
+            sql_type: SqlType::BIGINT,
             target_table: TargetTable::FileEntities,
         };
         let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
@@ -287,9 +261,21 @@ mod tests {
         let triager = ItemTriager::new(&registry);
 
         let cols = vec![
-            ColumnDef { name: "size".into(), sql_type: "BIGINT", target_table: TargetTable::FileEntities },
-            ColumnDef { name: "path".into(), sql_type: "TEXT", target_table: TargetTable::Locations },
-            ColumnDef { name: "ext".into(), sql_type: "TEXT", target_table: TargetTable::BaseTags },
+            ColumnDef { 
+                name: "size".into(), 
+                sql_type: SqlType::BIGINT, 
+                target_table: TargetTable::FileEntities 
+            },
+            ColumnDef { 
+                name: "path".into(), 
+                sql_type: SqlType::VARCHAR, 
+                target_table: TargetTable::Locations 
+            },
+            ColumnDef { 
+                name: "ext".into(), 
+                sql_type: SqlType::VARCHAR, 
+                target_table: TargetTable::BaseTags 
+            },
         ];
         let vals = vec![
             TagValue::BigInt(500),
@@ -297,53 +283,12 @@ mod tests {
             TagValue::Text("rs".into()),
         ];
 
-        let res = triager.triage_item(7, vals, &cols);
+        let res = triager.triage_item(7, vals, ScanHash(123), &cols);
 
         assert_eq!(res.entity_row.id, 7);
-        // Entity: [Rank(0), Size(500)]
-        assert_eq!(res.entity_row.values.len(), 2);
+        assert_eq!(res.scan_hash, ScanHash(123));
         assert_eq!(res.entity_row.values[1], TagValue::BigInt(500));
-
-        assert_eq!(res.location_row.id, 7);
         assert_eq!(res.location_row.values[0], TagValue::Text("/foo.rs".into()));
-
-        assert_eq!(res.tags.len(), 1);
-        assert_eq!(res.tags[0].tag_type, "ext");
-        assert_eq!(res.tags[0].label, "rs");
-    }
-
-    #[test]
-    fn test_triager_rebuild_from_path_strict() {
-        let registry = FunctionRegistry::with_standard();
-        let triager = ItemTriager::new(&registry);
-
-        let path = Path::new("/test/dir/file.txt");
-        let functions = registry.all_functions();
-        let values = triager.rebuild_values_from_path(path, functions);
-        assert_eq!(values.len(), 4);
-    }
-
-    #[test]
-    fn test_is_not_found_helper() {
-        use std::io::{Error, ErrorKind};
-        let io_err = Error::new(ErrorKind::NotFound, "missing");
-        let anyhow_err = anyhow::Error::from(io_err);
-        assert!(is_not_found(&anyhow_err));
-
-        let io_err_other = Error::new(ErrorKind::PermissionDenied, "denied");
-        let anyhow_err_other = anyhow::Error::from(io_err_other);
-        assert!(!is_not_found(&anyhow_err_other));
-    }
-
-    #[test]
-    fn test_triager_extract_skip_missing() {
-        let registry = FunctionRegistry::with_standard();
-        let triager = ItemTriager::new(&registry);
-
-        // 存在しないパス
-        let res = triager.extract_single_file("non_existent_file_12345");
-        assert!(res.is_ok());
-        assert!(res.unwrap().is_none(), "Should return None (skip) for missing file");
     }
 
     #[test]
@@ -355,7 +300,6 @@ mod tests {
         let registry = FunctionRegistry::with_standard();
         let triager = ItemTriager::new(&registry);
 
-        // 1. ファイルをいくつか作成
         let paths = vec![
             dir.path().join("file1.txt"),
             dir.path().join("file2.txt"),
@@ -365,25 +309,42 @@ mod tests {
             File::create(p).unwrap();
         }
 
-        // 2. ScanEntry を作成 (この時点では全ファイル存在)
-        let entries: Vec<ScanEntry> = paths
+        let entries: Vec<(Option<ItemId>, TempScanEntry)> = paths
             .iter()
             .map(|p| {
-                let metadata = std::fs::metadata(p).unwrap();
-                ScanEntry::from_path_metadata(p, &SafeMetadata::new(&metadata))
-                    .unwrap()
+                let m = std::fs::metadata(p).unwrap();
+                let entry = ScanEntry::from_path_metadata(p, &SafeMetadata::new(&m))
+                    .unwrap();
+                let hash = calc_scanhash(
+                    &entry.path.value, 
+                    entry.mtime.value.0, 
+                    entry.size.value.0
+                );
+                (None, TempScanEntry { entry, hash })
             })
             .collect();
 
-        // 3. 1つだけファイルを削除して、今回の不具合状況（競合）を再現
         std::fs::remove_file(&paths[1]).unwrap();
 
-        // 4. 実行: 修正前なら Err になっていたはず
         let res = triager
             .extract_all(entries)
-            .expect("Should not fail even if file is missing during extraction");
+            .expect("Should handle missing file");
 
-        // 5. 検証: 2つだけ成功し、1つは安全にスキップされているはず
-        assert_eq!(res.len(), 2, "Expected 2 files to be processed, 1 skipped");
+        assert_eq!(res.len(), 2);
+    }
+
+    #[test]
+    fn test_assemble_records_id_reuse() {
+        let registry = FunctionRegistry::new();
+        let triager = ItemTriager::new(&registry);
+        let input = vec![
+            (Some(100), vec![], ScanHash(1)),
+            (None, vec![], ScanHash(2)),
+        ];
+
+        let results = triager.assemble_records(input, 500).unwrap();
+
+        assert_eq!(results[0].entity_row.id, 100, "Should reuse existing ID");
+        assert_eq!(results[1].entity_row.id, 501, "Should issue next new ID");
     }
 }

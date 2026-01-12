@@ -61,9 +61,9 @@ Create a desktop interface for ease of use.
 ### 6. Schema Redesign & Origin Management (v0.2.0)
 Transition to a robust schema that separates system-generated metadata from user-defined tags.
 
-- [ ] **Home Directory Support**:
-    - [ ] Switch storage/config location to `~/.ttfm` (Linux) / `%USERPROFILE%\.ttfm` (Windows).
-    - [ ] Remove current directory dependency.
+- [x] **Home Directory Support**:
+    - [x] Switch storage/config location to `~/.ttfm` (Linux) / `%USERPROFILE%\.ttfm` (Windows).
+    - [x] Remove current directory dependency.
 
 - [x] **Database Schema Migration**:
     - [x] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
@@ -74,7 +74,7 @@ Transition to a robust schema that separates system-generated metadata from user
     - [x] Implement `name` tag support in query parser and search results.
     - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
-- [ ] **Entity-Based Location Management**: Support multiple locations per item (e.g., hard links) and replace "move detection" with robust location synchronization.
+- [x] **Entity-Based Location Management**: Support multiple locations per item (e.g., hard links) and replace "move detection" with robust location synchronization.
 
 ### 7. File Operations
 Directly interact with files from the CLI.
@@ -97,8 +97,8 @@ Directly interact with files from the CLI.
 
   - [x] Generalized file move detection logic to be implementation-agnostic.
 
-- [ ] **Phase 1.5: Indexing Optimization & Robustness**:
-  - [ ] **Avoid redundant metadata calls**: Update `FunctionRegistry::process_file` and `Tagger::tag_file` to accept optional metadata. Pass `ScanEntry` metadata from `ItemTriager` to prevent redundant `fs::metadata` calls and "file not found" errors during indexing.
+- [x] **Phase 1.5: Indexing Optimization & Robustness**:
+  - [x] **Avoid redundant metadata calls**: (Implemented via hash-based early filtering and UUID-based identity tracking).
 
 - [ ] **Phase 2: Plugin System Optimization**:
 
@@ -113,11 +113,11 @@ Directly interact with files from the CLI.
   - [ ] Standardize error messages for invalid queries.
 
 - [ ] **Identity & Location Management**:
-  - [ ] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.
+  - [x] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.
   - [ ] **Multi-Layer Identity Verification**: Support identity matching using FileID, Hash (MD5/SHA256), or Name+Size+Mtime heuristics.
   - [ ] **Online File Support**: Integrate `RemoteID` (ETag/VersionID) into the location identity model.
   - [ ] **Split & Merge Commands**: Implement `ttfm split` to separate multi-location items and `ttfm merge` to combine identical entities.
 
-- [ ] **Benchmark**: Validate performance on extreme datasets (1M+ files).
+- [x] **Benchmark**: Validate performance on extreme datasets (1M+ files).
 
 - [ ] **Test Coverage**: Add more edge cases for Windows paths and complex boolean logic.

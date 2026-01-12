@@ -85,10 +85,11 @@ macro_rules! define_scan_entry {
 
             /// カラム名と型のペアの識別子リストを取得します。
             pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)> {
+                use sea_query::IntoIden;
                 Self::schema().into_iter().map(|cd| {
                     (
                         Self::name_to_iden(&cd.name),
-                        $crate::util::alias_from(cd.sql_type),
+                        cd.sql_type.into_iden(),
                     )
                 }).collect()
             }
@@ -113,9 +114,14 @@ macro_rules! define_scan_entry {
 
             /// DuckDBの行(`row`)から `ScanEntry` を生成します。
             pub fn from_row(row: &duckdb::Row) -> duckdb::Result<Self> {
+                Self::from_row_with_offset(row, 0)
+            }
+
+            /// 指定されたオフセットから DuckDBの行(`row`)を読み込み `ScanEntry` を生成します。
+            pub fn from_row_with_offset(row: &duckdb::Row, offset: usize) -> duckdb::Result<Self> {
                 #[allow(unused_imports)]
                 use $crate::util::DotOk;
-                let mut _idx = 0;
+                let mut _idx = offset;
 
                 $( let $name = $crate::macros::read_next_field::<$func>(row, &mut _idx)?; )*
 
