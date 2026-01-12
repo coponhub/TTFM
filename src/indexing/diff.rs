@@ -1,10 +1,12 @@
-use crate::functions::{ScanEntry, ScanRole};
+use crate::functions::{ScanEntry};
 use crate::db::{Tbl, Col, TargetTable, Store};
 use crate::util::{self};
+use crate::types::{ItemId};
+use super::indexer::{TempScanEntry, ScanEntryLoader};
 use anyhow::Result;
 use duckdb::{Connection};
 use sea_query::{
-    Query, Expr, Condition, JoinType, PostgresQueryBuilder, 
+    Query, Expr, JoinType, PostgresQueryBuilder, 
     SelectStatement
 };
 use std::path::{Path};
@@ -14,20 +16,24 @@ use std::path::{Path};
 // ========================================================
 
 pub(crate) fn run_diff(conn: &Connection, store: &Store) -> Result<IndexDiff> {
-    let diff = DiffAuditor::new(store);
+    let auditor = DiffAuditor::new(store);
 
-    if diff.is_initial() {
+    if auditor.is_initial() {
         return Ok(IndexDiff {
-            to_tag: diff.query_all().fetch_entries(conn)?,
+            to_process: auditor.query_all_scanned().fetch_with_ids(conn)?,
             ..Default::default()
         });
     }
 
+    // 1. 今回スキャンされたエントリに対し、既存の Inode を持っていればその ID を特定
+    let to_process = auditor.query_with_existing_ids().fetch_with_ids(conn)?;
+
+    // 2. 削除対象の特定（生存リストにも、今回のスキャン結果にも載っていない既存 ID）
+    let deleted_ids = auditor.query_deleted().fetch_ids(conn)?;
+
     Ok(IndexDiff {
-        to_tag: diff.query_to_tag().fetch_entries(conn)?,
-        moved: diff.query_moved().fetch_moved(conn)?,
-        deleted_ids: diff.query_deleted().fetch_ids(conn)?,
-        unchanged_ids: diff.query_unchanged().fetch_ids(conn)?,
+        to_process,
+        deleted_ids,
     })
 }
 
@@ -37,8 +43,8 @@ pub(crate) fn run_diff(conn: &Connection, store: &Store) -> Result<IndexDiff> {
 
 pub(crate) struct DiffAuditor {
     scan: String,
+    live: String,
     ents: String,
-    locs: String,
 }
 
 impl DiffAuditor {
@@ -46,8 +52,8 @@ impl DiffAuditor {
         let path = |t| store.path_for_target(t).to_string_lossy().into_owned();
         Self {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
+            live: store.temp_live_path().to_string_lossy().into_owned(),
             ents: path(TargetTable::FileEntities),
-            locs: path(TargetTable::Locations),
         }
     }
 
@@ -55,155 +61,54 @@ impl DiffAuditor {
         !Path::new(&self.ents).exists()
     }
 
-    pub(crate) fn query_all(&self) -> SelectStatement {
+    /// 今回スキャンされた全データを取得（ID未定として扱う）
+    pub(crate) fn query_all_scanned(&self) -> SelectStatement {
         Query::select()
-            .columns(ScanEntry::column_idens())
+            .expr_as(Expr::cust("NULL"), Col::ItemId)
+            .columns(TempScanEntry::columns_with_type().into_iter().map(|(c, _)| c))
             .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
             .to_owned()
     }
 
-    pub(crate) fn query_to_tag(&self) -> SelectStatement {
-        AuditQueryParts::to_tag(&self.scan, &self.ents)
-    }
-
-    pub(crate) fn query_moved(&self) -> SelectStatement {
-        AuditQueryParts::moved(&self.scan, &self.ents, &self.locs)
-    }
-
-    pub(crate) fn query_deleted(&self) -> SelectStatement {
-        AuditQueryParts::deleted(&self.scan, &self.ents)
-    }
-
-    pub(crate) fn query_unchanged(&self) -> SelectStatement {
-        AuditQueryParts::unchanged(&self.scan, &self.ents, &self.locs)
-    }
-}
-
-// ========================================================
-// 2. Query Builder for Auditing
-// ========================================================
-
-struct AuditQueryParts;
-
-impl AuditQueryParts {
-    fn join_by_role(left: Tbl, right: Tbl, role: ScanRole) -> Condition {
-        let col_eq = |col: sea_query::DynIden| {
-            Expr::col((left, col.clone())).eq(Expr::col((right, col)))
-        };
-
-        ScanEntry::schema()
-            .iter()
-            .filter(|cd| cd.role == role)
-            .map(|cd| col_eq(util::col_to_iden(cd.name)))
-            .fold(Condition::all(), Condition::add)
-    }
-
-    fn join_ent_scan(role: ScanRole) -> Condition {
-        Self::join_by_role(Tbl::FileEntities, Tbl::Scan, role)
-    }
-
-    fn to_tag(scan_path: &str, entities_path: &str) -> SelectStatement {
-        let sub_exists = Query::select()
-            .expr(Expr::val(1))
-            .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)
-            .cond_where(Self::join_ent_scan(ScanRole::ScanId))
-            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
-            .to_owned();
-
-        let columns = ScanEntry::schema()
-            .iter()
-            .map(|c| {
-                let col = util::col_to_iden(c.name);
-                (Tbl::Scan, col)
-            })
-            .collect::<Vec<_>>();
-
-        Query::select()
-            .columns(columns)
-            .from_subquery(util::parquet_query(scan_path), Tbl::Scan)
-            .and_where(Expr::exists(sub_exists).not())
-            .to_owned()
-    }
-
-    fn moved(
-        scan_path: &str,
-        entities_path: &str,
-        loc_path: &str,
-    ) -> SelectStatement {
-        let path_name = ScanEntry::schema()[0].name;
-        let col_path = util::col_to_iden(path_name);
+    /// スキャン結果と既存 DB を Inode で JOIN し、既存 ID を特定するクエリ
+    pub(crate) fn query_with_existing_ids(&self) -> SelectStatement {
+        let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
+        
         Query::select()
             .column((Tbl::FileEntities, Col::ItemId))
-            .column((Tbl::Scan, col_path.clone()))
-            .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)
-            .join_subquery(
-                JoinType::InnerJoin,
-                util::parquet_query(scan_path),
-                Tbl::Scan,
-                Self::join_ent_scan(ScanRole::ScanId),
-            )
-            .join_subquery(
-                JoinType::InnerJoin,
-                util::parquet_query(loc_path),
-                Tbl::Locations,
-                Expr::col((Tbl::FileEntities, Col::ItemId))
-                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
-            )
-            .and_where(
-                Expr::col((Tbl::Locations, Col::Path)).ne(Expr::col((Tbl::Scan, col_path))),
-            )
-            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
-            .to_owned()
-    }
-
-    fn deleted(scan_path: &str, entities_path: &str) -> SelectStatement {
-        let path_name = ScanEntry::schema()[0].name;
-        let col_path = util::col_to_iden(path_name);
-        let join_cond = Condition::all()
-            .add(Self::join_ent_scan(ScanRole::ScanId))
-            .add(Self::join_ent_scan(ScanRole::Integrity));
-
-        Query::select()
-            .column((Tbl::FileEntities, Col::ItemId))
-            .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)
+            .columns(TempScanEntry::columns_with_type().into_iter().map(|(c, _)| (Tbl::Scan, c)))
+            .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
             .join_subquery(
                 JoinType::LeftJoin,
-                util::parquet_query(scan_path),
-                Tbl::Scan,
-                join_cond,
+                util::parquet_query(&self.ents),
+                Tbl::FileEntities,
+                Expr::col((Tbl::Scan, col_file_id.clone())).eq(Expr::col((Tbl::FileEntities, col_file_id)))
             )
-            .and_where(Expr::col((Tbl::Scan, col_path)).is_null())
             .to_owned()
     }
 
-    fn unchanged(
-        scan_path: &str,
-        entities_path: &str,
-        loc_path: &str,
-    ) -> SelectStatement {
-        let path_name = ScanEntry::schema()[0].name;
-        let col_path = util::col_to_iden(path_name);
-        Query::select()
-            .column((Tbl::FileEntities, Col::ItemId))
-            .from_subquery(util::parquet_query(entities_path), Tbl::FileEntities)
-            .join_subquery(
-                JoinType::InnerJoin,
-                util::parquet_query(scan_path),
-                Tbl::Scan,
-                Self::join_ent_scan(ScanRole::ScanId),
-            )
-            .join_subquery(
-                JoinType::InnerJoin,
-                util::parquet_query(loc_path),
-                Tbl::Locations,
-                Expr::col((Tbl::FileEntities, Col::ItemId))
-                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
-            )
-            .and_where(
-                Expr::col((Tbl::Locations, Col::Path)).eq(Expr::col((Tbl::Scan, col_path))),
-            )
-            .cond_where(Self::join_ent_scan(ScanRole::Integrity))
-            .to_owned()
+    /// 削除判定：生存リスト(live)にも、変更(scan)にも載っていない既存 ID
+    pub(crate) fn query_deleted(&self) -> SelectStatement {
+        let mut q = Query::select();
+        q.column(Col::ItemId).from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities);
+
+        let mut live_q = Query::select();
+        live_q.column(Col::ItemId).from_subquery(util::parquet_query(&self.live), Tbl::Live);
+        q.union(sea_query::UnionType::Except, live_q);
+
+        let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
+        let mut scan_q = Query::select();
+        scan_q.column((Tbl::FileEntities, Col::ItemId))
+              .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
+              .join_subquery(
+                  JoinType::InnerJoin, 
+                  util::parquet_query(&self.scan), 
+                  Tbl::Scan, 
+                  Expr::col((Tbl::FileEntities, col_file_id.clone())).eq(Expr::col((Tbl::Scan, col_file_id)))
+              );
+        q.union(sea_query::UnionType::Except, scan_q);
+
+        q
     }
 }
 
@@ -212,37 +117,30 @@ impl AuditQueryParts {
 // ========================================================
 
 pub(crate) trait SelectFetchExt {
-    fn fetch_entries(&self, conn: &Connection) -> Result<Vec<ScanEntry>>;
-    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<i64>>;
-    fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>>;
-}
-
-fn fetch_rows<T, F>(
-    stmt: &SelectStatement,
-    conn: &Connection,
-    mapper: F,
-) -> Result<Vec<T>>
-where
-    F: FnMut(&duckdb::Row<'_>) -> duckdb::Result<T>,
-{
-    let sql = stmt.to_string(PostgresQueryBuilder);
-    conn.prepare(&sql)?
-        .query_map([], mapper)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    fn fetch_with_ids(&self, conn: &Connection) -> Result<Vec<(Option<ItemId>, TempScanEntry)>>;
+    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<ItemId>>;
 }
 
 impl SelectFetchExt for SelectStatement {
-    fn fetch_entries(&self, conn: &Connection) -> Result<Vec<ScanEntry>> {
-        fetch_rows(self, conn, |row| ScanEntry::from_row(row))
+    fn fetch_with_ids(&self, conn: &Connection) -> Result<Vec<(Option<ItemId>, TempScanEntry)>> {
+        let loader = ScanEntryLoader::new();
+        let sql = self.to_string(PostgresQueryBuilder);
+        conn.prepare(&sql)?
+            .query_map([], |row| {
+                let id: Option<ItemId> = row.get(0)?;
+                let entry = TempScanEntry::from_row_with_offset(row, 1, &loader)?;
+                Ok((id, entry))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
-    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<i64>> {
-        fetch_rows(self, conn, |row| row.get(0))
-    }
-
-    fn fetch_moved(&self, conn: &Connection) -> Result<Vec<(i64, String)>> {
-        fetch_rows(self, conn, |row| Ok((row.get(0)?, row.get(1)?)))
+    fn fetch_ids(&self, conn: &Connection) -> Result<Vec<ItemId>> {
+        let sql = self.to_string(PostgresQueryBuilder);
+        conn.prepare(&sql)?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }
 
@@ -252,10 +150,8 @@ impl SelectFetchExt for SelectStatement {
 
 #[derive(Default)]
 pub(crate) struct IndexDiff {
-    pub to_tag: Vec<ScanEntry>,
-    pub moved: Vec<(i64, String)>,
-    pub deleted_ids: Vec<i64>,
-    pub unchanged_ids: Vec<i64>,
+    pub to_process: Vec<(Option<ItemId>, TempScanEntry)>,
+    pub deleted_ids: Vec<ItemId>,
 }
 
 #[cfg(test)]
@@ -264,39 +160,10 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_diff_auditor_logic() {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join("db");
-        let store = Store::new(db_dir);
-
-        // 1. 初回スキャンのテスト
-        let diff = DiffAuditor::new(&store);
-        assert!(diff.is_initial());
-        let sql = diff.query_all().to_string(PostgresQueryBuilder);
-        assert!(sql.contains("read_parquet"));
-
-        // 2. 既存DBがある場合のテスト
-        std::fs::create_dir_all(&store.db_dir).unwrap();
-        std::fs::write(store.path_for_target(TargetTable::FileEntities), "").unwrap();
-        let diff2 = DiffAuditor::new(&store);
-        assert!(!diff2.is_initial());
-    }
-
-    #[test]
-    fn test_diff_auditor_sql_generation() {
+    fn test_diff_auditor_initial() {
         let dir = tempdir().unwrap();
         let store = Store::new(dir.path().to_path_buf());
         let auditor = DiffAuditor::new(&store);
-
-        let sql_to_tag = auditor.query_to_tag().to_string(PostgresQueryBuilder);
-        assert!(sql_to_tag.contains("NOT EXISTS"));
-
-        let sql_moved = auditor.query_moved().to_string(PostgresQueryBuilder);
-        assert!(sql_moved.contains("JOIN"));
-        assert!(sql_moved.contains("<>"));
-
-        let sql_deleted = auditor.query_deleted().to_string(PostgresQueryBuilder);
-        assert!(sql_deleted.contains("LEFT JOIN"));
-        assert!(sql_deleted.contains("IS NULL"));
+        assert!(auditor.is_initial());
     }
 }

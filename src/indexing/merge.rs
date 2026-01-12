@@ -1,7 +1,7 @@
 use crate::taggers::{ColumnDef};
 use crate::db::{Tbl, Col, SqlType, TargetTable, Store};
 use crate::{FunctionRegistry};
-use crate::util::{self, ExecuteSql, ParquetExt};
+use crate::util::{self, ExecuteSql, ParquetExt, IdenExt};
 use crate::indexing::indexer::{TaggingResult, DynamicRow};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
@@ -22,22 +22,27 @@ pub(crate) fn run_merge(
     results: Vec<TaggingResult>,
     moved: Vec<DynamicRow>,
     deleted_ids: Vec<i64>,
-    unchanged_ids: Vec<i64>,
     temp_scan_path: &Path,
+    temp_live_path: &Path,
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
 ) -> Result<()> {
-    if results.is_empty() && moved.is_empty() && deleted_ids.is_empty() {
-        return Ok(());
-    }
+    // 各テーブルの取り込みと同期を実行
+    let ent = FileEntityMerger { conn, registry, store }
+        .prepare()?
+        .ingest(&results)?
+        .sync(&deleted_ids)?;
+    
+    let loc = LocationMerger { conn, registry, store }
+        .prepare()?
+        .ingest(&results, &moved)?
+        .sync(temp_live_path)?;
+    
+    let tag = BaseTagMerger { conn, registry, store }
+        .prepare()?
+        .ingest(&results)?
+        .sync(&deleted_ids)?;
 
-    let has_updates = !results.is_empty() || !moved.is_empty();
-
-    // Ingest and Sync each table
-    let ent = FileEntityMerger { conn, registry, store }.prepare()?.ingest(&results)?.sync(&deleted_ids)?;
-    let loc = LocationMerger { conn, registry, store }.prepare()?.ingest(&results, &moved)?.sync(&unchanged_ids)?;
-    let tag = BaseTagMerger { conn, registry, store }.prepare()?.ingest(&results)?.sync(&deleted_ids)?;
-
-    if has_updates {
+    if !results.is_empty() || !moved.is_empty() {
         let tags = MergeQueryParts::diff_tags(&registry.get_all_columns());
         let candidates_data = MergeQueryParts::expand_variants(tags);
         update_sys_fn(Some(candidates_data))?;
@@ -47,7 +52,9 @@ pub(crate) fn run_merge(
     loc.cleanup()?;
     tag.cleanup()?;
 
+    // 一時ファイルを削除してクリーンアップ
     std::fs::remove_file(temp_scan_path).ok();
+    std::fs::remove_file(temp_live_path).ok();
     Ok(())
 }
 
@@ -64,13 +71,12 @@ pub(crate) struct FileEntityMerger<'a> {
 impl<'a> FileEntityMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
-        crate::db::Schema::build_table(
-                TargetTable::FileEntities,
-                Tbl::FileEntitiesDiff,
-                &all_cols,
-            )
-            .temporary()
-            .execute(self.conn)?;
+        let mut create_stmt = crate::db::Schema::build_table(
+            TargetTable::FileEntities,
+            Tbl::FileEntitiesDiff,
+            &all_cols,
+        );
+        create_stmt.temporary().execute(self.conn)?;
         Ok(self)
     }
 
@@ -78,12 +84,13 @@ impl<'a> FileEntityMerger<'a> {
         if results.is_empty() {
             return Ok(self);
         }
-        let mut app = self.conn.appender(
-            &Tbl::FileEntitiesDiff.to_string().replace('"', ""),
-        )?;
+        let table_name = Tbl::FileEntitiesDiff.to_string().replace('"', "");
+        let mut app = self.conn.appender(&table_name)?;
+        
         for res in results {
             let mut er = vec![&res.entity_row.id as &dyn ToSql];
             er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
+            er.push(&res.scan_hash as &dyn ToSql);
             app.append_row(er.as_slice())?;
         }
         Ok(self)
@@ -103,7 +110,6 @@ impl<'a> FileEntityMerger<'a> {
     }
 
     pub(crate) fn cleanup(self) -> Result<()> {
-        use crate::util::IdenExt;
         Tbl::FileEntitiesDiff.drop_table(self.conn).ok();
         Ok(())
     }
@@ -132,9 +138,9 @@ impl<'a> LocationMerger<'a> {
         if results.is_empty() && moved.is_empty() {
             return Ok(self);
         }
-        let mut app = self.conn.appender(
-            &Tbl::LocationsDiff.to_string().replace('"', ""),
-        )?;
+        let table_name = Tbl::LocationsDiff.to_string().replace('"', "");
+        let mut app = self.conn.appender(&table_name)?;
+        
         for res in results {
             let mut lr = vec![&res.location_row.id as &dyn ToSql];
             lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
@@ -148,25 +154,23 @@ impl<'a> LocationMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self, unchanged_ids: &[i64]) -> Result<Self> {
+    pub(crate) fn sync(self, live_path: &Path) -> Result<Self> {
+        let path_str = live_path.to_string_lossy();
+        let live_query = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(util::parquet_query(&path_str), Tbl::Live)
+            .to_owned();
+
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
-            if unchanged_ids.is_empty() {
-                Some(Condition::all().add(Expr::val(1).eq(0)))
-            } else {
-                Some(
-                    Condition::all()
-                        .add(Expr::col(Col::ItemId).is_in(unchanged_ids.to_vec())),
-                )
-            },
+            Some(Condition::all().add(Expr::col(Col::ItemId).in_subquery(live_query))),
         )?;
         Ok(self)
     }
 
     pub(crate) fn cleanup(self) -> Result<()> {
-        use crate::util::IdenExt;
         Tbl::LocationsDiff.drop_table(self.conn).ok();
         Ok(())
     }
@@ -195,9 +199,9 @@ impl<'a> BaseTagMerger<'a> {
         if results.is_empty() {
             return Ok(self);
         }
-        let mut app = self.conn.appender(
-            &Tbl::BaseTagsDiff.to_string().replace('"', ""),
-        )?;
+        let table_name = Tbl::BaseTagsDiff.to_string().replace('"', "");
+        let mut app = self.conn.appender(&table_name)?;
+        
         for res in results {
             for t in &res.tags {
                 app.append_row([
@@ -224,7 +228,6 @@ impl<'a> BaseTagMerger<'a> {
     }
 
     pub(crate) fn cleanup(self) -> Result<()> {
-        use crate::util::IdenExt;
         Tbl::BaseTagsDiff.drop_table(self.conn).ok();
         Ok(())
     }

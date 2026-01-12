@@ -3268,6 +3268,7 @@ dependencies = [
  "indicatif",
  "path-slash",
  "rayon",
+ "rustc-hash",
  "sea-query",
  "serde",
  "strum 0.26.3",

@@ -23,6 +23,7 @@ sea-query = "0.32.7"
 terminal_size = "0.4.3"
 path-slash = "0.2"
 strum = { version = "0.26", features = ["derive"] }
+rustc-hash = "2.1.1"
 
 [dev-dependencies]
 tempfile = "3.24.0"

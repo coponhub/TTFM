@@ -34,6 +34,11 @@ impl Store {
     pub fn temp_scan_path(&self) -> PathBuf {
         self.db_dir.join("current_scan.parquet")
     }
+
+    /// 一時的な生存 ID リストの保存先パスを返します。
+    pub fn temp_live_path(&self) -> PathBuf {
+        self.db_dir.join("live_ids.parquet")
+    }
 }
 
 /// データベースのテーブル名を表す識別子。
@@ -58,6 +63,7 @@ pub enum Tbl {
 
     // --- Work Tables / Aliases ---
     Scan,
+    Live,
     Item,
     IdItem,
     Target,
@@ -100,6 +106,7 @@ pub enum Col {
     Name,
     Types,
     Labels,
+    ScanHash,
 }
 
 impl Col {
@@ -123,6 +130,7 @@ impl Col {
             "name" => Some(Col::Name),
             "types" => Some(Col::Types),
             "labels" => Some(Col::Labels),
+            "scan_hash" => Some(Col::ScanHash),
             _ => None,
         }
     }
@@ -168,6 +176,7 @@ impl Schema {
                     };
                     create.col(&mut def);
                 }
+                create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
             }
             TargetTable::Locations => {
                 create.col(SeaColumnDef::new(Col::ItemId).big_integer());

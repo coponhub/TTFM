@@ -1,8 +1,12 @@
 use crate::taggers::{TagValue, ColumnDef};
+use crate::functions::{ScanEntry};
+use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
 use crate::db::{Tbl, Col, DuckDbFunc, TargetTable, Store};
 use crate::{FunctionRegistry};
 use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt};
-use anyhow::Result;
+use crate::types::{ItemId};
+use anyhow::{Context, Result};
+use rustc_hash::FxHashMap;
 use duckdb::{Connection};
 use sea_query::{
     Query, Expr, PostgresQueryBuilder, 
@@ -23,6 +27,7 @@ pub struct TaggingResult {
     pub entity_row: DynamicRow,
     pub location_row: DynamicRow,
     pub tags: Vec<TagRow>,
+    pub scan_hash: ScanHash,
 }
 
 pub struct DynamicRow {
@@ -71,12 +76,17 @@ impl<'a> Indexer<'a> {
         P: AsRef<Path>,
         F: Fn(usize) + Sync + Send,
     {
+        // 既存のハッシュをロード
+        let cache = self.load_metadata_cache()?;
+
         // 1. Scan Phase
         let count = scan::run_scan(
             self.conn,
             &self.store.db_dir,
             &self.store.temp_scan_path(),
+            &self.store.temp_live_path(),
             root_path.as_ref(),
+            &cache,
             on_progress,
             dry_run,
         )?;
@@ -89,10 +99,9 @@ impl<'a> Indexer<'a> {
         let diff = diff::run_diff(self.conn, &self.store)?;
 
         // 3. Triage Phase
-        let (results, moved) = triage::run_triage(
+        let (results, moved_rows) = triage::run_triage(
             self.registry,
-            diff.to_tag,
-            diff.moved,
+            diff.to_process,
             || self.max_file_id()
         )?;
 
@@ -102,14 +111,51 @@ impl<'a> Indexer<'a> {
             self.registry,
             &self.store,
             results,
-            moved,
+            moved_rows,
             diff.deleted_ids,
-            diff.unchanged_ids,
             &self.store.temp_scan_path(),
+            &self.store.temp_live_path(),
             |data| self.update_system_items(data)
         )?;
 
         Ok(count)
+    }
+
+    /// 既存のインデックスから変更検知用のメタデータ・キャッシュをロードします。
+    pub fn load_metadata_cache(&self) -> Result<FxHashMap<ScanHash, ItemId>> {
+        let ents_path = self.store.path_for_target(TargetTable::FileEntities);
+        if !ents_path.exists() {
+            return Ok(FxHashMap::default());
+        }
+
+        let ents_str = ents_path.to_string_lossy();
+        
+        // item_id と scan_hash カラムを取得
+        let sql = Query::select()
+            .column(Col::ItemId)
+            .column(Col::ScanHash)
+            .from_subquery(util::parquet_query(&ents_str), Tbl::FileEntities)
+            .to_string(PostgresQueryBuilder);
+
+        let mut stmt = self.conn.prepare(&sql)
+            .context("Failed to prepare cache load query")?;
+        
+        // カラムが存在しない初回の実行などに対応するため、安全にハンドル
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, ItemId>(0)?, row.get::<_, ScanHash>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(_) => return Ok(FxHashMap::default()),
+        };
+
+        let mut cache = FxHashMap::default();
+        for res in rows {
+            if let Ok((id, h)) = res {
+                cache.insert(h, id);
+            }
+        }
+
+        Ok(cache)
     }
 
     /// データベーステーブルとビューの初期化を行います。
@@ -258,11 +304,161 @@ impl<'a> Indexer<'a> {
     }
 }
 
+/// スキャン時の高速フィルタリングに使用するメタデータハッシュ。
+/// データベース(BIGINT)との互換性のために内部で i64 を保持します。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScanHash(pub i64);
+
+impl ScanHash {
+    /// u64 のハッシュ値をデータベース保存用の i64 に変換します。
+    pub fn from_u64(v: u64) -> Self {
+        Self(v as i64)
+    }
+}
+
+// DuckDB 連携用実装
+impl FromSql for ScanHash {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).map(ScanHash)
+    }
+}
+
+impl ToSql for ScanHash {
+    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+/// 一時的なスキャン結果テーブル（Tbl::Scan）の 1 行を表す構造体。
+/// `ScanEntry` の情報に、高速比較用のハッシュ値を付加したものです。
+pub struct TempScanEntry {
+    pub entry: ScanEntry,
+    pub hash: ScanHash,
+}
+
+impl TempScanEntry {
+    /// データベース書き込み用のパラメータリスト（ハッシュ込み）を返します。
+    pub fn params(&self) -> Vec<&dyn duckdb::ToSql> {
+        let mut p = self.entry.as_params();
+        p.push(&self.hash);
+        p
+    }
+
+    /// Tbl::Scan テーブル作成用のカラム構成リストを取得します。
+    pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)> {
+        use sea_query::IntoIden;
+        use crate::db::{Col, SqlType};
+        
+        let mut cols = ScanEntry::columns_with_type();
+        cols.push((Col::ScanHash.into_iden(), SqlType::BIGINT.into_iden()));
+        cols
+    }
+
+    /// 指定されたオフセットから DuckDB の Row を読み込み、TempScanEntry を復元します。
+    pub fn from_row_with_offset(
+        row: &duckdb::Row,
+        offset: usize,
+        loader: &ScanEntryLoader
+    ) -> duckdb::Result<Self> {
+        let entry = ScanEntry::from_row_with_offset(row, offset)?;
+        let hash: ScanHash = row.get(offset + loader.hash_idx)?;
+        Ok(Self { entry, hash })
+    }
+}
+
+/// `TempScanEntry` をデータベースの行から効率的に読み出すためのローダー。
+pub struct ScanEntryLoader {
+    hash_idx: usize,
+}
+
+impl Default for ScanEntryLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScanEntryLoader {
+    /// 新しいローダーを作成します。ハッシュのカラム位置を事前に計算します。
+    pub fn new() -> Self {
+        Self {
+            hash_idx: ScanEntry::schema().len(),
+        }
+    }
+
+    /// DuckDB の Row から `TempScanEntry` を高速に読み出します。
+    pub fn load(&self, row: &duckdb::Row) -> duckdb::Result<TempScanEntry> {
+        let entry = ScanEntry::from_row(row)?;
+        let hash: ScanHash = row.get(self.hash_idx)?;
+        Ok(TempScanEntry { entry, hash })
+    }
+}
+
+/// メタデータ（パス、更新日時、サイズ）から ScanHash を計算します。
+pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
+    use std::hash::{Hash, Hasher};
+    use rustc_hash::FxHasher;
+    let mut hasher = FxHasher::default();
+    (path, mtime, size).hash(&mut hasher);
+    ScanHash(hasher.finish() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
     use crate::FunctionRegistry;
+
+    #[test]
+    fn test_calc_scanhash() {
+        let h1 = calc_scanhash("test.txt", 100, 500);
+        let h2 = calc_scanhash("test.txt", 100, 500);
+        let h3 = calc_scanhash("test.txt", 101, 500); // mtime違い
+        let h4 = calc_scanhash("other.txt", 100, 500); // path違い
+        let h5 = calc_scanhash("test.txt", 100, 501); // size違い
+
+        assert_eq!(h1, h2, "同じ入力なら同じハッシュになること");
+        assert_ne!(h1, h3, "mtimeが変わればハッシュが変わること");
+        assert_ne!(h1, h4, "pathが変わればハッシュが変わること");
+        assert_ne!(h1, h5, "sizeが変わればハッシュが変わること");
+    }
+
+    #[test]
+    fn test_load_metadata_cache_empty() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let indexer = Indexer::new(&conn, &registry, db_dir);
+
+        // まだファイルがない状態でのロード
+        let cache = indexer.load_metadata_cache().unwrap();
+        assert!(cache.is_empty(), "Cache should be empty when no files exist");
+    }
+
+    #[test]
+    fn test_load_metadata_cache_with_data() {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().to_path_buf();
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        let indexer = Indexer::new(&conn, &registry, db_dir);
+
+        // 1. テーブルを初期化
+        indexer.initialize_tables().unwrap();
+
+        // 2. ダミーデータを直接 file_entities に書き込む (scan_hash 込み)
+        let hash_val = ScanHash(123456789);
+        let item_id: ItemId = 1;
+        let ents_path = indexer.store.path_for_target(TargetTable::FileEntities);
+        
+        conn.execute("CREATE TABLE temp_ents AS SELECT ? as item_id, 0 as rank, ? as scan_hash", [item_id, hash_val.0]).unwrap();
+        conn.execute(&format!("COPY temp_ents TO '{}' (FORMAT PARQUET)", ents_path.to_string_lossy()), []).unwrap();
+
+        // 3. ロードして検証
+        let cache = indexer.load_metadata_cache().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert_eq!(*cache.get(&hash_val).unwrap(), item_id, "Cache should contain the correct item_id");
+    }
 
     #[test]
     fn test_initialize_tables() {

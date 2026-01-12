@@ -6,6 +6,9 @@ pub const METADATA_ERROR: i64 = -1;
 /// アイテムの優先度を表す型。
 pub type Rank = i64;
 
+/// アイテムの一意なID。
+pub type ItemId = i64;
+
 /// データベース上の型名を取得するためのトレイト。
 pub trait DBType {
     /// 対応する SQL の型名（例: "VARCHAR", "BIGINT"）を返します。

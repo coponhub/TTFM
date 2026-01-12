@@ -113,9 +113,14 @@ macro_rules! define_scan_entry {
 
             /// DuckDBの行(`row`)から `ScanEntry` を生成します。
             pub fn from_row(row: &duckdb::Row) -> duckdb::Result<Self> {
+                Self::from_row_with_offset(row, 0)
+            }
+
+            /// 指定されたオフセットから DuckDBの行(`row`)を読み込み `ScanEntry` を生成します。
+            pub fn from_row_with_offset(row: &duckdb::Row, offset: usize) -> duckdb::Result<Self> {
                 #[allow(unused_imports)]
                 use $crate::util::DotOk;
-                let mut _idx = 0;
+                let mut _idx = offset;
 
                 $( let $name = $crate::macros::read_next_field::<$func>(row, &mut _idx)?; )*
 

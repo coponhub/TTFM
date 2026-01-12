@@ -1,5 +1,6 @@
 use ttfm::{FileManager, TargetTable};
 use tempfile::tempdir;
+use file_id::get_file_id;
 
 #[test]
 fn test_incremental_indexing_full_flow() {
@@ -30,24 +31,43 @@ fn test_incremental_indexing_full_flow() {
     assert_eq!(fm.search(all_files).unwrap().len(), 3);
     assert_eq!(fm.search("filename:b.rs").unwrap().len(), 1);
 
-    // 4. 更新: a.txt のサイズを変更 (3)
+    // 4. 更新: a.txt の内容を変更 (サイズ変更)
+    // 実体(ID)が変わらないことを確認
+    let old_id = fm.search("filename:a.txt").unwrap()[0].id;
     std::fs::write(&path_a, "updated content with more bytes").unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
-    assert_eq!(fm.search(all_files).unwrap().len(), 3);
+    
+    let res_edit = fm.search("filename:a.txt").unwrap();
+    let files_edit: Vec<_> = res_edit.iter().filter(|r| r.item_kind == "file").collect();
+    assert_eq!(files_edit.len(), 1, "Should find exactly one a.txt");
+    assert_eq!(files_edit[0].id, old_id, "Item ID must be reused after content edit");
 
     // 5. 削除: b.rs を削除 (root + a.txt = 2)
     std::fs::remove_file(&path_b).unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
     assert_eq!(fm.search(all_files).unwrap().len(), 2);
-    assert_eq!(fm.search("filename:b.rs").unwrap().len(), 0);
+    
+    let res_b_del = fm.search("filename:b.rs").unwrap();
+    let files_b_del: Vec<_> = res_b_del.iter().filter(|r| r.item_kind == "file").collect();
+    assert_eq!(files_b_del.len(), 0, "b.rs must be removed from search results");
 
-    // 6. 移動: a.txt -> c.txt (root + c.txt = 2)
+    // 6. 別名追加 (ハードリンク): a.txt の別名として c.txt を作成
     let path_c = root.join("c.txt");
-    std::fs::rename(&path_a, &path_c).unwrap();
+    std::fs::hard_link(&path_a, &path_c).unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false).unwrap();
-    assert_eq!(fm.search(all_files).unwrap().len(), 2);
-    assert_eq!(fm.search("filename:a.txt").unwrap().len(), 0);
-    assert_eq!(fm.search("filename:c.txt").unwrap().len(), 1);
+    
+    // Inode 情報を直接取得して検索
+    let fid = get_file_id(&path_a).unwrap();
+    let query = format!("file_id:\"{:?}\"", fid);
+    let res_inode = fm.search(&query).unwrap();
+    let files_inode: Vec<_> = res_inode.iter().filter(|r| r.item_kind == "file").collect();
+
+    // 検証：1つの実体に対して a.txt と c.txt の 2つの場所がヒットすること
+    assert_eq!(files_inode.len(), 2, "Searching by FileID must return both hard-linked names");
+    let names: Vec<_> = files_inode.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"a.txt"));
+    assert!(names.contains(&"c.txt"));
+    assert_eq!(files_inode[0].id, files_inode[1].id, "Both results must share the same Item ID");
 }
 
 #[test]
