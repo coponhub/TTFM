@@ -59,9 +59,43 @@ impl ToSql for FileTimestamp {
     }
 }
 
-/// タグの「キー」部分（例: "extension", "parentdir"）。
+/// タグの「キー（型）」部分を表す SuperType。
+/// システム定義の標準タグ（SType）と、自由なカスタムタグの両方を扱えます。
 #[derive(Debug, PartialEq, Clone)]
-pub struct TagType(pub String);
+pub enum TagType {
+    Base(SType),
+    Custom(String),
+}
+
+impl TagType {
+    /// 文字列としての表現を取得します。
+    pub fn as_str(&self) -> &str {
+        match self {
+            TagType::Base(s) => (*s).into(),
+            TagType::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl From<SType> for TagType {
+    fn from(s: SType) -> Self {
+        TagType::Base(s)
+    }
+}
+
+impl From<String> for TagType {
+    fn from(s: String) -> Self {
+        SType::from_str(&s)
+            .map(TagType::Base)
+            .unwrap_or(TagType::Custom(s))
+    }
+}
+
+impl From<&str> for TagType {
+    fn from(s: &str) -> Self {
+        s.to_string().into()
+    }
+}
 
 /// タグの「値」部分（例: "rs", "1024"）。
 /// 文字列と数値のどちらかを取り得ます。
@@ -89,6 +123,24 @@ impl Label {
     }
 }
 
+impl From<String> for Label {
+    fn from(s: String) -> Self {
+        Label::String(s)
+    }
+}
+
+impl From<&str> for Label {
+    fn from(s: &str) -> Self {
+        Label::String(s.to_string())
+    }
+}
+
+impl From<i64> for Label {
+    fn from(i: i64) -> Self {
+        Label::Integer(i)
+    }
+}
+
 /// 「キー:値」のペアを表す構造体。
 #[derive(Debug, PartialEq, Clone)]
 pub struct TypedTag {
@@ -100,10 +152,10 @@ pub struct TypedTag {
 
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
-    pub fn new(key: impl Into<String>, label: Label) -> Self {
+    pub fn new(tagtype: impl Into<TagType>, label: impl Into<Label>) -> Self {
         Self {
-            tagtype: TagType(key.into()),
-            label,
+            tagtype: tagtype.into(),
+            label: label.into(),
         }
     }
 }
@@ -155,7 +207,7 @@ pub type StaticName = &'static str;
 /// システムで使用される標準的なタグ名のシンボル定義。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString, strum::Display)]
 #[strum(serialize_all = "snake_case")]
-pub enum STag {
+pub enum SType {
     ItemId,
     FileId,
     Path,

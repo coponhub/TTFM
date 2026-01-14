@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::Chars;
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
-use crate::types::{Label, TagType, TypedTag};
+use crate::types::{Label, SType, TagType, TypedTag};
 use crate::db::{Tbl, Col};
 
 /// 検索クエリの展開を行う抽象化単位。
@@ -55,15 +55,21 @@ impl QueryFunctionRegistry {
 
     /// タグを検索し、登録された関数があれば適用します。
     pub fn process_tag(&self, tagtype: TagType, label: Label) -> QueryNode {
-        if let Some(f) = self.functions.get(&tagtype.0) {
-            f.expand(&label)
-        } else {
-            QueryNode::TypedTag(TypedTag { tagtype, label })
+        // Baseタグ（SType）であれば、レジストリから展開関数を探す
+        if let TagType::Base(stag) = tagtype {
+            let key_str: &'static str = stag.into();
+            if let Some(f) = self.functions.get(key_str) {
+                return f.expand(&label);
+            }
         }
+
+        // それ以外（カスタムタグまたは未登録の標準タグ）はそのまま TypedTag として保持
+        QueryNode::TypedTag(TypedTag { tagtype, label })
     }
 }
 
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
+/// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
 pub enum QueryNode {
     /// AND条件 (`A & B` または `A B`)
@@ -73,7 +79,7 @@ pub enum QueryNode {
     /// NOT条件 (`-A`)
     Not(Box<QueryNode>),
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
-    ColumnMatch { col: Col, label: Label },
+    ColumnMatch { tag: SType, label: Label },
     /// 汎用タグ検索 (TypedTag 型を使用)
     TypedTag(TypedTag),
 }
@@ -91,8 +97,8 @@ impl QueryNode {
                 Box::new(r.expand(registry)),
             ),
             QueryNode::Not(c) => QueryNode::Not(Box::new(c.expand(registry))),
-            QueryNode::ColumnMatch { col, label } => {
-                QueryNode::ColumnMatch { col, label }
+            QueryNode::ColumnMatch { tag, label } => {
+                QueryNode::ColumnMatch { tag, label }
             }
             QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
         }
@@ -104,8 +110,8 @@ impl QueryNode {
             QueryNode::And(l, r) => self.build_and_sql(l, r, view_name),
             QueryNode::Or(l, r) => self.build_or_sql(l, r, view_name),
             QueryNode::Not(c) => self.build_not_sql(c, view_name),
-            QueryNode::ColumnMatch { col, label } => {
-                self.build_column_match_sql(*col, label, view_name)
+            QueryNode::ColumnMatch { tag, label } => {
+                self.build_column_match_sql(*tag, label, view_name)
             }
             QueryNode::TypedTag(tt) => {
                 self.build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
@@ -161,7 +167,7 @@ impl QueryNode {
 
     fn build_column_match_sql(
         &self,
-        col: Col,
+        tag: SType,
         label: &Label,
         view: &str,
     ) -> SelectStatement {
@@ -169,12 +175,12 @@ impl QueryNode {
         q.column(Col::ItemId).distinct().from(Alias::new(view));
         match label {
             Label::Integer(i) => {
-                q.and_where(Expr::col(col).eq(*i));
+                q.and_where(Expr::col(tag).eq(*i));
             }
             Label::String(s) => {
-                q.and_where(Expr::col(col).binary(
+                q.and_where(Expr::col(tag).binary(
                     BinOper::Custom("GLOB"),
-                    Expr::val(s.clone()),
+                    Expr::val(s.as_str()),
                 ));
             }
         }
@@ -190,15 +196,13 @@ impl QueryNode {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
         let glob = BinOper::Custom("GLOB");
-        q.and_where(
-            Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.0.clone())),
-        );
+        q.and_where(Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.as_str())));
         match label {
             Label::Integer(i) => {
-                q.and_where(Expr::col(Col::Label).eq(i.to_string()));
+                q.and_where(Expr::col(Col::Label).eq(*i));
             }
             Label::String(s) => {
-                q.and_where(Expr::col(Col::Label).binary(glob, Expr::val(s.clone())));
+                q.and_where(Expr::col(Col::Label).binary(glob, Expr::val(s.as_str())));
             }
         }
         q
@@ -224,9 +228,9 @@ impl QueryNode {
             QueryNode::Not(c) => {
                 c.collect_types(types);
             }
-            QueryNode::ColumnMatch { .. } => {} // No types here
+            QueryNode::ColumnMatch { .. } => {}
             QueryNode::TypedTag(tt) => {
-                types.insert(tt.tagtype.0.clone());
+                types.insert(tt.tagtype.as_str().to_string());
             }
         }
     }
@@ -323,7 +327,7 @@ impl<'a> QueryParser<'a> {
                 if self.chars.peek() == Some(&':') {
                     self.chars.next();
                     let value = self.read_value()?;
-                    Ok(QueryNode::TypedTag(TypedTag::new(key, value)))
+                    Ok(QueryNode::TypedTag(TypedTag::new(TagType::from(key), value)))
                 } else {
                     Err(anyhow::anyhow!("Expected ':' after tag key '{}'", key))
                 }
@@ -402,7 +406,7 @@ mod tests {
     fn test_query_types() {
         let node = QueryNode::TypedTag(TypedTag::new("extension", Label::String("rs".into())));
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.0, "extension");
+            assert_eq!(tt.tagtype.as_str(), "extension");
             assert_eq!(tt.label.as_str(), "rs");
         } else {
             panic!("Should be a TypedTag");
@@ -413,7 +417,7 @@ mod tests {
     fn test_case_preservation() {
         let node = QueryParser::parse("Extension:RS").unwrap();
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.0, "Extension");
+            assert_eq!(tt.tagtype.as_str(), "Extension");
             assert_eq!(tt.label.as_str(), "RS");
             assert!(matches!(tt.label, Label::String(_)));
         } else {
@@ -436,7 +440,7 @@ mod tests {
         let input = "file_id:\"Inode { device_id: 2096 }\"";
         let node = QueryParser::parse(input).unwrap();
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.0, "file_id");
+            assert_eq!(tt.tagtype.as_str(), "file_id");
             assert_eq!(tt.label.as_str(), "Inode { device_id: 2096 }");
         } else {
             panic!("Should be a TypedTag");

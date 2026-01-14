@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 use chrono::Local;
-use crate::types::{METADATA_ERROR, DBType, FileSize, FileTimestamp, STag, Name, StaticName};
+use crate::types::{METADATA_ERROR, DBType, FileSize, FileTimestamp, SType, Name, StaticName};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::db::{TargetTable, SqlType};
 use crate::util::{SafeMetadata};
@@ -135,7 +135,7 @@ impl PathFunction {
 
 impl TagFunction for PathFunction {
     fn name(&self) -> Name {
-        STag::Path.into()
+        SType::Path.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -152,7 +152,7 @@ impl TagFunction for PathFunction {
 
 impl TagDefinition for PathFunction {
     fn name() -> StaticName {
-        STag::Path.into()
+        SType::Path.into()
     }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
@@ -206,7 +206,7 @@ impl ParentDirFunction {
 
 impl TagFunction for ParentDirFunction {
     fn name(&self) -> Name {
-        STag::Parentdir.into()
+        SType::Parentdir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -223,7 +223,7 @@ impl TagFunction for ParentDirFunction {
 
 impl TagDefinition for ParentDirFunction {
     fn name() -> StaticName {
-        STag::Parentdir.into()
+        SType::Parentdir.into()
     }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
@@ -283,7 +283,7 @@ impl FilenameFunction {
 
 impl TagFunction for FilenameFunction {
     fn name(&self) -> Name {
-        STag::Filename.into()
+        SType::Filename.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -299,7 +299,7 @@ impl TagFunction for FilenameFunction {
 
 impl TagDefinition for FilenameFunction {
     fn name() -> StaticName {
-        STag::Filename.into()
+        SType::Filename.into()
     }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
@@ -359,7 +359,7 @@ impl StemFunction {
 
 impl TagFunction for StemFunction {
     fn name(&self) -> Name {
-        STag::Stem.into()
+        SType::Stem.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -368,7 +368,7 @@ impl TagFunction for StemFunction {
 
 impl TagDefinition for StemFunction {
     fn name() -> StaticName {
-        STag::Stem.into()
+        SType::Stem.into()
     }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
@@ -427,7 +427,7 @@ impl ExtensionFunction {
 
 impl TagFunction for ExtensionFunction {
     fn name(&self) -> Name {
-        STag::Extension.into()
+        SType::Extension.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -443,7 +443,7 @@ impl TagFunction for ExtensionFunction {
 
 impl TagDefinition for ExtensionFunction {
     fn name() -> StaticName {
-        STag::Extension.into()
+        SType::Extension.into()
     }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
@@ -497,7 +497,7 @@ impl DirectoryFunction {
 
 impl TagFunction for DirectoryFunction {
     fn name(&self) -> Name {
-        STag::IsDir.into()
+        SType::IsDir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -506,7 +506,7 @@ impl TagFunction for DirectoryFunction {
 
 impl TagDefinition for DirectoryFunction {
     fn name() -> StaticName {
-        STag::IsDir.into()
+        SType::IsDir.into()
     }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = bool;
@@ -563,7 +563,7 @@ impl SizeBytesFunction {
 
 impl TagFunction for SizeBytesFunction {
     fn name(&self) -> Name {
-        STag::Size.into()
+        SType::Size.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -575,7 +575,7 @@ impl TagFunction for SizeBytesFunction {
 
 impl TagDefinition for SizeBytesFunction {
     fn name() -> StaticName {
-        STag::Size.into()
+        SType::Size.into()
     }
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileSize;
@@ -632,7 +632,7 @@ impl ModifiedTsFunction {
 
 impl TagFunction for ModifiedTsFunction {
     fn name(&self) -> Name {
-        STag::Mtime.into()
+        SType::Mtime.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -644,7 +644,7 @@ impl TagFunction for ModifiedTsFunction {
 
 impl TagDefinition for ModifiedTsFunction {
     fn name() -> StaticName {
-        STag::Mtime.into()
+        SType::Mtime.into()
     }
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileTimestamp;
@@ -691,7 +691,7 @@ impl InodeFunction {
 
 impl TagFunction for InodeFunction {
     fn name(&self) -> Name {
-        STag::FileId.into()
+        SType::FileId.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -703,7 +703,7 @@ impl TagFunction for InodeFunction {
 
 impl TagDefinition for InodeFunction {
     fn name() -> StaticName {
-        STag::FileId.into()
+        SType::FileId.into()
     }
     const ROLE: ScanRole = ScanRole::ScanId;
     type RustType = crate::types::FileRef;
@@ -742,7 +742,7 @@ impl Tagger for TypeFromExtTagger {
 
 impl TagDefinition for TypeFromExtFunction {
     fn name() -> StaticName {
-        STag::TypeFromExt.into()
+        SType::TypeFromExt.into()
     }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
@@ -781,7 +781,7 @@ impl TypeFromExtFunction {
 
 impl TagFunction for TypeFromExtFunction {
     fn name(&self) -> Name {
-        STag::TypeFromExt.into()
+        SType::TypeFromExt.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -830,7 +830,7 @@ impl Tagger for SizeStrTagger {
 
 impl TagDefinition for SizeStrFunction {
     fn name() -> StaticName {
-        STag::SizeStr.into()
+        SType::SizeStr.into()
     }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
@@ -865,7 +865,7 @@ impl SizeStrFunction {
 
 impl TagFunction for SizeStrFunction {
     fn name(&self) -> Name {
-        STag::SizeStr.into()
+        SType::SizeStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -901,7 +901,7 @@ impl Tagger for ModifiedStrTagger {
 
 impl TagDefinition for ModifiedStrFunction {
     fn name() -> StaticName {
-        STag::ModifiedStr.into()
+        SType::ModifiedStr.into()
     }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
@@ -937,7 +937,7 @@ impl ModifiedStrFunction {
 
 impl TagFunction for ModifiedStrFunction {
     fn name(&self) -> Name {
-        STag::ModifiedStr.into()
+        SType::ModifiedStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
@@ -952,7 +952,7 @@ impl TagFunction for ModifiedStrFunction {
 pub struct NameTagFunction;
 impl TagFunction for NameTagFunction {
     fn name(&self) -> Name {
-        STag::Name.into()
+        SType::Name.into()
     }
     fn role(&self) -> ScanRole {
         ScanRole::DefinitionOnly
@@ -965,7 +965,7 @@ impl TagFunction for NameTagFunction {
 pub struct KindTagFunction;
 impl TagFunction for KindTagFunction {
     fn name(&self) -> Name {
-        STag::ItemKind.into()
+        SType::ItemKind.into()
     }
     fn role(&self) -> ScanRole {
         ScanRole::DefinitionOnly
@@ -978,7 +978,7 @@ impl TagFunction for KindTagFunction {
 pub struct ContentTagFunction;
 impl TagFunction for ContentTagFunction {
     fn name(&self) -> Name {
-        STag::Content.into()
+        SType::Content.into()
     }
     fn role(&self) -> ScanRole {
         ScanRole::DefinitionOnly

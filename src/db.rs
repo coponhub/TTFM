@@ -100,7 +100,7 @@ impl Iden for SqlType {
 }
 
 /// 共通で使用されるカラム名を表す識別子。
-pub use crate::types::STag as Col;
+pub use crate::types::SType as Col;
 
 impl sea_query::Iden for Col {
     fn unquoted(&self, s: &mut dyn std::fmt::Write) {

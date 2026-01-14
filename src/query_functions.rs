@@ -1,6 +1,5 @@
 use crate::query::{QueryFunction, QueryNode};
-use crate::types::{STag, Label, TypedTag};
-use crate::db::Col;
+use crate::types::{SType, Label, TypedTag};
 use std::path::Path;
 use path_slash::PathExt;
 
@@ -8,16 +7,16 @@ use path_slash::PathExt;
 pub struct DirectoryQuery;
 impl QueryFunction for DirectoryQuery {
     fn name(&self) -> &str {
-        STag::Directory.into()
+        SType::Directory.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(
             Box::new(QueryNode::ColumnMatch {
-                col: Col::Name,
+                tag: SType::Name,
                 label: label.clone(),
             }),
             Box::new(QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(STag::IsDir).to_string(),
+                <&str>::from(SType::IsDir).to_string(),
                 Label::String("true".to_string()),
             ))),
         )
@@ -28,16 +27,16 @@ impl QueryFunction for DirectoryQuery {
 pub struct FilenameQuery;
 impl QueryFunction for FilenameQuery {
     fn name(&self) -> &str {
-        STag::Filename.into()
+        SType::Filename.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(
             Box::new(QueryNode::ColumnMatch {
-                col: Col::Name,
+                tag: SType::Name,
                 label: label.clone(),
             }),
             Box::new(QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(STag::IsDir).to_string(),
+                <&str>::from(SType::IsDir).to_string(),
                 Label::String("false".to_string()),
             ))),
         )
@@ -48,7 +47,7 @@ impl QueryFunction for FilenameQuery {
 pub struct ExtensionQuery;
 impl QueryFunction for ExtensionQuery {
     fn name(&self) -> &str {
-        STag::Extension.into()
+        SType::Extension.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         let normalized = label
@@ -57,7 +56,7 @@ impl QueryFunction for ExtensionQuery {
             .trim_start_matches('.')
             .to_string();
         QueryNode::TypedTag(TypedTag::new(
-            <&str>::from(STag::Extension).to_string(),
+            <&str>::from(SType::Extension).to_string(),
             Label::String(normalized),
         ))
     }
@@ -72,11 +71,11 @@ fn normalize_path(path_str: &str) -> String {
 pub struct PathQuery;
 impl QueryFunction for PathQuery {
     fn name(&self) -> &str {
-        STag::Path.into()
+        SType::Path.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(
-            <&str>::from(STag::Path).to_string(),
+            <&str>::from(SType::Path).to_string(),
             Label::String(normalize_path(&label.as_str())),
         ))
     }
@@ -86,81 +85,81 @@ impl QueryFunction for PathQuery {
 pub struct ParentDirQuery;
 impl QueryFunction for ParentDirQuery {
     fn name(&self) -> &str {
-        STag::Parentdir.into()
+        SType::Parentdir.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(
-            <&str>::from(STag::Parentdir).to_string(),
+            <&str>::from(SType::Parentdir).to_string(),
             Label::String(normalize_path(&label.as_str())),
         ))
     }
 }
 
-/// "name:label" -> ColumnMatch(Col::Name, label)
+/// "name:label" -> ColumnMatch(SType::Name, label)
 pub struct NameQuery;
 impl QueryFunction for NameQuery {
     fn name(&self) -> &str {
-        STag::Name.into()
+        SType::Name.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
-            col: Col::Name,
+            tag: SType::Name,
             label: label.clone(),
         }
     }
 }
 
-/// "item_kind:label" -> ColumnMatch(Col::ItemKind, label)
+/// "item_kind:label" -> ColumnMatch(SType::ItemKind, label)
 pub struct ItemKindQuery;
 impl QueryFunction for ItemKindQuery {
     fn name(&self) -> &str {
-        STag::ItemKind.into()
+        SType::ItemKind.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
-            col: Col::ItemKind,
+            tag: SType::ItemKind,
             label: label.clone(),
         }
     }
 }
 
-/// "rank:label" -> ColumnMatch(Col::Rank, label)
+/// "rank:label" -> ColumnMatch(SType::Rank, label)
 pub struct RankQuery;
 impl QueryFunction for RankQuery {
     fn name(&self) -> &str {
-        STag::Rank.into()
+        SType::Rank.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
-            col: Col::Rank,
+            tag: SType::Rank,
             label: label.clone(),
         }
     }
 }
 
-/// "size:label" -> ColumnMatch(Col::Size, label)
+/// "size:label" -> ColumnMatch(SType::Size, label)
 pub struct SizeQuery;
 impl QueryFunction for SizeQuery {
     fn name(&self) -> &str {
-        STag::Size.into()
+        SType::Size.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
-            col: Col::Size,
+            tag: SType::Size,
             label: label.clone(),
         }
     }
 }
 
-/// "mtime:label" -> ColumnMatch(Col::Mtime, label)
+/// "mtime:label" -> ColumnMatch(SType::Mtime, label)
 pub struct MtimeQuery;
 impl QueryFunction for MtimeQuery {
     fn name(&self) -> &str {
-        STag::Mtime.into()
+        SType::Mtime.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
-            col: Col::Mtime,
+            tag: SType::Mtime,
             label: label.clone(),
         }
     }
