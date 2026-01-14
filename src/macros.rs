@@ -17,7 +17,7 @@ pub fn name_to_iden(name: &str) -> sea_query::DynIden {
 /// TagDefinition から ScanColumn 情報を取得します。
 pub fn get_column_def<F: TagDefinition>() -> ScanColumn {
     ScanColumn {
-        name: F::NAME,
+        name: F::name(),
         sql_type: <<F as TagDefinition>::RustType as DBType>::db_type(),
         role: F::ROLE,
     }

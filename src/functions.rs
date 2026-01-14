@@ -1,34 +1,28 @@
 use anyhow::Result;
 use std::path::Path;
 use chrono::Local;
-use sea_query::{Expr, SimpleExpr, extension::postgres::PgExpr};
-use crate::types::{METADATA_ERROR, TypedTag, DBType, FileSize, FileTimestamp};
+use crate::types::{METADATA_ERROR, DBType, FileSize, FileTimestamp, STag, Name, StaticName};
 use crate::taggers::{Tagger, ColumnDef, TagValue};
-use crate::db::{Tbl, Col, TargetTable, SqlType};
+use crate::db::{TargetTable, SqlType};
 use crate::util::{SafeMetadata};
 use path_slash::PathExt;
 
-/// 特定の TypedTag に関する**定義・検索・抽出の統合単位**。
+/// 特定の TypedTag に関する**定義・抽出の統合単位**。
 /// 
 /// 新しいタグ機能（例：Exif情報、Gitステータスなど）を追加する場合は、
 /// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
 pub trait TagFunction: Send + Sync {
     /// この機能の識別子名を取得します。
-    fn name(&self) -> &str;
+    fn name(&self) -> Name;
 
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
     fn tagger(&self) -> Option<&dyn Tagger> { None }
 
-    /// 指定された `TypedTag` に対する検索SQL条件を生成します。
-    /// 
-    /// この機能が担当しないタグ（キーが一致しない等）の場合は `None` を返します。
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr>;
-
     /// このタグのスキャンにおける役割を返します。
     fn role(&self) -> ScanRole { ScanRole::Other }
 
-    /// パスのみから値を生成できる場合、その値を返します。
-    /// （移動処理などで、実際にファイルを開かずにタグを更新するために使用）
+    /// パスのみから値を生成できる場合, その値を返します。
+    /// （移動処理などで, 実際にファイルを開かずにタグを更新するために使用）
     fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
 
     /// このタグのデフォルトのランク値（優先度）を返します。
@@ -37,8 +31,8 @@ pub trait TagFunction: Send + Sync {
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
 pub trait TagDefinition {
-    /// タグ의 識別子名。
-    const NAME: &'static str;
+    /// タグの 識別子名。
+    fn name() -> StaticName;
     /// スキャンにおける役割。
     const ROLE: ScanRole;
     /// 対応する Rust の型。
@@ -95,34 +89,7 @@ crate::define_scan_entry! {
 
 // --- Utilities ---
 
-/// SQLインジェクションを防ぐための簡易エスケープ処理。
-/// 文字列内のシングルクォートを2つ重ねてエスケープします。
-/// 特定のタグが `oneview` ビューに存在するかを確認する EXISTS 式を生成します。
-///
-/// # Arguments
-/// * `tag_type` - タグの種類（例: "directory", "mimetype"）
-/// * `tag_value` - 検索する値
-/// * `exact` - true の場合は完全一致（=）、false の場合は部分一致（ILIKE）を使用します。
-pub(crate) fn exists_in_tags(
-    tag_type: &str,
-    tag_value: &str,
-    exact: bool,
-) -> SimpleExpr {
-    let mut query = sea_query::Query::select();
-    query
-        .expr(Expr::val(1))
-        .from(Tbl::OneView)
-        .and_where(Expr::col(Col::ItemId).eq(Expr::col((Tbl::FileEntities, Col::ItemId))))
-        .and_where(Expr::col(Col::Type).eq(tag_type.to_string()));
-
-    if exact {
-        query.and_where(Expr::col(Col::Label).eq(tag_value.to_string()));
-    } else {
-        query.and_where(Expr::col(Col::Label).ilike(format!("%{}%", tag_value)));
-    }
-
-    Expr::exists(query.to_owned()).into()
-}
+/// 指定されたファイルパスのメタデータを取得します。
 
 // ========================================================
 // 1. Path Function
@@ -167,19 +134,11 @@ impl PathFunction {
 }
 
 impl TagFunction for PathFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Path.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let expr = Expr::col((Tbl::Locations, Col::Path))
-                .ilike(format!("%{}%", tag.label.0));
-            return Some(expr.into());
-        }
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Location
@@ -192,7 +151,9 @@ impl TagFunction for PathFunction {
 }
 
 impl TagDefinition for PathFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Path.into()
+    }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
     fn generate(
@@ -212,7 +173,7 @@ struct ParentDirTagger;
 impl Tagger for ParentDirTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: ParentDirFunction::NAME.to_string(),
+            name: <ParentDirFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
@@ -235,8 +196,6 @@ pub struct ParentDirFunction {
 }
 
 impl ParentDirFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "parentdir";
     /// 新しい `ParentDirFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -246,33 +205,26 @@ impl ParentDirFunction {
 }
 
 impl TagFunction for ParentDirFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Parentdir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let val = &tag.label.0;
-            let expr = Expr::col((Tbl::Locations, Col::Parentdir))
-                .ilike(format!("%/{}", val))
-                .or(Expr::col((Tbl::Locations, Col::Parentdir)).eq(val.clone()));
-            return Some(expr.into());
-        }
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, &SafeMetadata::recovered()).ok().map(TagValue::Text)
+        path.parent()
+            .map(|p| TagValue::Text(p.to_slash_lossy().to_string()))
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PARENT_DIR }
 }
 
 impl TagDefinition for ParentDirFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Parentdir.into()
+    }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
     fn generate(
@@ -296,17 +248,18 @@ struct FilenameTagger;
 impl Tagger for FilenameTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: FilenameFunction::NAME.to_string(),
+            name: <FilenameFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let m = match std::fs::metadata(path) {
+            Ok(real_m) => SafeMetadata::new(&real_m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(_) => SafeMetadata::recovered(),
+        };
+        let name = FilenameFunction::generate(path, &m)?; // This line is different in the original replace
         Ok(vec![TagValue::Text(name)])
     }
 }
@@ -314,14 +267,12 @@ impl Tagger for FilenameTagger {
 /// ファイル名（`filename`）に関する機能。
 ///
 /// # Examples
-/// - Query: `filename:report` -> ファイル名に "report" を含むファイルを検索（ディレクトリ除外）
+/// - Query: `filename:report` -> 名前に "report" を含むファイルを検索
 pub struct FilenameFunction {
     tagger: FilenameTagger,
 }
 
 impl FilenameFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "filename";
     /// 新しい `FilenameFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -331,21 +282,11 @@ impl FilenameFunction {
 }
 
 impl TagFunction for FilenameFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Filename.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let val = &tag.label.0;
-            let expr = Expr::col((Tbl::Locations, Col::Filename))
-                .ilike(format!("%{}%", val))
-                .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
-            return Some(expr.into());
-        }
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Location
@@ -357,7 +298,9 @@ impl TagFunction for FilenameFunction {
 }
 
 impl TagDefinition for FilenameFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Filename.into()
+    }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
     fn generate(
@@ -382,7 +325,7 @@ struct StemTagger;
 impl Tagger for StemTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: StemFunction::NAME.to_string(),
+            name: <StemFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
@@ -406,8 +349,6 @@ pub struct StemFunction {
 }
 
 impl StemFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "stem";
     /// 新しい `StemFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -417,26 +358,18 @@ impl StemFunction {
 }
 
 impl TagFunction for StemFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Stem.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let val = &tag.label.0;
-            let expr = Expr::col((Tbl::Locations, Col::Filename))
-                .ilike(format!("%{}%", val))
-                .and(exists_in_tags(DirectoryFunction::NAME, "TRUE", true).not());
-            return Some(expr.into());
-        }
-        None
-    }
 }
 
 impl TagDefinition for StemFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Stem.into()
+    }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
@@ -460,7 +393,7 @@ struct ExtensionTagger;
 impl Tagger for ExtensionTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: ExtensionFunction::NAME.to_string(),
+            name: <ExtensionFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::Locations,
         }]
@@ -484,8 +417,6 @@ pub struct ExtensionFunction {
 }
 
 impl ExtensionFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "extension";
     /// 新しい `ExtensionFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -495,19 +426,11 @@ impl ExtensionFunction {
 }
 
 impl TagFunction for ExtensionFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Extension.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let expr =
-                Expr::col((Tbl::Locations, Col::Extension)).eq(tag.label.0.clone());
-            return Some(expr.into());
-        }
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Location
@@ -519,7 +442,9 @@ impl TagFunction for ExtensionFunction {
 }
 
 impl TagDefinition for ExtensionFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Extension.into()
+    }
     const ROLE: ScanRole = ScanRole::Location;
     type RustType = String;
     fn generate(
@@ -543,7 +468,7 @@ struct DirectoryTagger;
 impl Tagger for DirectoryTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: DirectoryFunction::NAME.to_string(),
+            name: <DirectoryFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::BOOLEAN,
             target_table: TargetTable::BaseTags,
         }]
@@ -553,17 +478,15 @@ impl Tagger for DirectoryTagger {
     }
 }
 
-/// ディレクトリ判定（`directory`）に関する機能。
+/// ディレクトリ判定（`is_dir`）に関する機能。
 ///
 /// # Examples
-/// - Query: `directory:src` -> 名前に "src" を含むディレクトリを検索
+/// - Query: `is_dir:true` -> ディレクトリを検索
 pub struct DirectoryFunction {
     tagger: DirectoryTagger,
 }
 
 impl DirectoryFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "directory";
     /// 新しい `DirectoryFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -573,26 +496,18 @@ impl DirectoryFunction {
 }
 
 impl TagFunction for DirectoryFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::IsDir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            let val = &tag.label.0;
-            let expr = Expr::col((Tbl::Locations, Col::Filename))
-                .ilike(format!("%{}%", val))
-                .and(exists_in_tags(Self::NAME, "TRUE", true));
-            return Some(expr.into());
-        }
-        None
-    }
 }
 
 impl TagDefinition for DirectoryFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::IsDir.into()
+    }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = bool;
     fn generate(
@@ -612,7 +527,7 @@ struct SizeBytesTagger;
 impl Tagger for SizeBytesTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: SizeBytesFunction::NAME.to_string(),
+            name: <SizeBytesFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::BIGINT,
             target_table: TargetTable::Locations,
         }]
@@ -638,8 +553,6 @@ pub struct SizeBytesFunction {
 }
 
 impl SizeBytesFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "size";
     /// 新しい `SizeBytesFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -649,14 +562,11 @@ impl SizeBytesFunction {
 }
 
 impl TagFunction for SizeBytesFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Size.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> {
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Integrity
@@ -664,7 +574,9 @@ impl TagFunction for SizeBytesFunction {
 }
 
 impl TagDefinition for SizeBytesFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Size.into()
+    }
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileSize;
     fn generate(
@@ -684,7 +596,7 @@ struct ModifiedTsTagger;
 impl Tagger for ModifiedTsTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: ModifiedTsFunction::NAME.to_string(),
+            name: <ModifiedTsFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::BIGINT,
             target_table: TargetTable::Locations,
         }]
@@ -710,8 +622,6 @@ pub struct ModifiedTsFunction {
 }
 
 impl ModifiedTsFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "mtime";
     /// 新しい `ModifiedTsFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -721,14 +631,11 @@ impl ModifiedTsFunction {
 }
 
 impl TagFunction for ModifiedTsFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::Mtime.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> {
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::Integrity
@@ -736,7 +643,9 @@ impl TagFunction for ModifiedTsFunction {
 }
 
 impl TagDefinition for ModifiedTsFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::Mtime.into()
+    }
     const ROLE: ScanRole = ScanRole::Integrity;
     type RustType = FileTimestamp;
     fn generate(
@@ -756,7 +665,7 @@ struct InodeTagger;
 impl Tagger for InodeTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: InodeFunction::NAME.to_string(),
+            name: <InodeFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::UUID,
             target_table: TargetTable::FileEntities,
         }]
@@ -773,7 +682,6 @@ pub struct InodeFunction {
 }
 
 impl InodeFunction {
-    pub const NAME: &'static str = "file_id";
     pub fn new() -> Self {
         Self {
             tagger: InodeTagger,
@@ -782,22 +690,11 @@ impl InodeFunction {
 }
 
 impl TagFunction for InodeFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::FileId.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME || tag.tagtype.0 == "inode" {
-            // UUID形式の文字列をパースして数値比較を行う
-            if let Ok(val) = uuid::Uuid::parse_str(&tag.label.0) {
-                let expr =
-                    Expr::col((Tbl::FileEntities, Col::FileId)).eq(val.to_string());
-                return Some(expr.into());
-            }
-        }
-        None
     }
     fn role(&self) -> ScanRole {
         ScanRole::ScanId
@@ -805,7 +702,9 @@ impl TagFunction for InodeFunction {
 }
 
 impl TagDefinition for InodeFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::FileId.into()
+    }
     const ROLE: ScanRole = ScanRole::ScanId;
     type RustType = crate::types::FileRef;
     fn generate(
@@ -825,7 +724,7 @@ struct TypeFromExtTagger;
 impl Tagger for TypeFromExtTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: TypeFromExtFunction::NAME.to_string(),
+            name: <TypeFromExtFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
@@ -842,25 +741,23 @@ impl Tagger for TypeFromExtTagger {
 }
 
 impl TagDefinition for TypeFromExtFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::TypeFromExt.into()
+    }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
         path: &Path,
         metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        let is_dir = metadata.is_dir();
+        if metadata.is_dir() {
+            return Ok("Folder".to_string());
+        }
         let ext = path
             .extension()
-            .map(|e| e.to_string_lossy().to_string().to_lowercase())
-            .unwrap_or_default();
-        Ok(if is_dir {
-            "Folder".to_string()
-        } else if ext.is_empty() {
-            "File".to_string()
-        } else {
-            format!("{} File", ext.to_uppercase())
-        })
+            .map(|e| e.to_string_lossy().to_uppercase())
+            .unwrap_or_else(|| "File".to_string());
+        Ok(ext)
     }
 }
 
@@ -874,8 +771,6 @@ pub struct TypeFromExtFunction {
 }
 
 impl TypeFromExtFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "type_from_ext";
     /// 新しい `TypeFromExtFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -885,17 +780,11 @@ impl TypeFromExtFunction {
 }
 
 impl TagFunction for TypeFromExtFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::TypeFromExt.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
-        }
-        None
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::TYPE_FROM_EXT }
 }
@@ -923,7 +812,7 @@ impl SizeStrTagger {
 impl Tagger for SizeStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: SizeStrFunction::NAME.to_string(),
+            name: <SizeStrFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
@@ -940,16 +829,16 @@ impl Tagger for SizeStrTagger {
 }
 
 impl TagDefinition for SizeStrFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::SizeStr.into()
+    }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
         _path: &Path,
         metadata: &SafeMetadata,
     ) -> Result<Self::RustType> {
-        Ok(if metadata.is_dir() { 
-            "-".to_string() 
-        } else if metadata.len() == METADATA_ERROR {
+        Ok(if metadata.len() == METADATA_ERROR {
             "-".to_string()
         } else {
             SizeStrTagger::format_size(metadata.len() as u64)
@@ -966,8 +855,6 @@ pub struct SizeStrFunction {
 }
 
 impl SizeStrFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "size_str";
     /// 新しい `SizeStrFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -977,17 +864,11 @@ impl SizeStrFunction {
 }
 
 impl TagFunction for SizeStrFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::SizeStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
-        }
-        None
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::SIZE_STR }
 }
@@ -1001,7 +882,7 @@ struct ModifiedStrTagger;
 impl Tagger for ModifiedStrTagger {
     fn get_columns(&self) -> Vec<ColumnDef> {
         vec![ColumnDef {
-            name: ModifiedStrFunction::NAME.to_string(),
+            name: <ModifiedStrFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::VARCHAR,
             target_table: TargetTable::BaseTags,
         }]
@@ -1019,7 +900,9 @@ impl Tagger for ModifiedStrTagger {
 }
 
 impl TagDefinition for ModifiedStrFunction {
-    const NAME: &'static str = Self::NAME;
+    fn name() -> StaticName {
+        STag::ModifiedStr.into()
+    }
     const ROLE: ScanRole = ScanRole::Other;
     type RustType = String;
     fn generate(
@@ -1044,8 +927,6 @@ pub struct ModifiedStrFunction {
 }
 
 impl ModifiedStrFunction {
-    /// この機能の識別子名。
-    pub const NAME: &'static str = "modified_str";
     /// 新しい `ModifiedStrFunction` インスタンスを作成します。
     pub fn new() -> Self {
         Self {
@@ -1055,17 +936,11 @@ impl ModifiedStrFunction {
 }
 
 impl TagFunction for ModifiedStrFunction {
-    fn name(&self) -> &str {
-        Self::NAME
+    fn name(&self) -> Name {
+        STag::ModifiedStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
-    }
-    fn to_expr(&self, tag: &TypedTag) -> Option<SimpleExpr> {
-        if tag.tagtype.0 == Self::NAME {
-            return Some(exists_in_tags(Self::NAME, &tag.label.0, false));
-        }
-        None
     }
     fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::MODIFIED_STR }
 }
@@ -1076,26 +951,41 @@ impl TagFunction for ModifiedStrFunction {
 
 pub struct NameTagFunction;
 impl TagFunction for NameTagFunction {
-    fn name(&self) -> &str { "name" }
-    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
-    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::NAME }
+    fn name(&self) -> Name {
+        STag::Name.into()
+    }
+    fn role(&self) -> ScanRole {
+        ScanRole::DefinitionOnly
+    }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::NAME
+    }
 }
 
 pub struct KindTagFunction;
 impl TagFunction for KindTagFunction {
-    fn name(&self) -> &str { "kind" }
-    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
-    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::ITEM_KIND }
+    fn name(&self) -> Name {
+        STag::ItemKind.into()
+    }
+    fn role(&self) -> ScanRole {
+        ScanRole::DefinitionOnly
+    }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::ITEM_KIND
+    }
 }
 
 pub struct ContentTagFunction;
 impl TagFunction for ContentTagFunction {
-    fn name(&self) -> &str { "content" }
-    fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
-    fn role(&self) -> ScanRole { ScanRole::DefinitionOnly }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::CONTENT }
+    fn name(&self) -> Name {
+        STag::Content.into()
+    }
+    fn role(&self) -> ScanRole {
+        ScanRole::DefinitionOnly
+    }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::CONTENT
+    }
 }
 
 // ========================================================
@@ -1105,17 +995,9 @@ impl TagFunction for ContentTagFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Col;
     use crate::types::{TypedTag, TagType, Label};
     use sea_query::{Query, PostgresQueryBuilder};
-
-    // Helper to stringify a SimpleExpr for testing
-    fn to_sql(expr: SimpleExpr) -> String {
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
-        // "SELECT ..." -> remove "SELECT "
-        sql.strip_prefix("SELECT ").unwrap_or(&sql).to_string()
-    }
 
     // Helper to create a TypedTag
     fn ttag(key: &str, value: &str) -> TypedTag {
@@ -1123,32 +1005,6 @@ mod tests {
             tagtype: TagType(key.to_string()),
             label: Label(value.to_string()),
         }
-    }
-
-    #[test]
-    fn test_path_function() {
-        let f = PathFunction::new();
-        let expr = f.to_expr(&ttag(PathFunction::NAME, "foo")).unwrap();
-        let sql = to_sql(expr);
-        assert_eq!(sql, "\"locations\".\"path\" ILIKE '%foo%'" );
-    }
-
-    #[test]
-    fn test_filename_function() {
-        let f = FilenameFunction::new();
-        let expr = f.to_expr(&ttag(FilenameFunction::NAME, "report")).unwrap();
-        let sql = to_sql(expr);
-        assert!(sql.contains("\"locations\".\"filename\" ILIKE '%report%'" ));
-        assert!(sql.contains("NOT EXISTS"));
-        assert!(sql.contains("\"type\" = 'directory'"));
-    }
-
-    #[test]
-    fn test_extension_function() {
-        let f = ExtensionFunction::new();
-        let expr = f.to_expr(&ttag(ExtensionFunction::NAME, "rs")).unwrap();
-        let sql = to_sql(expr);
-        assert_eq!(sql, "\"locations\".\"extension\" = 'rs'");
     }
 
     #[test]
@@ -1169,7 +1025,6 @@ mod tests {
     #[test]
     fn test_size_bytes_function() {
         let f = SizeBytesFunction::new();
-        assert!(f.to_expr(&ttag(SizeBytesFunction::NAME, "123")).is_none());
         assert_eq!(f.role(), ScanRole::Integrity);
     }
 
@@ -1186,19 +1041,6 @@ mod tests {
         query.column(Col::FileId);
         let sql = query.to_string(PostgresQueryBuilder);
         assert!(sql.contains("\"file_id\""), "Direct Col::FileId should be snake_case");
-    }
-
-    #[test]
-    fn test_inode_function_to_expr() {
-        let f = InodeFunction::new();
-        // 有効な UUID 文字列を渡す
-        let test_uuid = uuid::Uuid::nil().to_string();
-        let expr = f.to_expr(&ttag(InodeFunction::NAME, &test_uuid)).unwrap();
-        let sql = to_sql(expr);
-        println!("SQL: {}", sql);
-        
-        // UUID 文字列として比較が行われていることを確認
-        assert!(sql.contains(&format!("\"file_id\" = '{}'", test_uuid)), "Expected UUID comparison");
     }
 
     #[test]

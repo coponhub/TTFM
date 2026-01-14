@@ -8,13 +8,14 @@ use duckdb::Connection;
 use std::path::Path;
 use file_id::get_file_id;
 use sea_query::{
-    Expr, PostgresQueryBuilder, Alias, Query, BinOper, Func
+    Expr, Func, PostgresQueryBuilder, Query,
 };
 use crate::db::{Tbl, Col, DuckDbFunc};
 use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 
 pub mod types;
 pub mod query;
+pub mod query_functions;
 pub mod plugins;
 pub mod config;
 pub mod db;
@@ -179,132 +180,11 @@ impl FunctionRegistry {
     // --- Search Support ---
 
     /// `all_tags` ビューに対する検索SQL（IDのリストを返すクエリ）を生成します。
-    pub fn generate_view_query(&self, node: &QueryNode, view_name: &str) -> String {
-        let select = self.build_set_query(node, view_name);
+    pub fn generate_view_query(&self, node: &crate::query::QueryNode, view_name: &str) -> String {
+        let registry = crate::query::QueryFunctionRegistry::with_standard();
+        let select = node.clone().expand(&registry).to_sql(view_name);
         select.to_string(PostgresQueryBuilder)
     }
-
-    /// クエリツリーを集合演算（UNION/INTERSECT/EXCEPT）を用いた SelectStatement に変換します。
-    fn build_set_query(
-        &self,
-        node: &QueryNode,
-        view_name: &str,
-    ) -> sea_query::SelectStatement {
-        match node {
-            QueryNode::And(left, right) => {
-                let mut q = Query::select();
-                q.column(Col::ItemId).from_subquery(
-                    self.build_set_query(left, view_name),
-                    Tbl::LeftSide,
-                );
-
-                let mut right_q = Query::select();
-                right_q.column(Col::ItemId).from_subquery(
-                    self.build_set_query(right, view_name),
-                    Tbl::RightSide,
-                );
-
-                q.union(sea_query::UnionType::Intersect, right_q);
-                q
-            }
-            QueryNode::Or(left, right) => {
-                let mut q = Query::select();
-                q.column(Col::ItemId).from_subquery(
-                    self.build_set_query(left, view_name),
-                    Tbl::LeftSide,
-                );
-
-                let mut right_q = Query::select();
-                right_q.column(Col::ItemId).from_subquery(
-                    self.build_set_query(right, view_name),
-                    Tbl::RightSide,
-                );
-
-                q.union(sea_query::UnionType::Distinct, right_q);
-                q
-            }
-            QueryNode::Not(child) => {
-                let types = child.get_all_types();
-                let mut q = Query::select();
-                q.column(Col::ItemId).distinct().from(Alias::new(view_name));
-                
-                if !types.is_empty() {
-                    q.and_where(Expr::col(Col::Type).is_in(types));
-                }
-
-                let mut except_q = Query::select();
-                except_q.column(Col::ItemId).from_subquery(
-                    self.build_set_query(child, view_name),
-                    Tbl::NotSide,
-                );
-
-                q.union(sea_query::UnionType::Except, except_q);
-                q
-            }
-            QueryNode::TypedTag(tt) => {
-                // 特別なロジックが必要なタグの処理
-                if tt.tagtype.0 == "directory" {
-                    let mut q_name = Query::select();
-                    q_name
-                        .column(Col::ItemId)
-                        .from(Alias::new(view_name))
-                        .and_where(Expr::col(Col::Type).eq("filename"))
-                        .and_where(Expr::col(Col::Label).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
-
-                    let mut q_dir = Query::select();
-                    q_dir
-                        .column(Col::ItemId)
-                        .from(Alias::new(view_name))
-                        .and_where(Expr::col(Col::Type).eq("directory"))
-                        .and_where(Expr::col(Col::Label).eq("true"));
-
-                    q_name.union(sea_query::UnionType::Intersect, q_dir);
-                    return q_name;
-                }
-
-                // カラムを直接検索する特別なタグ
-                let mut q = Query::select();
-                q.column(Col::ItemId).distinct().from(Alias::new(view_name));
-
-                match tt.tagtype.0.as_str() {
-                    "item_kind" | "itemtype" => {
-                        q.and_where(Expr::col(Col::ItemKind).eq(tt.label.0.clone()));
-                        return q;
-                    }
-                    "name" => {
-                        q.and_where(Expr::col(Col::Name).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
-                        return q;
-                    }
-                    "origin" => {
-                        q.and_where(Expr::col(Col::Origin).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
-                        return q;
-                    }
-                    "rank" => {
-                        if let Ok(val) = tt.label.0.parse::<i64>() {
-                            q.and_where(Expr::col(Col::Rank).eq(val));
-                            return q;
-                        }
-                    }
-                    "item_id" | "id" => {
-                        if let Ok(val) = tt.label.0.parse::<i64>() {
-                            q.and_where(Expr::col(Col::ItemId).eq(val));
-                            return q;
-                        }
-                    }
-                    _ => {}
-                }
-
-                let mut q = Query::select();
-                q.column(Col::ItemId)
-                    .distinct()
-                    .from(Alias::new(view_name))
-                    .and_where(Expr::col(Col::Type).eq(tt.tagtype.0.clone()))
-                    .and_where(Expr::col(Col::Label).binary(BinOper::Custom("GLOB"), Expr::val(tt.label.0.clone())));
-                q
-            }
-        }
-    }
-
 }
 
 /// ファイル管理システムのメインインターフェース。
@@ -424,8 +304,9 @@ impl FileManager {
                 .from(Tbl::OneView)
                 .to_owned()
         } else {
-            let node = QueryParser::parse(query)?;
-            self.registry.build_set_query(&node, "oneview")
+            let node = crate::query::QueryParser::parse(query)?;
+            let q_reg = crate::query::QueryFunctionRegistry::with_standard();
+            node.expand(&q_reg).to_sql("oneview")
         };
 
         // 2. マッチしたIDの全タグを取得して集約

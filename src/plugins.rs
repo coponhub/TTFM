@@ -8,10 +8,9 @@ use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::functions::{TagFunction, exists_in_tags};
+use crate::functions::TagFunction;
 use crate::taggers::{Tagger, ColumnDef, TagValue};
 use crate::db::{TargetTable, SqlType};
-use crate::types::TypedTag;
 
 // WIT定義から自動生成
 bindgen!({
@@ -195,13 +194,6 @@ impl TagFunction for WasmPluginAdapter {
 
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(self)
-    }
-
-    fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
-        if tag.tagtype.0 == self.name {
-            return Some(exists_in_tags(&self.name, &tag.label.0, false));
-        }
-        None
     }
 }
 

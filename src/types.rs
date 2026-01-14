@@ -63,9 +63,31 @@ impl ToSql for FileTimestamp {
 #[derive(Debug, PartialEq, Clone)]
 pub struct TagType(pub String);
 
-/// タグの「値」部分（例: "rs", "src"）。
+/// タグの「値」部分（例: "rs", "1024"）。
+/// 文字列と数値のどちらかを取り得ます。
 #[derive(Debug, PartialEq, Clone)]
-pub struct Label(pub String);
+pub enum Label {
+    String(String),
+    Integer(i64),
+}
+
+impl Label {
+    /// 文字列としての値を取得します。
+    pub fn as_str(&self) -> String {
+        match self {
+            Label::String(s) => s.clone(),
+            Label::Integer(i) => i.to_string(),
+        }
+    }
+
+    /// 数値としての値を取得します（数値でない場合は 0）。
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            Label::Integer(i) => *i,
+            Label::String(s) => s.parse::<i64>().unwrap_or_default(),
+        }
+    }
+}
 
 /// 「キー:値」のペアを表す構造体。
 #[derive(Debug, PartialEq, Clone)]
@@ -78,10 +100,10 @@ pub struct TypedTag {
 
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
-    pub fn new(key: String, value: String) -> Self {
+    pub fn new(key: impl Into<String>, label: Label) -> Self {
         Self {
-            tagtype: TagType(key),
-            label: Label(value),
+            tagtype: TagType(key.into()),
+            label,
         }
     }
 }
@@ -122,4 +144,43 @@ impl SearchResult {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
+}
+
+/// ライフタイムに制約のないタグ名（参照）。
+pub type Name<'a> = &'a str;
+
+/// プログラム終了まで有効なタグ名（静的文字列）。
+pub type StaticName = &'static str;
+
+/// システムで使用される標準的なタグ名のシンボル定義。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+pub enum STag {
+    ItemId,
+    FileId,
+    Path,
+    Parentdir,
+    Filename,
+    Stem,
+    Extension,
+    IsDir,
+    Size,
+    Mtime,
+    TypeFromExt,
+    SizeStr,
+    ModifiedStr,
+    Hash,
+    Type,
+    Label,
+    ItemKind,
+    Content,
+    Rank,
+    Origin,
+    Name,
+    // 内部カラム用
+    Types,
+    Labels,
+    ScanHash,
+    // 検索専用仮想タグ
+    Directory,
 }

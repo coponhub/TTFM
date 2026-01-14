@@ -100,53 +100,18 @@ impl Iden for SqlType {
 }
 
 /// 共通で使用されるカラム名を表す識別子。
-#[derive(Iden, Clone, Copy)]
-pub enum Col {
-    ItemId,
-    FileId,
-    Path,
-    Parentdir,
-    Filename,
-    Extension,
-    Size,
-    Mtime,
-    Hash,
-    Type,
-    Label,
-    ItemKind,
-    Content,
-    Rank,
-    Origin,
-    Name,
-    Types,
-    Labels,
-    ScanHash,
+pub use crate::types::STag as Col;
+
+impl sea_query::Iden for Col {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        let val: &'static str = (*self).into();
+        write!(s, "{}", val).unwrap();
+    }
 }
 
 impl Col {
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "item_id" => Some(Col::ItemId),
-            "file_id" => Some(Col::FileId),
-            "path" => Some(Col::Path),
-            "parentdir" => Some(Col::Parentdir),
-            "filename" => Some(Col::Filename),
-            "extension" => Some(Col::Extension),
-            "size" => Some(Col::Size),
-            "mtime" => Some(Col::Mtime),
-            "hash" => Some(Col::Hash),
-            "type" => Some(Col::Type),
-            "label" => Some(Col::Label),
-            "item_kind" => Some(Col::ItemKind),
-            "content" => Some(Col::Content),
-            "rank" => Some(Col::Rank),
-            "origin" => Some(Col::Origin),
-            "name" => Some(Col::Name),
-            "types" => Some(Col::Types),
-            "labels" => Some(Col::Labels),
-            "scan_hash" => Some(Col::ScanHash),
-            _ => None,
-        }
+        <Self as std::str::FromStr>::from_str(s).ok()
     }
 }
 

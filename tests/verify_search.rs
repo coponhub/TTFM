@@ -53,15 +53,16 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         // --- Complex nested combinations ---
         ("(extension:pdf | extension:txt) & filename:project_alpha_report.pdf", 1),
         ("extension:pdf & (filename:project_alpha_report.pdf | filename:project_beta_report.pdf)", 2),
-        ("(directory:work_docs & filename:work_docs) | (extension:pdf & filename:project_beta_report.pdf)", 2),
+        ("(directory:work_docs & name:work_docs) | (extension:pdf & filename:project_beta_report.pdf)", 2),
         
         // --- Deeply nested parentheses ---
         ("((extension:pdf | extension:txt) & filename:project_alpha_report.pdf) | directory:work_docs", 2),
         
         // Folder specific searches (directories are also entries with filenames)
-        ("filename:work_docs", 1),            // work_docs
-        ("filename:personal_photos | filename:temp_backup | filename:backup_2023.zip", 3),
-        ("filename:work_docs & directory:work_docs", 1),     
+        ("filename:work_docs", 0),            // filename no longer matches directories
+        ("name:work_docs", 2),                // name matches both directory and label item
+        ("filename:personal_photos | filename:temp_backup | filename:backup_2023.zip", 1),
+        ("name:work_docs & directory:work_docs", 1),     
     ];
 
         for (query, expected_count) in test_cases {

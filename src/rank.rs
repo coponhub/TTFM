@@ -85,7 +85,6 @@ mod tests {
     impl TagFunction for MockFunc {
         fn name(&self) -> &str { &self.name }
         fn tagger(&self) -> Option<&dyn Tagger> { Some(&MockTagger) }
-        fn to_expr(&self, _tag: &TypedTag) -> Option<SimpleExpr> { None }
         fn default_rank(&self) -> Rank { self.rank }
     }
 

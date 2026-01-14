@@ -55,6 +55,8 @@ impl OneView {
             .column((Tbl::FileEntities, Col::Rank))
             .expr_as(Expr::val("file"), Col::ItemKind)
             .expr_as(Expr::col((Tbl::Locations, Col::Filename)), Col::Name)
+            .column((Tbl::Locations, Col::Size))
+            .column((Tbl::Locations, Col::Mtime))
             .from_subquery(util::parquet_query(ents), Tbl::FileEntities)
             .join_subquery(
                 JoinType::InnerJoin,
@@ -67,10 +69,12 @@ impl OneView {
         // Base info from other items
         let mut item_master = Query::select();
         item_master
-            .column(Col::ItemId)
-            .column(Col::Rank)
-            .column(Col::ItemKind)
+            .expr_as(Expr::col(Col::ItemId), Col::ItemId)
+            .expr_as(Expr::col(Col::Rank), Col::Rank)
+            .expr_as(Expr::col(Col::ItemKind), Col::ItemKind)
             .expr_as(Expr::col(Col::Content), Col::Name)
+            .expr_as(Expr::val(0), Col::Size)
+            .expr_as(Expr::val(0), Col::Mtime)
             .from_subquery(util::parquet_query(items), Tbl::Item);
 
         let mut all_master_base = file_master;
@@ -86,9 +90,11 @@ impl OneView {
 
         let mut final_master = Query::select();
         final_master
-            .expr_as(Expr::col((Tbl::Master, Col::ItemId)), Col::ItemId)
+            .column((Tbl::Master, Col::ItemId))
             .column((Tbl::Master, Col::Rank))
             .column((Tbl::Master, Col::ItemKind))
+            .column((Tbl::Master, Col::Size))
+            .column((Tbl::Master, Col::Mtime))
             .expr_as(
                 Func::cust(DuckDbFunc::Coalesce).args([
                     Expr::col((Tbl::UserTags, Col::Name)).into(),
@@ -129,7 +135,10 @@ impl OneView {
                 _ => unreachable!(),
             };
 
-            for cd in all_columns.iter().filter(|c| c.target_table == target) {
+            for cd in all_columns.iter().filter(|c| {
+                c.target_table == target 
+                && c.name != "size" && c.name != "mtime" && c.name != "rank"
+            }) {
                 let col_iden = crate::macros::name_to_iden(&cd.name);
                 let sub = Query::select()
                     .column(Col::ItemId)
@@ -184,6 +193,8 @@ impl OneView {
             .column((Tbl::BaseTags, Col::ItemId))
             .column((Tbl::Master, Col::ItemKind))
             .column((Tbl::Master, Col::Rank))
+            .column((Tbl::Master, Col::Size))
+            .column((Tbl::Master, Col::Mtime))
             .column((Tbl::BaseTags, Col::Origin))
             .column((Tbl::BaseTags, Col::Type))
             .column((Tbl::BaseTags, Col::Label))
