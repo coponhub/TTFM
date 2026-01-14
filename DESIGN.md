@@ -124,9 +124,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
 
 #### A. `TagFunction` trait (`src/functions.rs`)
-特定の TypedTag に関する**定義・検索・抽出の統合単位**。
+特定の TypedTag に関する**定義・抽出の統合単位**。
 - **タグ名の管理**: 担当する識別子（例: `"path"`, `"extension"`) を `NAME` 定数として保持する。
-- **検索の変換**: ユーザー入力（TypedTag）を解釈し、SQL条件式へ変換する (`to_sql`)。
 - **Taggerの提供**: 内部に `Tagger` を必ず持ち、インデックス作成時の抽出ロジックをシステムへ提供する。 
 
 #### B. `Tagger` trait (`src/taggers.rs`)
@@ -181,12 +180,17 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
         - `type:label` 形式の基本単位。
         - **ルール**: `type` と `label` の間にスペースを含めることはできない。
     - **集合演算**:
-        - `&`: 積集合 (Intersection)
-        - `|`: 和集合 (Union)
-        - `-`: 差集合 (Difference) ※二項演算子
-        - `^()`: 補集合 (Complement) ※単項演算子。**対象を必ず括弧 `()` で囲む必要があり、かつ `^(` と密着させる（スペース不可）。**
-        - 例: `type:file & project:ttfm`
-        - 例: `^(type:file)`
+        - 演算子
+            - `&`: 積集合 (Intersection)
+            - `|`: 和集合 (Union)
+            - `-`: 差集合 (Difference) ※二項演算子
+            - `^()`: 補集合 (Complement) ※単項演算子。**対象を必ず括弧 `()` で囲む必要があり、かつ `^(` と密着させる（スペース不可）。**
+            - 例: `type:file & project:ttfm`
+            - 例: `^(type:file)`
+        - **演算対象 (Operand)**:
+	    - グループ
+	    - TypedTag
+	    - ラベル比較
     - **ラベル比較 (Label Comparison)**:
         - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。
         - **演算対象 (Operand)**:
