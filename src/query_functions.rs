@@ -10,11 +10,11 @@ impl QueryFunction for DirectoryQuery {
     fn name(&self) -> &str {
         STag::Directory.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(
             Box::new(QueryNode::ColumnMatch {
                 col: Col::Name,
-                value: value.clone(),
+                label: label.clone(),
             }),
             Box::new(QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(STag::IsDir).to_string(),
@@ -30,11 +30,11 @@ impl QueryFunction for FilenameQuery {
     fn name(&self) -> &str {
         STag::Filename.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(
             Box::new(QueryNode::ColumnMatch {
                 col: Col::Name,
-                value: value.clone(),
+                label: label.clone(),
             }),
             Box::new(QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(STag::IsDir).to_string(),
@@ -50,8 +50,8 @@ impl QueryFunction for ExtensionQuery {
     fn name(&self) -> &str {
         STag::Extension.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
-        let normalized = value
+    fn expand(&self, label: &Label) -> QueryNode {
+        let normalized = label
             .as_str()
             .to_lowercase()
             .trim_start_matches('.')
@@ -74,10 +74,10 @@ impl QueryFunction for PathQuery {
     fn name(&self) -> &str {
         STag::Path.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(
             <&str>::from(STag::Path).to_string(),
-            Label::String(normalize_path(&value.as_str())),
+            Label::String(normalize_path(&label.as_str())),
         ))
     }
 }
@@ -88,10 +88,10 @@ impl QueryFunction for ParentDirQuery {
     fn name(&self) -> &str {
         STag::Parentdir.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(
             <&str>::from(STag::Parentdir).to_string(),
-            Label::String(normalize_path(&value.as_str())),
+            Label::String(normalize_path(&label.as_str())),
         ))
     }
 }
@@ -102,10 +102,10 @@ impl QueryFunction for NameQuery {
     fn name(&self) -> &str {
         STag::Name.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
             col: Col::Name,
-            value: value.clone(),
+            label: label.clone(),
         }
     }
 }
@@ -116,10 +116,10 @@ impl QueryFunction for ItemKindQuery {
     fn name(&self) -> &str {
         STag::ItemKind.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
             col: Col::ItemKind,
-            value: value.clone(),
+            label: label.clone(),
         }
     }
 }
@@ -130,10 +130,10 @@ impl QueryFunction for RankQuery {
     fn name(&self) -> &str {
         STag::Rank.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
             col: Col::Rank,
-            value: value.clone(),
+            label: label.clone(),
         }
     }
 }
@@ -144,10 +144,10 @@ impl QueryFunction for SizeQuery {
     fn name(&self) -> &str {
         STag::Size.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
             col: Col::Size,
-            value: value.clone(),
+            label: label.clone(),
         }
     }
 }
@@ -158,10 +158,10 @@ impl QueryFunction for MtimeQuery {
     fn name(&self) -> &str {
         STag::Mtime.into()
     }
-    fn expand(&self, value: &Label) -> QueryNode {
+    fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::ColumnMatch {
             col: Col::Mtime,
-            value: value.clone(),
+            label: label.clone(),
         }
     }
 }

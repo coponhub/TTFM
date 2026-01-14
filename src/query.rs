@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::Chars;
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
-use crate::types::{Label, TypedTag};
+use crate::types::{Label, TagType, TypedTag};
 use crate::db::{Tbl, Col};
 
 /// 検索クエリの展開を行う抽象化単位。
@@ -11,7 +11,7 @@ pub trait QueryFunction: Send + Sync {
     /// この関数の名前（例: "directory", "filename"）
     fn name(&self) -> &str;
     /// タグを別のクエリ構造（QueryNode）へ展開します。
-    fn expand(&self, value: &Label) -> QueryNode;
+    fn expand(&self, label: &Label) -> QueryNode;
 }
 
 /// QueryFunction を管理するレジストリ。
@@ -54,11 +54,11 @@ impl QueryFunctionRegistry {
     }
 
     /// タグを検索し、登録された関数があれば適用します。
-    pub fn process_tag(&self, key: String, value: Label) -> QueryNode {
-        if let Some(f) = self.functions.get(&key) {
-            f.expand(&value)
+    pub fn process_tag(&self, tagtype: TagType, label: Label) -> QueryNode {
+        if let Some(f) = self.functions.get(&tagtype.0) {
+            f.expand(&label)
         } else {
-            QueryNode::TypedTag(TypedTag::new(key, value))
+            QueryNode::TypedTag(TypedTag { tagtype, label })
         }
     }
 }
@@ -73,7 +73,7 @@ pub enum QueryNode {
     /// NOT条件 (`-A`)
     Not(Box<QueryNode>),
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
-    ColumnMatch { col: Col, value: Label },
+    ColumnMatch { col: Col, label: Label },
     /// 汎用タグ検索 (TypedTag 型を使用)
     TypedTag(TypedTag),
 }
@@ -91,10 +91,10 @@ impl QueryNode {
                 Box::new(r.expand(registry)),
             ),
             QueryNode::Not(c) => QueryNode::Not(Box::new(c.expand(registry))),
-            QueryNode::ColumnMatch { col, value } => {
-                QueryNode::ColumnMatch { col, value }
+            QueryNode::ColumnMatch { col, label } => {
+                QueryNode::ColumnMatch { col, label }
             }
-            QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype.0, tt.label),
+            QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
         }
     }
 
@@ -104,11 +104,11 @@ impl QueryNode {
             QueryNode::And(l, r) => self.build_and_sql(l, r, view_name),
             QueryNode::Or(l, r) => self.build_or_sql(l, r, view_name),
             QueryNode::Not(c) => self.build_not_sql(c, view_name),
-            QueryNode::ColumnMatch { col, value } => {
-                self.build_column_match_sql(*col, value, view_name)
+            QueryNode::ColumnMatch { col, label } => {
+                self.build_column_match_sql(*col, label, view_name)
             }
             QueryNode::TypedTag(tt) => {
-                self.build_typed_tag_sql(&tt.tagtype.0, &tt.label, view_name)
+                self.build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
             }
         }
     }
@@ -162,12 +162,12 @@ impl QueryNode {
     fn build_column_match_sql(
         &self,
         col: Col,
-        val: &Label,
+        label: &Label,
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
-        match val {
+        match label {
             Label::Integer(i) => {
                 q.and_where(Expr::col(col).eq(*i));
             }
@@ -183,15 +183,17 @@ impl QueryNode {
 
     fn build_typed_tag_sql(
         &self,
-        key: &str,
-        val: &Label,
+        tagtype: &TagType,
+        label: &Label,
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
         let glob = BinOper::Custom("GLOB");
-        q.and_where(Expr::col(Col::Type).binary(glob.clone(), Expr::val(key.to_string())));
-        match val {
+        q.and_where(
+            Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.0.clone())),
+        );
+        match label {
             Label::Integer(i) => {
                 q.and_where(Expr::col(Col::Label).eq(i.to_string()));
             }
