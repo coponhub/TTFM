@@ -37,11 +37,11 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     // 3. Verify Queries
     let test_cases = vec![
         ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
-        ("filename:project_alpha_report.pdf & -filename:project_alpha_draft.txt", 1),
+        ("filename:project_alpha_report.pdf & ^(filename:project_alpha_draft.txt)", 1),
         ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
         ("filename:image_vacation_2024.jpg | filename:image_work_2024.png", 2),
         ("filename:image_vacation_2024.jpg", 1),
-        ("-(extension:txt | extension:zip | extension:pdf | extension:jpg | extension:png)", 4), // 3 folders + 1 root directory
+        ("^(extension:txt | extension:zip | extension:pdf | extension:jpg | extension:png)", 4), // 3 folders + 1 root directory
         
         // --- Added cases to verify set-based search fixes ---
         ("extension:pdf & filename:project_alpha_report.pdf", 1),   // Cross-attribute AND
@@ -125,11 +125,10 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
 
         fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    
 
-        // 2. クエリ実行: item_kind:type | -extension:rs
+        // 2. クエリ実行: item_kind:type | ^(extension:rs)
 
-        let query = "item_kind:type | -extension:rs";
+        let query = "item_kind:type | ^(extension:rs)";
 
         let results = fm.search(query).unwrap();
 

@@ -84,7 +84,7 @@ unquoted_string = @{
 // Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
 reserved_chars = _{ 
     WHITESPACE 
-  | "&" | "|" | "-" | "(" | ")" | ":" | "\"" | "'"
+  | "&" | "|" | "(" | ")" | "\"" | "'"
   | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
   | "," | ";" | "{" | "}" | "[" | "]"
 }

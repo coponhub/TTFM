@@ -20,8 +20,8 @@ static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
 fn get_parser() -> &'static PrattParser<Rule> {
     PRATT_PARSER.get_or_init(|| {
         PrattParser::new()
-            .op(Op::infix(Rule::ampersand, Assoc::Left))
             .op(Op::infix(Rule::pipe, Assoc::Left) | Op::infix(Rule::minus, Assoc::Left))
+            .op(Op::infix(Rule::ampersand, Assoc::Left))
     })
 }
 
@@ -440,8 +440,8 @@ impl QueryNode {
                 self.build_comp_sql(c, view_name)
             }
             QueryNode::Comparison(_cmp) => {
-                // TODO: 比較演算の SQL 生成
-                Query::select().from(Alias::new(view_name)).to_owned()
+                // Scope Restriction: ラベル比較・計算は本フェーズでは対象外
+                unimplemented!("Comparison logic is deferred to next phase");
             }
             QueryNode::ColumnMatch { tag, label } => {
                 self.build_column_match_sql(*tag, label, view_name)
@@ -459,9 +459,10 @@ impl QueryNode {
     ) -> SelectStatement {
         let mut it = nodes.iter();
         let first = it.next().expect("And nodes must not be empty");
-        let mut q = first.to_sql(view);
+        // Precedence Safety: Wrap children in subqueries to enforce (A | B) & C logic
+        let mut q = self.wrap_in_subquery(first.to_sql(view));
         for node in it {
-            q.union(sea_query::UnionType::Intersect, node.to_sql(view));
+            q.union(sea_query::UnionType::Intersect, self.wrap_in_subquery(node.to_sql(view)));
         }
         q
     }
@@ -486,9 +487,16 @@ impl QueryNode {
         r: &QueryNode,
         view: &str,
     ) -> SelectStatement {
-        let mut q = l.to_sql(view);
-        q.union(sea_query::UnionType::Except, r.to_sql(view));
+        let mut q = self.wrap_in_subquery(l.to_sql(view));
+        q.union(sea_query::UnionType::Except, self.wrap_in_subquery(r.to_sql(view)));
         q
+    }
+
+    fn wrap_in_subquery(&self, q: SelectStatement) -> SelectStatement {
+        Query::select()
+            .column(Col::ItemId)
+            .from_subquery(q, Alias::new("sub"))
+            .to_owned()
     }
 
     fn build_comp_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
