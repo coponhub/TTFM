@@ -113,24 +113,30 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
 }
 
 fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
-    // typed_tag = @{ identifier ~ ":" ~ label }
-    // Since it's atomic (@), inner tokens might be flattened or structured differently depending on Pest version/grammar.
-    // Actually, atomic rules produce inner pairs if those inner rules are normal rules, but silent rules (_) are omitted.
-    // identifier is atomic: @{ ... } -> produces a token.
-    // label is explicit rule: label = { ... } -> produces a token.
-    // ":" is a literal, usually not produced as a pair unless named.
-    
+    // typed_tag = ${ tag_type ~ ":" ~ label }
     let mut inner = pair.into_inner();
-    let key_pair = inner.next().ok_or_else(|| anyhow!("Missing tag key"))?;
-    // identifier rule should be the first one
-    let key = key_pair.as_str();
+    let type_pair = inner.next().ok_or_else(|| anyhow!("Missing tag key"))?;
+    let tagtype = build_tag_type(type_pair)?;
     
-    // The colon might not be a pair.
-    // The next pair should be label.
     let label_pair = inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
-    
     let label = build_label(label_pair)?;
-    Ok(QueryNode::TypedTag(TypedTag::new(key.to_string(), label)))
+    Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
+}
+
+fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
+    // tag_type = { quoted_string | identifier }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::quoted_string => {
+            let s = unescape_string(inner.as_str())?;
+            Ok(TagType::LiteralCustom(s))
+        }
+        Rule::identifier => {
+            let s = unescape_unquoted(inner.as_str())?;
+            Ok(TagType::from(s))
+        }
+        _ => Err(anyhow!("Unexpected tag_type rule: {:?}", inner.as_rule())),
+    }
 }
 
 fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
@@ -163,10 +169,9 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
     match inner.as_rule() {
         Rule::calculation => Ok(Operand::Calculation(Box::new(build_calculation(inner)?))),
         Rule::type_ref => {
-            // type_ref = @{ identifier ~ ":" } (trailing colon included)
-            let s = inner.as_str();
-            let key = s.trim_end_matches(':');
-            Ok(Operand::TypeRef(TagType::from(key)))
+            // type_ref = ${ tag_type ~ ":" }
+            let inner_tag = inner.into_inner().next().unwrap();
+            Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
         Rule::label => Ok(Operand::Literal(build_label(inner)?)),
         _ => Err(anyhow!("Unknown operand rule: {:?}", inner.as_rule())),
@@ -257,24 +262,63 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::quoted_string => {
-            // quoted_string = ${ "\"" ~ inner ... | "'" ... }
-            // Pest captures quotes. We need to parse content.
-            // But inner_str_double is distinct.
-            // Let's just strip quotes and unescase.
-            let s = inner.as_str();
-            let content = &s[1..s.len()-1];
-            // Simplistic unescape for now (TODO: robust unescape)
-            Ok(Label::String(content.to_string()))
+            let s = unescape_string(inner.as_str())?;
+            Ok(Label::Literal(s))
         }
         Rule::number => {
             let i = inner.as_str().parse::<i64>()?;
             Ok(Label::Integer(i))
         }
         Rule::unquoted_string => {
-            Ok(Label::String(inner.as_str().to_string()))
+            let s = unescape_unquoted(inner.as_str())?;
+            Ok(Label::String(s))
         }
         _ => Err(anyhow!("Unknown label rule")),
     }
+}
+
+fn unescape_string(s: &str) -> Result<String> {
+    // Remove outer quotes
+    let content = &s[1..s.len()-1];
+    let mut res = String::new();
+    let mut chars = content.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                res.push(next);
+            } else {
+                res.push('\\');
+            }
+        } else {
+            res.push(c);
+        }
+    }
+    Ok(res)
+}
+
+fn unescape_unquoted(s: &str) -> Result<String> {
+    let mut res = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                // Convert \* to [*] for DuckDB GLOB
+                match next {
+                    '*' | '?' | '[' | ']' | '!' => {
+                        res.push('[');
+                        res.push(next);
+                        res.push(']');
+                    }
+                    _ => res.push(next),
+                }
+            } else {
+                res.push('\\');
+            }
+        } else {
+            res.push(c);
+        }
+    }
+    Ok(res)
 }
 
 
@@ -328,6 +372,13 @@ impl QueryFunctionRegistry {
 
     /// タグを検索し、登録された関数があれば適用します。
     pub fn process_tag(&self, tagtype: TagType, label: Label) -> QueryNode {
+        // LiteralCustom の場合は魔法（展開関数）をスキップする
+        if let TagType::LiteralCustom(_) = tagtype {
+            return QueryNode::And(vec![
+                QueryNode::TypedTag(TypedTag { tagtype, label })
+            ]);
+        }
+
         // Baseタグ（SType）であれば、レジストリから展開関数を探す
         if let TagType::Base(stag) = tagtype {
             let key_str: &'static str = stag.into();
@@ -531,6 +582,9 @@ impl QueryNode {
                     Expr::val(s.as_str()),
                 ));
             }
+            Label::Literal(s) => {
+                q.and_where(Expr::col(tag).eq(s.as_str()));
+            }
         }
         q
     }
@@ -544,13 +598,26 @@ impl QueryNode {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
         let glob = BinOper::Custom("GLOB");
-        q.and_where(Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.as_str())));
+        
+        // Type side: LiteralCustom uses '='
+        match tagtype {
+            TagType::LiteralCustom(s) => {
+                q.and_where(Expr::col(Col::Type).eq(s.as_str()));
+            }
+            _ => {
+                q.and_where(Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.as_str())));
+            }
+        }
+
         match label {
             Label::Integer(i) => {
                 q.and_where(Expr::col(Col::Label).eq(*i));
             }
             Label::String(s) => {
                 q.and_where(Expr::col(Col::Label).binary(glob, Expr::val(s.as_str())));
+            }
+            Label::Literal(s) => {
+                q.and_where(Expr::col(Col::Label).eq(s.as_str()));
             }
         }
         q

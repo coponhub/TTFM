@@ -181,8 +181,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     
 
     #[test]
-
-    fn test_glob_search_behavior() {
+    fn test_glob_search_behavior() -> anyhow::Result<()> {
 
         let dir = tempdir().unwrap();
 
@@ -246,25 +245,47 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         let results = fm.search("filename:project_[!a]eta*").unwrap();
         assert_eq!(results.len(), 1); // beta only
 
-        // 7. クォート内でのGlob
+        // 7. クォート内でのGlob (無効化されるはず)
         let results = fm.search("filename:\"project_[ab]*\"").unwrap();
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 0); // リテラル一致を試みるため0件
 
-        // 8. Type側のGlob (実装済みか確認)
+        // 8. クォートでの完全一致
+        let results = fm.search("filename:\"project_alpha.pdf\"").unwrap();
+        assert_eq!(results.len(), 1);
+
+        // 9. Type側の引用符
+        let results = fm.search("\"filename\":project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 1);
+
+        // 10. Type側のGlob (実装済みか確認)
         // filename が対象になるはず
         let results = fm.search("*name:project_alpha.pdf").unwrap();
         assert_eq!(results.len(), 1);
 
-        // 9. Type側のGlob ([...] / [!...])
+        // 11. Type側のGlob ([...] / [!...])
         let results = fm.search("[f]ilename:project_alpha.pdf").unwrap();
         assert_eq!(results.len(), 1);
         
         let results = fm.search("[!f]ilename:project_alpha.pdf").unwrap();
         assert_eq!(results.len(), 0); // filename にはマッチしないはず
 
-        // 10. Type側のGlob (?)
+        // 12. Type側のGlob (?)
         let results = fm.search("file?ame:project_alpha.pdf").unwrap();
         assert_eq!(results.len(), 1);
+
+        // 13. バックスラッシュ・エスケープ
+        // テスト用の特殊ファイルを作成
+        let special_file = root.join("[WIP]_test.txt");
+        std::fs::File::create(&special_file)?;
+        fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+        // バックスラッシュなしだとGlobとして解釈され、マッチしない可能性がある（または意図しないマッチ）
+        // ここでは \[WIP\] とすることでリテラルとして扱う
+        let results = fm.search(r"filename:\[WIP\]_*").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "[WIP]_test.txt");
+
+        Ok(())
     }
 
     

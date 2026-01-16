@@ -35,7 +35,7 @@ cmp_op = { "==" | "^=" | "^" | ">=" | ">" | "<=" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)
-typed_tag = ${ identifier ~ ":" ~ label }
+typed_tag = ${ tag_type ~ ":" ~ label }
 
 // --- Operands ---
 operand = { 
@@ -54,13 +54,15 @@ arith_op = { "+" | "-" | "*" | "/" | "%" }
 operand_calc = { type_ref | label | calculation }
 
 // Type Reference (trailing colon)
-type_ref = @{ identifier ~ ":" }
+type_ref = ${ tag_type ~ ":" }
+
+tag_type = { quoted_string | identifier }
 
 // --- Labels and Literals ---
 label = { quoted_string | number | unquoted_string }
 
-// Identifiers (allow Glob patterns for Type-side globbing: *, ?, [], !)
-identifier = @{ (ASCII_ALPHANUMERIC | "_" | "*" | "?" | "[" | "]" | "!") ~ (ASCII_ALPHANUMERIC | "_" | "-" | "*" | "?" | "[" | "]" | "!")* }
+// Identifiers (allow same characters as unquoted strings, but boundary is :)
+identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
 number = @{ "-"? ~ ASCII_DIGIT+ }
@@ -76,9 +78,10 @@ inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 // Unquoted strings: MUST NOT contain whitespace or control operators.
 // But MUST allow Glob patterns (*, ?) and path separators (/, \).
 unquoted_string = @{ 
-    !number ~ 
-    (!reserved_chars ~ ANY)+ 
+    (escape | (!reserved_chars ~ ANY))+ 
 }
+
+escape = @{ "\\" ~ ANY }
 
 // Reserved characters are only those that trigger higher-level rules or separators.
 // Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
@@ -87,4 +90,5 @@ reserved_chars = _{
   | "&" | "|" | "(" | ")" | "\"" | "'"
   | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
   | "," | ";" | "{" | "}" 
+  | ":"
 }

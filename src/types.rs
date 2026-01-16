@@ -65,6 +65,8 @@ impl ToSql for FileTimestamp {
 pub enum TagType {
     Base(SType),
     Custom(String),
+    /// 引用符で囲まれたリテラル。Glob無効・自動展開を行わない。
+    LiteralCustom(String),
 }
 
 impl TagType {
@@ -73,6 +75,7 @@ impl TagType {
         match self {
             TagType::Base(s) => (*s).into(),
             TagType::Custom(s) => s.as_str(),
+            TagType::LiteralCustom(s) => s.as_str(),
         }
     }
 }
@@ -103,6 +106,8 @@ impl From<&str> for TagType {
 pub enum Label {
     String(String),
     Integer(i64),
+    /// 引用符で囲まれたリテラル文字列。Globを無効化する。
+    Literal(String),
 }
 
 impl Label {
@@ -111,6 +116,7 @@ impl Label {
         match self {
             Label::String(s) => s.clone(),
             Label::Integer(i) => i.to_string(),
+            Label::Literal(s) => s.clone(),
         }
     }
 
@@ -118,7 +124,7 @@ impl Label {
     pub fn as_i64(&self) -> i64 {
         match self {
             Label::Integer(i) => *i,
-            Label::String(s) => s.parse::<i64>().unwrap_or_default(),
+            Label::String(s) | Label::Literal(s) => s.parse::<i64>().unwrap_or_default(),
         }
     }
 }
