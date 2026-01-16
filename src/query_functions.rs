@@ -164,3 +164,17 @@ impl QueryFunction for MtimeQuery {
         }
     }
 }
+
+/// "origin:system/user" -> ColumnMatch(SType::Origin, label)
+pub struct OriginQuery;
+impl QueryFunction for OriginQuery {
+    fn name(&self) -> &str {
+        SType::Origin.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::Origin,
+            label: label.clone(),
+        }
+    }
+}

@@ -46,6 +46,7 @@ impl QueryFunctionRegistry {
         reg.register(Box::new(RankQuery));
         reg.register(Box::new(SizeQuery));
         reg.register(Box::new(MtimeQuery));
+        reg.register(Box::new(OriginQuery));
         reg
     }
 

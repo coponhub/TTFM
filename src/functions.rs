@@ -1002,8 +1002,8 @@ mod tests {
     // Helper to create a TypedTag
     fn ttag(key: &str, value: &str) -> TypedTag {
         TypedTag {
-            tagtype: TagType(key.to_string()),
-            label: Label(value.to_string()),
+            tagtype: TagType::Custom(key.to_string()),
+            label: Label::String(value.to_string()),
         }
     }
 

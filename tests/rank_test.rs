@@ -74,7 +74,7 @@ fn test_rank_set_by_id_low_level() {
     let id = fm.add_item("note", "test note").unwrap();
     fm.set_rank_by_id(id, false, 500).unwrap();
 
-    let results = fm.search("itemtype:note").unwrap();
+    let results = fm.search("item_kind:note").unwrap();
     assert_eq!(results[0].id, id);
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }

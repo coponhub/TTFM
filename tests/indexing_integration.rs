@@ -153,5 +153,5 @@ fn test_definition_only_items_registration() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     assert!(!fm.search("item_kind:type & name:name").unwrap().is_empty());
-    assert!(!fm.search("item_kind:type & name:kind").unwrap().is_empty());
+    assert!(!fm.search("item_kind:type & name:item_kind").unwrap().is_empty());
 }
