@@ -110,9 +110,16 @@ Directly interact with files from the CLI.
 
   - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
   - [ ] **Schema Optimization (Phase E)**: 
-    - Separate `label` column into `label_str` (VARCHAR) and `label_int` (BIGINT).
-    - Remove privileged physical columns (`size`, `mtime`, `rank`) and unify them into the tag system using `label_int`.
-    - This eliminates `TRY_CAST` overhead and solves ambiguity issues (e.g. `size=0` for non-files).
+    - Separate `label` column into stored typed columns:
+      - `label_str` (VARCHAR): Text data, extensions, paths.
+      - `label_int` (BIGINT): Size, mtime, rank, counts.
+      - `label_double` (DOUBLE): Scores, durations, ratios.
+      - `label_bool` (BOOLEAN): Flags like `is_dir`, `readonly`.
+    - This allows strict typed querying (e.g., `is_dir IS TRUE`) and efficient storage (DuckDB handles NULLs efficiently).
+    - Remove privileged physical columns (`size`, `mtime`, `rank`) and map them to `label_int`.
+    - **Tag Schema Table**: Create a dedicated table (e.g., `tag_schema` or `datatype_definitions`) to map Tag Keys to Data Types.
+      - Example: `size` -> `Int`, `score` -> `Double`.
+      - This provides the most rigorous validation and fastest lookup for query planning.
 
 - [ ] **Identity & Location Management**:
   - [x] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.
