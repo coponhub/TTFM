@@ -231,9 +231,40 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     
 
         let results = fm.search("filename:project_alpha.pdf").unwrap();
-
         assert_eq!(results.len(), 1);
 
+        // 4. ? (任意の一文字)
+        let results = fm.search("filename:project_alph?.pdf").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "project_alpha.pdf");
+
+        // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
+        let results = fm.search("filename:project_[ab]*").unwrap();
+        assert_eq!(results.len(), 2); // alpha and beta
+
+        // 6. [!...] (否定文字セット) - beta のみを拾う
+        let results = fm.search("filename:project_[!a]eta*").unwrap();
+        assert_eq!(results.len(), 1); // beta only
+
+        // 7. クォート内でのGlob
+        let results = fm.search("filename:\"project_[ab]*\"").unwrap();
+        assert_eq!(results.len(), 2);
+
+        // 8. Type側のGlob (実装済みか確認)
+        // filename が対象になるはず
+        let results = fm.search("*name:project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 1);
+
+        // 9. Type側のGlob ([...] / [!...])
+        let results = fm.search("[f]ilename:project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 1);
+        
+        let results = fm.search("[!f]ilename:project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 0); // filename にはマッチしないはず
+
+        // 10. Type側のGlob (?)
+        let results = fm.search("file?ame:project_alpha.pdf").unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     

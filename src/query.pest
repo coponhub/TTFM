@@ -59,8 +59,8 @@ type_ref = @{ identifier ~ ":" }
 // --- Labels and Literals ---
 label = { quoted_string | number | unquoted_string }
 
-// Identifiers
-identifier = @{ (ASCII_ALPHANUMERIC | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+// Identifiers (allow Glob patterns for Type-side globbing: *, ?, [], !)
+identifier = @{ (ASCII_ALPHANUMERIC | "_" | "*" | "?" | "[" | "]" | "!") ~ (ASCII_ALPHANUMERIC | "_" | "-" | "*" | "?" | "[" | "]" | "!")* }
 
 // Numbers
 number = @{ "-"? ~ ASCII_DIGIT+ }
@@ -86,5 +86,5 @@ reserved_chars = _{
     WHITESPACE 
   | "&" | "|" | "(" | ")" | "\"" | "'"
   | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
-  | "," | ";" | "{" | "}" | "[" | "]"
+  | "," | ";" | "{" | "}" 
 }
