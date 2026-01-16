@@ -1,5 +1,5 @@
 use crate::db::SqlType;
-use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
+use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use uuid::Uuid;
 
 /// メタデータ取得に失敗した際のデフォルト値。
@@ -20,15 +20,35 @@ pub trait DBType {
     fn db_type() -> SqlType;
 }
 
-impl DBType for String { fn db_type() -> SqlType { SqlType::VARCHAR } }
-impl DBType for i64 { fn db_type() -> SqlType { SqlType::BIGINT } }
-impl DBType for Uuid { fn db_type() -> SqlType { SqlType::UUID } }
-impl DBType for bool { fn db_type() -> SqlType { SqlType::BOOLEAN } }
+impl DBType for String {
+    fn db_type() -> SqlType {
+        SqlType::VARCHAR
+    }
+}
+impl DBType for i64 {
+    fn db_type() -> SqlType {
+        SqlType::BIGINT
+    }
+}
+impl DBType for Uuid {
+    fn db_type() -> SqlType {
+        SqlType::UUID
+    }
+}
+impl DBType for bool {
+    fn db_type() -> SqlType {
+        SqlType::BOOLEAN
+    }
+}
 
 /// ファイルサイズ（バイト単位）を表す型。
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileSize(pub i64);
-impl DBType for FileSize { fn db_type() -> SqlType { SqlType::BIGINT } }
+impl DBType for FileSize {
+    fn db_type() -> SqlType {
+        SqlType::BIGINT
+    }
+}
 
 impl FromSql for FileSize {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -45,7 +65,11 @@ impl ToSql for FileSize {
 /// UNIXタイムスタンプ（秒単位）を表す型。
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileTimestamp(pub i64);
-impl DBType for FileTimestamp { fn db_type() -> SqlType { SqlType::BIGINT } }
+impl DBType for FileTimestamp {
+    fn db_type() -> SqlType {
+        SqlType::BIGINT
+    }
+}
 
 impl FromSql for FileTimestamp {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
@@ -124,7 +148,9 @@ impl Label {
     pub fn as_i64(&self) -> i64 {
         match self {
             Label::Integer(i) => *i,
-            Label::String(s) | Label::Literal(s) => s.parse::<i64>().unwrap_or_default(),
+            Label::String(s) | Label::Literal(s) => {
+                s.parse::<i64>().unwrap_or_default()
+            }
         }
     }
 }
@@ -198,7 +224,8 @@ impl SearchResult {
 
     /// 指定されたキーのタグ値を取得します。
     pub fn get_tag_value(&self, key: &str) -> Option<&str> {
-        self.tags.iter()
+        self.tags
+            .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
@@ -211,7 +238,16 @@ pub type Name<'a> = &'a str;
 pub type StaticName = &'static str;
 
 /// システムで使用される標準的なタグ名のシンボル定義。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::Display,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum SType {
     ItemId,

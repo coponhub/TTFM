@@ -1,8 +1,8 @@
 use anyhow::Result;
+use duckdb::types::{Null, ToSql, ToSqlOutput};
 use std::path::Path;
-use duckdb::types::{ToSql, ToSqlOutput, Null};
 
-use crate::db::{TargetTable, SqlType};
+use crate::db::{SqlType, TargetTable};
 
 /// データベースのカラム定義。
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub enum TagValue {
     Boolean(bool),
     Null,
     #[allow(dead_code)]
-    Map(Vec<(String, String)>), 
+    Map(Vec<(String, String)>),
 }
 
 impl TagValue {

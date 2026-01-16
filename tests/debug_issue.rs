@@ -1,6 +1,6 @@
-use ttfm::FileManager;
 use std::fs::File;
 use tempfile::tempdir;
+use ttfm::FileManager;
 
 #[test]
 fn debug_parent_and_extension_search() -> anyhow::Result<()> {
@@ -15,13 +15,13 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
     //     mod.rs
     //   strange.rs/  <-- 拡張子っぽい名前のフォルダ
     //     ignored.txt
-    
+
     let src = root.join("src");
     std::fs::create_dir(&src)?;
-    
+
     File::create(src.join("main.rs"))?;
     File::create(src.join("lib.rs"))?;
-    
+
     let sub = src.join("sub_folder");
     std::fs::create_dir(&sub)?;
     File::create(sub.join("mod.rs"))?;
@@ -37,7 +37,7 @@ fn debug_parent_and_extension_search() -> anyhow::Result<()> {
 
     // 3. 検索実行: parentdir:src & extension:rs
     let results = fm.search("parentdir:src & extension:rs")?;
-    
+
     for path in &results {
         println!("Hit: {:?}", path);
     }

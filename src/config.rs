@@ -1,8 +1,8 @@
-use serde::Deserialize;
-use std::path::Path;
-use std::fs;
-use std::collections::HashMap;
 use anyhow::Result;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 /// TTFMの全体設定を保持する構造体。
 #[derive(Debug, Deserialize)]
@@ -26,14 +26,16 @@ pub struct PluginsConfig {
 
 impl Default for PluginsConfig {
     fn default() -> Self {
-        Self { 
+        Self {
             enabled: true,
             status: HashMap::new(),
         }
     }
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {

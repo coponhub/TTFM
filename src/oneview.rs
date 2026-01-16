@@ -1,10 +1,8 @@
-use sea_query::{
-    Query, Expr, JoinType, SelectStatement, Func
-};
-use std::path::Path;
-use crate::db::{Tbl, Col, DuckDbFunc, TargetTable};
-use crate::taggers::{ColumnDef};
+use crate::db::{Col, DuckDbFunc, TargetTable, Tbl};
+use crate::taggers::ColumnDef;
 use crate::util;
+use sea_query::{Expr, Func, JoinType, Query, SelectStatement};
+use std::path::Path;
 
 pub struct OneView;
 
@@ -47,7 +45,7 @@ impl OneView {
         user_tags: &str,
     ) -> SelectStatement {
         // --- 1. Unified Master Info (ID, Rank, Name, ItemKind) ---
-        
+
         // Base info from files
         let mut file_master = Query::select();
         file_master
@@ -63,7 +61,7 @@ impl OneView {
                 util::parquet_query(locs),
                 Tbl::Locations,
                 Expr::col((Tbl::FileEntities, Col::ItemId))
-                    .eq(Expr::col((Tbl::Locations, Col::ItemId)))
+                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
             );
 
         // Base info from other items
@@ -78,7 +76,8 @@ impl OneView {
             .from_subquery(util::parquet_query(items), Tbl::Item);
 
         let mut all_master_base = file_master;
-        all_master_base.union(sea_query::UnionType::All, item_master.to_owned());
+        all_master_base
+            .union(sea_query::UnionType::All, item_master.to_owned());
 
         // Name override from user tags
         let mut user_names = Query::select();
@@ -100,7 +99,7 @@ impl OneView {
                     Expr::col((Tbl::UserTags, Col::Name)).into(),
                     Expr::col((Tbl::Master, Col::Name)).into(),
                 ]),
-                Col::Name
+                Col::Name,
             )
             .from_subquery(all_master_base, Tbl::Master)
             .join_subquery(
@@ -108,15 +107,16 @@ impl OneView {
                 user_names,
                 Tbl::UserTags,
                 Expr::col((Tbl::Master, Col::ItemId))
-                    .eq(Expr::col((Tbl::UserTags, Col::ItemId)))
+                    .eq(Expr::col((Tbl::UserTags, Col::ItemId))),
             );
 
         // --- 2. Unified Tag Sources (item_id, origin, type, label) ---
-        
+
         let mut base_q = Query::select();
-        
+
         // A. base_tags
-        base_q.column(Col::ItemId)
+        base_q
+            .column(Col::ItemId)
             .expr_as(Expr::val("system"), Col::Origin)
             .column(Col::Type)
             .column(Col::Label)
@@ -136,8 +136,10 @@ impl OneView {
             };
 
             for cd in all_columns.iter().filter(|c| {
-                c.target_table == target 
-                && c.name != "size" && c.name != "mtime" && c.name != "rank"
+                c.target_table == target
+                    && c.name != "size"
+                    && c.name != "mtime"
+                    && c.name != "rank"
             }) {
                 let col_iden = crate::macros::name_to_iden(&cd.name);
                 let sub = Query::select()
@@ -151,7 +153,10 @@ impl OneView {
                         ),
                         Col::Label,
                     )
-                    .from_subquery(util::parquet_query(parquet_path), table_iden)
+                    .from_subquery(
+                        util::parquet_query(parquet_path),
+                        table_iden,
+                    )
                     .to_owned();
                 base_q.union(sea_query::UnionType::All, sub);
             }
@@ -205,7 +210,7 @@ impl OneView {
                 final_master,
                 Tbl::Master,
                 Expr::col((Tbl::BaseTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::Master, Col::ItemId)))
+                    .eq(Expr::col((Tbl::Master, Col::ItemId))),
             )
             .to_owned()
     }
@@ -213,8 +218,8 @@ impl OneView {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
     use crate::FileManager;
+    use tempfile::tempdir;
 
     #[test]
     fn test_oneview_consistency() {
@@ -234,7 +239,7 @@ mod tests {
             GROUP BY item_id 
             HAVING COUNT(DISTINCT name) > 1 OR COUNT(DISTINCT rank) > 1
         ";
-        
+
         let mut stmt = fm.conn.prepare(sql).unwrap();
         let inconsistent_ids: Vec<i64> = stmt
             .query_map([], |row| row.get(0))
@@ -243,13 +248,11 @@ mod tests {
             .collect();
 
         assert!(
-            inconsistent_ids.is_empty(), 
+            inconsistent_ids.is_empty(),
             "Inconsistency found in oneview for IDs: {:?}. \
              Each item must have exactly one unique Name and Rank \
-             across all its tag rows.", 
+             across all its tag rows.",
             inconsistent_ids
         );
     }
 }
-
-        

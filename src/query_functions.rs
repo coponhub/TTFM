@@ -1,7 +1,7 @@
 use crate::query::{QueryFunction, QueryNode};
-use crate::types::{SType, Label, TypedTag};
-use std::path::Path;
+use crate::types::{Label, SType, TypedTag};
 use path_slash::PathExt;
+use std::path::Path;
 
 /// "directory:name" -> "name:name & is_dir:true" への展開
 pub struct DirectoryQuery;

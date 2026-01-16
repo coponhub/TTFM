@@ -1,12 +1,12 @@
-use clap::{Parser, Subcommand};
-use ttfm::FileManager;
-use ttfm::config::Config;
 use anyhow::Result;
-use std::path::PathBuf;
+use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::time::Duration;
 use std::collections::{HashMap, HashSet};
-use terminal_size::{Width, terminal_size};
+use std::path::PathBuf;
+use std::time::Duration;
+use terminal_size::{terminal_size, Width};
+use ttfm::config::Config;
+use ttfm::FileManager;
 
 /// TTFM (Typed Tag File Manager) のメインCLI構造体。
 #[derive(Parser)]
@@ -29,7 +29,7 @@ enum Commands {
     Index {
         /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
         path: PathBuf,
-        
+
         /// trueの場合、データベースへの書き込みやParquet保存を行わず、スキャン速度の計測のみを行います。
         #[arg(long)]
         dry_run: bool,
@@ -81,19 +81,28 @@ fn main() -> Result<()> {
     match &cli.command {
         Commands::Index { path, dry_run } => {
             println!("Indexing directory: {:?} (dry-run: {})", path, dry_run);
-            
+
             let pb = ProgressBar::new_spinner();
-            pb.set_style(ProgressStyle::default_spinner()
-                .tick_chars("/|\\-")
-                .template("{spinner:.green} {msg}")?);
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .tick_chars("/|\\-")
+                    .template("{spinner:.green} {msg}")?,
+            );
             pb.set_message("Scanning...");
             pb.enable_steady_tick(Duration::from_millis(100));
 
-            let count = fm.index_directory(path, Some(&|count| {
-                pb.set_message(format!("Indexed {} files...", count));
-            }), *dry_run)?;
-            
-            pb.finish_with_message(format!("Done! Successfully indexed {} files.", count));
+            let count = fm.index_directory(
+                path,
+                Some(&|count| {
+                    pb.set_message(format!("Indexed {} files...", count));
+                }),
+                *dry_run,
+            )?;
+
+            pb.finish_with_message(format!(
+                "Done! Successfully indexed {} files.",
+                count
+            ));
         }
         Commands::Search { query } => {
             println!("Searching for: '{}'", query);
@@ -158,8 +167,11 @@ fn truncate_text(text: &str, max_width: usize) -> String {
             return "...".chars().take(max_width).collect();
         }
         let truncated: String = text.chars().take(max_width - 3).collect();
-        format!("{}\
-...", truncated)
+        format!(
+            "{}\
+...",
+            truncated
+        )
     }
 }
 
@@ -171,7 +183,7 @@ fn get_terminal_width() -> usize {
             return width;
         }
     }
-    
+
     if let Some((Width(w), _)) = terminal_size() {
         w as usize
     } else {
@@ -195,7 +207,8 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         all_keys: Vec<String>,
     }
 
-    let mut groups: HashMap<(String, Vec<String>), Vec<DisplayRow>> = HashMap::new();
+    let mut groups: HashMap<(String, Vec<String>), Vec<DisplayRow>> =
+        HashMap::new();
     let term_width = get_terminal_width();
 
     for res in results {
@@ -223,24 +236,33 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| fm.get_default_rank(a));
-            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| fm.get_default_rank(b));
+            let r_a = type_ranks
+                .get(a)
+                .cloned()
+                .unwrap_or_else(|| fm.get_default_rank(a));
+            let r_b = type_ranks
+                .get(b)
+                .cloned()
+                .unwrap_or_else(|| fm.get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
 
         // 優先表示される（ランクが高い）カラムをグループキーの識別に使う
         let priority_threshold = 1; // ランクが設定されているものを優先
-        let priority_intersection: Vec<String> = sorted_keys.iter()
-            .filter(|&k| type_ranks.get(k).cloned().unwrap_or(0) >= priority_threshold)
+        let priority_intersection: Vec<String> = sorted_keys
+            .iter()
+            .filter(|&k| {
+                type_ranks.get(k).cloned().unwrap_or(0) >= priority_threshold
+            })
             .cloned()
             .collect();
 
         let group_key = (res.item_kind.clone(), priority_intersection);
-        
+
         groups.entry(group_key).or_default().push(DisplayRow {
             id: res.id,
             columns: row_data,
-            all_keys: sorted_keys, 
+            all_keys: sorted_keys,
         });
     }
 
@@ -250,7 +272,7 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
     for ((_kind, _visible_keys), rows) in groups {
         let mut seen_keys = HashSet::new();
         let mut all_group_keys = Vec::new();
-        
+
         for row in &rows {
             for k in &row.all_keys {
                 if !seen_keys.contains(k) {
@@ -259,14 +281,20 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
                 }
             }
         }
-        
+
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
-            let r_a = type_ranks.get(a).cloned().unwrap_or_else(|| fm.get_default_rank(a));
-            let r_b = type_ranks.get(b).cloned().unwrap_or_else(|| fm.get_default_rank(b));
+            let r_a = type_ranks
+                .get(a)
+                .cloned()
+                .unwrap_or_else(|| fm.get_default_rank(a));
+            let r_b = type_ranks
+                .get(b)
+                .cloned()
+                .unwrap_or_else(|| fm.get_default_rank(b));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
-        
+
         let final_columns = all_group_keys;
 
         let mut item_id_width = 7; // "item_id"
@@ -275,7 +303,11 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         for row in &rows {
             item_id_width = item_id_width.max(row.id.to_string().len());
             for (i, col_name) in final_columns.iter().enumerate() {
-                let val_len = row.columns.get(col_name).map(|s| s.chars().count()).unwrap_or(0);
+                let val_len = row
+                    .columns
+                    .get(col_name)
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
                 col_widths[i] = col_widths[i].max(val_len);
             }
         }
@@ -290,10 +322,16 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             let is_header = row_vals.is_none();
 
             // item_id
-            let id_str = if let Some(r) = row_vals { r.id.to_string() } else { "item_id".to_string() };
+            let id_str = if let Some(r) = row_vals {
+                r.id.to_string()
+            } else {
+                "item_id".to_string()
+            };
             let available_for_id = term_width.saturating_sub(current_width);
-            if available_for_id == 0 { return; }
-            
+            if available_for_id == 0 {
+                return;
+            }
+
             let id_disp = if item_id_width <= available_for_id {
                 format!("{:<width$}", id_str, width = item_id_width)
             } else {
@@ -308,9 +346,9 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
             current_width += id_disp.chars().count();
 
             for (i, col_name) in final_columns.iter().enumerate() {
-                if current_width + sep_len >= term_width { 
+                if current_width + sep_len >= term_width {
                     print!("...");
-                    break; 
+                    break;
                 }
                 print!("{}", sep);
                 current_width += sep_len;
@@ -322,11 +360,14 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
                 };
 
                 let available = term_width.saturating_sub(current_width);
-                if available == 0 { break; }
+                if available == 0 {
+                    break;
+                }
 
                 let target_width = col_widths[i];
                 if target_width <= available {
-                    let val_disp = format!("{:<width$}", val_str, width = target_width);
+                    let val_disp =
+                        format!("{:<width$}", val_str, width = target_width);
                     if is_header {
                         print!("\x1b[1m{}\x1b[0m", val_disp);
                     } else {

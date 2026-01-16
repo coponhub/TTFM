@@ -1,30 +1,33 @@
 use anyhow::Result;
 use duckdb::Connection;
 use sea_query::{
-    PostgresQueryBuilder, SelectStatement, TableCreateStatement, 
-    TableDropStatement, DeleteStatement, UpdateStatement, 
-    InsertStatement, Iden, Query, Expr, IntoIden, ColumnDef
+    ColumnDef, DeleteStatement, Expr, Iden, InsertStatement, IntoIden,
+    PostgresQueryBuilder, Query, SelectStatement, TableCreateStatement,
+    TableDropStatement, UpdateStatement,
 };
 use std::path::Path;
 
 // --- 1. 通常の関数 (ロジックの実体) ---
 
 /// sea-query のステートメントをビルドして実行します。
-pub fn execute<S: SqlStatement + ?Sized>(conn: &Connection, stmt: &S) -> Result<()> {
+pub fn execute<S: SqlStatement + ?Sized>(
+    conn: &Connection,
+    stmt: &S,
+) -> Result<()> {
     conn.execute(&stmt.build(), [])?;
     Ok(())
 }
 
 /// SelectStatement の結果をアトミックに Parquet 保存します。
 pub fn save_parquet(
-    conn: &Connection, 
-    query: &SelectStatement, 
-    path: &Path
+    conn: &Connection,
+    query: &SelectStatement,
+    path: &Path,
 ) -> Result<()> {
     let sql = query.to_string(PostgresQueryBuilder);
     let path_str = path.to_string_lossy();
     let tmp_path = format!("{}.tmp", path_str);
-    
+
     let copy_sql = format!(
         "COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
         sql, tmp_path
@@ -36,14 +39,11 @@ pub fn save_parquet(
 
 /// 指定したテーブル（Iden）の全内容を Parquet 保存します。
 pub fn write_parquet<I: Iden + Clone + 'static>(
-    conn: &Connection, 
-    table: I, 
-    path: &Path
+    conn: &Connection,
+    table: I,
+    path: &Path,
 ) -> Result<()> {
-    let query = Query::select()
-        .expr(Expr::cust("*"))
-        .from(table)
-        .to_owned();
+    let query = Query::select().expr(Expr::cust("*")).from(table).to_owned();
     save_parquet(conn, &query, path)
 }
 
@@ -65,8 +65,12 @@ macro_rules! impl_sql_statement {
 }
 
 impl_sql_statement!(
-    SelectStatement, TableCreateStatement, TableDropStatement,
-    DeleteStatement, UpdateStatement, InsertStatement
+    SelectStatement,
+    TableCreateStatement,
+    TableDropStatement,
+    DeleteStatement,
+    UpdateStatement,
+    InsertStatement
 );
 
 /// .execute(conn) を提供するトレイト
@@ -90,12 +94,24 @@ impl ParquetExt for SelectStatement {
 }
 
 pub trait SelectExt {
-    fn create_table_as<I: Iden + Clone + 'static>(&self, conn: &Connection, name: I) -> Result<I>;
-    fn create_temp_table_as<I: Iden + Clone + 'static>(&self, conn: &Connection, name: I) -> Result<I>;
+    fn create_table_as<I: Iden + Clone + 'static>(
+        &self,
+        conn: &Connection,
+        name: I,
+    ) -> Result<I>;
+    fn create_temp_table_as<I: Iden + Clone + 'static>(
+        &self,
+        conn: &Connection,
+        name: I,
+    ) -> Result<I>;
 }
 
 impl SelectExt for SelectStatement {
-    fn create_table_as<I: Iden + Clone + 'static>(&self, conn: &Connection, name: I) -> Result<I> {
+    fn create_table_as<I: Iden + Clone + 'static>(
+        &self,
+        conn: &Connection,
+        name: I,
+    ) -> Result<I> {
         let sql = format!(
             "CREATE TABLE {} AS {}",
             iden_to_sql(name.clone()),
@@ -105,7 +121,11 @@ impl SelectExt for SelectStatement {
         Ok(name)
     }
 
-    fn create_temp_table_as<I: Iden + Clone + 'static>(&self, conn: &Connection, name: I) -> Result<I> {
+    fn create_temp_table_as<I: Iden + Clone + 'static>(
+        &self,
+        conn: &Connection,
+        name: I,
+    ) -> Result<I> {
         let sql = format!(
             "CREATE TEMP TABLE {} AS {}",
             iden_to_sql(name.clone()),
@@ -167,8 +187,8 @@ pub fn create_or_replace_view(
 ) -> Result<()> {
     let quoted_name = iden_to_sql(name);
     let sql = format!(
-        "CREATE OR REPLACE VIEW {} AS {}", 
-        quoted_name, 
+        "CREATE OR REPLACE VIEW {} AS {}",
+        quoted_name,
         query.to_string(PostgresQueryBuilder)
     );
     conn.execute(&sql, [])?;
@@ -212,8 +232,8 @@ pub trait DotOk: Sized {
 impl<T: Sized> DotOk for T {}
 
 pub fn parquet_query(path: &str) -> SelectStatement {
-    use crate::db::{Tbl, DuckDbFunc};
-    use sea_query::{Func};
+    use crate::db::{DuckDbFunc, Tbl};
+    use sea_query::Func;
     Query::select()
         .expr(Expr::cust("*"))
         .from_function(
@@ -234,8 +254,12 @@ impl SafeMetadata {
     /// 本物のメタデータから値を抽出して作成します。
     pub fn new(m: &std::fs::Metadata) -> Self {
         use std::time::UNIX_EPOCH;
-        let secs = m.modified()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(|_| std::io::ErrorKind::Other.into()))
+        let secs = m
+            .modified()
+            .and_then(|t| {
+                t.duration_since(UNIX_EPOCH)
+                    .map_err(|_| std::io::ErrorKind::Other.into())
+            })
             .map(|d| d.as_secs() as i64)
             .unwrap_or(crate::types::METADATA_ERROR);
 
@@ -287,7 +311,7 @@ impl CustomExpr {
     {
         sea_query::Expr::cust_with_exprs(
             "DISTINCT ON ($1) *",
-            [sea_query::Expr::col(col).into()]
+            [sea_query::Expr::col(col).into()],
         )
     }
 }
@@ -306,10 +330,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.txt");
         std::fs::write(&path, "hello").unwrap();
-        
+
         let m = std::fs::metadata(&path).unwrap();
         let safe_m = SafeMetadata::new(&m);
-        
+
         assert_eq!(safe_m.len(), 5);
         assert!(!safe_m.is_dir());
         assert!(safe_m.modified() > 0);

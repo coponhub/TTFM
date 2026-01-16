@@ -1,6 +1,6 @@
-use sea_query::{CaseStatement, Condition, SimpleExpr};
-use crate::FunctionRegistry;
 use crate::types::Rank;
+use crate::FunctionRegistry;
+use sea_query::{CaseStatement, Condition, SimpleExpr};
 
 /// システムにおける標準的なランク（優先度）の定義。
 /// 数値が大きいほど、検索結果やカラム表示において優先されます。
@@ -43,7 +43,7 @@ pub fn build_rank_expr(
             key_case = key_case.case(key.clone().eq(func.name()), rank);
         }
     }
-    
+
     // 2. キーに対するCASE文を完成させる
     let key_rank_expr = key_case.finally(default_rank);
 
@@ -70,32 +70,63 @@ pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
 mod tests {
     use super::*;
     use crate::functions::TagFunction;
-    use crate::taggers::{Tagger, ColumnDef, TagValue};
+    use crate::taggers::{ColumnDef, TagValue, Tagger};
     use crate::types::TypedTag;
-    use sea_query::{Query, PostgresQueryBuilder, Expr};
+    use sea_query::{Expr, PostgresQueryBuilder, Query};
 
     // Mock TagFunction implementation
     struct MockTagger;
     impl Tagger for MockTagger {
-        fn get_columns(&self) -> Vec<ColumnDef> { vec![] }
-        fn tag_file(&self, _path: &std::path::Path) -> anyhow::Result<Vec<TagValue>> { Ok(vec![]) }
+        fn get_columns(&self) -> Vec<ColumnDef> {
+            vec![]
+        }
+        fn tag_file(
+            &self,
+            _path: &std::path::Path,
+        ) -> anyhow::Result<Vec<TagValue>> {
+            Ok(vec![])
+        }
     }
 
-    struct MockFunc { name: String, rank: Rank }
+    struct MockFunc {
+        name: String,
+        rank: Rank,
+    }
     impl TagFunction for MockFunc {
-        fn name(&self) -> &str { &self.name }
-        fn tagger(&self) -> Option<&dyn Tagger> { Some(&MockTagger) }
-        fn default_rank(&self) -> Rank { self.rank }
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn tagger(&self) -> Option<&dyn Tagger> {
+            Some(&MockTagger)
+        }
+        fn default_rank(&self) -> Rank {
+            self.rank
+        }
     }
 
     fn create_registry() -> FunctionRegistry {
         let mut reg = FunctionRegistry::new();
-        reg.register(Box::new(MockFunc { name: "high".to_string(), rank: 100 }));
-        reg.register(Box::new(MockFunc { name: "low".to_string(), rank: 1 }));
-        reg.register(Box::new(MockFunc { name: "zero".to_string(), rank: 0 }));
+        reg.register(Box::new(MockFunc {
+            name: "high".to_string(),
+            rank: 100,
+        }));
+        reg.register(Box::new(MockFunc {
+            name: "low".to_string(),
+            rank: 1,
+        }));
+        reg.register(Box::new(MockFunc {
+            name: "zero".to_string(),
+            rank: 0,
+        }));
         // Add system defaults for testing
-        reg.register(Box::new(MockFunc { name: "name".to_string(), rank: 10 }));
-        reg.register(Box::new(MockFunc { name: "kind".to_string(), rank: 5 }));
+        reg.register(Box::new(MockFunc {
+            name: "name".to_string(),
+            rank: 10,
+        }));
+        reg.register(Box::new(MockFunc {
+            name: "kind".to_string(),
+            rank: 5,
+        }));
         reg
     }
 
@@ -106,7 +137,7 @@ mod tests {
         assert_eq!(get_rank_by_name(&reg, "low"), 1);
         assert_eq!(get_rank_by_name(&reg, "zero"), 0);
         assert_eq!(get_rank_by_name(&reg, "unknown"), 0); // Default for unknown
-        
+
         // System defaults check
         assert_eq!(get_rank_by_name(&reg, "name"), 10);
         assert_eq!(get_rank_by_name(&reg, "kind"), 5);
@@ -115,28 +146,29 @@ mod tests {
     #[test]
     fn test_build_rank_expr_sql_generation() {
         let reg = create_registry();
-        
+
         // Build the expression
         // Guard: col("kind") = "type"
         // Key: col("content")
         let expr = build_rank_expr(
             &reg,
-            Condition::all().add(Expr::col(sea_query::Alias::new("kind")).eq("type")),
+            Condition::all()
+                .add(Expr::col(sea_query::Alias::new("kind")).eq("type")),
             Expr::col(sea_query::Alias::new("content")),
-            0
+            0,
         );
 
         // Convert to SQL string for verification
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
-        
+
         // Verification
         // "SELECT CASE WHEN "kind" = 'type' THEN CASE ... END ELSE 0 END"
         assert!(sql.contains(r#"CASE WHEN ("kind" = 'type') THEN"#));
-        
+
         // Verify inner cases (Registry items)
         assert!(sql.contains(r#"WHEN ("content" = 'high') THEN 100"#));
         assert!(sql.contains(r#"WHEN ("content" = 'low') THEN 1"#));
-        
+
         // "zero" (rank 0) should NOT be in the CASE statement (optimization)
         assert!(!sql.contains(r#"WHEN ("content" = 'zero'"#));
 

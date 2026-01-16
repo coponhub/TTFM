@@ -1,15 +1,14 @@
+use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
+use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::taggers::{ColumnDef, TagValue};
-use crate::db::{Tbl, Col, SqlType, TargetTable, Store};
-use crate::{FunctionRegistry};
-use crate::util::{self, ExecuteSql, ParquetExt, IdenExt};
-use crate::indexing::indexer::{TaggingResult, DynamicRow};
+use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
+use crate::FunctionRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    Query, Expr, Condition, JoinType, 
-    Iden, SelectStatement, CaseStatement
+    CaseStatement, Condition, Expr, Iden, JoinType, Query, SelectStatement,
 };
-use std::path::{Path};
+use std::path::Path;
 
 // ========================================================
 // Merge Phase Orchestrator
@@ -27,24 +26,36 @@ pub(crate) fn run_merge(
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
 ) -> Result<()> {
     // 各テーブルの取り込みと同期を実行
-    
+
     // A. 実体テーブル (不変): 削除は行わず、新規登録のみ。
-    let ent = FileEntityMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results)?
-        .sync()?;
-    
+    let ent = FileEntityMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results)?
+    .sync()?;
+
     // B. 場所テーブル (可変): 属性（size/mtime/hash）を含めて上書き更新。
-    let loc = LocationMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results, &moved)?
-        .sync(temp_live_path)?;
-    
+    let loc = LocationMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results, &moved)?
+    .sync(temp_live_path)?;
+
     // C. タグテーブル (可変): 削除 ID の分を掃除。
-    let tag = BaseTagMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results)?
-        .sync(&deleted_ids)?;
+    let tag = BaseTagMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results)?
+    .sync(&deleted_ids)?;
 
     if !results.is_empty() || !moved.is_empty() {
         let tags = MergeQueryParts::diff_tags(&registry.get_all_columns());
@@ -90,7 +101,7 @@ impl<'a> FileEntityMerger<'a> {
         }
         let table_name = Tbl::FileEntitiesDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             let mut er = vec![&res.entity_row.id as &dyn ToSql];
             er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
@@ -127,21 +138,25 @@ impl<'a> LocationMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         let mut create_stmt = crate::db::Schema::build_table(
-                TargetTable::Locations,
-                Tbl::LocationsDiff,
-                &all_cols,
-            );
+            TargetTable::Locations,
+            Tbl::LocationsDiff,
+            &all_cols,
+        );
         create_stmt.temporary().execute(self.conn)?;
         Ok(self)
     }
 
-    pub(crate) fn ingest(self, results: &[TaggingResult], moved: &[DynamicRow]) -> Result<Self> {
+    pub(crate) fn ingest(
+        self,
+        results: &[TaggingResult],
+        moved: &[DynamicRow],
+    ) -> Result<Self> {
         if results.is_empty() && moved.is_empty() {
             return Ok(self);
         }
         let table_name = Tbl::LocationsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             let mut lr = vec![&res.location_row.id as &dyn ToSql];
             lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
@@ -169,7 +184,10 @@ impl<'a> LocationMerger<'a> {
             self.conn,
             &self.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
-            Some(Condition::all().add(Expr::col(Col::ItemId).in_subquery(live_query))),
+            Some(
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).in_subquery(live_query)),
+            ),
             Col::Path,
         )?;
         Ok(self)
@@ -191,12 +209,12 @@ impl<'a> BaseTagMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         crate::db::Schema::build_table(
-                TargetTable::BaseTags,
-                Tbl::BaseTagsDiff,
-                &all_cols,
-            )
-            .temporary()
-            .execute(self.conn)?;
+            TargetTable::BaseTags,
+            Tbl::BaseTagsDiff,
+            &all_cols,
+        )
+        .temporary()
+        .execute(self.conn)?;
         Ok(self)
     }
 
@@ -206,7 +224,7 @@ impl<'a> BaseTagMerger<'a> {
         }
         let table_name = Tbl::BaseTagsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             for t in &res.tags {
                 app.append_row([
@@ -254,9 +272,10 @@ impl MergeQueryParts {
             .expr_as(Expr::col(Col::Label), Col::Label)
             .from(Tbl::BaseTagsDiff);
 
-        for col in all_cols.iter().filter(|c| {
-            c.target_table == TargetTable::Locations
-        }) {
+        for col in all_cols
+            .iter()
+            .filter(|c| c.target_table == TargetTable::Locations)
+        {
             let mut sub = Query::select();
             let col_iden = util::col_to_iden(&col.name);
             sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
@@ -294,10 +313,10 @@ impl MergeQueryParts {
         let mut tt_q = Query::select();
         tt_q.expr_as(Expr::val("typedtag"), Col::ItemKind)
             .expr_as(
-                Expr::cust_with_exprs("$1 || ':' || $2", [
-                    Expr::col(Col::Type).into(),
-                    Expr::col(Col::Label).into(),
-                ]),
+                Expr::cust_with_exprs(
+                    "$1 || ':' || $2",
+                    [Expr::col(Col::Type).into(), Expr::col(Col::Label).into()],
+                ),
                 Col::Content,
             )
             .expr_as(Expr::val(0), Col::Rank)
@@ -309,7 +328,9 @@ impl MergeQueryParts {
         cand_q
     }
 
-    pub(crate) fn registry_variants(registry: &FunctionRegistry) -> SelectStatement {
+    pub(crate) fn registry_variants(
+        registry: &FunctionRegistry,
+    ) -> SelectStatement {
         let funcs = registry.all_functions();
         if funcs.is_empty() {
             let mut q = Query::select();
@@ -338,7 +359,10 @@ impl MergeQueryParts {
         query
     }
 
-    pub(crate) fn filter_new(candidates: SelectStatement, items_path: &str) -> SelectStatement {
+    pub(crate) fn filter_new(
+        candidates: SelectStatement,
+        items_path: &str,
+    ) -> SelectStatement {
         Query::select()
             .column((Tbl::Item, Col::ItemKind))
             .column((Tbl::Item, Col::Content))
@@ -435,7 +459,7 @@ fn merge_and_save(
 
     // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
     query.and_where(Expr::col(key_col).not_in_subquery(
-        Query::select().column(key_col).from(temp_table).to_owned()
+        Query::select().column(key_col).from(temp_table).to_owned(),
     ));
 
     if let Some(cond) = filter {
@@ -463,7 +487,8 @@ mod tests {
             .expr_as(Expr::val("rs"), Col::Label)
             .from(Tbl::Diff)
             .to_owned();
-        let sql = MergeQueryParts::expand_variants(tags).to_string(PostgresQueryBuilder);
+        let sql = MergeQueryParts::expand_variants(tags)
+            .to_string(PostgresQueryBuilder);
         assert!(sql.contains("'type'"));
         assert!(sql.contains("'label'"));
         assert!(sql.contains("'typedtag'"));
@@ -471,7 +496,8 @@ mod tests {
 
     #[test]
     fn test_query_parts_metadata_tags_logic() {
-        let sql = MergeQueryParts::metadata_tags().to_string(PostgresQueryBuilder);
+        let sql =
+            MergeQueryParts::metadata_tags().to_string(PostgresQueryBuilder);
         assert!(sql.contains("CASE"));
         assert!(sql.contains("'typedtag'"));
     }

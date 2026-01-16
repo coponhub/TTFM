@@ -1,7 +1,9 @@
-use sea_query::{Iden, TableCreateStatement, Table, ColumnDef as SeaColumnDef, IntoIden};
-use crate::taggers::{ColumnDef};
-use strum::{EnumIter, Display};
-use std::path::{PathBuf};
+use crate::taggers::ColumnDef;
+use sea_query::{
+    ColumnDef as SeaColumnDef, Iden, IntoIden, Table, TableCreateStatement,
+};
+use std::path::PathBuf;
+use strum::{Display, EnumIter};
 
 /// カラムが所属すべきテーブル。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display, Iden)]
@@ -52,7 +54,7 @@ pub enum Tbl {
     UserTags,
     #[iden = "oneview"]
     OneView,
-    
+
     // --- Diff Tables ---
     FileEntitiesDiff,
     LocationsDiff,
@@ -69,6 +71,7 @@ pub enum Tbl {
     Target,
     Diff,
     Master,
+    Sub,
 
     // --- Set Operation Aliases ---
     LeftSide,
@@ -132,6 +135,21 @@ pub enum DuckDbKeyword {
     DistinctOn,
 }
 
+/// DuckDB 固有の複雑な構文を型安全に構築するためのヘルパー。
+pub struct CustomFunc;
+
+impl CustomFunc {
+    /// TRY_CAST(expr AS BIGINT) を生成します。
+    pub fn try_cast_bigint<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Expr::cust_with_exprs(
+            "TRY_CAST($1 AS BIGINT)",
+            [expr.into()],
+        )
+    }
+}
+
 /// データベーススキーマ定義（テーブル作成SQL）を提供する構造体。
 pub struct Schema;
 
@@ -159,7 +177,9 @@ impl Schema {
                         SqlType::UUID => def.custom(SqlType::UUID),
                         SqlType::BOOLEAN => def.boolean(),
                         SqlType::VARCHAR => def.string(),
-                        SqlType::Other(custom) => def.custom(crate::util::alias_from(custom)),
+                        SqlType::Other(custom) => {
+                            def.custom(crate::util::alias_from(custom))
+                        }
                     };
                     create.col(&mut def);
                 }
@@ -179,7 +199,9 @@ impl Schema {
                         SqlType::UUID => def.custom(SqlType::UUID),
                         SqlType::BOOLEAN => def.boolean(),
                         SqlType::VARCHAR => def.string(),
-                        SqlType::Other(custom) => def.custom(crate::util::alias_from(custom)),
+                        SqlType::Other(custom) => {
+                            def.custom(crate::util::alias_from(custom))
+                        }
                     };
                     create.col(&mut def);
                 }

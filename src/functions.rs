@@ -1,14 +1,16 @@
+use crate::db::{SqlType, TargetTable};
+use crate::taggers::{ColumnDef, TagValue, Tagger};
+use crate::types::{
+    DBType, FileSize, FileTimestamp, Name, SType, StaticName, METADATA_ERROR,
+};
+use crate::util::SafeMetadata;
 use anyhow::Result;
-use std::path::Path;
 use chrono::Local;
-use crate::types::{METADATA_ERROR, DBType, FileSize, FileTimestamp, SType, Name, StaticName};
-use crate::taggers::{Tagger, ColumnDef, TagValue};
-use crate::db::{TargetTable, SqlType};
-use crate::util::{SafeMetadata};
 use path_slash::PathExt;
+use std::path::Path;
 
 /// 特定の TypedTag に関する**定義・抽出の統合単位**。
-/// 
+///
 /// 新しいタグ機能（例：Exif情報、Gitステータスなど）を追加する場合は、
 /// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
 pub trait TagFunction: Send + Sync {
@@ -16,17 +18,25 @@ pub trait TagFunction: Send + Sync {
     fn name(&self) -> Name;
 
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
-    fn tagger(&self) -> Option<&dyn Tagger> { None }
+    fn tagger(&self) -> Option<&dyn Tagger> {
+        None
+    }
 
     /// このタグのスキャンにおける役割を返します。
-    fn role(&self) -> ScanRole { ScanRole::Other }
+    fn role(&self) -> ScanRole {
+        ScanRole::Other
+    }
 
     /// パスのみから値を生成できる場合, その値を返します。
     /// （移動処理などで, 実際にファイルを開かずにタグを更新するために使用）
-    fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
+    fn generate_from_path(&self, _path: &Path) -> Option<TagValue> {
+        None
+    }
 
     /// このタグのデフォルトのランク値（優先度）を返します。
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::DEFAULT }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::DEFAULT
+    }
 }
 
 /// 型レベルでのタグ定義情報を保持するトレイト。
@@ -38,7 +48,8 @@ pub trait TagDefinition {
     /// 対応する Rust の型。
     type RustType: DBType + std::fmt::Debug + PartialEq + Clone;
     /// パスとメタデータから値を生成します。
-    fn generate(path: &Path, metadata: &SafeMetadata) -> Result<Self::RustType>;
+    fn generate(path: &Path, metadata: &SafeMetadata)
+        -> Result<Self::RustType>;
 }
 
 /// `TagDefinition` に基づく値を保持するコンテナ。
@@ -60,7 +71,9 @@ impl<D: TagDefinition> PartialEq for Field<D> {
 
 impl<D: TagDefinition> Clone for Field<D> {
     fn clone(&self) -> Self {
-        Self { value: self.value.clone() }
+        Self {
+            value: self.value.clone(),
+        }
     }
 }
 
@@ -127,9 +140,7 @@ impl PathFunction {
     pub const NAME: &'static str = "path";
     /// 新しい `PathFunction` インスタンスを作成します。
     pub fn new() -> Self {
-        Self {
-            tagger: PathTagger,
-        }
+        Self { tagger: PathTagger }
     }
 }
 
@@ -147,7 +158,9 @@ impl TagFunction for PathFunction {
         let p = path.to_slash_lossy().to_string();
         Some(TagValue::Text(p))
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PATH }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::PATH
+    }
 }
 
 impl TagDefinition for PathFunction {
@@ -218,7 +231,9 @@ impl TagFunction for ParentDirFunction {
         path.parent()
             .map(|p| TagValue::Text(p.to_slash_lossy().to_string()))
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::PARENT_DIR }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::PARENT_DIR
+    }
 }
 
 impl TagDefinition for ParentDirFunction {
@@ -256,7 +271,9 @@ impl Tagger for FilenameTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
         let name = FilenameFunction::generate(path, &m)?; // This line is different in the original replace
@@ -292,9 +309,13 @@ impl TagFunction for FilenameFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        Self::generate(path, &SafeMetadata::recovered()).ok().map(TagValue::Text)
+        Self::generate(path, &SafeMetadata::recovered())
+            .ok()
+            .map(TagValue::Text)
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::FILENAME }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::FILENAME
+    }
 }
 
 impl TagDefinition for FilenameFunction {
@@ -351,9 +372,7 @@ pub struct StemFunction {
 impl StemFunction {
     /// 新しい `StemFunction` インスタンスを作成します。
     pub fn new() -> Self {
-        Self {
-            tagger: StemTagger,
-        }
+        Self { tagger: StemTagger }
     }
 }
 
@@ -400,10 +419,13 @@ impl Tagger for ExtensionTagger {
     }
     /// ファイルの拡張子を抽出し、小文字化します。
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let ext = path.extension().map(|e| {
-            let s = e.to_string_lossy().to_string().to_lowercase();
-            TagValue::Text(s)
-        }).unwrap_or(TagValue::Null);
+        let ext = path
+            .extension()
+            .map(|e| {
+                let s = e.to_string_lossy().to_string().to_lowercase();
+                TagValue::Text(s)
+            })
+            .unwrap_or(TagValue::Null);
         Ok(vec![ext])
     }
 }
@@ -436,8 +458,9 @@ impl TagFunction for ExtensionFunction {
         ScanRole::Location
     }
     fn generate_from_path(&self, path: &Path) -> Option<TagValue> {
-        path.extension()
-            .map(|e| TagValue::Text(e.to_string_lossy().to_string().to_lowercase()))
+        path.extension().map(|e| {
+            TagValue::Text(e.to_string_lossy().to_string().to_lowercase())
+        })
     }
 }
 
@@ -536,7 +559,9 @@ impl Tagger for SizeBytesTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
         let size = SizeBytesFunction::generate(path, &m)?;
@@ -605,7 +630,9 @@ impl Tagger for ModifiedTsTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
         let ts = ModifiedTsFunction::generate(path, &m)?;
@@ -733,10 +760,14 @@ impl Tagger for TypeFromExtTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
-        Ok(vec![TagValue::Text(TypeFromExtFunction::generate(path, &m)?)])
+        Ok(vec![TagValue::Text(TypeFromExtFunction::generate(
+            path, &m,
+        )?)])
     }
 }
 
@@ -786,7 +817,9 @@ impl TagFunction for TypeFromExtFunction {
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::TYPE_FROM_EXT }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::TYPE_FROM_EXT
+    }
 }
 
 // ========================================================
@@ -821,7 +854,9 @@ impl Tagger for SizeStrTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
         Ok(vec![TagValue::Text(SizeStrFunction::generate(path, &m)?)])
@@ -870,7 +905,9 @@ impl TagFunction for SizeStrFunction {
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::SIZE_STR }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::SIZE_STR
+    }
 }
 
 // ========================================================
@@ -891,7 +928,9 @@ impl Tagger for ModifiedStrTagger {
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
         let m = match std::fs::metadata(path) {
             Ok(real_m) => SafeMetadata::new(&real_m),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(e.into())
+            }
             Err(_) => SafeMetadata::recovered(),
         };
         let val = ModifiedStrFunction::generate(path, &m)?;
@@ -912,7 +951,9 @@ impl TagDefinition for ModifiedStrFunction {
         Ok(if metadata.modified() == METADATA_ERROR {
             "-".to_string()
         } else {
-            let datetime: chrono::DateTime<Local> = (std::time::UNIX_EPOCH + std::time::Duration::from_secs(metadata.modified() as u64)).into();
+            let datetime: chrono::DateTime<Local> = (std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(metadata.modified() as u64))
+            .into();
             datetime.format("%Y-%m-%d %H:%M").to_string()
         })
     }
@@ -942,7 +983,9 @@ impl TagFunction for ModifiedStrFunction {
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(&self.tagger)
     }
-    fn default_rank(&self) -> crate::types::Rank { crate::rank::SystemRank::MODIFIED_STR }
+    fn default_rank(&self) -> crate::types::Rank {
+        crate::rank::SystemRank::MODIFIED_STR
+    }
 }
 
 // ========================================================
@@ -996,8 +1039,8 @@ impl TagFunction for ContentTagFunction {
 mod tests {
     use super::*;
     use crate::db::Col;
-    use crate::types::{TypedTag, TagType, Label};
-    use sea_query::{Query, PostgresQueryBuilder};
+    use crate::types::{Label, TagType, TypedTag};
+    use sea_query::{PostgresQueryBuilder, Query};
 
     // Helper to create a TypedTag
     fn ttag(key: &str, value: &str) -> TypedTag {
@@ -1040,7 +1083,10 @@ mod tests {
         let mut query = Query::select();
         query.column(Col::FileId);
         let sql = query.to_string(PostgresQueryBuilder);
-        assert!(sql.contains("\"file_id\""), "Direct Col::FileId should be snake_case");
+        assert!(
+            sql.contains("\"file_id\""),
+            "Direct Col::FileId should be snake_case"
+        );
     }
 
     #[test]
@@ -1049,8 +1095,14 @@ mod tests {
         let safe_m = SafeMetadata::recovered();
         let path = Path::new("dummy");
 
-        assert_eq!(SizeBytesFunction::generate(path, &safe_m).unwrap().0, METADATA_ERROR);
-        assert_eq!(ModifiedTsFunction::generate(path, &safe_m).unwrap().0, METADATA_ERROR);
+        assert_eq!(
+            SizeBytesFunction::generate(path, &safe_m).unwrap().0,
+            METADATA_ERROR
+        );
+        assert_eq!(
+            ModifiedTsFunction::generate(path, &safe_m).unwrap().0,
+            METADATA_ERROR
+        );
         assert_eq!(SizeStrFunction::generate(path, &safe_m).unwrap(), "-");
         assert_eq!(ModifiedStrFunction::generate(path, &safe_m).unwrap(), "-");
     }
@@ -1069,12 +1121,24 @@ mod tests {
         let safe_m = SafeMetadata::recovered();
 
         // metadata() は ELOOP エラー（エラー値へのフォールバック対象）になるはず
-        assert_eq!(SizeBytesFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
-        assert_eq!(ModifiedTsFunction::generate(&loop_link, &safe_m).unwrap().0, METADATA_ERROR);
-        
+        assert_eq!(
+            SizeBytesFunction::generate(&loop_link, &safe_m).unwrap().0,
+            METADATA_ERROR
+        );
+        assert_eq!(
+            ModifiedTsFunction::generate(&loop_link, &safe_m).unwrap().0,
+            METADATA_ERROR
+        );
+
         // Str系 もエラー値 "-" になるはず
-        assert_eq!(SizeStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
-        assert_eq!(ModifiedStrFunction::generate(&loop_link, &safe_m).unwrap(), "-");
+        assert_eq!(
+            SizeStrFunction::generate(&loop_link, &safe_m).unwrap(),
+            "-"
+        );
+        assert_eq!(
+            ModifiedStrFunction::generate(&loop_link, &safe_m).unwrap(),
+            "-"
+        );
     }
 
     #[test]
@@ -1090,6 +1154,8 @@ mod tests {
         assert_eq!(SizeBytesFunction::generate(&path, &safe_m).unwrap().0, 5);
         assert!(ModifiedTsFunction::generate(&path, &safe_m).unwrap().0 > 0);
         assert_eq!(SizeStrFunction::generate(&path, &safe_m).unwrap(), "5.0 B");
-        assert!(!ModifiedStrFunction::generate(&path, &safe_m).unwrap().is_empty());
+        assert!(!ModifiedStrFunction::generate(&path, &safe_m)
+            .unwrap()
+            .is_empty());
     }
 }

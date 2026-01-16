@@ -1,14 +1,14 @@
-use crate::taggers::{TagValue, ColumnDef};
-use crate::db::{TargetTable};
-use crate::{FunctionRegistry};
+use crate::db::TargetTable;
 use crate::indexing::indexer::{
-    TaggingResult, DynamicRow, TagRow, TempScanEntry, ScanHash
+    DynamicRow, ScanHash, TagRow, TaggingResult, TempScanEntry,
 };
-use crate::types::{ItemId};
+use crate::taggers::{ColumnDef, TagValue};
+use crate::types::ItemId;
 use crate::util::DotOk;
+use crate::FunctionRegistry;
 use anyhow::Result;
-use std::path::{Path};
 use rayon::prelude::*;
+use std::path::Path;
 
 /// 指定されたエラーが「ファイルが見つからない」ことに起因するか判定します。
 fn is_not_found(err: &anyhow::Error) -> bool {
@@ -30,7 +30,7 @@ pub(crate) fn run_triage(
     // 1. 各エントリからメタデータを抽出（ハッシュとIDも引き継ぐ）
     let raw_values = triager.extract_all(to_process)?;
     let max_id = max_id_fn()?;
-    
+
     // 2. ID の割当（既存 ID があれば流用、なければ新規採番）
     let results = triager.assemble_records(raw_values, max_id)?;
 
@@ -52,8 +52,8 @@ impl<'a> ItemTriager<'a> {
     }
 
     pub(crate) fn extract_all(
-        &self, 
-        entries: Vec<(Option<ItemId>, TempScanEntry)>
+        &self,
+        entries: Vec<(Option<ItemId>, TempScanEntry)>,
     ) -> Result<Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
         entries
             .into_par_iter()
@@ -67,9 +67,9 @@ impl<'a> ItemTriager<'a> {
 
     /// ファイルからタグを抽出し、元のハッシュ値と ID をセットにして返します。
     fn extract_with_hash(
-        &self, 
+        &self,
         existing_id: Option<ItemId>,
-        entry: TempScanEntry
+        entry: TempScanEntry,
     ) -> Result<Option<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
         let path = &entry.entry.path.value;
         let hash = entry.hash;
@@ -81,7 +81,10 @@ impl<'a> ItemTriager<'a> {
     }
 
     /// 1つのファイルに対してタグ抽出を試みます。
-    fn extract_single_file(&self, path_str: &str) -> Result<Option<Vec<TagValue>>> {
+    fn extract_single_file(
+        &self,
+        path_str: &str,
+    ) -> Result<Option<Vec<TagValue>>> {
         let res = self.registry.process_file(Path::new(path_str));
 
         if let Ok(values) = res {
@@ -130,7 +133,7 @@ impl<'a> ItemTriager<'a> {
             .map(|(v, c)| self.classify(id, v, c))
             .fold(TriageAccumulator::new(id), |acc, p| acc.collect(p))
             .finish();
-        
+
         res.scan_hash = hash;
         res
     }
@@ -144,7 +147,12 @@ impl<'a> ItemTriager<'a> {
         }
     }
 
-    fn triage_base_tag(&self, id: i64, val: TagValue, name: &str) -> TriagePiece {
+    fn triage_base_tag(
+        &self,
+        id: i64,
+        val: TagValue,
+        name: &str,
+    ) -> TriagePiece {
         val.into_string()
             .filter(|s| !s.is_empty())
             .map(|label| {
@@ -180,7 +188,7 @@ impl TriageAccumulator {
     pub(crate) fn new(id: i64) -> Self {
         Self {
             id,
-            entities: vec![TagValue::BigInt(0)], 
+            entities: vec![TagValue::BigInt(0)],
             locations: Vec::new(),
             tags: Vec::new(),
         }
@@ -219,16 +227,17 @@ impl TriageAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::SafeMetadata;
+    use crate::db::SqlType;
     use crate::functions::ScanEntry;
     use crate::indexing::indexer::calc_scanhash;
-    use crate::db::SqlType;
+    use crate::util::SafeMetadata;
 
     #[test]
     fn test_triage_accumulator_logic() {
         let mut acc = TriageAccumulator::new(123);
         acc = acc.collect(TriagePiece::Entity(TagValue::BigInt(100)));
-        acc = acc.collect(TriagePiece::Location(TagValue::Text("/path".into())));
+        acc =
+            acc.collect(TriagePiece::Location(TagValue::Text("/path".into())));
         acc = acc.collect(TriagePiece::Tag(TagRow {
             item_id: 123,
             tag_type: "ext".into(),
@@ -261,20 +270,20 @@ mod tests {
         let triager = ItemTriager::new(&registry);
 
         let cols = vec![
-            ColumnDef { 
-                name: "size".into(), 
-                sql_type: SqlType::BIGINT, 
-                target_table: TargetTable::FileEntities 
+            ColumnDef {
+                name: "size".into(),
+                sql_type: SqlType::BIGINT,
+                target_table: TargetTable::FileEntities,
             },
-            ColumnDef { 
-                name: "path".into(), 
-                sql_type: SqlType::VARCHAR, 
-                target_table: TargetTable::Locations 
+            ColumnDef {
+                name: "path".into(),
+                sql_type: SqlType::VARCHAR,
+                target_table: TargetTable::Locations,
             },
-            ColumnDef { 
-                name: "ext".into(), 
-                sql_type: SqlType::VARCHAR, 
-                target_table: TargetTable::BaseTags 
+            ColumnDef {
+                name: "ext".into(),
+                sql_type: SqlType::VARCHAR,
+                target_table: TargetTable::BaseTags,
             },
         ];
         let vals = vec![
@@ -288,13 +297,16 @@ mod tests {
         assert_eq!(res.entity_row.id, 7);
         assert_eq!(res.scan_hash, ScanHash(123));
         assert_eq!(res.entity_row.values[1], TagValue::BigInt(500));
-        assert_eq!(res.location_row.values[0], TagValue::Text("/foo.rs".into()));
+        assert_eq!(
+            res.location_row.values[0],
+            TagValue::Text("/foo.rs".into())
+        );
     }
 
     #[test]
     fn test_extract_all_with_race_condition() {
-        use tempfile::tempdir;
         use std::fs::File;
+        use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
         let registry = FunctionRegistry::with_standard();
@@ -313,12 +325,13 @@ mod tests {
             .iter()
             .map(|p| {
                 let m = std::fs::metadata(p).unwrap();
-                let entry = ScanEntry::from_path_metadata(p, &SafeMetadata::new(&m))
-                    .unwrap();
+                let entry =
+                    ScanEntry::from_path_metadata(p, &SafeMetadata::new(&m))
+                        .unwrap();
                 let hash = calc_scanhash(
-                    &entry.path.value, 
-                    entry.mtime.value.0, 
-                    entry.size.value.0
+                    &entry.path.value,
+                    entry.mtime.value.0,
+                    entry.size.value.0,
                 );
                 (None, TempScanEntry { entry, hash })
             })

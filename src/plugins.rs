@@ -1,16 +1,16 @@
-use wasmtime::component::*;
-use wasmtime::{Config, Engine, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
-use anyhow::{Result, Context};
 use crate::util::DotOk;
-use std::path::Path;
-use std::sync::Arc;
+use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use wasmtime::component::*;
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
+use crate::db::{SqlType, TargetTable};
 use crate::functions::TagFunction;
-use crate::taggers::{Tagger, ColumnDef, TagValue};
-use crate::db::{TargetTable, SqlType};
+use crate::taggers::{ColumnDef, TagValue, Tagger};
 
 // WIT定義から自動生成
 bindgen!({
@@ -30,8 +30,12 @@ struct WasmStore {
 }
 
 impl WasiView for WasmStore {
-    fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
-    fn table(&mut self) -> &mut ResourceTable { &mut self.resource_table }
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi_ctx
+    }
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.resource_table
+    }
 }
 
 // スレッドローカルなインスタンスキャッシュ。
@@ -73,8 +77,9 @@ impl WasmPlugin {
         let mut store = self
             .create_store()
             .context("Failed to create store for introspection")?;
-        let plugin = Plugin::instantiate(&mut store, &self.component, &self.linker)
-            .context("Failed to instantiate plugin for introspection")?;
+        let plugin =
+            Plugin::instantiate(&mut store, &self.component, &self.linker)
+                .context("Failed to instantiate plugin for introspection")?;
         let info = plugin
             .ttfm_plugin_core()
             .call_get_info(&mut store)
@@ -169,9 +174,10 @@ impl Tagger for WasmPluginAdapter {
                 cache.insert(self.name.clone(), (store, plugin));
             }
 
-            let (store, plugin) = cache.get_mut(&self.name).ok_or_else(|| {
-                anyhow::anyhow!("Plugin instance missing from cache")
-            })?;
+            let (store, plugin) =
+                cache.get_mut(&self.name).ok_or_else(|| {
+                    anyhow::anyhow!("Plugin instance missing from cache")
+                })?;
             let interface = plugin.ttfm_plugin_tag_function();
 
             interface.call_tag_file(store, &path_str).with_context(|| {

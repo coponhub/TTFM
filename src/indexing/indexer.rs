@@ -1,23 +1,20 @@
-use crate::taggers::{TagValue, ColumnDef};
-use crate::functions::{ScanEntry};
-use duckdb::types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput};
-use crate::db::{Tbl, Col, DuckDbFunc, TargetTable, Store};
-use crate::{FunctionRegistry};
-use crate::util::{self, ExecuteSql, ParquetExt, IdenExt, SelectExt};
-use crate::types::{ItemId};
+use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
+use crate::functions::ScanEntry;
+use crate::taggers::{ColumnDef, TagValue};
+use crate::types::ItemId;
+use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
+use crate::FunctionRegistry;
 use anyhow::{Context, Result};
+use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use duckdb::Connection;
 use rustc_hash::FxHashMap;
-use duckdb::{Connection};
-use sea_query::{
-    Query, Expr, PostgresQueryBuilder, 
-    Func, Table
-};
+use sea_query::{Expr, Func, PostgresQueryBuilder, Query, Table};
 use std::path::{Path, PathBuf};
 
-use super::scan;
 use super::diff;
-use super::triage;
 use super::merge::{self, MergeQueryParts};
+use super::scan;
+use super::triage;
 
 // ========================================================
 // Shared Data Structures
@@ -99,11 +96,10 @@ impl<'a> Indexer<'a> {
         let diff = diff::run_diff(self.conn, &self.store)?;
 
         // 3. Triage Phase
-        let (results, moved_rows) = triage::run_triage(
-            self.registry,
-            diff.to_process,
-            || self.max_file_id()
-        )?;
+        let (results, moved_rows) =
+            triage::run_triage(self.registry, diff.to_process, || {
+                self.max_file_id()
+            })?;
 
         // 4. Merge Phase
         merge::run_merge(
@@ -115,7 +111,7 @@ impl<'a> Indexer<'a> {
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            |data| self.update_system_items(data)
+            |data| self.update_system_items(data),
         )?;
 
         Ok(count)
@@ -129,7 +125,7 @@ impl<'a> Indexer<'a> {
         }
 
         let locs_str = locs_path.to_string_lossy();
-        
+
         // item_id と scan_hash カラムを取得
         let sql = Query::select()
             .column(Col::ItemId)
@@ -137,9 +133,11 @@ impl<'a> Indexer<'a> {
             .from_subquery(util::parquet_query(&locs_str), Tbl::Locations)
             .to_string(PostgresQueryBuilder);
 
-        let mut stmt = self.conn.prepare(&sql)
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
             .context("Failed to prepare cache load query")?;
-        
+
         // カラムが存在しない初回の実行などに対応するため、安全にハンドル
         let rows = match stmt.query_map([], |row| {
             Ok((row.get::<_, ItemId>(0)?, row.get::<_, ScanHash>(1)?))
@@ -168,8 +166,12 @@ impl<'a> Indexer<'a> {
             self.ensure_empty_parquet_if_missing(&path, target, &all_cols)?;
         }
 
-        crate::oneview::OneView::recreate(self.conn, &all_cols, &self.store.db_dir)?;
-        
+        crate::oneview::OneView::recreate(
+            self.conn,
+            &all_cols,
+            &self.store.db_dir,
+        )?;
+
         self.update_system_items(None)?;
         Ok(())
     }
@@ -197,12 +199,17 @@ impl<'a> Indexer<'a> {
     }
 
     /// システム定義アイテム（拡張子、タグ型など）をデータベースに登録・更新します。
-    pub fn update_system_items(&self, data_candidates: Option<sea_query::SelectStatement>) -> Result<()> {
+    pub fn update_system_items(
+        &self,
+        data_candidates: Option<sea_query::SelectStatement>,
+    ) -> Result<()> {
         let items_path = self.store.path_for_target(TargetTable::ItemEntities);
-        let system_tags_path = self.store.path_for_target(TargetTable::SystemTags);
+        let system_tags_path =
+            self.store.path_for_target(TargetTable::SystemTags);
         let items_str = items_path.to_string_lossy();
 
-        let mut all_candidates = MergeQueryParts::registry_variants(self.registry);
+        let mut all_candidates =
+            MergeQueryParts::registry_variants(self.registry);
         if let Some(data) = data_candidates {
             all_candidates.union(sea_query::UnionType::Distinct, data);
         }
@@ -226,7 +233,12 @@ impl<'a> Indexer<'a> {
             .union(
                 sea_query::UnionType::All,
                 Query::select()
-                    .columns([Col::ItemId, Col::Rank, Col::ItemKind, Col::Content])
+                    .columns([
+                        Col::ItemId,
+                        Col::Rank,
+                        Col::ItemKind,
+                        Col::Content,
+                    ])
                     .from(Tbl::IdItem)
                     .to_owned(),
             )
@@ -269,10 +281,10 @@ impl<'a> Indexer<'a> {
     /// 次の負のアイテムIDを取得します（システムアイテム用）。
     pub(crate) fn next_item_id(&self, items_path: &str) -> Result<i64> {
         let query_min = Query::select()
-            .expr(
-                Func::cust(DuckDbFunc::Coalesce)
-                    .args([Expr::col(Col::ItemId).min().into(), Expr::val(0).into()]),
-            )
+            .expr(Func::cust(DuckDbFunc::Coalesce).args([
+                Expr::col(Col::ItemId).min().into(),
+                Expr::val(0).into(),
+            ]))
             .from_subquery(util::parquet_query(items_path), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
 
@@ -281,12 +293,17 @@ impl<'a> Indexer<'a> {
     }
 
     /// テーブルのレコード数を取得します（共有ロジック）。
-    pub(crate) fn count_table(&self, table: impl sea_query::Iden + Clone + 'static) -> Result<i64> {
+    pub(crate) fn count_table(
+        &self,
+        table: impl sea_query::Iden + Clone + 'static,
+    ) -> Result<i64> {
         let sql = Query::select()
             .expr(Expr::cust("COUNT(*)"))
             .from(table)
             .to_string(PostgresQueryBuilder);
-        self.conn.query_row(&sql, [], |r| r.get(0)).map_err(Into::into)
+        self.conn
+            .query_row(&sql, [], |r| r.get(0))
+            .map_err(Into::into)
     }
 
     fn finalize_updates(
@@ -345,10 +362,11 @@ impl TempScanEntry {
     }
 
     /// Tbl::Scan テーブル作成用のカラム構成リストを取得します。
-    pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)> {
-        use sea_query::IntoIden;
+    pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)>
+    {
         use crate::db::{Col, SqlType};
-        
+        use sea_query::IntoIden;
+
         let mut cols = ScanEntry::columns_with_type();
         cols.push((Col::ScanHash.into_iden(), SqlType::BIGINT.into_iden()));
         cols
@@ -358,7 +376,7 @@ impl TempScanEntry {
     pub fn from_row_with_offset(
         row: &duckdb::Row,
         offset: usize,
-        loader: &ScanEntryLoader
+        loader: &ScanEntryLoader,
     ) -> duckdb::Result<Self> {
         let entry = ScanEntry::from_row_with_offset(row, offset)?;
         let hash: ScanHash = row.get(offset + loader.hash_idx)?;
@@ -395,8 +413,8 @@ impl ScanEntryLoader {
 
 /// メタデータ（パス、更新日時、サイズ）から ScanHash を計算します。
 pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
-    use std::hash::{Hash, Hasher};
     use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
     let mut hasher = FxHasher::default();
     (path, mtime, size).hash(&mut hasher);
     ScanHash(hasher.finish() as i64)
@@ -405,8 +423,8 @@ pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::FunctionRegistry;
+    use tempfile::tempdir;
 
     #[test]
     fn test_calc_scanhash() {
@@ -432,7 +450,10 @@ mod tests {
 
         // まだファイルがない状態でのロード
         let cache = indexer.load_metadata_cache().unwrap();
-        assert!(cache.is_empty(), "Cache should be empty when no files exist");
+        assert!(
+            cache.is_empty(),
+            "Cache should be empty when no files exist"
+        );
     }
 
     #[test]
@@ -450,14 +471,29 @@ mod tests {
         let hash_val = ScanHash(123456789);
         let item_id: ItemId = 1;
         let locs_path = indexer.store.path_for_target(TargetTable::Locations);
-        
-        conn.execute("CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash", [item_id, hash_val.0]).unwrap();
-        conn.execute(&format!("COPY temp_locs TO '{}' (FORMAT PARQUET)", locs_path.to_string_lossy()), []).unwrap();
+
+        conn.execute(
+            "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
+            [item_id, hash_val.0],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "COPY temp_locs TO '{}' (FORMAT PARQUET)",
+                locs_path.to_string_lossy()
+            ),
+            [],
+        )
+        .unwrap();
 
         // 3. ロードして検証
         let cache = indexer.load_metadata_cache().unwrap();
         assert_eq!(cache.len(), 1);
-        assert_eq!(*cache.get(&hash_val).unwrap(), item_id, "Cache should contain the correct item_id");
+        assert_eq!(
+            *cache.get(&hash_val).unwrap(),
+            item_id,
+            "Cache should contain the correct item_id"
+        );
     }
 
     #[test]
@@ -474,7 +510,11 @@ mod tests {
     #[test]
     fn test_indexer_next_item_id_logic() {
         fn calc_next(min_id: i64) -> i64 {
-            if min_id > -1 { -1 } else { min_id - 1 }
+            if min_id > -1 {
+                -1
+            } else {
+                min_id - 1
+            }
         }
         assert_eq!(calc_next(0), -1);
         assert_eq!(calc_next(-1), -2);

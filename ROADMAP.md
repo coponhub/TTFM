@@ -109,8 +109,10 @@ Directly interact with files from the CLI.
 - [ ] **Phase 3: Database & Search Refinement**:
 
   - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
-
-  - [ ] Standardize error messages for invalid queries.
+  - [ ] **Schema Optimization (Phase E)**: 
+    - Separate `label` column into `label_str` (VARCHAR) and `label_int` (BIGINT).
+    - Remove privileged physical columns (`size`, `mtime`, `rank`) and unify them into the tag system using `label_int`.
+    - This eliminates `TRY_CAST` overhead and solves ambiguity issues (e.g. `size=0` for non-files).
 
 - [ ] **Identity & Location Management**:
   - [x] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.

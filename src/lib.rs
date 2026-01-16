@@ -3,52 +3,38 @@
 //! このライブラリは、Typed Tag（型付きタグ）を用いたファイル管理システムのコア機能を提供します。
 //! DuckDBをバックエンドに使用し、Parquet形式でのインデックス保存と高速な検索を実現します。
 
+use crate::db::{Col, DuckDbFunc, Tbl};
+use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 use anyhow::{Context, Result};
 use duckdb::Connection;
-use std::path::Path;
 use file_id::get_file_id;
-use sea_query::{
-    Expr, Func, PostgresQueryBuilder, Query,
-};
-use crate::db::{Tbl, Col, DuckDbFunc};
-use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
+use sea_query::{Expr, Func, PostgresQueryBuilder, Query};
+use std::path::Path;
 
-pub mod types;
-pub mod query;
-pub mod query_functions;
-pub mod plugins;
 pub mod config;
 pub mod db;
-pub mod rank;
-pub mod macros;
-mod taggers;
 mod functions;
-pub mod oneview;
 pub mod indexing;
+pub mod macros;
+pub mod oneview;
+pub mod plugins;
+pub mod query;
+pub mod query_functions;
+pub mod rank;
+mod taggers;
+pub mod types;
 pub mod util;
 
+pub use db::TargetTable;
+use functions::{
+    ContentTagFunction, DirectoryFunction, ExtensionFunction, FilenameFunction,
+    InodeFunction, KindTagFunction, ModifiedStrFunction, ModifiedTsFunction,
+    NameTagFunction, ParentDirFunction, PathFunction, SizeBytesFunction,
+    SizeStrFunction, StemFunction, TagFunction, TypeFromExtFunction,
+};
 pub use query::{parse, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use db::TargetTable;
-pub use types::{SearchResult, TagType, TypedTag, Label, FileRef};
-use functions::{
-    TagFunction,
-    PathFunction,
-    ParentDirFunction,
-    FilenameFunction,
-    StemFunction,
-    ExtensionFunction,
-    DirectoryFunction,
-    SizeBytesFunction,
-    ModifiedTsFunction,
-    InodeFunction,
-    TypeFromExtFunction,
-    SizeStrFunction,
-    ModifiedStrFunction,
-    NameTagFunction,
-    KindTagFunction,
-    ContentTagFunction,
-};
+pub use types::{FileRef, Label, SearchResult, TagType, TypedTag};
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
 pub fn get_file_ref(path: &Path) -> Result<FileRef> {
@@ -56,23 +42,32 @@ pub fn get_file_ref(path: &Path) -> Result<FileRef> {
     if let Ok(id) = get_file_id(path) {
         let (upper, lower) = match id {
             // Unix/Linux: device_id (64bit) + inode_number (64bit)
-            file_id::FileId::Inode { device_id, inode_number } => {
-                (device_id, inode_number)
-            }
+            file_id::FileId::Inode {
+                device_id,
+                inode_number,
+            } => (device_id, inode_number),
             // Windows (Standard): volume_serial_number (32bit) + file_index (64bit)
-            file_id::FileId::LowRes { volume_serial_number, file_index } => {
-                (volume_serial_number as u64, file_index)
-            }
+            file_id::FileId::LowRes {
+                volume_serial_number,
+                file_index,
+            } => (volume_serial_number as u64, file_index),
             // Windows (High Precision / ReFS): volume_serial_number (64bit) + file_id (128bit)
-            file_id::FileId::HighRes { volume_serial_number, file_id } => {
-                ((file_id >> 64) as u64 ^ volume_serial_number, file_id as u64)
-            }
+            file_id::FileId::HighRes {
+                volume_serial_number,
+                file_id,
+            } => (
+                (file_id >> 64) as u64 ^ volume_serial_number,
+                file_id as u64,
+            ),
         };
         return Ok(uuid::Uuid::from_u64_pair(upper, lower));
     }
 
     // 2. 失敗した場合（ELOOP, EIO等）はパス名から決定論的な UUID を生成
-    Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, path.to_string_lossy().as_bytes()))
+    Ok(uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        path.to_string_lossy().as_bytes(),
+    ))
 }
 
 /// TTFMのホームディレクトリを取得します。
@@ -83,8 +78,8 @@ pub fn get_ttfm_home() -> Result<std::path::PathBuf> {
         return Ok(std::path::PathBuf::from(home));
     }
 
-    let mut home = dirs::home_dir()
-        .context("Failed to determine home directory")?;
+    let mut home =
+        dirs::home_dir().context("Failed to determine home directory")?;
     home.push(".ttfm");
     Ok(home)
 }
@@ -109,7 +104,9 @@ impl Default for FunctionRegistry {
 impl FunctionRegistry {
     /// 空のレジストリを作成します。
     pub fn new() -> Self {
-        Self { functions: Vec::new() }
+        Self {
+            functions: Vec::new(),
+        }
     }
 
     /// 新しい機能（`TagFunction`）をレジストリに追加します。
@@ -138,12 +135,12 @@ impl FunctionRegistry {
         reg.register(Box::new(TypeFromExtFunction::new()));
         reg.register(Box::new(SizeStrFunction::new()));
         reg.register(Box::new(ModifiedStrFunction::new()));
-        
+
         // 定義のみの機能（ランク付けや検索用）
         reg.register(Box::new(NameTagFunction));
         reg.register(Box::new(KindTagFunction));
         reg.register(Box::new(ContentTagFunction));
-        
+
         reg
     }
 
@@ -180,7 +177,11 @@ impl FunctionRegistry {
     // --- Search Support ---
 
     /// `all_tags` ビューに対する検索SQL（IDのリストを返すクエリ）を生成します。
-    pub fn generate_view_query(&self, node: &crate::query::QueryNode, view_name: &str) -> String {
+    pub fn generate_view_query(
+        &self,
+        node: &crate::query::QueryNode,
+        view_name: &str,
+    ) -> String {
         let registry = crate::query::QueryFunctionRegistry::with_standard();
         let select = node.clone().expand(&registry).to_sql(view_name);
         select.to_string(PostgresQueryBuilder)
@@ -206,17 +207,18 @@ impl FileManager {
         // ホームディレクトリの準備
         if !plugins_dir.exists() {
             std::fs::create_dir_all(&plugins_dir).with_context(|| {
-                format!("Failed to create plugins directory at {:?}", plugins_dir)
+                format!(
+                    "Failed to create plugins directory at {:?}",
+                    plugins_dir
+                )
             })?;
         }
 
         // デフォルトプラグインの展開
-        let mimetype_path =
-            plugins_dir.join("mimetype_plugin.component.wasm");
+        let mimetype_path = plugins_dir.join("mimetype_plugin.component.wasm");
         if !mimetype_path.exists() {
-            let bytes = include_bytes!(
-                "../plugins/mimetype_plugin.component.wasm"
-            );
+            let bytes =
+                include_bytes!("../plugins/mimetype_plugin.component.wasm");
             std::fs::write(&mimetype_path, bytes).with_context(|| {
                 format!("Failed to setup default plugin at {:?}", mimetype_path)
             })?;
@@ -243,7 +245,8 @@ impl FileManager {
         let registry = FunctionRegistry::with_standard();
 
         // Initialize tables and views
-        let indexer = crate::indexing::Indexer::new(&conn, &registry, db_dir.clone());
+        let indexer =
+            crate::indexing::Indexer::new(&conn, &registry, db_dir.clone());
         indexer
             .initialize_tables()
             .context("Failed to initialize database tables")?;
@@ -323,11 +326,13 @@ impl FileManager {
                 Col::Labels,
             )
             .expr_as(
-                Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
+                Func::cust(DuckDbFunc::Coalesce)
+                    .args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
                 Col::Rank,
             )
             .expr_as(
-                Func::cust(DuckDbFunc::Coalesce).args([Expr::col(Col::Name).into(), Expr::val("").into()]),
+                Func::cust(DuckDbFunc::Coalesce)
+                    .args([Expr::col(Col::Name).into(), Expr::val("").into()]),
                 Col::Name,
             )
             .from(Tbl::OneView)
@@ -375,7 +380,14 @@ impl FileManager {
 
             let tags = types.into_iter().zip(labels.into_iter()).collect();
 
-            SearchResult { id, item_kind, name, rank, tags }.to_ok()
+            SearchResult {
+                id,
+                item_kind,
+                name,
+                rank,
+                tags,
+            }
+            .to_ok()
         })?;
 
         let mut results = Vec::new();
@@ -414,7 +426,10 @@ impl FileManager {
             .from_subquery(util::parquet_query(&path_str), Tbl::ItemEntities)
             .to_string(PostgresQueryBuilder);
 
-        let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0)).unwrap_or(0);
+        let min_id: i64 = self
+            .conn
+            .query_row(&query_min, [], |r| r.get(0))
+            .unwrap_or(0);
         let new_id = if min_id > -1 { -1 } else { min_id - 1 };
 
         // 2. Append new row via Temp Table & COPY
@@ -438,8 +453,9 @@ impl FileManager {
 
     /// アイテム（ファイルまたは Item Entity）にタグを付与します。
     pub fn tag_item(&self, item: &str, tag_str: &str) -> Result<()> {
-        let (key, value) =
-            tag_str.split_once(':').context("Tag must be in 'key:value' format")?;
+        let (key, value) = tag_str
+            .split_once(':')
+            .context("Tag must be in 'key:value' format")?;
 
         // 1. タグ自体の Item Entity が存在することを確認（なければ作成）
         self.get_or_create_item("type", key)?;
@@ -454,7 +470,11 @@ impl FileManager {
             let query_path = Query::select()
                 .column(Col::ItemId)
                 .from_subquery(
-                    util::parquet_query(&self.path_for_target(TargetTable::Locations).to_string_lossy()),
+                    util::parquet_query(
+                        &self
+                            .path_for_target(TargetTable::Locations)
+                            .to_string_lossy(),
+                    ),
                     Tbl::Locations,
                 )
                 .and_where(Expr::col(Col::Path).eq(item))
@@ -470,9 +490,9 @@ impl FileManager {
                     .and_where(Expr::col(Col::Name).eq(item))
                     .to_string(PostgresQueryBuilder);
 
-                self.conn
-                    .query_row(&query_name, [], |r| r.get(0))
-                    .context(format!("Item not found by path or name: {}", item))?
+                self.conn.query_row(&query_name, [], |r| r.get(0)).context(
+                    format!("Item not found by path or name: {}", item),
+                )?
             }
         };
 
@@ -490,11 +510,21 @@ impl FileManager {
     }
 
     /// 検索結果リストに対して優先度を一括設定します。
-    pub fn update_ranks(&self, results: &[SearchResult], rank: i64) -> Result<()> {
-        let file_ids: Vec<i64> = results.iter()
-            .filter(|r| r.item_kind == "file").map(|r| r.id).collect();
-        let item_ids: Vec<i64> = results.iter()
-            .filter(|r| r.item_kind != "file").map(|r| r.id).collect();
+    pub fn update_ranks(
+        &self,
+        results: &[SearchResult],
+        rank: i64,
+    ) -> Result<()> {
+        let file_ids: Vec<i64> = results
+            .iter()
+            .filter(|r| r.item_kind == "file")
+            .map(|r| r.id)
+            .collect();
+        let item_ids: Vec<i64> = results
+            .iter()
+            .filter(|r| r.item_kind != "file")
+            .map(|r| r.id)
+            .collect();
 
         if !file_ids.is_empty() {
             self.batch_update_rank(&file_ids, true, rank)?;
@@ -505,7 +535,12 @@ impl FileManager {
         Ok(())
     }
 
-    fn batch_update_rank(&self, ids: &[i64], is_file: bool, rank: i64) -> Result<()> {
+    fn batch_update_rank(
+        &self,
+        ids: &[i64],
+        is_file: bool,
+        rank: i64,
+    ) -> Result<()> {
         let path = if is_file {
             self.path_for_target(TargetTable::FileEntities)
         } else {
@@ -521,7 +556,14 @@ impl FileManager {
         Query::update()
             .table(temp_table)
             .values([(Col::Rank, rank.into())])
-            .and_where(Expr::col(Col::ItemId).is_in(ids.iter().cloned().map(sea_query::Value::from).collect::<Vec<_>>()))
+            .and_where(
+                Expr::col(Col::ItemId).is_in(
+                    ids.iter()
+                        .cloned()
+                        .map(sea_query::Value::from)
+                        .collect::<Vec<_>>(),
+                ),
+            )
             .execute(&self.conn)?;
 
         temp_table.write_parquet(&self.conn, &path)?;
@@ -531,14 +573,23 @@ impl FileManager {
     }
 
     /// IDを指定して優先度を設定します。
-    pub fn set_rank_by_id(&self, id: i64, is_file: bool, rank: i64) -> Result<()> {
+    pub fn set_rank_by_id(
+        &self,
+        id: i64,
+        is_file: bool,
+        rank: i64,
+    ) -> Result<()> {
         self.batch_update_rank(&[id], is_file, rank)
     }
 
     /// 全てのタグ型の優先度（RANK）を取得します。
-    pub fn get_type_ranks(&self) -> Result<std::collections::HashMap<String, i64>> {
+    pub fn get_type_ranks(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>> {
         let path = self.path_for_target(TargetTable::ItemEntities);
-        if !path.exists() { return Ok(Default::default()); }
+        if !path.exists() {
+            return Ok(Default::default());
+        }
 
         let query = Query::select()
             .column(Col::Content)
@@ -551,7 +602,9 @@ impl FileManager {
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
 
         let mut map = std::collections::HashMap::new();
         for row in rows {
@@ -633,9 +686,13 @@ impl FileManager {
                         let adapter = plugin.into_adapter()?;
 
                         // 個別設定のチェック
-                        let is_enabled = *status.get(&adapter.name).unwrap_or(&true);
+                        let is_enabled =
+                            *status.get(&adapter.name).unwrap_or(&true);
                         if is_enabled {
-                            println!("Loaded plugin: {} from {:?}", adapter.name, path);
+                            println!(
+                                "Loaded plugin: {} from {:?}",
+                                adapter.name, path
+                            );
                             self.registry.register(Box::new(adapter));
                         } else {
                             println!(
@@ -645,7 +702,10 @@ impl FileManager {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to load plugin {:?}: {}", path, e);
+                        eprintln!(
+                            "Warning: Failed to load plugin {:?}: {}",
+                            path, e
+                        );
                     }
                 }
             }

@@ -1,18 +1,18 @@
-use anyhow::{Result, anyhow};
-use std::collections::HashMap;
-// Unused imports removed
-use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
+use crate::db::{Col, CustomFunc, Tbl};
 use crate::types::{Label, SType, TagType, TypedTag};
-use crate::db::{Tbl, Col};
-use pest_derive::Parser;
+use crate::util::DotOk;
+use anyhow::{anyhow, Result};
 use pest::Parser;
+use pest_derive::Parser;
+use sea_query::{Alias, BinOper, Expr, Query, SelectStatement, SimpleExpr};
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Parser)]
 #[grammar = "query.pest"]
 pub struct PestQueryParser;
 
 use pest::iterators::Pair;
-use pest::pratt_parser::{PrattParser, Op, Assoc};
+use pest::pratt_parser::{Assoc, Op, PrattParser};
 use std::sync::OnceLock;
 
 static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
@@ -20,7 +20,8 @@ static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
 fn get_parser() -> &'static PrattParser<Rule> {
     PRATT_PARSER.get_or_init(|| {
         PrattParser::new()
-            .op(Op::infix(Rule::pipe, Assoc::Left) | Op::infix(Rule::minus, Assoc::Left))
+            .op(Op::infix(Rule::pipe, Assoc::Left)
+                | Op::infix(Rule::minus, Assoc::Left))
             .op(Op::infix(Rule::ampersand, Assoc::Left))
     })
 }
@@ -29,8 +30,12 @@ fn get_parser() -> &'static PrattParser<Rule> {
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
         .map_err(|e| anyhow!("Parse error: {}", e))?;
-    let expr_pair = pairs.next().ok_or_else(|| anyhow!("No query found"))?
-        .into_inner().next().ok_or_else(|| anyhow!("No expression found"))?;
+    let expr_pair = pairs
+        .next()
+        .ok_or_else(|| anyhow!("No query found"))?
+        .into_inner()
+        .next()
+        .ok_or_else(|| anyhow!("No expression found"))?;
     build_ast(expr_pair)
 }
 
@@ -45,35 +50,37 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
                     let rhs = rhs?;
                     match op.as_rule() {
                         Rule::ampersand => {
-                             // Combine And nodes if possible, but strict binary is fine for now.
-                             // Wait, previously And was Vec.
-                             // Binary reduction: And(vec![l, r])
-                             // If lhs is And, we can flatten? 
-                             // Pratt reduces binary. A & B & C -> ((A & B) & C).
-                             // We can merge if we want, or just build nested binary trees and flatten later, 
-                             // OR check types here.
-                             // For simplicity and matching prior multi-child structure:
-                             match lhs {
-                                 QueryNode::And(mut v) => {
-                                     v.push(rhs);
-                                     Ok(QueryNode::And(v))
-                                 }
-                                 _ => Ok(QueryNode::And(vec![lhs, rhs]))
-                             }
+                            // Combine And nodes if possible, but strict binary is fine for now.
+                            // Wait, previously And was Vec.
+                            // Binary reduction: And(vec![l, r])
+                            // If lhs is And, we can flatten?
+                            // Pratt reduces binary. A & B & C -> ((A & B) & C).
+                            // We can merge if we want, or just build nested binary trees and flatten later,
+                            // OR check types here.
+                            // For simplicity and matching prior multi-child structure:
+                            match lhs {
+                                QueryNode::And(mut v) => {
+                                    v.push(rhs);
+                                    Ok(QueryNode::And(v))
+                                }
+                                _ => Ok(QueryNode::And(vec![lhs, rhs])),
+                            }
                         }
-                        Rule::pipe => {
-                             match lhs {
-                                 QueryNode::Or(mut v) => {
-                                     v.push(rhs);
-                                     Ok(QueryNode::Or(v))
-                                 }
-                                 _ => Ok(QueryNode::Or(vec![lhs, rhs]))
-                             }
-                        }
-                        Rule::minus => {
-                             Ok(QueryNode::Difference(Box::new(lhs), Box::new(rhs)))
-                        }
-                        _ => Err(anyhow!("Unknown infix rule: {:?}", op.as_rule())),
+                        Rule::pipe => match lhs {
+                            QueryNode::Or(mut v) => {
+                                v.push(rhs);
+                                Ok(QueryNode::Or(v))
+                            }
+                            _ => Ok(QueryNode::Or(vec![lhs, rhs])),
+                        },
+                        Rule::minus => Ok(QueryNode::Difference(
+                            Box::new(lhs),
+                            Box::new(rhs),
+                        )),
+                        _ => Err(anyhow!(
+                            "Unknown infix rule: {:?}",
+                            op.as_rule()
+                        )),
                     }
                 })
                 .parse(pairs)
@@ -83,32 +90,39 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
             build_ast(inner)
         }
         Rule::factor => {
-             // factor = { "(" ~ expr ~ ")" | typed_tag | comparison }
-             let inner = pair.into_inner().next().unwrap();
-             match inner.as_rule() {
-                 Rule::expr => build_ast(inner),
-                 Rule::typed_tag => build_typed_tag(inner),
-                 Rule::comparison => build_comparison(inner),
-                 _ => Err(anyhow!("Unknown factor inner: {:?}", inner.as_rule())),
-             }
+            // factor = { "(" ~ expr ~ ")" | typed_tag | comparison }
+            let inner = pair.into_inner().next().unwrap();
+            match inner.as_rule() {
+                Rule::expr => build_ast(inner),
+                Rule::typed_tag => build_typed_tag(inner),
+                Rule::comparison => build_comparison(inner),
+                _ => {
+                    Err(anyhow!("Unknown factor inner: {:?}", inner.as_rule()))
+                }
+            }
         }
         Rule::complement => {
-             let mut inner = pair.into_inner();
-             let _ = inner.next(); // ^
-             // The grammar for complement: "^" ~ "(" ~ expr ~ ")"
-             // inner pairs: (expr)
-             // Wait. `complement = { "^" ~ "(" ~ expr ~ ")" }`
-             // Pest pairs: Literal "^", Literal "(", Rule expr, Literal ")"
-             // If rules are atomic or silent, it changes.
-             // complement is normal rule.
-             // Literals don't show up in `into_inner()` unless strict coverage?
-             // Default: no.
-             // So `inner` contains `expr`.
-             // Let's debug if needed, but usually inner.next() is expr.
-             let expr_pair = inner.next().ok_or_else(|| anyhow!("Complement missing expr"))?;
-             Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
+            let mut inner = pair.into_inner();
+            let _ = inner.next(); // ^
+                                  // The grammar for complement: "^" ~ "(" ~ expr ~ ")"
+                                  // inner pairs: (expr)
+                                  // Wait. `complement = { "^" ~ "(" ~ expr ~ ")" }`
+                                  // Pest pairs: Literal "^", Literal "(", Rule expr, Literal ")"
+                                  // If rules are atomic or silent, it changes.
+                                  // complement is normal rule.
+                                  // Literals don't show up in `into_inner()` unless strict coverage?
+                                  // Default: no.
+                                  // So `inner` contains `expr`.
+                                  // Let's debug if needed, but usually inner.next() is expr.
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| anyhow!("Complement missing expr"))?;
+            Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
         }
-        _ => Err(anyhow!("Unexpected rule in build_ast: {:?}", pair.as_rule())),
+        _ => Err(anyhow!(
+            "Unexpected rule in build_ast: {:?}",
+            pair.as_rule()
+        )),
     }
 }
 
@@ -117,8 +131,9 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
     let mut inner = pair.into_inner();
     let type_pair = inner.next().ok_or_else(|| anyhow!("Missing tag key"))?;
     let tagtype = build_tag_type(type_pair)?;
-    
-    let label_pair = inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
+
+    let label_pair =
+        inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
     let label = build_label(label_pair)?;
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
@@ -128,12 +143,14 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::quoted_string => {
-            let s = unescape_string(inner.as_str())?;
-            Ok(TagType::LiteralCustom(s))
+            // Remove outer quotes before unescaping
+            let content = &inner.as_str()[1..inner.as_str().len() - 1];
+            let s = unescape_string(content)?;
+            TagType::LiteralCustom(s).to_ok()
         }
         Rule::identifier => {
             let s = unescape_unquoted(inner.as_str())?;
-            Ok(TagType::from(s))
+            TagType::from(s).to_ok()
         }
         _ => Err(anyhow!("Unexpected tag_type rule: {:?}", inner.as_rule())),
     }
@@ -156,18 +173,25 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
             "<=" => ComparisonOp::Le,
             s => return Err(anyhow!("Unknown comparison op: {}", s)),
         };
-        let right_pair = inner.next().ok_or_else(|| anyhow!("Missing comparison operand"))?;
+        let right_pair = inner
+            .next()
+            .ok_or_else(|| anyhow!("Missing comparison operand"))?;
         let right_op = build_operand(right_pair)?;
         rest.push((op, right_op));
     }
-    Ok(QueryNode::Comparison(ComparisonNode { first: first_op, rest }))
+    Ok(QueryNode::Comparison(ComparisonNode {
+        first: first_op,
+        rest,
+    }))
 }
 
 fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
     // operand = { calculation | type_ref | label }
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::calculation => Ok(Operand::Calculation(Box::new(build_calculation(inner)?))),
+        Rule::calculation => {
+            Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
+        }
         Rule::type_ref => {
             // type_ref = ${ tag_type ~ ":" }
             let inner_tag = inner.into_inner().next().unwrap();
@@ -189,7 +213,7 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
 
     let inner_pair = pair.into_inner().next().unwrap(); // calculation_inner
     let mut pairs = inner_pair.into_inner();
-    
+
     let first_pair = pairs.next().unwrap();
     let mut left = build_operand_calc(first_pair)?;
 
@@ -204,7 +228,7 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
         };
         let right_pair = pairs.next().unwrap();
         let right = build_operand_calc(right_pair)?;
-        
+
         // Nesting for left associativity: (left op right)
         // But `Operand::Calculation` holds `CalculationNode`.
         // We wrap the current `left` (which might be an Operand) into a new CalculationNode as needed?
@@ -214,12 +238,9 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
         // Next op: +. right = C.
         // We need 'left' to reference the previous result.
         // Operand has `Calculation(Box<CalculationNode>)`.
-        
-        left = Operand::Calculation(Box::new(CalculationNode {
-            left,
-            op,
-            right,
-        }));
+
+        left =
+            Operand::Calculation(Box::new(CalculationNode { left, op, right }));
     }
 
     // The result is an Operand. But we need to return CalculationNode?
@@ -228,17 +249,17 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
     // If left is Operand::Calculation(box node), verify content.
     match left {
         Operand::Calculation(node) => Ok(*node),
-         // If there was no operation (just one operand), grammar says (op ~ operand)+ so at least one op?
-         // No, grammar: operand_calc ~ (arith_op ~ operand_calc)+
-         // Actually, if there is NO op, it's just an operand_calc.
-         // But `calculation` rule implies it's a calculation. 
-         // If "label" is passed as calculation, logic above handles it?
-         // If only one operand and no ops, logic returns the operand. 
-         // But we must return CalculationNode.
-         // This implies we can't represent a single operand as CalculationNode plainly.
-         // Or maybe we treat (A) as A + 0? No.
-         // Assuming valid calculation always has op.
-         _ => Err(anyhow!("Calculation must contain at least one operation")),
+        // If there was no operation (just one operand), grammar says (op ~ operand)+ so at least one op?
+        // No, grammar: operand_calc ~ (arith_op ~ operand_calc)+
+        // Actually, if there is NO op, it's just an operand_calc.
+        // But `calculation` rule implies it's a calculation.
+        // If "label" is passed as calculation, logic above handles it?
+        // If only one operand and no ops, logic returns the operand.
+        // But we must return CalculationNode.
+        // This implies we can't represent a single operand as CalculationNode plainly.
+        // Or maybe we treat (A) as A + 0? No.
+        // Assuming valid calculation always has op.
+        _ => Err(anyhow!("Calculation must contain at least one operation")),
     }
 }
 
@@ -252,7 +273,9 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
             Ok(Operand::TypeRef(TagType::from(key)))
         }
         Rule::label => Ok(Operand::Literal(build_label(inner)?)),
-        Rule::calculation => Ok(Operand::Calculation(Box::new(build_calculation(inner)?))),
+        Rule::calculation => {
+            Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
+        }
         _ => Err(anyhow!("Unknown operand_calc rule")),
     }
 }
@@ -262,8 +285,10 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::quoted_string => {
-            let s = unescape_string(inner.as_str())?;
-            Ok(Label::Literal(s))
+            // Remove outer quotes before unescaping
+            let content = &inner.as_str()[1..inner.as_str().len() - 1];
+            let s = unescape_string(content)?;
+            Label::Literal(s).to_ok()
         }
         Rule::number => {
             let i = inner.as_str().parse::<i64>()?;
@@ -278,49 +303,49 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
 }
 
 fn unescape_string(s: &str) -> Result<String> {
-    // Remove outer quotes
-    let content = &s[1..s.len()-1];
-    let mut res = String::new();
-    let mut chars = content.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.next() {
-                res.push(next);
-            } else {
-                res.push('\\');
-            }
-        } else {
-            res.push(c);
-        }
-    }
-    Ok(res)
+    let mut chars = s.chars();
+    std::iter::from_fn(move || match chars.next()? {
+        '\\' => match chars.next() {
+            Some('n') => Some('\n'),
+            Some('r') => Some('\r'),
+            Some('t') => Some('\t'),
+            Some('\\') => Some('\\'),
+            Some('\'') => Some('\''),
+            Some('"') => Some('"'),
+            Some(c) => Some(c),
+            None => Some('\\'),
+        },
+        c => Some(c),
+    })
+    .collect::<String>()
+    .to_ok()
 }
 
 fn unescape_unquoted(s: &str) -> Result<String> {
-    let mut res = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.next() {
-                // Convert \* to [*] for DuckDB GLOB
-                match next {
-                    '*' | '?' | '[' | ']' | '!' => {
-                        res.push('[');
-                        res.push(next);
-                        res.push(']');
-                    }
-                    _ => res.push(next),
-                }
-            } else {
-                res.push('\\');
-            }
-        } else {
-            res.push(c);
-        }
-    }
-    Ok(res)
-}
+    let mut chars = s.chars();
+    let mut pending = VecDeque::new();
 
+    std::iter::from_fn(move || {
+        if let Some(c) = pending.pop_front() {
+            return Some(c);
+        }
+        match chars.next()? {
+            '\\' => match chars.next() {
+                // DuckDB GLOB escape: \* -> [*]
+                Some(c @ ('*' | '?' | '[' | ']' | '!')) => {
+                    pending.push_back(c);
+                    pending.push_back(']');
+                    Some('[')
+                }
+                Some(c) => Some(c),
+                None => Some('\\'),
+            },
+            c => Some(c),
+        }
+    })
+    .collect::<String>()
+    .to_ok()
+}
 
 /// 検索クエリの展開を行う抽象化単位。
 pub trait QueryFunction: Send + Sync {
@@ -374,9 +399,10 @@ impl QueryFunctionRegistry {
     pub fn process_tag(&self, tagtype: TagType, label: Label) -> QueryNode {
         // LiteralCustom の場合は魔法（展開関数）をスキップする
         if let TagType::LiteralCustom(_) = tagtype {
-            return QueryNode::And(vec![
-                QueryNode::TypedTag(TypedTag { tagtype, label })
-            ]);
+            return QueryNode::And(vec![QueryNode::TypedTag(TypedTag {
+                tagtype,
+                label,
+            })]);
         }
 
         // Baseタグ（SType）であれば、レジストリから展開関数を探す
@@ -394,12 +420,21 @@ impl QueryFunctionRegistry {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ComparisonOp {
-    Eq, Ne, Gt, Ge, Lt, Le
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ArithmeticOp {
-    Add, Sub, Mul, Div, Mod
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -446,22 +481,16 @@ impl QueryNode {
     /// 特殊なタグ（QueryFunction）を基本構造へ展開します。
     pub fn expand(self, registry: &QueryFunctionRegistry) -> QueryNode {
         match self {
-            QueryNode::And(nodes) => {
-                QueryNode::And(nodes.into_iter()
-                    .map(|n| n.expand(registry))
-                    .collect())
-            }
-            QueryNode::Or(nodes) => {
-                QueryNode::Or(nodes.into_iter()
-                    .map(|n| n.expand(registry))
-                    .collect())
-            }
-            QueryNode::Difference(l, r) => {
-                QueryNode::Difference(
-                    Box::new(l.expand(registry)),
-                    Box::new(r.expand(registry))
-                )
-            }
+            QueryNode::And(nodes) => QueryNode::And(
+                nodes.into_iter().map(|n| n.expand(registry)).collect(),
+            ),
+            QueryNode::Or(nodes) => QueryNode::Or(
+                nodes.into_iter().map(|n| n.expand(registry)).collect(),
+            ),
+            QueryNode::Difference(l, r) => QueryNode::Difference(
+                Box::new(l.expand(registry)),
+                Box::new(r.expand(registry)),
+            ),
             QueryNode::Complement(c) => {
                 QueryNode::Complement(Box::new(c.expand(registry)))
             }
@@ -478,21 +507,12 @@ impl QueryNode {
     /// クエリ構造を SQL (SelectStatement) へ変換します。
     pub fn to_sql(&self, view_name: &str) -> SelectStatement {
         match self {
-            QueryNode::And(nodes) => {
-                self.build_and_sql(nodes, view_name)
-            }
-            QueryNode::Or(nodes) => {
-                self.build_or_sql(nodes, view_name)
-            }
-            QueryNode::Difference(l, r) => {
-                self.build_diff_sql(l, r, view_name)
-            }
-            QueryNode::Complement(c) => {
-                self.build_comp_sql(c, view_name)
-            }
-            QueryNode::Comparison(_cmp) => {
-                // Scope Restriction: ラベル比較・計算は本フェーズでは対象外
-                unimplemented!("Comparison logic is deferred to next phase");
+            QueryNode::And(nodes) => self.build_and_sql(nodes, view_name),
+            QueryNode::Or(nodes) => self.build_or_sql(nodes, view_name),
+            QueryNode::Difference(l, r) => self.build_diff_sql(l, r, view_name),
+            QueryNode::Complement(c) => self.build_comp_sql(c, view_name),
+            QueryNode::Comparison(cmp) => {
+                self.build_comparison_sql(cmp, view_name)
             }
             QueryNode::ColumnMatch { tag, label } => {
                 self.build_column_match_sql(*tag, label, view_name)
@@ -513,16 +533,15 @@ impl QueryNode {
         // Precedence Safety: Wrap children in subqueries to enforce (A | B) & C logic
         let mut q = self.wrap_in_subquery(first.to_sql(view));
         for node in it {
-            q.union(sea_query::UnionType::Intersect, self.wrap_in_subquery(node.to_sql(view)));
+            q.union(
+                sea_query::UnionType::Intersect,
+                self.wrap_in_subquery(node.to_sql(view)),
+            );
         }
         q
     }
 
-    fn build_or_sql(
-        &self,
-        nodes: &[QueryNode],
-        view: &str,
-    ) -> SelectStatement {
+    fn build_or_sql(&self, nodes: &[QueryNode], view: &str) -> SelectStatement {
         let mut it = nodes.iter();
         let first = it.next().expect("Or nodes must not be empty");
         let mut q = first.to_sql(view);
@@ -539,14 +558,17 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut q = self.wrap_in_subquery(l.to_sql(view));
-        q.union(sea_query::UnionType::Except, self.wrap_in_subquery(r.to_sql(view)));
+        q.union(
+            sea_query::UnionType::Except,
+            self.wrap_in_subquery(r.to_sql(view)),
+        );
         q
     }
 
     fn wrap_in_subquery(&self, q: SelectStatement) -> SelectStatement {
         Query::select()
             .column(Col::ItemId)
-            .from_subquery(q, Alias::new("sub"))
+            .from_subquery(q, Tbl::Sub)
             .to_owned()
     }
 
@@ -564,6 +586,149 @@ impl QueryNode {
         q
     }
 
+    fn build_comparison_sql(
+        &self,
+        node: &ComparisonNode,
+        view: &str,
+    ) -> SelectStatement {
+        let mut operands = vec![&node.first];
+        for (_, opd) in &node.rest {
+            operands.push(opd);
+        }
+
+        let mut subqueries = Vec::new();
+        for (i, (op, _)) in node.rest.iter().enumerate() {
+            let left = operands[i];
+            let right = operands[i + 1];
+            subqueries
+                .push(self.build_binary_comparison_sql(left, *op, right, view));
+        }
+
+        if subqueries.len() == 1 {
+            subqueries.pop().unwrap()
+        } else {
+            let mut first = subqueries.remove(0);
+            for next in subqueries {
+                first.union(sea_query::UnionType::Intersect, next);
+            }
+            first
+        }
+    }
+
+    fn build_binary_comparison_sql(
+        &self,
+        left: &Operand,
+        op: ComparisonOp,
+        right: &Operand,
+        view: &str,
+    ) -> SelectStatement {
+        let mut q = Query::select();
+        q.column(Col::ItemId).distinct().from(Alias::new(view));
+
+        let bin_op = self.to_bin_op(op);
+
+        // オペランドを (TagType, Label, 補正済み演算子) の形に正規化
+        let (tt, lab, effective_op) =
+            match self.normalize_comparison(left, bin_op, right) {
+                Some(res) => res,
+                None => {
+                    q.and_where(Expr::val(1).eq(0));
+                    return q;
+                }
+            };
+
+        // 特権カラム（物理カラム）への最適化パス
+        if let TagType::Base(stag) = tt {
+            if matches!(stag, SType::Size | SType::Mtime | SType::Rank) {
+                return self.apply_privileged_comparison(
+                    q,
+                    stag,
+                    effective_op,
+                    lab,
+                );
+            }
+        }
+
+        // 一般的なタグへのフォールバックパス
+        self.apply_generic_comparison(q, tt, effective_op, lab)
+    }
+
+    fn to_bin_op(&self, op: ComparisonOp) -> BinOper {
+        match op {
+            ComparisonOp::Eq => BinOper::Equal,
+            ComparisonOp::Ne => BinOper::NotEqual,
+            ComparisonOp::Gt => BinOper::GreaterThan,
+            ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
+            ComparisonOp::Lt => BinOper::SmallerThan,
+            ComparisonOp::Le => BinOper::SmallerThanOrEqual,
+        }
+    }
+
+    fn flip_bin_op(&self, op: BinOper) -> BinOper {
+        match op {
+            BinOper::GreaterThan => BinOper::SmallerThan,
+            BinOper::GreaterThanOrEqual => BinOper::SmallerThanOrEqual,
+            BinOper::SmallerThan => BinOper::GreaterThan,
+            BinOper::SmallerThanOrEqual => BinOper::GreaterThanOrEqual,
+            other => other,
+        }
+    }
+
+    fn normalize_comparison(
+        &self,
+        left: &Operand,
+        op: BinOper,
+        right: &Operand,
+    ) -> Option<(TagType, Label, BinOper)> {
+        match (left, right) {
+            (Operand::TypeRef(tt), Operand::Literal(lab)) => {
+                Some((tt.clone(), lab.clone(), op))
+            }
+            (Operand::Literal(lab), Operand::TypeRef(tt)) => {
+                Some((tt.clone(), lab.clone(), self.flip_bin_op(op)))
+            }
+            _ => None,
+        }
+    }
+
+    fn apply_privileged_comparison(
+        &self,
+        mut q: SelectStatement,
+        tag: SType,
+        op: BinOper,
+        label: Label,
+    ) -> SelectStatement {
+        let mut apply = |rhs: SimpleExpr| {
+            q.and_where(Expr::col(tag).binary(op, rhs));
+        };
+
+        match label {
+            Label::Integer(i) => apply(Expr::val(i).into()),
+            _ => apply(CustomFunc::try_cast_bigint(Expr::val(label.as_str()))),
+        }
+        q
+    }
+
+    fn apply_generic_comparison(
+        &self,
+        mut q: SelectStatement,
+        tagtype: TagType,
+        op: BinOper,
+        label: Label,
+    ) -> SelectStatement {
+        let condition = match label {
+            Label::Integer(i) => {
+                CustomFunc::try_cast_bigint(Expr::col(Col::Label))
+                    .binary(op, Expr::val(i))
+            }
+            _ => Expr::col(Col::Label).binary(op, Expr::val(label.as_str())),
+        };
+
+        q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()))
+            .and_where(condition);
+        q
+    }
+
     fn build_column_match_sql(
         &self,
         tag: SType,
@@ -577,10 +742,10 @@ impl QueryNode {
                 q.and_where(Expr::col(tag).eq(*i));
             }
             Label::String(s) => {
-                q.and_where(Expr::col(tag).binary(
-                    BinOper::Custom("GLOB"),
-                    Expr::val(s.as_str()),
-                ));
+                q.and_where(
+                    Expr::col(tag)
+                        .binary(BinOper::Custom("GLOB"), Expr::val(s.as_str())),
+                );
             }
             Label::Literal(s) => {
                 q.and_where(Expr::col(tag).eq(s.as_str()));
@@ -598,14 +763,17 @@ impl QueryNode {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
         let glob = BinOper::Custom("GLOB");
-        
+
         // Type side: LiteralCustom uses '='
         match tagtype {
             TagType::LiteralCustom(s) => {
                 q.and_where(Expr::col(Col::Type).eq(s.as_str()));
             }
             _ => {
-                q.and_where(Expr::col(Col::Type).binary(glob.clone(), Expr::val(tagtype.as_str())));
+                q.and_where(
+                    Expr::col(Col::Type)
+                        .binary(glob.clone(), Expr::val(tagtype.as_str())),
+                );
             }
         }
 
@@ -614,7 +782,9 @@ impl QueryNode {
                 q.and_where(Expr::col(Col::Label).eq(*i));
             }
             Label::String(s) => {
-                q.and_where(Expr::col(Col::Label).binary(glob, Expr::val(s.as_str())));
+                q.and_where(
+                    Expr::col(Col::Label).binary(glob, Expr::val(s.as_str())),
+                );
             }
             Label::Literal(s) => {
                 q.and_where(Expr::col(Col::Label).eq(s.as_str()));
@@ -729,16 +899,22 @@ mod tests {
             "extension:rs & ^(path:*/target/*)",
             "^(extension:pdf)",
             "size: > 1024",
+            "size: >= 1024",
+            "size: < 2048",
+            "size: <= 2048",
+            "rank: == 5",
+            "rank: ^= 1", // Not Equal
             "50 < width: < 100",
+            "10 <= height: <= 20",
             "(size: + 1024) > 2048",
             "name:\"My File\" | name:'Other File'",
             "extension:pdf - filename:test.pdf",
         ];
 
         for q in queries {
-            parse(q).map_err(|e| {
-                panic!("Failed to parse query '{}': {}", q, e)
-            }).unwrap();
+            parse(q)
+                .map_err(|e| panic!("Failed to parse query '{}': {}", q, e))
+                .unwrap();
         }
     }
 
@@ -747,8 +923,8 @@ mod tests {
         // Test spaces (should fail according to DESIGN.md)
         let fail_queries = [
             "^ (extension:pdf)", // Space after ^
-            "extension : rs",     // Space around :
-            "size :> 100",      // Space before :>
+            "extension : rs",    // Space around :
+            "size :> 100",       // Space before :>
         ];
         for q in fail_queries {
             assert!(
@@ -760,18 +936,15 @@ mod tests {
 
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
-        assert!(
-            parse(q_unary).is_err(),
-            "Unary minus should be invalid"
-        );
+        assert!(parse(q_unary).is_err(), "Unary minus should be invalid");
     }
 
     #[test]
     fn test_pest_grammar_complex_math() {
         // Multi-level math and negative numbers
         let q = "(size: - -100) > (width: * (height: / 2))";
-        parse(q).map_err(|e| {
-            panic!("Failed to parse math query '{}': {}", q, e)
-        }).unwrap();
+        parse(q)
+            .map_err(|e| panic!("Failed to parse math query '{}': {}", q, e))
+            .unwrap();
     }
 }

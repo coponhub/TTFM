@@ -1,6 +1,6 @@
-use ttfm::FileManager;
-use tempfile::tempdir;
 use std::fs;
+use tempfile::tempdir;
+use ttfm::FileManager;
 
 #[test]
 fn test_rank_sorting_files() {
@@ -20,7 +20,7 @@ fn test_rank_sorting_files() {
     // high.txt を 100 に
     let res_high = fm.search("filename:high.txt").unwrap();
     fm.update_ranks(&res_high, 100).unwrap();
-    
+
     // mid.txt を 50 に
     let res_mid = fm.search("filename:mid.txt").unwrap();
     fm.update_ranks(&res_mid, 50).unwrap();
@@ -40,7 +40,7 @@ fn test_rank_batch_update() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
-    
+
     fs::write(root.join("a.txt"), "a").unwrap();
     fs::write(root.join("b.txt"), "b").unwrap();
     fs::write(root.join("c.rs"), "c").unwrap();
@@ -67,9 +67,10 @@ fn test_rank_set_by_id_low_level() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join(".ttfm/db");
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    
+
     fs::create_dir_all(&db_dir).unwrap();
-    fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
+    fm.index_directory(dir.path(), None::<&fn(usize)>, false)
+        .unwrap();
 
     let id = fm.add_item("note", "test note").unwrap();
     fm.set_rank_by_id(id, false, 500).unwrap();

@@ -1,3 +1,4 @@
+use crate::db::Col;
 use crate::functions::{Field, ScanColumn, TagDefinition};
 use crate::types::DBType;
 use crate::util::alias_from;
@@ -5,7 +6,6 @@ use anyhow::Result;
 use duckdb::types::FromSql;
 use sea_query::IntoIden;
 use std::path::Path;
-use crate::db::Col;
 
 /// 名称（またはエイリアス）から sea-query の識別子（Iden）を生成します。
 pub fn name_to_iden(name: &str) -> sea_query::DynIden {
@@ -24,7 +24,10 @@ pub fn get_column_def<F: TagDefinition>() -> ScanColumn {
 }
 
 /// パスとメタデータから Field を生成します。
-pub fn generate_field<F: TagDefinition>(path: &Path, metadata: &crate::util::SafeMetadata) -> Result<Field<F>> {
+pub fn generate_field<F: TagDefinition>(
+    path: &Path,
+    metadata: &crate::util::SafeMetadata,
+) -> Result<Field<F>> {
     Ok(Field {
         value: F::generate(path, metadata)?,
     })
@@ -32,9 +35,12 @@ pub fn generate_field<F: TagDefinition>(path: &Path, metadata: &crate::util::Saf
 
 /// DuckDB の Row からフィールドを順次読み込み、インデックスを更新します。
 /// マクロ内での初期化をフラットにするためのヘルパーです。
-pub fn read_next_field<F: TagDefinition>(row: &duckdb::Row, idx: &mut usize) -> duckdb::Result<Field<F>> 
-where 
-    <F as TagDefinition>::RustType: FromSql 
+pub fn read_next_field<F: TagDefinition>(
+    row: &duckdb::Row,
+    idx: &mut usize,
+) -> duckdb::Result<Field<F>>
+where
+    <F as TagDefinition>::RustType: FromSql,
 {
     let val = row.get(*idx)?;
     *idx += 1;
