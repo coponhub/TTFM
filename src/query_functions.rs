@@ -10,16 +10,16 @@ impl QueryFunction for DirectoryQuery {
         SType::Directory.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::And(
-            Box::new(QueryNode::ColumnMatch {
+        QueryNode::And(vec![
+            QueryNode::ColumnMatch {
                 tag: SType::Name,
                 label: label.clone(),
-            }),
-            Box::new(QueryNode::TypedTag(TypedTag::new(
+            },
+            QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::IsDir).to_string(),
                 Label::String("true".to_string()),
-            ))),
-        )
+            )),
+        ])
     }
 }
 
@@ -30,16 +30,16 @@ impl QueryFunction for FilenameQuery {
         SType::Filename.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::And(
-            Box::new(QueryNode::ColumnMatch {
+        QueryNode::And(vec![
+            QueryNode::ColumnMatch {
                 tag: SType::Name,
                 label: label.clone(),
-            }),
-            Box::new(QueryNode::TypedTag(TypedTag::new(
+            },
+            QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::IsDir).to_string(),
                 Label::String("false".to_string()),
-            ))),
-        )
+            )),
+        ])
     }
 }
 

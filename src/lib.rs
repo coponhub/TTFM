@@ -27,7 +27,7 @@ pub mod oneview;
 pub mod indexing;
 pub mod util;
 
-pub use query::{QueryParser, QueryNode};
+pub use query::{parse, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
 pub use db::TargetTable;
 pub use types::{SearchResult, TagType, TypedTag, Label, FileRef};
@@ -304,7 +304,7 @@ impl FileManager {
                 .from(Tbl::OneView)
                 .to_owned()
         } else {
-            let node = crate::query::QueryParser::parse(query)?;
+            let node = crate::query::parse(query)?;
             let q_reg = crate::query::QueryFunctionRegistry::with_standard();
             node.expand(&q_reg).to_sql("oneview")
         };

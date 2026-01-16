@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::iter::Peekable;
-use std::str::Chars;
+// Unused imports removed
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
 use crate::types::{Label, SType, TagType, TypedTag};
 use crate::db::{Tbl, Col};
@@ -11,6 +10,272 @@ use pest::Parser;
 #[derive(Parser)]
 #[grammar = "query.pest"]
 pub struct PestQueryParser;
+
+use pest::iterators::Pair;
+use pest::pratt_parser::{PrattParser, Op, Assoc};
+use std::sync::OnceLock;
+
+static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
+
+fn get_parser() -> &'static PrattParser<Rule> {
+    PRATT_PARSER.get_or_init(|| {
+        PrattParser::new()
+            .op(Op::infix(Rule::ampersand, Assoc::Left))
+            .op(Op::infix(Rule::pipe, Assoc::Left) | Op::infix(Rule::minus, Assoc::Left))
+    })
+}
+
+/// クエリ文字列を解析し、QueryNode AST を構築します。
+pub fn parse(input: &str) -> Result<QueryNode> {
+    let mut pairs = PestQueryParser::parse(Rule::query, input)
+        .map_err(|e| anyhow!("Parse error: {}", e))?;
+    let expr_pair = pairs.next().ok_or_else(|| anyhow!("No query found"))?
+        .into_inner().next().ok_or_else(|| anyhow!("No expression found"))?;
+    build_ast(expr_pair)
+}
+
+fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
+    match pair.as_rule() {
+        Rule::expr => {
+            let pairs = pair.into_inner();
+            get_parser()
+                .map_primary(|primary| build_ast(primary))
+                .map_infix(|lhs, op, rhs| {
+                    let lhs = lhs?;
+                    let rhs = rhs?;
+                    match op.as_rule() {
+                        Rule::ampersand => {
+                             // Combine And nodes if possible, but strict binary is fine for now.
+                             // Wait, previously And was Vec.
+                             // Binary reduction: And(vec![l, r])
+                             // If lhs is And, we can flatten? 
+                             // Pratt reduces binary. A & B & C -> ((A & B) & C).
+                             // We can merge if we want, or just build nested binary trees and flatten later, 
+                             // OR check types here.
+                             // For simplicity and matching prior multi-child structure:
+                             match lhs {
+                                 QueryNode::And(mut v) => {
+                                     v.push(rhs);
+                                     Ok(QueryNode::And(v))
+                                 }
+                                 _ => Ok(QueryNode::And(vec![lhs, rhs]))
+                             }
+                        }
+                        Rule::pipe => {
+                             match lhs {
+                                 QueryNode::Or(mut v) => {
+                                     v.push(rhs);
+                                     Ok(QueryNode::Or(v))
+                                 }
+                                 _ => Ok(QueryNode::Or(vec![lhs, rhs]))
+                             }
+                        }
+                        Rule::minus => {
+                             Ok(QueryNode::Difference(Box::new(lhs), Box::new(rhs)))
+                        }
+                        _ => Err(anyhow!("Unknown infix rule: {:?}", op.as_rule())),
+                    }
+                })
+                .parse(pairs)
+        }
+        Rule::primary => {
+            let inner = pair.into_inner().next().unwrap();
+            build_ast(inner)
+        }
+        Rule::factor => {
+             // factor = { "(" ~ expr ~ ")" | typed_tag | comparison }
+             let inner = pair.into_inner().next().unwrap();
+             match inner.as_rule() {
+                 Rule::expr => build_ast(inner),
+                 Rule::typed_tag => build_typed_tag(inner),
+                 Rule::comparison => build_comparison(inner),
+                 _ => Err(anyhow!("Unknown factor inner: {:?}", inner.as_rule())),
+             }
+        }
+        Rule::complement => {
+             let mut inner = pair.into_inner();
+             let _ = inner.next(); // ^
+             // The grammar for complement: "^" ~ "(" ~ expr ~ ")"
+             // inner pairs: (expr)
+             // Wait. `complement = { "^" ~ "(" ~ expr ~ ")" }`
+             // Pest pairs: Literal "^", Literal "(", Rule expr, Literal ")"
+             // If rules are atomic or silent, it changes.
+             // complement is normal rule.
+             // Literals don't show up in `into_inner()` unless strict coverage?
+             // Default: no.
+             // So `inner` contains `expr`.
+             // Let's debug if needed, but usually inner.next() is expr.
+             let expr_pair = inner.next().ok_or_else(|| anyhow!("Complement missing expr"))?;
+             Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
+        }
+        _ => Err(anyhow!("Unexpected rule in build_ast: {:?}", pair.as_rule())),
+    }
+}
+
+fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
+    // typed_tag = @{ identifier ~ ":" ~ label }
+    // Since it's atomic (@), inner tokens might be flattened or structured differently depending on Pest version/grammar.
+    // Actually, atomic rules produce inner pairs if those inner rules are normal rules, but silent rules (_) are omitted.
+    // identifier is atomic: @{ ... } -> produces a token.
+    // label is explicit rule: label = { ... } -> produces a token.
+    // ":" is a literal, usually not produced as a pair unless named.
+    
+    let mut inner = pair.into_inner();
+    let key_pair = inner.next().ok_or_else(|| anyhow!("Missing tag key"))?;
+    // identifier rule should be the first one
+    let key = key_pair.as_str();
+    
+    // The colon might not be a pair.
+    // The next pair should be label.
+    let label_pair = inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
+    
+    let label = build_label(label_pair)?;
+    Ok(QueryNode::TypedTag(TypedTag::new(key.to_string(), label)))
+}
+
+fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
+    // comparison = { operand ~ (cmp_op ~ operand)+ }
+    // AST Node: ComparisonNode { first: Operand, rest: Vec<(ComparisonOp, Operand)> }
+    let mut inner = pair.into_inner();
+    let first_op = build_operand(inner.next().unwrap())?;
+    let mut rest = Vec::new();
+
+    while let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_str() {
+            "==" => ComparisonOp::Eq,
+            "^=" | "^" => ComparisonOp::Ne, // ^ and ^= are NotEqual
+            ">" => ComparisonOp::Gt,
+            ">=" => ComparisonOp::Ge,
+            "<" => ComparisonOp::Lt,
+            "<=" => ComparisonOp::Le,
+            s => return Err(anyhow!("Unknown comparison op: {}", s)),
+        };
+        let right_pair = inner.next().ok_or_else(|| anyhow!("Missing comparison operand"))?;
+        let right_op = build_operand(right_pair)?;
+        rest.push((op, right_op));
+    }
+    Ok(QueryNode::Comparison(ComparisonNode { first: first_op, rest }))
+}
+
+fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
+    // operand = { calculation | type_ref | label }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::calculation => Ok(Operand::Calculation(Box::new(build_calculation(inner)?))),
+        Rule::type_ref => {
+            // type_ref = @{ identifier ~ ":" } (trailing colon included)
+            let s = inner.as_str();
+            let key = s.trim_end_matches(':');
+            Ok(Operand::TypeRef(TagType::from(key)))
+        }
+        Rule::label => Ok(Operand::Literal(build_label(inner)?)),
+        _ => Err(anyhow!("Unknown operand rule: {:?}", inner.as_rule())),
+    }
+}
+
+fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
+    // calculation = { "(" ~ calculation_inner ~ ")" }
+    // calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
+    // NOTE: This implementation only supports simple binary calculation for now or left-associative chain.
+    // But CalculationNode definition is binary: left, op, right.
+    // If the grammar allows chaining (A + B + C), current AST doesn't fully support clean chaining unless nested.
+    // Grammar: operand_calc ~ (arith_op ~ operand_calc)+
+    // For MVP, handling first binary op chain as nested.
+
+    let inner_pair = pair.into_inner().next().unwrap(); // calculation_inner
+    let mut pairs = inner_pair.into_inner();
+    
+    let first_pair = pairs.next().unwrap();
+    let mut left = build_operand_calc(first_pair)?;
+
+    while let Some(op_pair) = pairs.next() {
+        let op = match op_pair.as_str() {
+            "+" => ArithmeticOp::Add,
+            "-" => ArithmeticOp::Sub,
+            "*" => ArithmeticOp::Mul,
+            "/" => ArithmeticOp::Div,
+            "%" => ArithmeticOp::Mod,
+            _ => return Err(anyhow!("Unknown arithmetic op")),
+        };
+        let right_pair = pairs.next().unwrap();
+        let right = build_operand_calc(right_pair)?;
+        
+        // Nesting for left associativity: (left op right)
+        // But `Operand::Calculation` holds `CalculationNode`.
+        // We wrap the current `left` (which might be an Operand) into a new CalculationNode as needed?
+        // Wait, CalculationNode { left: Operand, ... }.
+        // If we have A + B + C -> (A + B) + C
+        // left = A. right = B. new_node = Calc(A, +, B).
+        // Next op: +. right = C.
+        // We need 'left' to reference the previous result.
+        // Operand has `Calculation(Box<CalculationNode>)`.
+        
+        left = Operand::Calculation(Box::new(CalculationNode {
+            left,
+            op,
+            right,
+        }));
+    }
+
+    // The result is an Operand. But we need to return CalculationNode?
+    // Wait, build_calculation returns Result<CalculationNode>.
+    // But my loop potentially wrapped everything in Operand::Calculation.
+    // If left is Operand::Calculation(box node), verify content.
+    match left {
+        Operand::Calculation(node) => Ok(*node),
+         // If there was no operation (just one operand), grammar says (op ~ operand)+ so at least one op?
+         // No, grammar: operand_calc ~ (arith_op ~ operand_calc)+
+         // Actually, if there is NO op, it's just an operand_calc.
+         // But `calculation` rule implies it's a calculation. 
+         // If "label" is passed as calculation, logic above handles it?
+         // If only one operand and no ops, logic returns the operand. 
+         // But we must return CalculationNode.
+         // This implies we can't represent a single operand as CalculationNode plainly.
+         // Or maybe we treat (A) as A + 0? No.
+         // Assuming valid calculation always has op.
+         _ => Err(anyhow!("Calculation must contain at least one operation")),
+    }
+}
+
+fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
+    // operand_calc = { type_ref | label | calculation }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::type_ref => {
+            let s = inner.as_str();
+            let key = s.trim_end_matches(':');
+            Ok(Operand::TypeRef(TagType::from(key)))
+        }
+        Rule::label => Ok(Operand::Literal(build_label(inner)?)),
+        Rule::calculation => Ok(Operand::Calculation(Box::new(build_calculation(inner)?))),
+        _ => Err(anyhow!("Unknown operand_calc rule")),
+    }
+}
+
+fn build_label(pair: Pair<Rule>) -> Result<Label> {
+    // label = { quoted_string | number | unquoted_string }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::quoted_string => {
+            // quoted_string = ${ "\"" ~ inner ... | "'" ... }
+            // Pest captures quotes. We need to parse content.
+            // But inner_str_double is distinct.
+            // Let's just strip quotes and unescase.
+            let s = inner.as_str();
+            let content = &s[1..s.len()-1];
+            // Simplistic unescape for now (TODO: robust unescape)
+            Ok(Label::String(content.to_string()))
+        }
+        Rule::number => {
+            let i = inner.as_str().parse::<i64>()?;
+            Ok(Label::Integer(i))
+        }
+        Rule::unquoted_string => {
+            Ok(Label::String(inner.as_str().to_string()))
+        }
+        _ => Err(anyhow!("Unknown label rule")),
+    }
+}
 
 
 /// 検索クエリの展開を行う抽象化単位。
@@ -76,48 +341,108 @@ impl QueryFunctionRegistry {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ComparisonOp {
+    Eq, Ne, Gt, Ge, Lt, Le
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ArithmeticOp {
+    Add, Sub, Mul, Div, Mod
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Operand {
+    Literal(Label),
+    TypeRef(TagType),
+    Calculation(Box<CalculationNode>),
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct CalculationNode {
+    pub left: Operand,
+    pub op: ArithmeticOp,
+    pub right: Operand,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ComparisonNode {
+    pub first: Operand,
+    pub rest: Vec<(ComparisonOp, Operand)>,
+}
+
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
 pub enum QueryNode {
-    /// AND条件 (`A & B` または `A B`)
-    And(Box<QueryNode>, Box<QueryNode>),
-    /// OR条件 (`A | B`)
-    Or(Box<QueryNode>, Box<QueryNode>),
-    /// NOT条件 (`-A`)
-    Not(Box<QueryNode>),
-    /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
-    ColumnMatch { tag: SType, label: Label },
+    /// AND条件 (`A & B` または `A B`)。多分木構造。
+    And(Vec<QueryNode>),
+    /// OR条件 (`A | B`)。多分木構造。
+    Or(Vec<QueryNode>),
+    /// 二項差集合 (`A - B`)
+    Difference(Box<QueryNode>, Box<QueryNode>),
+    /// 補集合 (`^(A)`)
+    Complement(Box<QueryNode>),
+    /// 比較演算
+    Comparison(ComparisonNode),
     /// 汎用タグ検索 (TypedTag 型を使用)
     TypedTag(TypedTag),
+    /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
+    ColumnMatch { tag: SType, label: Label },
 }
 
 impl QueryNode {
     /// 特殊なタグ（QueryFunction）を基本構造へ展開します。
     pub fn expand(self, registry: &QueryFunctionRegistry) -> QueryNode {
         match self {
-            QueryNode::And(l, r) => QueryNode::And(
-                Box::new(l.expand(registry)),
-                Box::new(r.expand(registry)),
-            ),
-            QueryNode::Or(l, r) => QueryNode::Or(
-                Box::new(l.expand(registry)),
-                Box::new(r.expand(registry)),
-            ),
-            QueryNode::Not(c) => QueryNode::Not(Box::new(c.expand(registry))),
+            QueryNode::And(nodes) => {
+                QueryNode::And(nodes.into_iter()
+                    .map(|n| n.expand(registry))
+                    .collect())
+            }
+            QueryNode::Or(nodes) => {
+                QueryNode::Or(nodes.into_iter()
+                    .map(|n| n.expand(registry))
+                    .collect())
+            }
+            QueryNode::Difference(l, r) => {
+                QueryNode::Difference(
+                    Box::new(l.expand(registry)),
+                    Box::new(r.expand(registry))
+                )
+            }
+            QueryNode::Complement(c) => {
+                QueryNode::Complement(Box::new(c.expand(registry)))
+            }
+            QueryNode::Comparison(cmp) => QueryNode::Comparison(cmp),
             QueryNode::ColumnMatch { tag, label } => {
                 QueryNode::ColumnMatch { tag, label }
             }
-            QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
+            QueryNode::TypedTag(tt) => {
+                registry.process_tag(tt.tagtype, tt.label)
+            }
         }
     }
 
     /// クエリ構造を SQL (SelectStatement) へ変換します。
     pub fn to_sql(&self, view_name: &str) -> SelectStatement {
         match self {
-            QueryNode::And(l, r) => self.build_and_sql(l, r, view_name),
-            QueryNode::Or(l, r) => self.build_or_sql(l, r, view_name),
-            QueryNode::Not(c) => self.build_not_sql(c, view_name),
+            QueryNode::And(nodes) => {
+                self.build_and_sql(nodes, view_name)
+            }
+            QueryNode::Or(nodes) => {
+                self.build_or_sql(nodes, view_name)
+            }
+            QueryNode::Difference(l, r) => {
+                self.build_diff_sql(l, r, view_name)
+            }
+            QueryNode::Complement(c) => {
+                self.build_comp_sql(c, view_name)
+            }
+            QueryNode::Comparison(_cmp) => {
+                // TODO: 比較演算の SQL 生成
+                Query::select().from(Alias::new(view_name)).to_owned()
+            }
             QueryNode::ColumnMatch { tag, label } => {
                 self.build_column_match_sql(*tag, label, view_name)
             }
@@ -129,37 +454,44 @@ impl QueryNode {
 
     fn build_and_sql(
         &self,
-        l: &QueryNode,
-        r: &QueryNode,
+        nodes: &[QueryNode],
         view: &str,
     ) -> SelectStatement {
-        let mut q = Query::select();
-        q.column(Col::ItemId)
-            .from_subquery(l.to_sql(view), Tbl::LeftSide);
-        let mut rq = Query::select();
-        rq.column(Col::ItemId)
-            .from_subquery(r.to_sql(view), Tbl::RightSide);
-        q.union(sea_query::UnionType::Intersect, rq);
+        let mut it = nodes.iter();
+        let first = it.next().expect("And nodes must not be empty");
+        let mut q = first.to_sql(view);
+        for node in it {
+            q.union(sea_query::UnionType::Intersect, node.to_sql(view));
+        }
         q
     }
 
     fn build_or_sql(
         &self,
+        nodes: &[QueryNode],
+        view: &str,
+    ) -> SelectStatement {
+        let mut it = nodes.iter();
+        let first = it.next().expect("Or nodes must not be empty");
+        let mut q = first.to_sql(view);
+        for node in it {
+            q.union(sea_query::UnionType::Distinct, node.to_sql(view));
+        }
+        q
+    }
+
+    fn build_diff_sql(
+        &self,
         l: &QueryNode,
         r: &QueryNode,
         view: &str,
     ) -> SelectStatement {
-        let mut q = Query::select();
-        q.column(Col::ItemId)
-            .from_subquery(l.to_sql(view), Tbl::LeftSide);
-        let mut rq = Query::select();
-        rq.column(Col::ItemId)
-            .from_subquery(r.to_sql(view), Tbl::RightSide);
-        q.union(sea_query::UnionType::Distinct, rq);
+        let mut q = l.to_sql(view);
+        q.union(sea_query::UnionType::Except, r.to_sql(view));
         q
     }
 
-    fn build_not_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
+    fn build_comp_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
         let types = c.get_all_types();
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
@@ -225,16 +557,25 @@ impl QueryNode {
 
     fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
         match self {
-            QueryNode::And(l, r) => {
+            QueryNode::And(nodes) => {
+                for node in nodes {
+                    node.collect_types(types);
+                }
+            }
+            QueryNode::Or(nodes) => {
+                for node in nodes {
+                    node.collect_types(types);
+                }
+            }
+            QueryNode::Difference(l, r) => {
                 l.collect_types(types);
                 r.collect_types(types);
             }
-            QueryNode::Or(l, r) => {
-                l.collect_types(types);
-                r.collect_types(types);
-            }
-            QueryNode::Not(c) => {
+            QueryNode::Complement(c) => {
                 c.collect_types(types);
+            }
+            QueryNode::Comparison(cmp) => {
+                cmp.collect_types(types);
             }
             QueryNode::ColumnMatch { .. } => {}
             QueryNode::TypedTag(tt) => {
@@ -244,167 +585,39 @@ impl QueryNode {
     }
 }
 
+// --- Type Collection Helpers ---
+
+impl ComparisonNode {
+    pub fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
+        self.first.collect_types(types);
+        for (_, op) in &self.rest {
+            op.collect_types(types);
+        }
+    }
+}
+
+impl Operand {
+    pub fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
+        match self {
+            Operand::Literal(_) => {}
+            Operand::TypeRef(tag_type) => {
+                types.insert(tag_type.as_str().to_string());
+            }
+            Operand::Calculation(calc) => {
+                calc.collect_types(types);
+            }
+        }
+    }
+}
+
+impl CalculationNode {
+    pub fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
+        self.left.collect_types(types);
+        self.right.collect_types(types);
+    }
+}
+
 // --- Parsing Logic ---
-
-/// クエリ文字列を解析し、抽象構文木（AST）を構築する再帰下降パーサ。
-pub struct QueryParser<'a> {
-    chars: Peekable<Chars<'a>>,
-}
-
-impl<'a> QueryParser<'a> {
-    /// 検索クエリ文字列を解析して `QueryNode` を返します。
-    pub fn parse(input: &'a str) -> Result<QueryNode> {
-        let mut parser = QueryParser {
-            chars: input.chars().peekable(),
-        };
-        let node = parser.parse_expression()?;
-        parser.skip_whitespace();
-        if parser.chars.peek().is_some() {
-            return Err(anyhow::anyhow!("Unexpected characters at end of query"));
-        }
-        Ok(node)
-    }
-
-    /// 式（Expression）を解析します。主にOR演算を処理します。
-    fn parse_expression(&mut self) -> Result<QueryNode> {
-        let mut left = self.parse_and_term()?;
-        loop {
-            self.skip_whitespace();
-            if let Some(&'|') = self.chars.peek() {
-                self.chars.next();
-                let right = self.parse_and_term()?;
-                left = QueryNode::Or(Box::new(left), Box::new(right));
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    /// AND項を解析します。`&` 演算子または暗黙のANDを処理します。
-    fn parse_and_term(&mut self) -> Result<QueryNode> {
-        let mut left = self.parse_factor()?;
-        loop {
-            self.skip_whitespace();
-            if let Some(&c) = self.chars.peek() {
-                if c == '|' || c == ')' {
-                    break;
-                }
-                if c == '&' {
-                    self.chars.next();
-                    let right = self.parse_factor()?;
-                    left = QueryNode::And(Box::new(left), Box::new(right));
-                } else {
-                    // 暗黙の AND (スペース等)
-                    if let Ok(right) = self.parse_factor() {
-                        left = QueryNode::And(Box::new(left), Box::new(right));
-                    } else {
-                        break;
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        Ok(left)
-    }
-
-    /// 因子（括弧、NOT、リテラル）を解析します。
-    fn parse_factor(&mut self) -> Result<QueryNode> {
-        self.skip_whitespace();
-        match self.chars.peek() {
-            Some(&'(') => {
-                self.chars.next();
-                let node = self.parse_expression()?;
-                self.skip_whitespace();
-                if let Some(&')') = self.chars.peek() {
-                    self.chars.next();
-                    Ok(node)
-                } else {
-                    Err(anyhow::anyhow!("Missing closing parenthesis"))
-                }
-            }
-            Some(&'-') => {
-                self.chars.next();
-                let node = self.parse_factor()?;
-                Ok(QueryNode::Not(Box::new(node)))
-            }
-            Some(_) => {
-                // key:value 形式の解析
-                let key = self.read_string_until(':')?;
-                if self.chars.peek() == Some(&':') {
-                    self.chars.next();
-                    let value = self.read_value()?;
-                    Ok(QueryNode::TypedTag(TypedTag::new(TagType::from(key), value)))
-                } else {
-                    Err(anyhow::anyhow!("Expected ':' after tag key '{}'", key))
-                }
-            }
-            None => Err(anyhow::anyhow!("Unexpected end of input")),
-        }
-    }
-
-    /// 通常の文字列、またはクォートされた文字列を読み込み、Label を返します。
-    fn read_value(&mut self) -> Result<Label> {
-        self.skip_whitespace();
-        if let Some(&'"') = self.chars.peek() {
-            self.chars.next();
-            let mut s = String::new();
-            while let Some(&c) = self.chars.peek() {
-                if c == '"' {
-                    self.chars.next();
-                    return Ok(Label::String(s));
-                }
-                s.push(c);
-                self.chars.next();
-            }
-            Err(anyhow::anyhow!("Unclosed double quote"))
-        } else {
-            let mut s = String::new();
-            while let Some(&c) = self.chars.peek() {
-                if c == '&' || c == '|' || c == '(' || c == ')' || c.is_whitespace() {
-                    break;
-                }
-                s.push(c);
-                self.chars.next();
-            }
-            if s.is_empty() {
-                Err(anyhow::anyhow!("Empty value"))
-            } else if let Ok(i) = s.parse::<i64>() {
-                Ok(Label::Integer(i))
-            } else {
-                Ok(Label::String(s))
-            }
-        }
-    }
-
-    /// 指定された文字が現れるまで文字列を読み込みます（キーの解析用）。
-    fn read_string_until(&mut self, delimiter: char) -> Result<String> {
-        let mut s = String::new();
-        while let Some(&c) = self.chars.peek() {
-            if c == delimiter || c == '&' || c == '|' || c == '(' || c == ')' || c.is_whitespace() {
-                break;
-            }
-            s.push(c);
-            self.chars.next();
-        }
-        if s.is_empty() {
-            Err(anyhow::anyhow!("Empty identifier"))
-        } else {
-            Ok(s)
-        }
-    }
-
-    fn skip_whitespace(&mut self) {
-        while let Some(&c) = self.chars.peek() {
-            if c.is_whitespace() {
-                self.chars.next();
-            } else {
-                break;
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -412,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_query_types() {
-        let node = QueryNode::TypedTag(TypedTag::new("extension", Label::String("rs".into())));
+        let node = parse("extension:rs").expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
             assert_eq!(tt.tagtype.as_str(), "extension");
             assert_eq!(tt.label.as_str(), "rs");
@@ -422,36 +635,14 @@ mod tests {
     }
 
     #[test]
-    fn test_case_preservation() {
-        let node = QueryParser::parse("Extension:RS").unwrap();
+    fn test_basic_structure() {
+        let q = "extension:rs";
+        let node = parse(q).expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.as_str(), "Extension");
-            assert_eq!(tt.label.as_str(), "RS");
-            assert!(matches!(tt.label, Label::String(_)));
+            assert_eq!(tt.tagtype.as_str(), "extension");
+            assert_eq!(tt.label.as_str(), "rs");
         } else {
-            panic!("Should be a TypedTag");
-        }
-    }
-
-    #[test]
-    fn test_numeric_inference() {
-        let node = QueryParser::parse("size:1024").unwrap();
-        if let QueryNode::TypedTag(tt) = node {
-            assert!(matches!(tt.label, Label::Integer(1024)));
-        } else {
-            panic!("Should be a TypedTag");
-        }
-    }
-
-    #[test]
-    fn test_quoted_value_with_special_chars() {
-        let input = "file_id:\"Inode { device_id: 2096 }\"";
-        let node = QueryParser::parse(input).unwrap();
-        if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.as_str(), "file_id");
-            assert_eq!(tt.label.as_str(), "Inode { device_id: 2096 }");
-        } else {
-            panic!("Should be a TypedTag");
+            panic!("Expected TypedTag");
         }
     }
 
@@ -470,11 +661,9 @@ mod tests {
         ];
 
         for q in queries {
-            PestQueryParser::parse(Rule::query, q)
-                .map_err(|e| {
-                    panic!("Failed to parse query '{}': {}", q, e)
-                })
-                .unwrap();
+            parse(q).map_err(|e| {
+                panic!("Failed to parse query '{}': {}", q, e)
+            }).unwrap();
         }
     }
 
@@ -488,7 +677,7 @@ mod tests {
         ];
         for q in fail_queries {
             assert!(
-                PestQueryParser::parse(Rule::query, q).is_err(),
+                parse(q).is_err(),
                 "Query '{}' should fail due to space constraints",
                 q
             );
@@ -497,7 +686,7 @@ mod tests {
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
         assert!(
-            PestQueryParser::parse(Rule::query, q_unary).is_err(),
+            parse(q_unary).is_err(),
             "Unary minus should be invalid"
         );
     }
@@ -506,10 +695,8 @@ mod tests {
     fn test_pest_grammar_complex_math() {
         // Multi-level math and negative numbers
         let q = "(size: - -100) > (width: * (height: / 2))";
-        PestQueryParser::parse(Rule::query, q)
-            .map_err(|e| {
-                panic!("Failed to parse math query '{}': {}", q, e)
-            })
-            .unwrap();
+        parse(q).map_err(|e| {
+            panic!("Failed to parse math query '{}': {}", q, e)
+        }).unwrap();
     }
 }

@@ -4,13 +4,16 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 // --- Main entry point ---
 query = { SOI ~ expr ~ EOI }
 
-// --- Set operations (Lowest priority) ---
-// DESIGN.md: - is binary Difference (A - B).
-expr = { term ~ (set_op ~ term)* }
-set_op = { "&" | "|" | "-" }
+// --- Set operations (Pratt Parser) ---
+expr = { primary ~ (infix ~ primary)* }
 
-// --- Terms and Complement ---
-term = { complement | factor }
+infix = _{ ampersand | pipe | minus }
+    ampersand = { "&" }
+    pipe      = { "|" }
+    minus     = { "-" }
+
+// --- Primary elements ---
+primary = { complement | factor }
 
 // Complement (e.g., ^(extension:pdf))
 // DESIGN.md: MUST be followed by parens and no space between ^ and (.
@@ -32,7 +35,7 @@ cmp_op = { "==" | "^=" | "^" | ">=" | ">" | "<=" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)
-typed_tag = @{ identifier ~ ":" ~ label }
+typed_tag = ${ identifier ~ ":" ~ label }
 
 // --- Operands ---
 operand = { 
