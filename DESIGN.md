@@ -184,13 +184,16 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
             - `&`: 積集合 (Intersection)
             - `|`: 和集合 (Union)
             - `-`: 差集合 (Difference) ※二項演算子
-            - `^()`: 補集合 (Complement) ※単項演算子。**対象を必ず括弧 `()` で囲む必要があり、かつ `^(` と密着させる（スペース不可）。**
+            - `^()`: 補集合 (Complement) ※単項演算子。
+                - **対象を必ず括弧 `()` で囲む必要があり、かつ `^(` と密着させる（スペース不可）。**
             - 例: `type:file & project:ttfm`
             - 例: `^(type:file)`
         - **演算対象 (Operand)**:
-	    - グループ
-	    - TypedTag
-	    - ラベル比較
+	        - グループ
+	        - TypedTag
+	        - ラベル比較
+        - **演算子の優先順位**: 
+            - `^()` > `&` > `|` = `-`
     - **ラベル比較 (Label Comparison)**:
         - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。
         - **演算対象 (Operand)**:
