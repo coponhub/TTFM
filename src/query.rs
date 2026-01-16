@@ -1,10 +1,17 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::Chars;
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
 use crate::types::{Label, SType, TagType, TypedTag};
 use crate::db::{Tbl, Col};
+use pest_derive::Parser;
+use pest::Parser;
+
+#[derive(Parser)]
+#[grammar = "query.pest"]
+pub struct PestQueryParser;
+
 
 /// 検索クエリの展開を行う抽象化単位。
 pub trait QueryFunction: Send + Sync {
@@ -446,5 +453,63 @@ mod tests {
         } else {
             panic!("Should be a TypedTag");
         }
+    }
+
+    #[test]
+    fn test_pest_grammar_basics() {
+        // Basic parsing test using the new grammar
+        let queries = [
+            "type:file",
+            "extension:rs & ^(path:*/target/*)",
+            "^(extension:pdf)",
+            "size: > 1024",
+            "50 < width: < 100",
+            "(size: + 1024) > 2048",
+            "name:\"My File\" | name:'Other File'",
+            "extension:pdf - filename:test.pdf",
+        ];
+
+        for q in queries {
+            PestQueryParser::parse(Rule::query, q)
+                .map_err(|e| {
+                    panic!("Failed to parse query '{}': {}", q, e)
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pest_grammar_strict_conformance() {
+        // Test spaces (should fail according to DESIGN.md)
+        let fail_queries = [
+            "^ (extension:pdf)", // Space after ^
+            "extension : rs",     // Space around :
+            "size :> 100",      // Space before :>
+        ];
+        for q in fail_queries {
+            assert!(
+                PestQueryParser::parse(Rule::query, q).is_err(),
+                "Query '{}' should fail due to space constraints",
+                q
+            );
+        }
+
+        // Test unary minus (should fail according to DESIGN.md)
+        let q_unary = "-type:file";
+        assert!(
+            PestQueryParser::parse(Rule::query, q_unary).is_err(),
+            "Unary minus should be invalid"
+        );
+    }
+
+    #[test]
+    fn test_pest_grammar_complex_math() {
+        // Multi-level math and negative numbers
+        let q = "(size: - -100) > (width: * (height: / 2))";
+        PestQueryParser::parse(Rule::query, q)
+            .map_err(|e| {
+                panic!("Failed to parse math query '{}': {}", q, e)
+            })
+            .unwrap();
     }
 }

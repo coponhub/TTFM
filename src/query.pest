@@ -1,0 +1,87 @@
+// --- Whitespace handling ---
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+// --- Main entry point ---
+query = { SOI ~ expr ~ EOI }
+
+// --- Set operations (Lowest priority) ---
+// DESIGN.md: - is binary Difference (A - B).
+expr = { term ~ (set_op ~ term)* }
+set_op = { "&" | "|" | "-" }
+
+// --- Terms and Complement ---
+term = { complement | factor }
+
+// Complement (e.g., ^(extension:pdf))
+// DESIGN.md: MUST be followed by parens and no space between ^ and (.
+comp_prefix = @{ "^" ~ "(" }
+complement = { comp_prefix ~ expr ~ ")" }
+
+// --- Factors ---
+// PEG priority: Try specific rules first.
+factor = { 
+    "(" ~ expr ~ ")" 
+  | typed_tag
+  | comparison
+}
+
+// --- Label Comparison ---
+// Format: operand cmp_op operand [cmp_op operand ...]
+comparison = { operand ~ (cmp_op ~ operand)+ }
+cmp_op = { "==" | "^=" | "^" | ">=" | ">" | "<=" | "<" }
+
+// --- Typed Tag ---
+// DESIGN.md: type:label (no space allowed between them)
+typed_tag = @{ identifier ~ ":" ~ label }
+
+// --- Operands ---
+operand = { 
+    calculation 
+  | type_ref 
+  | label 
+}
+
+// --- Label Calculation ---
+// DESIGN.md: Arithmetic can ONLY be used inside parentheses of a comparison operand.
+calculation = { "(" ~ calculation_inner ~ ")" }
+calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
+arith_op = { "+" | "-" | "*" | "/" | "%" }
+
+// Calc operands (to avoid ambiguity)
+operand_calc = { type_ref | label | calculation }
+
+// Type Reference (trailing colon)
+type_ref = @{ identifier ~ ":" }
+
+// --- Labels and Literals ---
+label = { quoted_string | number | unquoted_string }
+
+// Identifiers
+identifier = @{ (ASCII_ALPHANUMERIC | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+
+// Numbers
+number = @{ "-"? ~ ASCII_DIGIT+ }
+
+// Quoted strings
+quoted_string = ${ 
+    ("\"" ~ inner_str_double ~ "\"") 
+  | ("'" ~ inner_str_single ~ "'") 
+}
+inner_str_double = @{ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* }
+inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
+
+// Unquoted strings: MUST NOT contain whitespace or control operators.
+// But MUST allow Glob patterns (*, ?) and path separators (/, \).
+unquoted_string = @{ 
+    !number ~ 
+    (!reserved_chars ~ ANY)+ 
+}
+
+// Reserved characters are only those that trigger higher-level rules or separators.
+// Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
+reserved_chars = _{ 
+    WHITESPACE 
+  | "&" | "|" | "-" | "(" | ")" | ":" | "\"" | "'"
+  | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
+  | "," | ";" | "{" | "}" | "[" | "]"
+}
