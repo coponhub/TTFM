@@ -73,11 +73,17 @@ impl OneView {
 
                 let mut q = Query::select();
                 q.column(Col::ItemId)
-                    .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+                    .expr_as(
+                        Expr::val("system"),
+                        crate::util::alias_from("origin"),
+                    )
                     .expr_as(Expr::val(&cd.name), Col::Type);
 
                 if cd.sql_type == SqlType::UUID {
-                    q.expr_as(Expr::col(iden).cast_as(SqlType::VARCHAR), label_col);
+                    q.expr_as(
+                        Expr::col(iden).cast_as(SqlType::VARCHAR),
+                        label_col,
+                    );
                 } else {
                     q.expr_as(Expr::col(iden), label_col);
                 }
@@ -91,28 +97,52 @@ impl OneView {
 
             if target == TargetTable::FileReferences {
                 let mut q_kind = Query::select();
-                q_kind.column(Col::ItemId)
-                    .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+                q_kind
+                    .column(Col::ItemId)
+                    .expr_as(
+                        Expr::val("system"),
+                        crate::util::alias_from("origin"),
+                    )
                     .expr_as(Expr::val("item_kind"), Col::Type)
                     .expr_as(Expr::val("file"), Col::LabelStr)
-                    .from_subquery(crate::util::parquet_query(&parquet_path), Tbl::FileReferences);
+                    .from_subquery(
+                        crate::util::parquet_query(&parquet_path),
+                        Tbl::FileReferences,
+                    );
                 query_parts.push(q_kind.to_string(PostgresQueryBuilder));
 
                 let mut q_rank = Query::select();
-                q_rank.column(Col::ItemId)
-                    .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+                q_rank
+                    .column(Col::ItemId)
+                    .expr_as(
+                        Expr::val("system"),
+                        crate::util::alias_from("origin"),
+                    )
                     .expr_as(Expr::val("rank"), Col::Type)
                     .expr_as(Expr::col(Col::Rank), Col::LabelInt)
-                    .from_subquery(crate::util::parquet_query(&parquet_path), Tbl::FileReferences);
+                    .from_subquery(
+                        crate::util::parquet_query(&parquet_path),
+                        Tbl::FileReferences,
+                    );
                 query_parts.push(q_rank.to_string(PostgresQueryBuilder));
             }
             if target == TargetTable::Locations {
                 let mut q_name = Query::select();
-                q_name.column(Col::ItemId)
-                    .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+                q_name
+                    .column(Col::ItemId)
+                    .expr_as(
+                        Expr::val("system"),
+                        crate::util::alias_from("origin"),
+                    )
                     .expr_as(Expr::val("name"), Col::Type)
-                    .expr_as(Expr::col(crate::util::alias_from("filename")), Col::LabelStr)
-                    .from_subquery(crate::util::parquet_query(&parquet_path), Tbl::Locations);
+                    .expr_as(
+                        Expr::col(crate::util::alias_from("filename")),
+                        Col::LabelStr,
+                    )
+                    .from_subquery(
+                        crate::util::parquet_query(&parquet_path),
+                        Tbl::Locations,
+                    );
                 query_parts.push(q_name.to_string(PostgresQueryBuilder));
             }
         }
@@ -123,18 +153,28 @@ impl OneView {
             if col == Col::ItemId {
                 continue;
             }
-            let label_col = if col == Col::Rank { Col::LabelInt } else { Col::LabelStr };
+            let label_col = if col == Col::Rank {
+                Col::LabelInt
+            } else {
+                Col::LabelStr
+            };
             let mut q = Query::select();
             q.column(Col::ItemId)
                 .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
                 .expr_as(Expr::val::<&str>(col.into()), Col::Type)
                 .expr_as(Expr::col(col), label_col)
-                .from_subquery(crate::util::parquet_query(&items_path), Tbl::ItemReferences);
+                .from_subquery(
+                    crate::util::parquet_query(&items_path),
+                    Tbl::ItemReferences,
+                );
             query_parts.push(q.to_string(PostgresQueryBuilder));
         }
 
         let sql = query_parts.join("\nUNION ALL BY NAME\n");
-        conn.execute(&format!("CREATE OR REPLACE VIEW oneview AS {}", sql), [])?;
+        conn.execute(
+            &format!("CREATE OR REPLACE VIEW oneview AS {}", sql),
+            [],
+        )?;
 
         Ok(())
     }

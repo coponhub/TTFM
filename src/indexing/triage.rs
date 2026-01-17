@@ -164,7 +164,11 @@ impl<'a> ItemTriager<'a> {
         };
 
         // 何らかの値があれば TagPiece を生成 (Null以外なら何かあるはず)
-        if l_str.is_none() && l_int.is_none() && l_dbl.is_none() && l_bool.is_none() {
+        if l_str.is_none()
+            && l_int.is_none()
+            && l_dbl.is_none()
+            && l_bool.is_none()
+        {
             return TriagePiece::None;
         }
 

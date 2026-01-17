@@ -104,8 +104,10 @@ impl DiffAuditor {
     /// 削除判定：生存リスト(live)にも、変更(scan)にも載っていない既存 ID
     pub(crate) fn query_deleted(&self) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId)
-            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences);
+        q.column(Col::ItemId).from_subquery(
+            util::parquet_query(&self.ents),
+            Tbl::FileReferences,
+        );
 
         let mut live_q = Query::select();
         live_q

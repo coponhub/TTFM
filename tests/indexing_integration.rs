@@ -185,7 +185,9 @@ fn test_no_empty_extension_system_item() {
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    let results = fm.search("item_kind:typedtag & name:\"extension:\"").unwrap();
+    let results = fm
+        .search("item_kind:typedtag & name:\"extension:\"")
+        .unwrap();
     assert!(
         results.is_empty(),
         "Should NOT register 'extension:' system item"

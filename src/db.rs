@@ -109,7 +109,10 @@ impl Iden for SqlType {
 }
 
 impl SqlType {
-    pub fn prepare_column<'a>(&self, def: &'a mut SeaColumnDef) -> &'a mut SeaColumnDef {
+    pub fn prepare_column<'a>(
+        &self,
+        def: &'a mut SeaColumnDef,
+    ) -> &'a mut SeaColumnDef {
         match self {
             SqlType::VARCHAR => def.string(),
             SqlType::BIGINT => def.big_integer(),
@@ -172,7 +175,9 @@ impl Col {
     pub fn sql_type(&self) -> SqlType {
         match self {
             Self::LabelStr => SqlType::VARCHAR,
-            Self::LabelInt | Self::ItemId | Self::Rank | Self::ScanHash => SqlType::BIGINT,
+            Self::LabelInt | Self::ItemId | Self::Rank | Self::ScanHash => {
+                SqlType::BIGINT
+            }
             Self::LabelDouble => SqlType::DOUBLE,
             Self::LabelBool => SqlType::BOOLEAN,
             _ => SqlType::VARCHAR,
@@ -217,7 +222,9 @@ impl CustomFunc {
     pub fn list<E: Into<sea_query::SimpleExpr>>(
         expr: E,
     ) -> sea_query::SimpleExpr {
-        sea_query::Func::cust(DuckDbFunc::List).arg(expr.into()).into()
+        sea_query::Func::cust(DuckDbFunc::List)
+            .arg(expr.into())
+            .into()
     }
 
     /// MAX(expr) FILTER (WHERE cond) を生成します。

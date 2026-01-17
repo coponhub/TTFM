@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use duckdb::Connection;
 use rustc_hash::FxHashMap;
-use sea_query::{Alias, Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
+use sea_query::{
+    Alias, Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table,
+};
 use std::path::{Path, PathBuf};
 
 use super::diff;
@@ -180,8 +182,6 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-
-
     /// `data_types` テーブルに初期データを投入します。
     fn ensure_data_types(&self) -> Result<()> {
         let path = self.store.path_for_target(TargetTable::DataTypes);
@@ -272,7 +272,8 @@ impl<'a> Indexer<'a> {
         &self,
         data_candidates: Option<sea_query::SelectStatement>,
     ) -> Result<()> {
-        let items_path = self.store.path_for_target(TargetTable::ItemReferences);
+        let items_path =
+            self.store.path_for_target(TargetTable::ItemReferences);
         let system_tags_path =
             self.store.path_for_target(TargetTable::SystemTags);
         let items_str = items_path.to_string_lossy();
@@ -301,11 +302,11 @@ impl<'a> Indexer<'a> {
         // query_union.union(sea_query::UnionType::All, ...);
 
         let mut lhs = Query::select();
-        lhs.columns(Col::item_references_columns())
-            .from_function(
-                Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(items_str.to_string())),
-                Alias::new("diff"),
-            );
+        lhs.columns(Col::item_references_columns()).from_function(
+            Func::cust(DuckDbFunc::ReadParquet)
+                .arg(Expr::val(items_str.to_string())),
+            Alias::new("diff"),
+        );
 
         let mut query_union = lhs;
         query_union.union(

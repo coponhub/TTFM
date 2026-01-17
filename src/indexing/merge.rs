@@ -306,12 +306,11 @@ impl ItemRow {
         type_expr: SimpleExpr,
         label_expr: SimpleExpr,
     ) -> Self {
-        let content = Func::cust(crate::db::DuckDbFunc::Concat)
-            .args([
-                Expr::col(Col::Type).into(),
-                Expr::val(":").into(),
-                label_expr.clone(),
-            ]);
+        let content = Func::cust(crate::db::DuckDbFunc::Concat).args([
+            Expr::col(Col::Type).into(),
+            Expr::val(":").into(),
+            label_expr.clone(),
+        ]);
         Self {
             kind: Expr::val("typedtag").into(),
             content: content.clone().into(),
@@ -340,7 +339,9 @@ impl MergeQueryParts {
                 Func::cust(crate::db::DuckDbFunc::Coalesce).args([
                     Expr::col(Col::LabelStr).into(),
                     Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
-                    Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
+                    Expr::col(Col::LabelDouble)
+                        .cast_as(SqlType::VARCHAR)
+                        .into(),
                     Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
                 ]),
                 Col::Label,
@@ -402,12 +403,20 @@ impl MergeQueryParts {
         }
 
         let first = &funcs[0];
-        let mut query = ItemRow::new_type(Expr::val(first.name()).into(), first.default_rank()).select();
+        let mut query = ItemRow::new_type(
+            Expr::val(first.name()).into(),
+            first.default_rank(),
+        )
+        .select();
 
         for func in funcs.iter().skip(1) {
             query.union(
                 sea_query::UnionType::Distinct,
-                ItemRow::new_type(Expr::val(func.name()).into(), func.default_rank()).select(),
+                ItemRow::new_type(
+                    Expr::val(func.name()).into(),
+                    func.default_rank(),
+                )
+                .select(),
             );
         }
         query
@@ -427,8 +436,10 @@ impl MergeQueryParts {
                 Tbl::ItemReferences,
                 Condition::all()
                     .add(
-                        Expr::col((Tbl::Item, Col::ItemKind))
-                            .eq(Expr::col((Tbl::ItemReferences, Col::ItemKind))),
+                        Expr::col((Tbl::Item, Col::ItemKind)).eq(Expr::col((
+                            Tbl::ItemReferences,
+                            Col::ItemKind,
+                        ))),
                     )
                     .add(
                         Expr::col((Tbl::Item, Col::Content))
@@ -510,5 +521,4 @@ mod tests {
         assert!(sql.contains("'label'"));
         assert!(sql.contains("'typedtag'"));
     }
-
 }

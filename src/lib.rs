@@ -8,9 +8,7 @@ use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use file_id::get_file_id;
-use sea_query::{
-    Expr, JoinType, PostgresQueryBuilder, Query,
-};
+use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query};
 use std::path::Path;
 
 pub mod config;
@@ -346,7 +344,8 @@ impl FileManager {
             } else {
                 col
             };
-            tag_agg.expr_as(crate::db::CustomFunc::list(Expr::col(source)), col);
+            tag_agg
+                .expr_as(crate::db::CustomFunc::list(Expr::col(source)), col);
         }
 
         tag_agg
@@ -390,7 +389,10 @@ impl FileManager {
                 Expr::col((Tbl::Identities, Col::ItemId))
                     .eq(Expr::col((Tbl::AggTags, Col::ItemId))),
             )
-            .order_by_expr(Expr::col((Tbl::AggTags, Col::Rank)).into(), sea_query::Order::Desc)
+            .order_by_expr(
+                Expr::col((Tbl::AggTags, Col::Rank)).into(),
+                sea_query::Order::Desc,
+            )
             .limit(100);
 
         let sql = query.to_string(PostgresQueryBuilder);
@@ -409,7 +411,8 @@ impl FileManager {
         let rows = stmt.query_map([], |row| {
             let id: i64 = row.get(c_id)?;
             // Aggregation result might be Null if no tag found, handle gracefully
-            let item_kind: String = row.get(c_kind).unwrap_or_else(|_| "unknown".to_string());
+            let item_kind: String =
+                row.get(c_kind).unwrap_or_else(|_| "unknown".to_string());
             let name: String = row.get(c_name).unwrap_or_default();
             let rank: i64 = row.get(c_rank).unwrap_or(0);
 
@@ -423,42 +426,34 @@ impl FileManager {
                 }
             }
 
-            let mut tag_lists = Vec::with_capacity(tag_value_cols.len());
-            for col_name in &tag_value_cols {
-                tag_lists.push(to_vec(row.get(col_name as &str)?));
-            }
+            let tag_lists: Vec<Vec<Value>> = tag_value_cols
+                .iter()
+                .map(|col_name| {
+                    to_vec(row.get(col_name as &str).unwrap_or(Value::Null))
+                })
+                .collect();
 
-            // Zip logic
-            let mut tags = Vec::new();
-            if !tag_lists.is_empty() {
-                let types = &tag_lists[0]; // First is always Types
-                let len = types.len();
-                
-                for i in 0..len {
-                    let t_name = match &types[i] {
-                        Value::Text(s) => s.clone(),
-                        _ => continue,
-                    };
+            let val_to_string = |v: &Value| match v {
+                Value::Text(s) => Some(s.clone()),
+                Value::BigInt(n) => Some(n.to_string()),
+                Value::Double(d) => Some(d.to_string()),
+                Value::Boolean(b) => Some(b.to_string()),
+                _ => None,
+            };
 
-                    // Check label lists in order (skipping Types at index 0)
-                    let mut val = None;
-                    for list in tag_lists.iter().skip(1) {
-                        if let Some(v) = list.get(i) {
-                            match v {
-                                Value::Text(s) => { val = Some(s.clone()); break; }
-                                Value::BigInt(n) => { val = Some(n.to_string()); break; }
-                                Value::Double(d) => { val = Some(d.to_string()); break; }
-                                Value::Boolean(b) => { val = Some(b.to_string()); break; }
-                                _ => {}
-                            }
-                        }
-                    }
+            let extract_tag = |i: usize| -> Option<(String, String)> {
+                let name = val_to_string(tag_lists.get(0)?.get(i)?)?;
+                tag_lists
+                    .iter()
+                    .skip(1)
+                    .find_map(|list| list.get(i).and_then(val_to_string))
+                    .map(|val| (name, val))
+            };
 
-                    if let Some(v) = val {
-                        tags.push((t_name, v));
-                    }
-                }
-            }
+            let tags: Vec<_> = tag_lists
+                .get(0)
+                .map(|types| (0..types.len()).filter_map(extract_tag).collect())
+                .unwrap_or_default();
 
             SearchResult {
                 id,

@@ -2,8 +2,8 @@ use anyhow::Result;
 use duckdb::Connection;
 use sea_query::{
     ColumnDef, DeleteStatement, Expr, Iden, InsertStatement, IntoIden,
-    PostgresQueryBuilder, Query, SelectStatement, SimpleExpr, TableCreateStatement,
-    TableDropStatement, UpdateStatement,
+    PostgresQueryBuilder, Query, SelectStatement, SimpleExpr,
+    TableCreateStatement, TableDropStatement, UpdateStatement,
 };
 use std::path::Path;
 
