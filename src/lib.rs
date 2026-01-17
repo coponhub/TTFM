@@ -3,12 +3,14 @@
 //! このライブラリは、Typed Tag（型付きタグ）を用いたファイル管理システムのコア機能を提供します。
 //! DuckDBをバックエンドに使用し、Parquet形式でのインデックス保存と高速な検索を実現します。
 
-use crate::db::{Col, DuckDbFunc, Tbl};
+use crate::db::{Col, Tbl};
 use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use file_id::get_file_id;
-use sea_query::{Expr, Func, PostgresQueryBuilder, Query};
+use sea_query::{
+    Expr, JoinType, PostgresQueryBuilder, Query,
+};
 use std::path::Path;
 
 pub mod config;
@@ -312,73 +314,151 @@ impl FileManager {
             node.expand(&q_reg).to_sql("oneview")
         };
 
-        // 2. マッチしたIDの全タグを取得して集約
-        let mut sql_query = Query::select();
-        sql_query
+        // DuckDBにおいて、複雑なビューに対する集計(MAXなど)と
+        // 相関サブクエリやIN/EXISTSを組み合わせた際、「WHERE句に集計関数を含められない」
+        // といった意図しないオプティマイザの挙動を回避するため、一時テーブルに隔離する。
+        Tbl::Sub.drop_table(&self.conn).ok();
+        sub_query.create_table_as(&self.conn, Tbl::Sub)?;
+
+        // 2. マッチしたIDの全タグを取得して集計
+        // アイテムごとの全タグを集約した CTE
+        let mut tag_agg = Query::select();
+        tag_agg
             .column(Col::ItemId)
-            .column(Col::ItemKind)
             .expr_as(
-                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Type)),
-                Col::Types,
+                crate::db::CustomFunc::max_filter(
+                    Expr::col(Col::LabelStr),
+                    Expr::col(Col::Type).eq("item_kind"),
+                ),
+                Col::ItemKind,
             )
             .expr_as(
-                Func::cust(DuckDbFunc::List).arg(Expr::col(Col::Label)),
-                Col::Labels,
-            )
-            .expr_as(
-                Func::cust(DuckDbFunc::Coalesce)
-                    .args([Expr::col(Col::Rank).into(), Expr::val(0).into()]),
+                crate::db::CustomFunc::max_filter(
+                    Expr::col(Col::LabelInt),
+                    Expr::col(Col::Type).eq("rank"),
+                ),
                 Col::Rank,
-            )
-            .expr_as(
-                Func::cust(DuckDbFunc::Coalesce)
-                    .args([Expr::col(Col::Name).into(), Expr::val("").into()]),
-                Col::Name,
-            )
+            );
+
+        for col in crate::db::Col::tag_value_columns() {
+            let source = if col == crate::db::Col::Types {
+                crate::db::Col::Type
+            } else {
+                col
+            };
+            tag_agg.expr_as(crate::db::CustomFunc::list(Expr::col(source)), col);
+        }
+
+        tag_agg
             .from(Tbl::OneView)
-            .and_where(Expr::col(Col::ItemId).in_subquery(sub_query))
-            .group_by_col(Col::ItemId)
-            .group_by_col(Col::ItemKind)
-            .group_by_col(Col::Rank)
-            .group_by_col(Col::Name)
-            .order_by(Col::Rank, sea_query::Order::Desc)
+            .and_where(
+                Expr::col((Tbl::OneView, Col::ItemId)).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from(Tbl::Sub)
+                        .to_owned(),
+                ),
+            )
+            .group_by_col(Col::ItemId);
+
+        // 各アイテムの「名前(場所)」ごとに独立した結果行を生成
+        let mut query = Query::select();
+        query
+            .column((Tbl::Identities, Col::ItemId))
+            .column((Tbl::AggTags, Col::ItemKind))
+            .column((Tbl::Identities, Col::Name))
+            .column((Tbl::AggTags, Col::Rank));
+
+        for col in crate::db::Col::tag_value_columns() {
+            query.column((Tbl::AggTags, col));
+        }
+
+        query
+            .from_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .expr_as(Expr::col(Col::LabelStr), Col::Name)
+                    .from(Tbl::OneView)
+                    .and_where(Expr::col(Col::Type).eq("name"))
+                    .to_owned(),
+                Tbl::Identities,
+            )
+            .join_subquery(
+                JoinType::InnerJoin,
+                tag_agg,
+                Tbl::AggTags,
+                Expr::col((Tbl::Identities, Col::ItemId))
+                    .eq(Expr::col((Tbl::AggTags, Col::ItemId))),
+            )
+            .order_by_expr(Expr::col((Tbl::AggTags, Col::Rank)).into(), sea_query::Order::Desc)
             .limit(100);
 
-        let sql = sql_query.to_string(PostgresQueryBuilder);
-
+        let sql = query.to_string(PostgresQueryBuilder);
         let mut stmt = self.conn.prepare(&sql)?;
+
+        let c_id: &str = Col::ItemId.into();
+        let c_kind: &str = Col::ItemKind.into();
+        let c_name: &str = Col::Name.into();
+        let c_rank: &str = Col::Rank.into();
+
+        let tag_value_cols: Vec<String> = crate::db::Col::tag_value_columns()
+            .into_iter()
+            .map(|c| c.to_string())
+            .collect();
+
         let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(0)?;
-            let item_kind: String = row.get(1)?;
+            let id: i64 = row.get(c_id)?;
+            // Aggregation result might be Null if no tag found, handle gracefully
+            let item_kind: String = row.get(c_kind).unwrap_or_else(|_| "unknown".to_string());
+            let name: String = row.get(c_name).unwrap_or_default();
+            let rank: i64 = row.get(c_rank).unwrap_or(0);
 
             use duckdb::types::Value;
-            let types_val: Value = row.get(2)?;
-            let labels_val: Value = row.get(3)?;
-            let rank: i64 = row.get(4)?;
-            let name: String = row.get(5).unwrap_or_default();
 
-            fn value_to_string(v: &Value) -> String {
-                match v {
-                    Value::Text(s) => s.clone(),
-                    Value::BigInt(i) => i.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => format!("{:?}", v),
+            fn to_vec(v: Value) -> Vec<Value> {
+                if let Value::List(vec) = v {
+                    vec
+                } else {
+                    Vec::new()
                 }
             }
 
-            let types: Vec<String> = if let Value::List(items) = types_val {
-                items.iter().map(value_to_string).collect()
-            } else {
-                vec![]
-            };
+            let mut tag_lists = Vec::with_capacity(tag_value_cols.len());
+            for col_name in &tag_value_cols {
+                tag_lists.push(to_vec(row.get(col_name as &str)?));
+            }
 
-            let labels: Vec<String> = if let Value::List(items) = labels_val {
-                items.iter().map(value_to_string).collect()
-            } else {
-                vec![]
-            };
+            // Zip logic
+            let mut tags = Vec::new();
+            if !tag_lists.is_empty() {
+                let types = &tag_lists[0]; // First is always Types
+                let len = types.len();
+                
+                for i in 0..len {
+                    let t_name = match &types[i] {
+                        Value::Text(s) => s.clone(),
+                        _ => continue,
+                    };
 
-            let tags = types.into_iter().zip(labels.into_iter()).collect();
+                    // Check label lists in order (skipping Types at index 0)
+                    let mut val = None;
+                    for list in tag_lists.iter().skip(1) {
+                        if let Some(v) = list.get(i) {
+                            match v {
+                                Value::Text(s) => { val = Some(s.clone()); break; }
+                                Value::BigInt(n) => { val = Some(n.to_string()); break; }
+                                Value::Double(d) => { val = Some(d.to_string()); break; }
+                                Value::Boolean(b) => { val = Some(b.to_string()); break; }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    if let Some(v) = val {
+                        tags.push((t_name, v));
+                    }
+                }
+            }
 
             SearchResult {
                 id,

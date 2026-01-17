@@ -4,7 +4,7 @@ use crate::util::DotOk;
 use anyhow::{anyhow, Result};
 use pest::Parser;
 use pest_derive::Parser;
-use sea_query::{Alias, BinOper, Expr, Query, SelectStatement, SimpleExpr};
+use sea_query::{Alias, BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Parser)]
@@ -716,16 +716,33 @@ impl QueryNode {
         op: BinOper,
         label: Label,
     ) -> SelectStatement {
-        let condition = match label {
+        let mut condition = Condition::any();
+        match label {
             Label::Integer(i) => {
-                CustomFunc::try_cast_bigint(Expr::col(Col::Label))
-                    .binary(op, Expr::val(i))
+                condition = condition
+                    .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
             }
-            _ => Expr::col(Col::Label).binary(op, Expr::val(label.as_str())),
+            Label::String(s) | Label::Literal(s) => {
+                condition = condition
+                    .add(Expr::col(Col::LabelStr).binary(op, Expr::val(s.as_str())));
+                
+                // もし文字列が数値やブーリアンとして解釈可能なら、それらのカラムも対象にする
+                if let Ok(i) = s.parse::<i64>() {
+                    condition = condition
+                        .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
+                        .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
+                } else if let Ok(f) = s.parse::<f64>() {
+                    condition = condition.add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)));
+                } else if s == "true" || s == "false" {
+                    let b = s == "true";
+                    condition = condition.add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)));
+                }
+            }
         };
 
         q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()))
-            .and_where(condition);
+            .and_where(condition.into());
         q
     }
 
@@ -737,19 +754,26 @@ impl QueryNode {
     ) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
+        
+        // Logic handles SType::Label redirection internally
+
+        
         match label {
-            Label::Integer(i) => {
-                q.and_where(Expr::col(tag).eq(*i));
-            }
-            Label::String(s) => {
-                q.and_where(
-                    Expr::col(tag)
+             Label::Integer(i) => {
+                 let t = if matches!(tag, SType::Label) { Col::LabelInt.into() } else { tag };
+                 q.and_where(Expr::col(t).eq(*i));
+             }
+             Label::String(s) => {
+                 let t = if matches!(tag, SType::Label) { Col::LabelStr.into() } else { tag };
+                 q.and_where(
+                    Expr::col(t)
                         .binary(BinOper::Custom("GLOB"), Expr::val(s.as_str())),
                 );
-            }
-            Label::Literal(s) => {
-                q.and_where(Expr::col(tag).eq(s.as_str()));
-            }
+             }
+             Label::Literal(s) => {
+                 let t = if matches!(tag, SType::Label) { Col::LabelStr.into() } else { tag };
+                 q.and_where(Expr::col(t).eq(s.as_str()));
+             }
         }
         q
     }
@@ -777,19 +801,36 @@ impl QueryNode {
             }
         }
 
+        let mut cond = Condition::any();
         match label {
             Label::Integer(i) => {
-                q.and_where(Expr::col(Col::Label).eq(*i));
+                cond = cond
+                    .add(Expr::col(Col::LabelInt).eq(*i))
+                    .add(Expr::col(Col::LabelDouble).eq(*i as f64));
             }
             Label::String(s) => {
-                q.and_where(
-                    Expr::col(Col::Label).binary(glob, Expr::val(s.as_str())),
+                cond = cond.add(
+                    Expr::col(Col::LabelStr).binary(glob, Expr::val(s.as_str())),
                 );
+                // 数値やブーリアンとしてもチェック
+                if let Ok(i) = s.parse::<i64>() {
+                    cond = cond.add(Expr::col(Col::LabelInt).eq(i));
+                }
+                if s == "true" || s == "false" {
+                    cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
+                }
             }
             Label::Literal(s) => {
-                q.and_where(Expr::col(Col::Label).eq(s.as_str()));
+                cond = cond.add(Expr::col(Col::LabelStr).eq(s.as_str()));
+                if let Ok(i) = s.parse::<i64>() {
+                    cond = cond.add(Expr::col(Col::LabelInt).eq(i));
+                }
+                if s == "true" || s == "false" {
+                    cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
+                }
             }
         }
+        q.and_where(cond.into());
         q
     }
 

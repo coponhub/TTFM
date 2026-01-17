@@ -125,7 +125,7 @@ fn test_system_items_registration() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
-    let _items_path_buf = fm.path_for_target(TargetTable::ItemEntities);
+    let _items_path_buf = fm.path_for_target(TargetTable::ItemReferences);
 
     // 内部DB接続へのアクセスが必要なため、 search 等で代用するか、
     // オリジナルのテストが意図していた「システムへの登録確認」を search で行う。
@@ -185,7 +185,7 @@ fn test_no_empty_extension_system_item() {
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    let results = fm.search("item_kind:typedtag & name:extension:").unwrap();
+    let results = fm.search("item_kind:typedtag & name:\"extension:\"").unwrap();
     assert!(
         results.is_empty(),
         "Should NOT register 'extension:' system item"

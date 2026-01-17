@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use duckdb::Connection;
 use rustc_hash::FxHashMap;
-use sea_query::{Expr, Func, PostgresQueryBuilder, Query, Table};
+use sea_query::{Alias, Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
 use std::path::{Path, PathBuf};
 
 use super::diff;
@@ -175,11 +175,75 @@ impl<'a> Indexer<'a> {
             &self.store.db_dir,
         )?;
 
+        self.ensure_data_types()?;
         self.update_system_items(None)?;
         Ok(())
     }
 
 
+
+    /// `data_types` テーブルに初期データを投入します。
+    fn ensure_data_types(&self) -> Result<()> {
+        let path = self.store.path_for_target(TargetTable::DataTypes);
+        if !path.exists() {
+            // initialize_tables で空ファイルは作られているはずだが、念のため
+            return Ok(());
+        }
+
+        // すでにデータがあるかチェック
+        let count_sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::DataTypes,
+            )
+            .to_string(PostgresQueryBuilder);
+
+        let count: i64 = self
+            .conn
+            .query_row(&count_sql, [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if count > 0 {
+            return Ok(());
+        }
+
+        // デフォルトのデータ型定義を挿入
+        use crate::db::SqlType;
+        let defaults = vec![
+            ("size", SqlType::BIGINT),
+            ("mtime", SqlType::BIGINT),
+            ("rank", SqlType::BIGINT),
+            ("name", SqlType::VARCHAR),
+            ("kind", SqlType::VARCHAR),
+            ("content", SqlType::VARCHAR),
+            // 将来的にはここで標準タグも追加
+            ("filename", SqlType::VARCHAR),
+            ("extension", SqlType::VARCHAR),
+            ("path", SqlType::VARCHAR),
+            ("parent_dir", SqlType::VARCHAR),
+        ];
+
+        let mut insert = Query::insert();
+        insert
+            .into_table(Tbl::DataTypes)
+            .columns([Col::Type, Col::DataType]);
+
+        for (key, type_) in defaults {
+            insert.values_panic([key.into(), (type_ as i32).into()]);
+        }
+
+        util::parquet_query(&path.to_string_lossy())
+            .create_table_as(self.conn, Tbl::DataTypes)?;
+
+        // Append (though table is empty/newly created, we use insert)
+        insert.execute(self.conn)?;
+
+        Tbl::DataTypes.write_parquet(self.conn, &path)?;
+        Tbl::DataTypes.drop_table(self.conn)?;
+
+        Ok(())
+    }
 
     fn ensure_empty_parquet_if_missing(
         &self,
@@ -234,24 +298,76 @@ impl<'a> Indexer<'a> {
         MergeQueryParts::assign_ids(start_id)
             .create_temp_table_as(self.conn, Tbl::IdItem)?;
 
-        util::parquet_query(&items_str)
-            .union(
-                sea_query::UnionType::All,
-                Query::select()
-                    .columns([
-                        Col::ItemId,
-                        Col::Rank,
-                        Col::ItemKind,
-                        Col::Content,
-                    ])
-                    .from(Tbl::IdItem)
-                    .to_owned(),
-            )
-            .save_parquet(self.conn, &tmp_items)?;
+        // query_union.union(sea_query::UnionType::All, ...);
 
-        util::parquet_query(&system_tags_path.to_string_lossy())
-            .union(sea_query::UnionType::All, MergeQueryParts::metadata_tags())
-            .save_parquet(self.conn, &tmp_stags)?;
+        let mut lhs = Query::select();
+        lhs.columns(Col::item_references_columns())
+            .from_function(
+                Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(items_str.to_string())),
+                Alias::new("diff"),
+            );
+
+        let mut query_union = lhs;
+        query_union.union(
+            sea_query::UnionType::All,
+            Query::select()
+                .columns(Col::item_references_columns())
+                .from(Tbl::IdItem)
+                .to_owned(),
+        );
+        query_union.save_parquet(self.conn, &tmp_items)?;
+        // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
+        let p1 = Query::select()
+            .column(sea_query::Asterisk)
+            .from_subquery(
+                crate::util::parquet_query(&system_tags_path.to_string_lossy()),
+                Tbl::SystemTags,
+            )
+            .to_owned();
+
+        // 共通のメタデータタグ (kind)
+        let p2 = Query::select()
+            .column(Col::ItemId)
+            .expr_as(Expr::val("type"), Col::Type)
+            .expr_as(
+                Expr::case(
+                    Expr::col(Col::ItemKind).eq("typedtag"),
+                    Expr::col(Col::Type),
+                )
+                .finally(Expr::col(Col::ItemKind))
+                .cast_as(crate::db::SqlType::VARCHAR),
+                Col::LabelStr,
+            )
+            .from(Tbl::IdItem)
+            .to_owned();
+
+        // 型付きタグのラベル部分
+        let p3 = Query::select()
+            .column(Col::ItemId)
+            .expr_as(Expr::val("label"), Col::Type)
+            .expr_as(
+                Expr::col(Col::Label).cast_as(crate::db::SqlType::VARCHAR),
+                Col::LabelStr,
+            )
+            .from(Tbl::IdItem)
+            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+            .to_owned();
+
+        let union_sql = format!(
+            "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
+            p1.to_string(PostgresQueryBuilder),
+            p2.to_string(PostgresQueryBuilder),
+            p3.to_string(PostgresQueryBuilder)
+        );
+
+        self.conn.execute(
+            &format!(
+                "COPY ({}) TO '{}' (FORMAT PARQUET)",
+                union_sql,
+                tmp_stags.to_string_lossy()
+            ),
+            [],
+        )?;
 
         self.finalize_updates(
             &items_path,

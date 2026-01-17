@@ -142,3 +142,26 @@ macro_rules! define_scan_entry {
         }
     };
 }
+
+/// Item関連のカラム順序を一元管理するマクロ。
+/// 構造体定義、SELECTプロジェクション、カラムリスト生成を一度の定義で行います。
+#[macro_export]
+macro_rules! define_item_schema {
+    ($($field:ident => $col:ident),* $(,)?) => {
+        pub(crate) struct ItemRow {
+            $(pub $field: ::sea_query::SimpleExpr,)*
+        }
+
+        impl ItemRow {
+            pub fn select(self) -> ::sea_query::SelectStatement {
+                let mut q = ::sea_query::Query::select();
+                $(q.expr_as(self.$field, $crate::db::Col::$col);)*
+                q
+            }
+
+            pub fn all_columns() -> [$crate::db::Col; 6] {
+                [$($crate::db::Col::$col),*]
+            }
+        }
+    };
+}

@@ -1,4 +1,4 @@
-use crate::db::SqlType;
+
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use uuid::Uuid;
 

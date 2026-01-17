@@ -80,6 +80,8 @@ pub enum Tbl {
     LeftSide,
     RightSide,
     NotSide,
+    Identities,
+    AggTags,
 }
 
 /// SQL型名（CAST用）。データベース上のデータ型ID（`data_types` テーブルと連携）。
@@ -106,6 +108,18 @@ impl Iden for SqlType {
     }
 }
 
+impl SqlType {
+    pub fn prepare_column<'a>(&self, def: &'a mut SeaColumnDef) -> &'a mut SeaColumnDef {
+        match self {
+            SqlType::VARCHAR => def.string(),
+            SqlType::BIGINT => def.big_integer(),
+            SqlType::DOUBLE => def.double(),
+            SqlType::BOOLEAN => def.boolean(),
+            SqlType::UUID => def.custom(SqlType::UUID),
+        }
+    }
+}
+
 /// 共通で使用されるカラム名を表す識別子。
 pub use crate::types::SType as Col;
 
@@ -120,6 +134,50 @@ impl Col {
     pub fn from_str(s: &str) -> Option<Self> {
         <Self as std::str::FromStr>::from_str(s).ok()
     }
+
+    pub fn item_references_columns() -> [Self; 5] {
+        [
+            Self::ItemId,
+            Self::Rank,
+            Self::Name,
+            Self::ItemKind,
+            Self::Content,
+        ]
+    }
+
+    pub fn typed_label_columns() -> [Self; 4] {
+        [
+            Self::LabelStr,
+            Self::LabelInt,
+            Self::LabelDouble,
+            Self::LabelBool,
+        ]
+    }
+
+    pub fn tag_value_columns() -> Vec<Self> {
+        std::iter::once(Self::Types)
+            .chain(Self::typed_label_columns())
+            .collect()
+    }
+
+    pub fn from_sql_type(st: SqlType) -> Self {
+        match st {
+            SqlType::VARCHAR | SqlType::UUID => Self::LabelStr,
+            SqlType::BIGINT => Self::LabelInt,
+            SqlType::DOUBLE => Self::LabelDouble,
+            SqlType::BOOLEAN => Self::LabelBool,
+        }
+    }
+
+    pub fn sql_type(&self) -> SqlType {
+        match self {
+            Self::LabelStr => SqlType::VARCHAR,
+            Self::LabelInt => SqlType::BIGINT,
+            Self::LabelDouble => SqlType::DOUBLE,
+            Self::LabelBool => SqlType::BOOLEAN,
+            _ => SqlType::VARCHAR,
+        }
+    }
 }
 
 /// DuckDB 固有の関数名を表す識別子。
@@ -131,6 +189,8 @@ pub enum DuckDbFunc {
     Coalesce,
     #[iden = "list"]
     List,
+    #[iden = "concat"]
+    Concat,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -150,6 +210,33 @@ impl CustomFunc {
         sea_query::Expr::cust_with_exprs(
             "TRY_CAST($1 AS BIGINT)",
             [expr.into()],
+        )
+    }
+
+    /// list(expr) を生成します。
+    pub fn list<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::List).arg(expr.into()).into()
+    }
+
+    /// MAX(expr) FILTER (WHERE cond) を生成します。
+    pub fn max_filter<E, F>(expr: E, filter_expr: F) -> sea_query::SimpleExpr
+    where
+        E: Into<sea_query::SimpleExpr>,
+        F: Into<sea_query::SimpleExpr>,
+    {
+        sea_query::Expr::cust_with_exprs(
+            "MAX($1) FILTER (WHERE $2)",
+            [expr.into(), filter_expr.into()],
+        )
+    }
+
+    /// ID割り当て用のウィンドウ関数式を生成します。
+    pub fn assign_id_window(start_id: i64) -> sea_query::SimpleExpr {
+        sea_query::Expr::cust_with_exprs(
+            "$1 - (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
+            [sea_query::Expr::val(start_id).into()],
         )
     }
 }
@@ -176,13 +263,7 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    match &c.sql_type {
-                        SqlType::BIGINT => def.big_integer(),
-                        SqlType::BOOLEAN => def.boolean(),
-                        SqlType::VARCHAR => def.string(),
-                        SqlType::DOUBLE => def.double(),
-                        SqlType::UUID => def.custom(SqlType::UUID),
-                    };
+                    c.sql_type.prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
@@ -196,13 +277,7 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    match &c.sql_type {
-                        SqlType::BIGINT => def.big_integer(),
-                        SqlType::BOOLEAN => def.boolean(),
-                        SqlType::VARCHAR => def.string(),
-                        SqlType::DOUBLE => def.double(),
-                        SqlType::UUID => def.custom(SqlType::UUID),
-                    };
+                    c.sql_type.prepare_column(&mut def);
                     create.col(&mut def);
                 }
                 create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
@@ -210,27 +285,30 @@ impl Schema {
             TargetTable::BaseTags => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::LabelStr).string())
-                    .col(SeaColumnDef::new(Col::LabelInt).big_integer())
-                    .col(SeaColumnDef::new(Col::LabelDouble).double())
-                    .col(SeaColumnDef::new(Col::LabelBool).boolean());
+                    .col(SeaColumnDef::new(Col::Type).string());
+                for l_col in Col::typed_label_columns() {
+                    let mut def = SeaColumnDef::new(l_col);
+                    l_col.sql_type().prepare_column(&mut def);
+                    create.col(&mut def);
+                }
             }
             TargetTable::ItemReferences => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Rank).big_integer())
+                    .col(SeaColumnDef::new(Col::Name).string())
                     .col(SeaColumnDef::new(Col::ItemKind).string())
                     .col(SeaColumnDef::new(Col::Content).string());
             }
             TargetTable::SystemTags | TargetTable::UserTags => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::LabelStr).string())
-                    .col(SeaColumnDef::new(Col::LabelInt).big_integer())
-                    .col(SeaColumnDef::new(Col::LabelDouble).double())
-                    .col(SeaColumnDef::new(Col::LabelBool).boolean());
+                    .col(SeaColumnDef::new(Col::Type).string());
+                for l_col in Col::typed_label_columns() {
+                    let mut def = SeaColumnDef::new(l_col);
+                    l_col.sql_type().prepare_column(&mut def);
+                    create.col(&mut def);
+                }
             }
             TargetTable::DataTypes => {
                 create

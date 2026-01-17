@@ -11,10 +11,7 @@ impl QueryFunction for DirectoryQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::ColumnMatch {
-                tag: SType::Name,
-                label: label.clone(),
-            },
+            QueryNode::TypedTag(TypedTag::new("name", label.clone())),
             QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::IsDir).to_string(),
                 Label::String("true".to_string()),
@@ -31,10 +28,7 @@ impl QueryFunction for FilenameQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::ColumnMatch {
-                tag: SType::Name,
-                label: label.clone(),
-            },
+            QueryNode::TypedTag(TypedTag::new("name", label.clone())),
             QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::IsDir).to_string(),
                 Label::String("false".to_string()),
@@ -102,10 +96,7 @@ impl QueryFunction for NameQuery {
         SType::Name.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Name,
-            label: label.clone(),
-        }
+        QueryNode::TypedTag(TypedTag::new("name", label.clone()))
     }
 }
 
@@ -116,10 +107,7 @@ impl QueryFunction for ItemKindQuery {
         SType::ItemKind.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::ItemKind,
-            label: label.clone(),
-        }
+        QueryNode::TypedTag(TypedTag::new("item_kind", label.clone()))
     }
 }
 
@@ -130,10 +118,7 @@ impl QueryFunction for RankQuery {
         SType::Rank.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Rank,
-            label: label.clone(),
-        }
+        QueryNode::TypedTag(TypedTag::new("rank", label.clone()))
     }
 }
 
@@ -144,10 +129,7 @@ impl QueryFunction for SizeQuery {
         SType::Size.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Size,
-            label: label.clone(),
-        }
+        QueryNode::TypedTag(TypedTag::new("size", label.clone()))
     }
 }
 
@@ -158,10 +140,7 @@ impl QueryFunction for MtimeQuery {
         SType::Mtime.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Mtime,
-            label: label.clone(),
-        }
+        QueryNode::TypedTag(TypedTag::new("mtime", label.clone()))
     }
 }
 

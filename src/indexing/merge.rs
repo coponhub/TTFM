@@ -6,7 +6,7 @@ use crate::FunctionRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    CaseStatement, Condition, Expr, Iden, JoinType, Query, SelectStatement,
+    Condition, Expr, Func, Iden, JoinType, Query, SelectStatement, SimpleExpr,
 };
 use std::path::Path;
 
@@ -35,7 +35,7 @@ pub(crate) fn run_merge(
     }
     .prepare()?
     .ingest(&results)?
-    .sync()?;
+    .sync(&deleted_ids)?;
 
     // B. 場所テーブル (可変): 属性（size/mtime/hash）を含めて上書き更新。
     let loc = LocationMerger {
@@ -110,13 +110,16 @@ impl<'a> FileEntityMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self) -> Result<Self> {
+    pub(crate) fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
         // file_entities は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::FileReferences),
             Tbl::FileReferencesDiff,
-            None,
+            (!deleted_ids.is_empty()).then(|| {
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+            }),
             Col::ItemId,
         )?;
         Ok(self)
@@ -264,15 +267,84 @@ impl<'a> BaseTagMerger<'a> {
 // ========================================================
 // 2. Query Builder for Merging
 // ========================================================
-
 pub(crate) struct MergeQueryParts;
+
+// 唯一の定義箇所。ここが Single Source of Truth となります。
+crate::define_item_schema! {
+    kind    => ItemKind,
+    content => Content,
+    name    => Name,
+    rank    => Rank,
+    type_   => Type,
+    label   => Label,
+}
+
+impl ItemRow {
+    pub(crate) fn new_type(content: SimpleExpr, rank: i64) -> Self {
+        Self {
+            kind: Expr::val("type").into(),
+            content: content.clone(),
+            name: content.clone(),
+            rank: Expr::val(rank).into(),
+            type_: content,
+            label: util::null_as(SqlType::VARCHAR),
+        }
+    }
+
+    pub(crate) fn new_label(content: SimpleExpr) -> Self {
+        Self {
+            kind: Expr::val("label").into(),
+            content: content.clone(),
+            name: util::null_as(SqlType::VARCHAR),
+            rank: Expr::val(0).into(),
+            type_: util::null_as(SqlType::VARCHAR),
+            label: content,
+        }
+    }
+
+    pub(crate) fn new_typedtag(
+        type_expr: SimpleExpr,
+        label_expr: SimpleExpr,
+    ) -> Self {
+        let content = Func::cust(crate::db::DuckDbFunc::Concat)
+            .args([
+                Expr::col(Col::Type).into(),
+                Expr::val(":").into(),
+                label_expr.clone(),
+            ]);
+        Self {
+            kind: Expr::val("typedtag").into(),
+            content: content.clone().into(),
+            name: content.into(),
+            rank: Expr::val(0).into(),
+            type_: type_expr,
+            label: label_expr,
+        }
+    }
+
+    pub(crate) fn variant_col(kind: &str, col: Col) -> Self {
+        match kind {
+            "type" => Self::new_type(Expr::col(col).into(), 0),
+            "label" => Self::new_label(Expr::col(col).into()),
+            _ => panic!("Unsupported tag kind for col builder"),
+        }
+    }
+}
 
 impl MergeQueryParts {
     pub(crate) fn diff_tags(all_cols: &[ColumnDef]) -> SelectStatement {
         let mut source_q = Query::select();
         source_q
             .expr_as(Expr::col(Col::Type), Col::Type)
-            .expr_as(Expr::col(Col::Label), Col::Label)
+            .expr_as(
+                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                    Expr::col(Col::LabelStr).into(),
+                    Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
+                    Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
+                    Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
+                ]),
+                Col::Label,
+            )
             .from(Tbl::BaseTagsDiff);
 
         for col in all_cols
@@ -293,39 +365,27 @@ impl MergeQueryParts {
         source_q
     }
 
-    pub(crate) fn expand_variants(tags: SelectStatement) -> SelectStatement {
-        let mut cand_q = Query::select();
-        cand_q
-            .expr_as(Expr::val("type"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Type), Col::Content)
-            .expr_as(Expr::val(0), Col::Rank)
-            .column(Col::Type)
-            .expr_as(Expr::cust("NULL"), Col::Label)
-            .from_subquery(tags.clone(), Tbl::Diff);
+    pub(crate) fn item_columns() -> [Col; 6] {
+        ItemRow::all_columns()
+    }
 
-        let mut label_q = Query::select();
-        label_q
-            .expr_as(Expr::val("label"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Label), Col::Content)
-            .expr_as(Expr::val(0), Col::Rank)
-            .expr_as(Expr::cust("NULL"), Col::Type)
-            .column(Col::Label)
-            .from_subquery(tags.clone(), Tbl::Diff);
+    pub(crate) fn expand_variants(tags: SelectStatement) -> SelectStatement {
+        // --- Branch 1: Tag Types ('type' tags) ---
+        let mut cand_q = ItemRow::variant_col("type", Col::Type).select();
+        cand_q.from_subquery(tags.clone(), Tbl::Diff);
+
+        // --- Branch 2: Labels ('label' tags) ---
+        let mut label_q = ItemRow::variant_col("label", Col::Label).select();
+        label_q.from_subquery(tags.clone(), Tbl::Diff);
         cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
 
-        let mut tt_q = Query::select();
-        tt_q.expr_as(Expr::val("typedtag"), Col::ItemKind)
-            .expr_as(
-                Expr::cust_with_exprs(
-                    "$1 || ':' || $2",
-                    [Expr::col(Col::Type).into(), Expr::col(Col::Label).into()],
-                ),
-                Col::Content,
-            )
-            .expr_as(Expr::val(0), Col::Rank)
-            .column(Col::Type)
-            .column(Col::Label)
-            .from_subquery(tags, Tbl::Diff);
+        // --- Branch 3: Typed Tags ('typedtag' tags) ---
+        let mut tt_q = ItemRow::new_typedtag(
+            Expr::col(Col::Type).into(),
+            Expr::col(Col::Label).into(),
+        )
+        .select();
+        tt_q.from_subquery(tags, Tbl::Diff);
         cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
 
         cand_q
@@ -341,23 +401,14 @@ impl MergeQueryParts {
             return q;
         }
 
-        let mut query = Query::select();
         let first = &funcs[0];
-        query
-            .expr_as(Expr::val("type"), Col::ItemKind)
-            .expr_as(Expr::val(first.name()), Col::Content)
-            .expr_as(Expr::val(first.default_rank()), Col::Rank)
-            .expr_as(Expr::val(first.name()), Col::Type)
-            .expr_as(Expr::cust("NULL"), Col::Label);
+        let mut query = ItemRow::new_type(Expr::val(first.name()).into(), first.default_rank()).select();
 
         for func in funcs.iter().skip(1) {
-            let mut sub = Query::select();
-            sub.expr_as(Expr::val("type"), Col::ItemKind)
-                .expr_as(Expr::val(func.name()), Col::Content)
-                .expr_as(Expr::val(func.default_rank()), Col::Rank)
-                .expr_as(Expr::val(func.name()), Col::Type)
-                .expr_as(Expr::cust("NULL"), Col::Label);
-            query.union(sea_query::UnionType::Distinct, sub);
+            query.union(
+                sea_query::UnionType::Distinct,
+                ItemRow::new_type(Expr::val(func.name()).into(), func.default_rank()).select(),
+            );
         }
         query
     }
@@ -367,11 +418,7 @@ impl MergeQueryParts {
         items_path: &str,
     ) -> SelectStatement {
         Query::select()
-            .column((Tbl::Item, Col::ItemKind))
-            .column((Tbl::Item, Col::Content))
-            .column((Tbl::Item, Col::Type))
-            .column((Tbl::Item, Col::Label))
-            .column((Tbl::Item, Col::Rank))
+            .columns(Self::item_columns().map(|c| (Tbl::Item, c)))
             .distinct()
             .from_subquery(candidates, Tbl::Item)
             .join_subquery(
@@ -395,45 +442,12 @@ impl MergeQueryParts {
     pub(crate) fn assign_ids(start_id: i64) -> SelectStatement {
         Query::select()
             .expr_as(
-                Expr::cust_with_exprs(
-                    "$1 - (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
-                    [Expr::val(start_id).into()],
-                ),
+                crate::db::CustomFunc::assign_id_window(start_id),
                 Col::ItemId,
             )
-            .column(Col::Rank)
-            .column(Col::ItemKind)
-            .column(Col::Content)
-            .column(Col::Type)
-            .column(Col::Label)
+            .columns(Self::item_columns())
             .from(Tbl::Item)
             .to_owned()
-    }
-
-    pub(crate) fn metadata_tags() -> SelectStatement {
-        let mut meta = Query::select();
-        meta.column(Col::ItemId)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                CaseStatement::new()
-                    .case(
-                        Expr::col(Col::ItemKind).eq("typedtag"),
-                        Expr::col(Col::Type),
-                    )
-                    .finally(Expr::col(Col::ItemKind)),
-                Col::Label,
-            )
-            .from(Tbl::IdItem);
-
-        let mut label = Query::select();
-        label
-            .column(Col::ItemId)
-            .expr_as(Expr::val("label"), Col::Type)
-            .column(Col::Label)
-            .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
-
-        meta.union(sea_query::UnionType::All, label).to_owned()
     }
 }
 
@@ -449,7 +463,7 @@ fn merge_and_save(
     key_col: Col,
 ) -> Result<()> {
     let base_query = Query::select()
-        .expr(Expr::cust("*"))
+        .column(sea_query::Asterisk)
         .from(temp_table.clone())
         .to_owned();
 
@@ -497,11 +511,4 @@ mod tests {
         assert!(sql.contains("'typedtag'"));
     }
 
-    #[test]
-    fn test_query_parts_metadata_tags_logic() {
-        let sql =
-            MergeQueryParts::metadata_tags().to_string(PostgresQueryBuilder);
-        assert!(sql.contains("CASE"));
-        assert!(sql.contains("'typedtag'"));
-    }
 }
