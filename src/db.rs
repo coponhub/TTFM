@@ -172,7 +172,7 @@ impl Col {
     pub fn sql_type(&self) -> SqlType {
         match self {
             Self::LabelStr => SqlType::VARCHAR,
-            Self::LabelInt => SqlType::BIGINT,
+            Self::LabelInt | Self::ItemId | Self::Rank | Self::ScanHash => SqlType::BIGINT,
             Self::LabelDouble => SqlType::DOUBLE,
             Self::LabelBool => SqlType::BOOLEAN,
             _ => SqlType::VARCHAR,
@@ -293,12 +293,11 @@ impl Schema {
                 }
             }
             TargetTable::ItemReferences => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Rank).big_integer())
-                    .col(SeaColumnDef::new(Col::Name).string())
-                    .col(SeaColumnDef::new(Col::ItemKind).string())
-                    .col(SeaColumnDef::new(Col::Content).string());
+                for col in Col::item_references_columns() {
+                    let mut def = SeaColumnDef::new(col);
+                    col.sql_type().prepare_column(&mut def);
+                    create.col(&mut def);
+                }
             }
             TargetTable::SystemTags | TargetTable::UserTags => {
                 create
