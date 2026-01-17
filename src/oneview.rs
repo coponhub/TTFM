@@ -201,8 +201,9 @@ mod tests {
         let sql = "
             SELECT item_id 
             FROM oneview 
+            WHERE type = 'name' OR type = 'rank'
             GROUP BY item_id 
-            HAVING COUNT(DISTINCT name) > 1 OR COUNT(DISTINCT rank) > 1
+            HAVING COUNT(DISTINCT label_str) > 1 OR COUNT(DISTINCT label_int) > 1
         ";
 
         let mut stmt = fm.conn.prepare(sql).unwrap();

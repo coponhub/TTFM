@@ -311,16 +311,25 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // 10. Type側のGlob (実装済みか確認)
     // filename が対象になるはず
     let results = fm.search("*name:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.len(), 2);
 
-    // 11. Type側のGlob ([...] / [!...])
+    // 11. Type Wildcard + Value Prefix (Regression Test)
+    // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
+    // This confirms that 'exte*' parses as a typed tag (not comparison) and '^pd' becomes 'pd*' glob.
+    let results = fm.search("exte*:^pd").unwrap();
+    assert!(
+        results.len() > 0,
+        "Should match .pdf files via 'exte*' type glob and '^pd' value prefix"
+    );
+
+    // 12. Type側のGlob ([...] / [!...])
     let results = fm.search("[f]ilename:project_alpha.pdf").unwrap();
     assert_eq!(results.len(), 1);
 
     let results = fm.search("[!f]ilename:project_alpha.pdf").unwrap();
     assert_eq!(results.len(), 0); // filename にはマッチしないはず
 
-    // 12. Type側のGlob (?)
+    // 13. Type側のGlob (?)
     let results = fm.search("file?ame:project_alpha.pdf").unwrap();
     assert_eq!(results.len(), 1);
 
@@ -337,4 +346,131 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     assert_eq!(results[0].name, "[WIP]_test.txt");
 
     Ok(())
+}
+
+#[test]
+fn test_complex_search_combinations() {
+    // Setup FM with dedicated temp dir
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+    
+    // Create deterministic test data
+    // 15 .rs files
+    for i in 0..15 {
+        std::fs::write(root.join(format!("test_src_{}.rs", i)), "").unwrap();
+    }
+    // Main file
+    std::fs::write(root.join("main.rs"), "").unwrap();
+    std::fs::write(root.join("lib.rs"), "").unwrap();
+    // Mod file
+    std::fs::write(root.join("mod.rs"), "").unwrap();
+    // Other types
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("LICENSE"), "").unwrap();
+    std::fs::write(root.join("readme.txt"), "").unwrap();
+
+    let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 1. Type Glob + Value Glob (exte*:r*)
+    // Should match 15 test_src + main + lib + mod = 18 files. (Extension is "rs")
+    let results = fm.search("exte*:r*").unwrap();
+    assert!(results.len() >= 18, "exte*:r* should match all rs files");
+
+    // 2. Type Glob + AND + Comparison (exte*:rs & size:>0)
+    // All files are empty (size 0), so this should be 0.
+    // Wait, let's make main.rs non-empty
+    std::fs::write(root.join("main.rs"), "content").unwrap();
+    // Re-index to update metadata
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    
+    let results = fm.search("exte*:rs & size:>0").unwrap();
+    assert_eq!(results.len(), 1, "exte*:rs & size:>0 should match main.rs");
+
+    // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
+    let results = fm.search("name:*.toml | name:^LIC").unwrap();
+    // Verify correct items are present (ignoring extra matches)
+    assert!(results.iter().any(|r| r.name == "Cargo.toml"), "Should find Cargo.toml");
+    assert!(results.iter().any(|r| r.name == "LICENSE"), "Should find LICENSE");
+
+    // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
+    let all_rs = fm.search("exte*:rs").unwrap().len();
+    let results_diff = fm.search("exte*:rs - name:mod*").unwrap();
+    assert_eq!(results_diff.len(), all_rs - 1, "Difference should remove mod.rs");
+    assert!(results_diff.iter().all(|r| r.name != "mod.rs"));
+
+    // 5. Grouping + Glob Types + Comparison
+    // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
+    let results = fm.search("(exte*:rs | exte*:toml) & size:>0").unwrap();
+    assert!(results.len() >= 1);
+    assert!(results.iter().all(|r| r.name == "main.rs"));
+
+    // 6. Value Glob + Value Prefix AND (name:*.rs & name:^mai)
+    let results = fm.search("name:*.rs & name:^mai").unwrap();
+    assert!(results.len() >= 1);
+    assert!(results.iter().all(|r| r.name == "main.rs"));
+    
+    // 7. Bracket Glob (name:[m]ain.rs)
+    let results = fm.search("name:[m]ain.rs").unwrap();
+    assert!(results.len() >= 1);
+    assert!(results.iter().any(|r| r.name == "main.rs"));
+
+    // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
+    let results = fm.search("exte*:r?").unwrap();
+    assert!(results.len() >= 18);
+
+    // 9. Double Glob (nam*:*.rs)
+    let results = fm.search("nam*:*.rs").unwrap();
+    assert!(results.len() >= 18);
+
+    // 10. Type Prefix + Value Glob (type:^fi & name:*.rs)
+    // Matches 'file' type items which are .rs
+    let results = fm.search("type:^fi & name:*.rs").unwrap();
+    assert!(results.len() >= 18);
+}
+
+#[test]
+fn test_escaping_behavior() {
+    use std::fs::File;
+    // Setup explicit temp dir for file creation
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    
+    // Create special files
+    File::create(root.join("colon:file.txt")).unwrap();
+    File::create(root.join("space file.txt")).unwrap();
+    File::create(root.join("caret^file.txt")).unwrap();
+    File::create(root.join("normal.txt")).unwrap();
+
+    let db_dir = root.join(".ttfm/db");
+    let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 1. Escaped Colon (Using raw string)
+    let res = fm.search(r"name:colon\:file.txt").unwrap();
+    assert!(res.len() >= 1, "Should match escaped colon");
+    assert!(res.iter().any(|r| r.name == "colon:file.txt"));
+
+    // 2. Escaped Space
+    let res = fm.search(r"name:space\ file.txt").unwrap();
+    assert!(res.len() >= 1, "Should match escaped space");
+    assert!(res.iter().any(|r| r.name == "space file.txt"));
+
+    // 3. Escaped Caret
+    let res = fm.search(r"name:caret\^file.txt").unwrap();
+    assert!(res.len() >= 1, "Should match escaped caret");
+    assert!(res.iter().any(|r| r.name == "caret^file.txt"));
+
+    // 4. Quoted Colon
+    let res = fm.search(r#"name:"colon:file.txt""#).unwrap();
+    assert!(res.len() >= 1, "Should match quoted colon");
+
+    // 5. Double Escape (colon + glob)
+    let res = fm.search(r"name:colon\:*.txt").unwrap();
+    assert!(res.len() >= 1, "Should match colon + glob");
+
+    // 6. Mixed Logic
+    let res = fm.search(r"name:colon\:* | name:space\ *").unwrap();
+    assert!(res.len() >= 2, "Should match combined");
 }

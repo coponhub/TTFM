@@ -67,6 +67,14 @@ enum Commands {
 /// アプリケーションのエントリポイント。
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Clear コマンドの場合は完全な初期化をスキップし、破損したDBでも削除できるようにする
+    if matches!(cli.command, Commands::Clear) {
+        FileManager::delete_database()?;
+        println!("Database cleared successfully.");
+        return Ok(());
+    }
+
     let mut fm = FileManager::new()?;
 
     // 設定ファイルの読み込み
@@ -114,14 +122,11 @@ fn main() -> Result<()> {
             let results = fm.search("")?;
             print_results(&fm, &results);
         }
-        Commands::Clear => {
-            fm.clear_index()?;
-            println!("Index cleared.");
-        }
         Commands::Tag { item, tag } => {
             fm.tag_item(item, tag)?;
             println!("Tagged '{}' with '{}'", item, tag);
         }
+        Commands::Clear => unreachable!("Handled early"),
         Commands::Note { content } => {
             let id = fm.add_item("note", content)?;
             println!("Created note (ID: {})", id);

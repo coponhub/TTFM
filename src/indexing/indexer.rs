@@ -626,7 +626,7 @@ mod tests {
         let registry = FunctionRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir.clone());
         indexer.initialize_tables().unwrap();
-        assert!(db_dir.join("file_entities.parquet").exists());
+        assert!(db_dir.join("file_references.parquet").exists());
     }
 
     #[test]

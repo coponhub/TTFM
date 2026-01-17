@@ -35,7 +35,9 @@ cmp_op = { "==" | "^=" | "^" | ">=" | ">" | "<=" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)
-typed_tag = ${ tag_type ~ ":" ~ label }
+// --- Typed Tag ---
+// DESIGN.md: type:label (no space allowed between them)
+typed_tag = ${ tag_type ~ ":" ~ tag_label }
 
 // --- Operands ---
 operand = { 
@@ -43,6 +45,19 @@ operand = {
   | type_ref 
   | label 
 }
+
+// ... existing rules ...
+
+// Tag Label (permissive, allows ^)
+tag_label = { quoted_string | number | unquoted_tag_string }
+
+// Unquoted tag string: allows ^ unlike standard unquoted_string
+unquoted_tag_string = @{ 
+    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+ 
+}
+
+// ... existing unquoted_string ...
+
 
 // --- Label Calculation ---
 // DESIGN.md: Arithmetic can ONLY be used inside parentheses of a comparison operand.

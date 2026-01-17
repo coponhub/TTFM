@@ -136,7 +136,7 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
 
     let label_pair =
         inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
-    let label = build_label(label_pair)?;
+    let label = build_tag_label(label_pair)?;
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
 
@@ -301,6 +301,29 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             Ok(Label::String(s))
         }
         _ => Err(anyhow!("Unknown label rule")),
+    }
+}
+
+
+
+fn build_tag_label(pair: Pair<Rule>) -> Result<Label> {
+    // tag_label = { quoted_string | number | unquoted_tag_string }
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::quoted_string => {
+            let content = &inner.as_str()[1..inner.as_str().len() - 1];
+            let s = unescape_string(content)?;
+            Label::Literal(s).to_ok()
+        }
+        Rule::number => {
+            let i = inner.as_str().parse::<i64>()?;
+            Ok(Label::Integer(i))
+        }
+        Rule::unquoted_tag_string => {
+            let s = unescape_unquoted(inner.as_str())?;
+            Ok(Label::String(s))
+        }
+        _ => Err(anyhow!("Unknown tag_label rule: {:?}", inner.as_rule())),
     }
 }
 
@@ -639,17 +662,10 @@ impl QueryNode {
                 }
             };
 
-        // 特権カラム（物理カラム）への最適化パス
-        if let TagType::Base(stag) = tt {
-            if matches!(stag, SType::Size | SType::Mtime | SType::Rank) {
-                return self.apply_privileged_comparison(
-                    q,
-                    stag,
-                    effective_op,
-                    lab,
-                );
-            }
-        }
+        // 特権カラム（物理カラム）への最適化パスは廃止。
+        // OneView は全てのメタデータを EAV (type, label) 形式で提供するため、
+        // 物理カラムへの直接アクセスは行わない。
+        // すべて apply_generic_comparison にフォールバックさせる。
 
         // 一般的なタグへのフォールバックパス
         self.apply_generic_comparison(q, tt, effective_op, lab)
@@ -693,23 +709,6 @@ impl QueryNode {
         }
     }
 
-    fn apply_privileged_comparison(
-        &self,
-        mut q: SelectStatement,
-        tag: SType,
-        op: BinOper,
-        label: Label,
-    ) -> SelectStatement {
-        let mut apply = |rhs: SimpleExpr| {
-            q.and_where(Expr::col(tag).binary(op, rhs));
-        };
-
-        match label {
-            Label::Integer(i) => apply(Expr::val(i).into()),
-            _ => apply(CustomFunc::try_cast_bigint(Expr::val(label.as_str()))),
-        }
-        q
-    }
 
     fn apply_generic_comparison(
         &self,
@@ -830,9 +829,15 @@ impl QueryNode {
                     .add(Expr::col(Col::LabelDouble).eq(*i as f64));
             }
             Label::String(s) => {
+                let val_str = if s.starts_with('^') {
+                    format!("{}*", &s[1..])
+                } else {
+                    s.clone()
+                };
+
                 cond = cond.add(
                     Expr::col(Col::LabelStr)
-                        .binary(glob, Expr::val(s.as_str())),
+                        .binary(glob, Expr::val(val_str)),
                 );
                 // 数値やブーリアンとしてもチェック
                 if let Ok(i) = s.parse::<i64>() {
@@ -999,7 +1004,7 @@ mod tests {
 
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
-        assert!(parse(q_unary).is_err(), "Unary minus should be invalid");
+        assert!(parse(q_unary).is_ok(), "Unary minus should be valid now");
     }
 
     #[test]

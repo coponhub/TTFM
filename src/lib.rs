@@ -263,6 +263,19 @@ impl FileManager {
         Self::new_with_db_dir(path)
     }
 
+    /// データベースファイルを物理的に削除します。
+    /// インスタンス化を行わずに実行できるため、データベース破損時の復旧に使用できます。
+    pub fn delete_database() -> Result<()> {
+        let home = get_ttfm_home()?;
+        let db_dir = home.join("db");
+        
+        if db_dir.exists() {
+            std::fs::remove_dir_all(&db_dir)
+                .with_context(|| format!("Failed to remove database directory: {:?}", db_dir))?;
+        }
+        Ok(())
+    }
+
     /// ターゲットテーブルに対応するパスを生成します。
     pub fn path_for_target(&self, target: TargetTable) -> std::path::PathBuf {
         self.db_dir.join(format!("{}.parquet", target))
@@ -562,7 +575,8 @@ impl FileManager {
                 let query_name = Query::select()
                     .column(Col::ItemId)
                     .from(Tbl::OneView)
-                    .and_where(Expr::col(Col::Name).eq(item))
+                    .and_where(Expr::col(Col::Type).eq("name"))
+                    .and_where(Expr::col(Col::LabelStr).eq(item))
                     .to_string(PostgresQueryBuilder);
 
                 self.conn.query_row(&query_name, [], |r| r.get(0)).context(
@@ -727,11 +741,30 @@ impl FileManager {
         util::parquet_query(&path_str)
             .create_table_as(&self.conn, temp_table)?;
 
+        // Type inference for user tags
+        let val_i64 = value.parse::<i64>().ok();
+        let val_f64 = value.parse::<f64>().ok();
+        let val_bool = value.parse::<bool>().ok();
+
         // INSERT INTO ...
         Query::insert()
             .into_table(temp_table)
-            .columns([id_col, Col::Type, Col::Label])
-            .values_panic([id.into(), key.into(), value.into()])
+            .columns([
+                id_col,
+                Col::Type,
+                Col::LabelStr,
+                Col::LabelInt,
+                Col::LabelDouble,
+                Col::LabelBool,
+            ])
+            .values_panic([
+                id.into(),
+                key.into(),
+                Some(value).into(), // Always populate label_str
+                val_i64.into(),
+                val_f64.into(),
+                val_bool.into(),
+            ])
             .execute(&self.conn)?;
 
         temp_table.write_parquet(&self.conn, &path)?;

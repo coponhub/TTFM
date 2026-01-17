@@ -295,7 +295,7 @@ impl ItemRow {
         Self {
             kind: Expr::val("label").into(),
             content: content.clone(),
-            name: util::null_as(SqlType::VARCHAR),
+            name: content.clone(),
             rank: Expr::val(0).into(),
             type_: util::null_as(SqlType::VARCHAR),
             label: content,
