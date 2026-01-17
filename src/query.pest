@@ -61,7 +61,7 @@ tag_type = { quoted_string | identifier }
 // --- Labels and Literals ---
 label = { quoted_string | number | unquoted_string }
 
-// Identifiers (allow same characters as unquoted strings, but boundary is :)
+// Identifiers (boundary is :)
 identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
@@ -75,10 +75,9 @@ quoted_string = ${
 inner_str_double = @{ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* }
 inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 
-// Unquoted strings: MUST NOT contain whitespace or control operators.
-// But MUST allow Glob patterns (*, ?) and path separators (/, \).
+// Unquoted strings: Allow colons in labels.
 unquoted_string = @{ 
-    (escape | (!reserved_chars ~ ANY))+ 
+    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+ 
 }
 
 escape = @{ "\\" ~ ANY }
