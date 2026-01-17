@@ -40,6 +40,8 @@ Enable tagging multiple files at once using search queries.
 Improve flexibility in viewing search results.
 - [ ] **Pagination/Limit**: Allow users to specify result limits (currently fixed at 100).
 - [ ] **Sorting**: Add options to sort by Size, Date Modified, or Name.
+- [ ] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals in query parser.
+- [ ] **Rank Display Scaling**: Represent internal BigInt ranks as user-friendly decimals (e.g., 2 decimal places).
 - [ ] **Output Formats**: Support JSON output for integration with other tools.
 
 ### 3. Documentation & Help
