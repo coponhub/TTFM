@@ -1,6 +1,7 @@
-use crate::db::{Col, SqlType, TargetTable, Tbl};
+use crate::db::{Col, SqlType, TargetTable, Tbl, Val};
 use crate::taggers::ColumnDef;
-use sea_query::{Expr, PostgresQueryBuilder, Query};
+use duckdb::{Connection, Result};
+use sea_query::{Expr, Iden, PostgresQueryBuilder, Query};
 use std::path::Path;
 
 pub struct OneView;
@@ -8,7 +9,7 @@ pub struct OneView;
 impl OneView {
     /// データベース上に oneview ビューを構築（または置換）します。
     pub fn recreate(
-        conn: &duckdb::Connection,
+        conn: &Connection,
         all_columns: &[ColumnDef],
         db_dir: &Path,
     ) -> anyhow::Result<()> {
@@ -28,7 +29,7 @@ impl OneView {
         // 1. BaseTags
         let mut q1 = Query::select();
         q1.column(Col::ItemId)
-            .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+            .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
             .columns(basic_cols.clone())
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::BaseTags)),
@@ -39,7 +40,7 @@ impl OneView {
         // 2. SystemTags
         let mut q2 = Query::select();
         q2.column(Col::ItemId)
-            .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+            .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
             .columns(basic_cols.clone())
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::SystemTags)),
@@ -50,7 +51,7 @@ impl OneView {
         // 3. UserTags
         let mut q3 = Query::select();
         q3.column(Col::ItemId)
-            .expr_as(Expr::val("user"), crate::util::alias_from("origin"))
+            .expr_as(Expr::val(Val::User.to_string()), Col::Origin)
             .columns(basic_cols.clone())
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::UserTags)),
@@ -73,10 +74,7 @@ impl OneView {
 
                 let mut q = Query::select();
                 q.column(Col::ItemId)
-                    .expr_as(
-                        Expr::val("system"),
-                        crate::util::alias_from("origin"),
-                    )
+                    .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
                     .expr_as(Expr::val(&cd.name), Col::Type);
 
                 if cd.sql_type == SqlType::UUID {
@@ -99,12 +97,9 @@ impl OneView {
                 let mut q_kind = Query::select();
                 q_kind
                     .column(Col::ItemId)
-                    .expr_as(
-                        Expr::val("system"),
-                        crate::util::alias_from("origin"),
-                    )
-                    .expr_as(Expr::val("item_kind"), Col::Type)
-                    .expr_as(Expr::val("file"), Col::LabelStr)
+                    .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
+                    .expr_as(Expr::val(Val::ItemKind.to_string()), Col::Type)
+                    .expr_as(Expr::val(Val::File.to_string()), Col::LabelStr)
                     .from_subquery(
                         crate::util::parquet_query(&parquet_path),
                         Tbl::FileReferences,
@@ -114,11 +109,8 @@ impl OneView {
                 let mut q_rank = Query::select();
                 q_rank
                     .column(Col::ItemId)
-                    .expr_as(
-                        Expr::val("system"),
-                        crate::util::alias_from("origin"),
-                    )
-                    .expr_as(Expr::val("rank"), Col::Type)
+                    .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
+                    .expr_as(Expr::val(Val::Rank.to_string()), Col::Type)
                     .expr_as(Expr::col(Col::Rank), Col::LabelInt)
                     .from_subquery(
                         crate::util::parquet_query(&parquet_path),
@@ -130,13 +122,10 @@ impl OneView {
                 let mut q_name = Query::select();
                 q_name
                     .column(Col::ItemId)
+                    .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
+                    .expr_as(Expr::val(Val::Name.to_string()), Col::Type)
                     .expr_as(
-                        Expr::val("system"),
-                        crate::util::alias_from("origin"),
-                    )
-                    .expr_as(Expr::val("name"), Col::Type)
-                    .expr_as(
-                        Expr::col(crate::util::alias_from("filename")),
+                        Expr::col(Col::Filename), // use specific col not alias_from
                         Col::LabelStr,
                     )
                     .from_subquery(
@@ -160,7 +149,7 @@ impl OneView {
             };
             let mut q = Query::select();
             q.column(Col::ItemId)
-                .expr_as(Expr::val("system"), crate::util::alias_from("origin"))
+                .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
                 .expr_as(Expr::val::<&str>(col.into()), Col::Type)
                 .expr_as(Expr::col(col), label_col)
                 .from_subquery(
@@ -170,14 +159,26 @@ impl OneView {
             query_parts.push(q.to_string(PostgresQueryBuilder));
         }
 
-        let sql = query_parts.join("\nUNION ALL BY NAME\n");
-        conn.execute(
-            &format!("CREATE OR REPLACE VIEW oneview AS {}", sql),
-            [],
-        )?;
+        create_view_union_by_name(conn, "oneview", &query_parts)?;
 
         Ok(())
     }
+}
+
+/// 指定されたSQLパーツを UNION ALL BY NAME で結合し、ビューを作成します。
+fn create_view_union_by_name(
+    conn: &Connection,
+    view_name: &str,
+    select_sqls: &[String],
+) -> Result<()> {
+    // DuckDB 独自の UNION ALL BY NAME を使用するため、ここでは文字列結合を行います。
+    // select_sqls の各要素は sea-query で安全に構築されていることが前提です。
+    let combined_sql = select_sqls.join("\nUNION ALL BY NAME\n");
+    conn.execute(
+        &format!("CREATE OR REPLACE VIEW {} AS {}", view_name, combined_sql),
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -123,6 +123,26 @@ impl SqlType {
     }
 }
 
+/// 値として使用される定数文字列の識別子。
+/// マジックストリングを排除するために使用します。
+#[derive(Iden, Clone, Copy, Debug)]
+pub enum Val {
+    #[iden = "system"]
+    System,
+    #[iden = "user"]
+    User,
+    #[iden = "file"]
+    File,
+    #[iden = "note"]
+    Note,
+    #[iden = "item_kind"]
+    ItemKind,
+    #[iden = "rank"]
+    Rank,
+    #[iden = "name"]
+    Name,
+}
+
 /// 共通で使用されるカラム名を表す識別子。
 pub use crate::types::SType as Col;
 
