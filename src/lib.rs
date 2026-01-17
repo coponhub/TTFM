@@ -293,7 +293,7 @@ impl FileManager {
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        if !self.path_for_target(TargetTable::FileEntities).exists() {
+        if !self.path_for_target(TargetTable::FileReferences).exists() {
             return Err(anyhow::anyhow!(
                 "Index not found. Please run 'index' command first."
             ));
@@ -412,7 +412,7 @@ impl FileManager {
 
     /// 新しいアイテム（Type, Label, Note等）をデータベースに追加します。
     pub fn add_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.path_for_target(TargetTable::ItemEntities);
+        let path = self.path_for_target(TargetTable::ItemReferences);
         if !path.exists() {
             return Err(anyhow::anyhow!(
                 "Item entities table not found. Please run index first."
@@ -423,7 +423,7 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         let query_min = Query::select()
             .expr(Expr::col(Col::ItemId).min())
-            .from_subquery(util::parquet_query(&path_str), Tbl::ItemEntities)
+            .from_subquery(util::parquet_query(&path_str), Tbl::ItemReferences)
             .to_string(PostgresQueryBuilder);
 
         let min_id: i64 = self
@@ -542,9 +542,9 @@ impl FileManager {
         rank: i64,
     ) -> Result<()> {
         let path = if is_file {
-            self.path_for_target(TargetTable::FileEntities)
+            self.path_for_target(TargetTable::FileReferences)
         } else {
-            self.path_for_target(TargetTable::ItemEntities)
+            self.path_for_target(TargetTable::ItemReferences)
         };
 
         let path_str = path.to_string_lossy();
@@ -586,7 +586,7 @@ impl FileManager {
     pub fn get_type_ranks(
         &self,
     ) -> Result<std::collections::HashMap<String, i64>> {
-        let path = self.path_for_target(TargetTable::ItemEntities);
+        let path = self.path_for_target(TargetTable::ItemReferences);
         if !path.exists() {
             return Ok(Default::default());
         }
@@ -596,7 +596,7 @@ impl FileManager {
             .column(Col::Rank)
             .from_subquery(
                 util::parquet_query(&path.to_string_lossy()),
-                Tbl::ItemEntities,
+                Tbl::ItemReferences,
             )
             .and_where(Expr::col(Col::ItemKind).eq("type"))
             .to_string(PostgresQueryBuilder);
@@ -620,12 +620,12 @@ impl FileManager {
     }
 
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
-        let path = self.path_for_target(TargetTable::ItemEntities);
+        let path = self.path_for_target(TargetTable::ItemReferences);
         let query = Query::select()
             .column(Col::ItemId)
             .from_subquery(
                 util::parquet_query(&path.to_string_lossy()),
-                Tbl::ItemEntities,
+                Tbl::ItemReferences,
             )
             .and_where(Expr::col(Col::ItemKind).eq(kind))
             .and_where(Expr::col(Col::Content).eq(content))

@@ -87,8 +87,8 @@ impl<'a> FileEntityMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         let mut create_stmt = crate::db::Schema::build_table(
-            TargetTable::FileEntities,
-            Tbl::FileEntitiesDiff,
+            TargetTable::FileReferences,
+            Tbl::FileReferencesDiff,
             &all_cols,
         );
         create_stmt.temporary().execute(self.conn)?;
@@ -99,7 +99,7 @@ impl<'a> FileEntityMerger<'a> {
         if results.is_empty() {
             return Ok(self);
         }
-        let table_name = Tbl::FileEntitiesDiff.to_string().replace('"', "");
+        let table_name = Tbl::FileReferencesDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
 
         for res in results {
@@ -114,8 +114,8 @@ impl<'a> FileEntityMerger<'a> {
         // file_entities は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
-            &self.store.path_for_target(TargetTable::FileEntities),
-            Tbl::FileEntitiesDiff,
+            &self.store.path_for_target(TargetTable::FileReferences),
+            Tbl::FileReferencesDiff,
             None,
             Col::ItemId,
         )?;
@@ -123,7 +123,7 @@ impl<'a> FileEntityMerger<'a> {
     }
 
     pub(crate) fn cleanup(self) -> Result<()> {
-        Tbl::FileEntitiesDiff.drop_table(self.conn).ok();
+        Tbl::FileReferencesDiff.drop_table(self.conn).ok();
         Ok(())
     }
 }
@@ -230,7 +230,10 @@ impl<'a> BaseTagMerger<'a> {
                 app.append_row([
                     &t.item_id as &dyn ToSql,
                     &t.tag_type,
-                    &t.label,
+                    &t.label_str,
+                    &t.label_int,
+                    &t.label_double,
+                    &t.label_bool,
                 ])?;
             }
         }
@@ -374,18 +377,18 @@ impl MergeQueryParts {
             .join_subquery(
                 JoinType::LeftJoin,
                 util::parquet_query(items_path),
-                Tbl::ItemEntities,
+                Tbl::ItemReferences,
                 Condition::all()
                     .add(
                         Expr::col((Tbl::Item, Col::ItemKind))
-                            .eq(Expr::col((Tbl::ItemEntities, Col::ItemKind))),
+                            .eq(Expr::col((Tbl::ItemReferences, Col::ItemKind))),
                     )
                     .add(
                         Expr::col((Tbl::Item, Col::Content))
-                            .eq(Expr::col((Tbl::ItemEntities, Col::Content))),
+                            .eq(Expr::col((Tbl::ItemReferences, Col::Content))),
                     ),
             )
-            .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null())
+            .and_where(Expr::col((Tbl::ItemReferences, Col::ItemId)).is_null())
             .to_owned()
     }
 

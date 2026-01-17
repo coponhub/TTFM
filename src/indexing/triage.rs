@@ -140,7 +140,7 @@ impl<'a> ItemTriager<'a> {
 
     fn classify(&self, id: i64, val: TagValue, col: &ColumnDef) -> TriagePiece {
         match col.target_table {
-            TargetTable::FileEntities => TriagePiece::Entity(val),
+            TargetTable::FileReferences => TriagePiece::Entity(val),
             TargetTable::Locations => TriagePiece::Location(val),
             TargetTable::BaseTags => self.triage_base_tag(id, val, &col.name),
             _ => TriagePiece::None,
@@ -153,16 +153,29 @@ impl<'a> ItemTriager<'a> {
         val: TagValue,
         name: &str,
     ) -> TriagePiece {
-        val.into_string()
-            .filter(|s| !s.is_empty())
-            .map(|label| {
-                TriagePiece::Tag(TagRow {
-                    item_id: id,
-                    tag_type: name.to_string(),
-                    label,
-                })
-            })
-            .unwrap_or(TriagePiece::None)
+        let (l_str, l_int, l_dbl, l_bool) = match val {
+            TagValue::Text(s) => (Some(s), None, None, None),
+            TagValue::BigInt(i) => (None, Some(i), None, None),
+            TagValue::Double(d) => (None, None, Some(d), None),
+            TagValue::Boolean(b) => (None, None, None, Some(b)),
+            TagValue::Uuid(u) => (Some(u.to_string()), None, None, None),
+            TagValue::Null => (None, None, None, None),
+            _ => (None, None, None, None),
+        };
+
+        // 何らかの値があれば TagPiece を生成 (Null以外なら何かあるはず)
+        if l_str.is_none() && l_int.is_none() && l_dbl.is_none() && l_bool.is_none() {
+            return TriagePiece::None;
+        }
+
+        TriagePiece::Tag(TagRow {
+            item_id: id,
+            tag_type: name.to_string(),
+            label_str: l_str,
+            label_int: l_int,
+            label_double: l_dbl,
+            label_bool: l_bool,
+        })
     }
 }
 
@@ -241,7 +254,10 @@ mod tests {
         acc = acc.collect(TriagePiece::Tag(TagRow {
             item_id: 123,
             tag_type: "ext".into(),
-            label: "rs".into(),
+            label_str: Some("rs".into()),
+            label_int: None,
+            label_double: None,
+            label_bool: None,
         }));
         let res = acc.finish();
         assert_eq!(res.entity_row.id, 123);
@@ -258,7 +274,7 @@ mod tests {
         let col_ent = ColumnDef {
             name: "size".to_string(),
             sql_type: SqlType::BIGINT,
-            target_table: TargetTable::FileEntities,
+            target_table: TargetTable::FileReferences,
         };
         let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
         assert!(matches!(p_ent, TriagePiece::Entity(TagValue::BigInt(1024))));
@@ -273,7 +289,7 @@ mod tests {
             ColumnDef {
                 name: "size".into(),
                 sql_type: SqlType::BIGINT,
-                target_table: TargetTable::FileEntities,
+                target_table: TargetTable::FileReferences,
             },
             ColumnDef {
                 name: "path".into(),

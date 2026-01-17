@@ -9,12 +9,13 @@ use strum::{Display, EnumIter};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, Display, Iden)]
 #[strum(serialize_all = "snake_case")]
 pub enum TargetTable {
-    FileEntities,
+    FileReferences,
     Locations,
     BaseTags,
-    ItemEntities,
+    ItemReferences,
     SystemTags,
     UserTags,
+    DataTypes,
 }
 
 /// データベースの物理ストレージ（Parquetファイル）へのパスを管理する構造体。
@@ -46,22 +47,24 @@ impl Store {
 /// データベースのテーブル名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum Tbl {
-    FileEntities,
+    FileReferences,
     Locations,
     BaseTags,
-    ItemEntities,
+    ItemReferences,
     SystemTags,
     UserTags,
+    DataTypes,
     #[iden = "oneview"]
     OneView,
 
     // --- Diff Tables ---
-    FileEntitiesDiff,
+    FileReferencesDiff,
     LocationsDiff,
     BaseTagsDiff,
-    ItemEntitiesDiff,
+    ItemReferencesDiff,
     SystemTagsDiff,
     UserTagsDiff,
+    DataTypesDiff,
 
     // --- Work Tables / Aliases ---
     Scan,
@@ -79,25 +82,26 @@ pub enum Tbl {
     NotSide,
 }
 
-/// SQL型名（CAST用）。
+/// SQL型名（CAST用）。データベース上のデータ型ID（`data_types` テーブルと連携）。
 #[allow(non_camel_case_types)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[repr(i32)]
 pub enum SqlType {
-    BIGINT,
-    VARCHAR,
-    BOOLEAN,
-    UUID,
-    Other(String),
+    VARCHAR = 1,
+    BIGINT = 2,
+    DOUBLE = 3,
+    BOOLEAN = 4,
+    UUID = 5,
 }
 
 impl Iden for SqlType {
     fn unquoted(&self, s: &mut dyn std::fmt::Write) {
         match self {
-            SqlType::BIGINT => write!(s, "BIGINT").unwrap(),
             SqlType::VARCHAR => write!(s, "VARCHAR").unwrap(),
+            SqlType::BIGINT => write!(s, "BIGINT").unwrap(),
+            SqlType::DOUBLE => write!(s, "DOUBLE").unwrap(),
             SqlType::BOOLEAN => write!(s, "BOOLEAN").unwrap(),
             SqlType::UUID => write!(s, "UUID").unwrap(),
-            SqlType::Other(custom) => write!(s, "{}", custom).unwrap(),
         }
     }
 }
@@ -161,12 +165,12 @@ impl Schema {
     ) -> TableCreateStatement {
         let mut create = Table::create().table(name).to_owned();
         match target {
-            TargetTable::FileEntities => {
+            TargetTable::FileReferences => {
                 create.col(SeaColumnDef::new(Col::ItemId).big_integer());
                 create.col(SeaColumnDef::new(Col::Rank).big_integer());
                 for c in columns
                     .iter()
-                    .filter(|c| c.target_table == TargetTable::FileEntities)
+                    .filter(|c| c.target_table == TargetTable::FileReferences)
                 {
                     let iden = Col::from_str(&c.name)
                         .map(|c| c.into_iden())
@@ -174,12 +178,10 @@ impl Schema {
                     let mut def = SeaColumnDef::new(iden);
                     match &c.sql_type {
                         SqlType::BIGINT => def.big_integer(),
-                        SqlType::UUID => def.custom(SqlType::UUID),
                         SqlType::BOOLEAN => def.boolean(),
                         SqlType::VARCHAR => def.string(),
-                        SqlType::Other(custom) => {
-                            def.custom(crate::util::alias_from(custom))
-                        }
+                        SqlType::DOUBLE => def.double(),
+                        SqlType::UUID => def.custom(SqlType::UUID),
                     };
                     create.col(&mut def);
                 }
@@ -196,12 +198,10 @@ impl Schema {
                     let mut def = SeaColumnDef::new(iden);
                     match &c.sql_type {
                         SqlType::BIGINT => def.big_integer(),
-                        SqlType::UUID => def.custom(SqlType::UUID),
                         SqlType::BOOLEAN => def.boolean(),
                         SqlType::VARCHAR => def.string(),
-                        SqlType::Other(custom) => {
-                            def.custom(crate::util::alias_from(custom))
-                        }
+                        SqlType::DOUBLE => def.double(),
+                        SqlType::UUID => def.custom(SqlType::UUID),
                     };
                     create.col(&mut def);
                 }
@@ -211,9 +211,12 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
+                    .col(SeaColumnDef::new(Col::LabelStr).string())
+                    .col(SeaColumnDef::new(Col::LabelInt).big_integer())
+                    .col(SeaColumnDef::new(Col::LabelDouble).double())
+                    .col(SeaColumnDef::new(Col::LabelBool).boolean());
             }
-            TargetTable::ItemEntities => {
+            TargetTable::ItemReferences => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Rank).big_integer())
@@ -224,7 +227,15 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Type).string())
-                    .col(SeaColumnDef::new(Col::Label).string());
+                    .col(SeaColumnDef::new(Col::LabelStr).string())
+                    .col(SeaColumnDef::new(Col::LabelInt).big_integer())
+                    .col(SeaColumnDef::new(Col::LabelDouble).double())
+                    .col(SeaColumnDef::new(Col::LabelBool).boolean());
+            }
+            TargetTable::DataTypes => {
+                create
+                    .col(SeaColumnDef::new(Col::Type).string())
+                    .col(SeaColumnDef::new(Col::DataType).integer());
             }
         }
         create

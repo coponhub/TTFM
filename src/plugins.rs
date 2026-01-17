@@ -93,11 +93,11 @@ impl WasmPlugin {
         let mut columns = Vec::new();
         for c in wasm_cols {
             let sql_type = match c.sql_type.to_uppercase().as_str() {
-                "BIGINT" => SqlType::BIGINT,
+                "BIGINT" | "INTEGER" | "INT" => SqlType::BIGINT,
                 "HUGEINT" | "UUID" => SqlType::UUID,
-                "BOOLEAN" => SqlType::BOOLEAN,
-                "VARCHAR" | "TEXT" => SqlType::VARCHAR,
-                other => SqlType::Other(other.to_string()),
+                "BOOLEAN" | "BOOL" => SqlType::BOOLEAN,
+                "VARCHAR" | "TEXT" | "STRING" => SqlType::VARCHAR,
+                _ => SqlType::VARCHAR,
             };
 
             columns.push(ColumnDef {

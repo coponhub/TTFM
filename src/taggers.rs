@@ -20,6 +20,7 @@ pub struct ColumnDef {
 pub enum TagValue {
     Text(String),
     BigInt(i64),
+    Double(f64),
     Uuid(uuid::Uuid),
     Boolean(bool),
     Null,
@@ -33,6 +34,7 @@ impl TagValue {
         match self {
             TagValue::Text(s) => Some(s),
             TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Double(f) => Some(f.to_string()),
             TagValue::Uuid(u) => Some(u.to_string()),
             TagValue::Boolean(b) => Some(b.to_string()),
             _ => None,
@@ -44,6 +46,7 @@ impl TagValue {
         match self {
             TagValue::Text(s) => Some(s.clone()),
             TagValue::BigInt(i) => Some(i.to_string()),
+            TagValue::Double(f) => Some(f.to_string()),
             TagValue::Uuid(u) => Some(u.to_string()),
             TagValue::Boolean(b) => Some(b.to_string()),
             _ => None,
@@ -56,6 +59,7 @@ impl ToSql for TagValue {
         match self {
             TagValue::Text(s) => Ok(ToSqlOutput::from(s.as_str())),
             TagValue::BigInt(i) => Ok(ToSqlOutput::from(*i)),
+            TagValue::Double(f) => Ok(ToSqlOutput::from(*f)),
             TagValue::Uuid(u) => Ok(ToSqlOutput::from(*u)),
             TagValue::Boolean(b) => Ok(ToSqlOutput::from(*b)),
             TagValue::Null => Ok(ToSqlOutput::from(Null)),

@@ -50,7 +50,7 @@ impl DiffAuditor {
         Self {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
             live: store.temp_live_path().to_string_lossy().into_owned(),
-            ents: path(TargetTable::FileEntities),
+            ents: path(TargetTable::FileReferences),
         }
     }
 
@@ -78,13 +78,13 @@ impl DiffAuditor {
         // Inode ごとに最小 ID を 1つ選ぶユニーク名簿
         let distinct_ents = Query::select()
             .expr(crate::util::CustomExpr::distinct_on_all(Col::FileId))
-            .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences)
             .order_by(Col::FileId, sea_query::Order::Asc)
             .order_by(Col::ItemId, sea_query::Order::Asc)
             .to_owned();
 
         Query::select()
-            .column((Tbl::FileEntities, Col::ItemId))
+            .column((Tbl::FileReferences, Col::ItemId))
             .columns(
                 TempScanEntry::columns_with_type()
                     .into_iter()
@@ -94,9 +94,9 @@ impl DiffAuditor {
             .join_subquery(
                 JoinType::LeftJoin,
                 distinct_ents,
-                Tbl::FileEntities,
+                Tbl::FileReferences,
                 Expr::col((Tbl::Scan, col_file_id.clone()))
-                    .eq(Expr::col((Tbl::FileEntities, col_file_id))),
+                    .eq(Expr::col((Tbl::FileReferences, col_file_id))),
             )
             .to_owned()
     }
@@ -105,7 +105,7 @@ impl DiffAuditor {
     pub(crate) fn query_deleted(&self) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId)
-            .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities);
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences);
 
         let mut live_q = Query::select();
         live_q
@@ -116,13 +116,13 @@ impl DiffAuditor {
         let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
         let mut scan_q = Query::select();
         scan_q
-            .column((Tbl::FileEntities, Col::ItemId))
-            .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
+            .column((Tbl::FileReferences, Col::ItemId))
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences)
             .join_subquery(
                 JoinType::InnerJoin,
                 util::parquet_query(&self.scan),
                 Tbl::Scan,
-                Expr::col((Tbl::FileEntities, col_file_id.clone()))
+                Expr::col((Tbl::FileReferences, col_file_id.clone()))
                     .eq(Expr::col((Tbl::Scan, col_file_id))),
             );
         q.union(sea_query::UnionType::Except, scan_q);

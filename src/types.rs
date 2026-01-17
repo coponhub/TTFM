@@ -17,27 +17,27 @@ pub type FileRef = Uuid;
 /// データベース上の型名を取得するためのトレイト。
 pub trait DBType {
     /// 対応する SQL の型を返します。
-    fn db_type() -> SqlType;
+    fn db_type() -> crate::db::SqlType;
 }
 
 impl DBType for String {
-    fn db_type() -> SqlType {
-        SqlType::VARCHAR
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::VARCHAR
     }
 }
 impl DBType for i64 {
-    fn db_type() -> SqlType {
-        SqlType::BIGINT
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::BIGINT
     }
 }
 impl DBType for Uuid {
-    fn db_type() -> SqlType {
-        SqlType::UUID
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::UUID
     }
 }
 impl DBType for bool {
-    fn db_type() -> SqlType {
-        SqlType::BOOLEAN
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::BOOLEAN
     }
 }
 
@@ -45,8 +45,8 @@ impl DBType for bool {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileSize(pub i64);
 impl DBType for FileSize {
-    fn db_type() -> SqlType {
-        SqlType::BIGINT
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::BIGINT
     }
 }
 
@@ -66,8 +66,8 @@ impl ToSql for FileSize {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FileTimestamp(pub i64);
 impl DBType for FileTimestamp {
-    fn db_type() -> SqlType {
-        SqlType::BIGINT
+    fn db_type() -> crate::db::SqlType {
+        crate::db::SqlType::BIGINT
     }
 }
 
@@ -277,4 +277,11 @@ pub enum SType {
     ScanHash,
     // 検索専用仮想タグ
     Directory,
+    // Typed Label Columns
+    LabelStr,
+    LabelInt,
+    LabelDouble,
+    LabelBool,
+    // Schema Table Columns
+    DataType,
 }

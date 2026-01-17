@@ -694,7 +694,7 @@ impl Tagger for InodeTagger {
         vec![ColumnDef {
             name: <InodeFunction as TagDefinition>::name().to_string(),
             sql_type: SqlType::UUID,
-            target_table: TargetTable::FileEntities,
+            target_table: TargetTable::FileReferences,
         }]
     }
     fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {

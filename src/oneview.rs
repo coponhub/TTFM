@@ -22,10 +22,10 @@ impl OneView {
 
         let q = Self::construct_query(
             all_columns,
-            &path(TargetTable::FileEntities),
+            &path(TargetTable::FileReferences),
             &path(TargetTable::BaseTags),
             &path(TargetTable::Locations),
-            &path(TargetTable::ItemEntities),
+            &path(TargetTable::ItemReferences),
             &path(TargetTable::SystemTags),
             &path(TargetTable::UserTags),
         );
@@ -44,175 +44,159 @@ impl OneView {
         system_tags: &str,
         user_tags: &str,
     ) -> SelectStatement {
-        // --- 1. Unified Master Info (ID, Rank, Name, ItemKind) ---
-
-        // Base info from files
-        let mut file_master = Query::select();
-        file_master
-            .column((Tbl::FileEntities, Col::ItemId))
-            .column((Tbl::FileEntities, Col::Rank))
-            .expr_as(Expr::val("file"), Col::ItemKind)
-            .expr_as(Expr::col((Tbl::Locations, Col::Filename)), Col::Name)
-            .column((Tbl::Locations, Col::Size))
-            .column((Tbl::Locations, Col::Mtime))
-            .from_subquery(util::parquet_query(ents), Tbl::FileEntities)
-            .join_subquery(
-                JoinType::InnerJoin,
-                util::parquet_query(locs),
-                Tbl::Locations,
-                Expr::col((Tbl::FileEntities, Col::ItemId))
-                    .eq(Expr::col((Tbl::Locations, Col::ItemId))),
-            );
-
-        // Base info from other items
-        let mut item_master = Query::select();
-        item_master
-            .expr_as(Expr::col(Col::ItemId), Col::ItemId)
-            .expr_as(Expr::col(Col::Rank), Col::Rank)
-            .expr_as(Expr::col(Col::ItemKind), Col::ItemKind)
-            .expr_as(Expr::col(Col::Content), Col::Name)
-            .expr_as(Expr::val(0), Col::Size)
-            .expr_as(Expr::val(0), Col::Mtime)
-            .from_subquery(util::parquet_query(items), Tbl::Item);
-
-        let mut all_master_base = file_master;
-        all_master_base
-            .union(sea_query::UnionType::All, item_master.to_owned());
-
-        // Name override from user tags
-        let mut user_names = Query::select();
-        user_names
-            .column(Col::ItemId)
-            .expr_as(Expr::col(Col::Label), Col::Name)
-            .from_subquery(util::parquet_query(user_tags), Tbl::BaseTags)
-            .and_where(Expr::col(Col::Type).eq("name"));
-
-        let mut final_master = Query::select();
-        final_master
-            .column((Tbl::Master, Col::ItemId))
-            .column((Tbl::Master, Col::Rank))
-            .column((Tbl::Master, Col::ItemKind))
-            .column((Tbl::Master, Col::Size))
-            .column((Tbl::Master, Col::Mtime))
-            .expr_as(
-                Func::cust(DuckDbFunc::Coalesce).args([
-                    Expr::col((Tbl::UserTags, Col::Name)).into(),
-                    Expr::col((Tbl::Master, Col::Name)).into(),
-                ]),
-                Col::Name,
-            )
-            .from_subquery(all_master_base, Tbl::Master)
-            .join_subquery(
-                JoinType::LeftJoin,
-                user_names,
-                Tbl::UserTags,
-                Expr::col((Tbl::Master, Col::ItemId))
-                    .eq(Expr::col((Tbl::UserTags, Col::ItemId))),
-            );
-
-        // --- 2. Unified Tag Sources (item_id, origin, type, label) ---
+        // --- Unified Tag Sources (item_id, origin, type, label_*) ---
 
         let mut base_q = Query::select();
 
-        // A. base_tags
+        // 1. BaseTags
         base_q
             .column(Col::ItemId)
             .expr_as(Expr::val("system"), Col::Origin)
             .column(Col::Type)
-            .column(Col::Label)
+            .column(Col::LabelStr)
+            .column(Col::LabelInt)
+            .column(Col::LabelDouble)
+            .column(Col::LabelBool)
             .from_subquery(util::parquet_query(base_tags), Tbl::BaseTags);
 
-        // B. Column-based system tags (file_entities & locations)
-        for target in [TargetTable::FileEntities, TargetTable::Locations] {
-            let table_iden = match target {
-                TargetTable::FileEntities => Tbl::FileEntities,
-                TargetTable::Locations => Tbl::Locations,
-                _ => unreachable!(),
-            };
-            let parquet_path = match target {
-                TargetTable::FileEntities => ents,
-                TargetTable::Locations => locs,
-                _ => unreachable!(),
-            };
-
-            for cd in all_columns.iter().filter(|c| {
-                c.target_table == target
-                    && c.name != "size"
-                    && c.name != "mtime"
-                    && c.name != "rank"
-            }) {
-                let col_iden = crate::macros::name_to_iden(&cd.name);
-                let sub = Query::select()
-                    .column(Col::ItemId)
-                    .expr_as(Expr::val("system"), Col::Origin)
-                    .expr_as(Expr::val(cd.name.to_string()), Col::Type)
-                    .expr_as(
-                        Expr::cust_with_exprs(
-                            "CAST($1 AS VARCHAR)",
-                            [Expr::col((table_iden, col_iden)).into()],
-                        ),
-                        Col::Label,
-                    )
-                    .from_subquery(
-                        util::parquet_query(parquet_path),
-                        table_iden,
-                    )
-                    .to_owned();
-                base_q.union(sea_query::UnionType::All, sub);
-            }
-        }
-
-        // C. item_entities (content)
-        let mut items_content = Query::select();
-        items_content
-            .column(Col::ItemId)
-            .expr_as(Expr::val("system"), Col::Origin)
-            .expr_as(Expr::val("content"), Col::Type)
-            .expr_as(Expr::col(Col::Content), Col::Label)
-            .from_subquery(util::parquet_query(items), Tbl::Item);
-        base_q.union(sea_query::UnionType::All, items_content.to_owned());
-
-        // D. system_tags
+        // 2. SystemTags
         let mut stags = Query::select();
         stags
             .column(Col::ItemId)
             .expr_as(Expr::val("system"), Col::Origin)
             .column(Col::Type)
-            .column(Col::Label)
-            .from_subquery(util::parquet_query(system_tags), Tbl::BaseTags);
+            .column(Col::LabelStr)
+            .column(Col::LabelInt)
+            .column(Col::LabelDouble)
+            .column(Col::LabelBool)
+            .from_subquery(util::parquet_query(system_tags), Tbl::SystemTags);
         base_q.union(sea_query::UnionType::All, stags.to_owned());
 
-        // E. user_tags
+        // 3. UserTags
         let mut utags = Query::select();
         utags
             .column(Col::ItemId)
             .expr_as(Expr::val("user"), Col::Origin)
             .column(Col::Type)
-            .column(Col::Label)
-            .from_subquery(util::parquet_query(user_tags), Tbl::BaseTags);
+            .column(Col::LabelStr)
+            .column(Col::LabelInt)
+            .column(Col::LabelDouble)
+            .column(Col::LabelBool)
+            .from_subquery(util::parquet_query(user_tags), Tbl::UserTags);
         base_q.union(sea_query::UnionType::All, utags.to_owned());
 
-        // --- 3. Final Assembly (Assemble Tags with Master Info) ---
+        // 4. Physical Tables Unpivoting (FileReferences, Locations)
+        for target in [TargetTable::FileReferences, TargetTable::Locations] {
+            let table_iden = match target {
+                TargetTable::FileReferences => Tbl::FileReferences,
+                TargetTable::Locations => Tbl::Locations,
+                _ => unreachable!(),
+            };
+            let parquet_path = match target {
+                TargetTable::FileReferences => ents,
+                TargetTable::Locations => locs,
+                _ => unreachable!(),
+            };
 
-        Query::select()
-            .column((Tbl::BaseTags, Col::ItemId))
-            .column((Tbl::Master, Col::ItemKind))
-            .column((Tbl::Master, Col::Rank))
-            .column((Tbl::Master, Col::Size))
-            .column((Tbl::Master, Col::Mtime))
-            .column((Tbl::BaseTags, Col::Origin))
-            .column((Tbl::BaseTags, Col::Type))
-            .column((Tbl::BaseTags, Col::Label))
-            .column((Tbl::Master, Col::Name))
-            .from_subquery(base_q, Tbl::BaseTags)
-            .join_subquery(
-                JoinType::InnerJoin,
-                final_master,
-                Tbl::Master,
-                Expr::col((Tbl::BaseTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::Master, Col::ItemId))),
-            )
-            .to_owned()
+            // 各テーブルの物理カラムをタグとして展開
+            for cd in all_columns.iter().filter(|c| c.target_table == target) {
+                let col_iden = crate::macros::name_to_iden(&cd.name);
+                let col_expr = Expr::col((table_iden, col_iden.clone()));
+
+                // カラムの型に応じて適切な label_x にマッピング
+                let (l_str, l_int, l_dbl, l_bool) = match cd.sql_type {
+                    crate::db::SqlType::VARCHAR | crate::db::SqlType::UUID => {
+                        (col_expr.into(), Expr::val(None::<i64>), Expr::val(None::<f64>), Expr::val(None::<bool>))
+                    }
+                    crate::db::SqlType::BIGINT => {
+                         // BIGINTの場合、col_exprはl_intに使われる
+                         // 他はNULL
+                         (Expr::val(None::<String>), col_expr.into(), Expr::val(None::<f64>), Expr::val(None::<bool>))
+                    }
+                    crate::db::SqlType::DOUBLE => {
+                         (Expr::val(None::<String>), Expr::val(None::<i64>), col_expr.into(), Expr::val(None::<bool>))
+                    }
+                    crate::db::SqlType::BOOLEAN => {
+                         (Expr::val(None::<String>), Expr::val(None::<i64>), Expr::val(None::<f64>), col_expr.into())
+                    }
+                };
+
+                // 特殊処理: VARCHARの場合は明示的なCASTが必要な場合がある (特にUUID)
+                let l_str_casted = if matches!(cd.sql_type, crate::db::SqlType::UUID) {
+                    Expr::cust_with_exprs("CAST($1 AS VARCHAR)", [l_str.into()])
+                } else {
+                    l_str.into()
+                };
+                // 既にmatchアームで分岐しているので、l_str_castedを使うのはStringの時だけにする微調整
+                // 既にmatchアームで分岐しているので、l_str_castedを使うのはStringの時だけにする微調整
+                let final_l_str = l_str_casted;
+
+
+                let sub = Query::select()
+                    .column(Col::ItemId)
+                    .expr_as(Expr::val("system"), Col::Origin)
+                    .expr_as(Expr::val(cd.name.to_string()), Col::Type)
+                    .expr_as(final_l_str, Col::LabelStr)
+                    .expr_as(l_int, Col::LabelInt)
+                    .expr_as(l_dbl, Col::LabelDouble)
+                    .expr_as(l_bool, Col::LabelBool)
+                    .from_subquery(util::parquet_query(parquet_path), table_iden)
+                    .to_owned();
+                base_q.union(sea_query::UnionType::All, sub);
+            }
+
+            // 特殊カラム (Rank for FileReferences) - all_columnsに含まれていない場合への対応
+            // しかし通常 Rank は functions.rs で定義されているはずなのでループでカバーされるはず。
+            // FileReferencesには ItemId, Rank がある。
+        }
+
+        // 5. ItemReferences Special Handling
+        // ItemReferences has: ItemId, Rank, ItemKind, Content
+        // Content -> 'content' tag (String)
+        // ItemKind -> 'kind' tag (String)
+        // Rank -> 'rank' tag (Int)
+
+        // Content
+        let mut items_content = Query::select();
+        items_content
+            .column(Col::ItemId)
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::val("content"), Col::Type)
+            .expr_as(Expr::col(Col::Content), Col::LabelStr)
+            .expr_as(Expr::val(None::<i64>), Col::LabelInt)
+            .expr_as(Expr::val(None::<f64>), Col::LabelDouble)
+            .expr_as(Expr::val(None::<bool>), Col::LabelBool)
+            .from_subquery(util::parquet_query(items), Tbl::ItemReferences);
+        base_q.union(sea_query::UnionType::All, items_content);
+
+        // ItemKind -> "type" tag? or "kind"? 
+        // Plan says: item_kind -> type='kind', label_str=...
+        let mut items_kind = Query::select();
+        items_kind
+            .column(Col::ItemId)
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::val("kind"), Col::Type)
+            .expr_as(Expr::col(Col::ItemKind), Col::LabelStr)
+            .expr_as(Expr::val(None::<i64>), Col::LabelInt)
+            .expr_as(Expr::val(None::<f64>), Col::LabelDouble)
+            .expr_as(Expr::val(None::<bool>), Col::LabelBool)
+            .from_subquery(util::parquet_query(items), Tbl::ItemReferences);
+        base_q.union(sea_query::UnionType::All, items_kind);
+
+        // Rank -> "rank" tag
+        let mut items_rank = Query::select();
+        items_rank
+            .column(Col::ItemId)
+            .expr_as(Expr::val("system"), Col::Origin)
+            .expr_as(Expr::val("rank"), Col::Type)
+            .expr_as(Expr::val(None::<String>), Col::LabelStr)
+            .expr_as(Expr::col(Col::Rank), Col::LabelInt)
+            .expr_as(Expr::val(None::<f64>), Col::LabelDouble)
+            .expr_as(Expr::val(None::<bool>), Col::LabelBool)
+            .from_subquery(util::parquet_query(items), Tbl::ItemReferences);
+        base_q.union(sea_query::UnionType::All, items_rank);
+
+        base_q
     }
 }
 

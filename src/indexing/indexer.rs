@@ -36,7 +36,10 @@ pub struct DynamicRow {
 pub struct TagRow {
     pub item_id: i64,
     pub tag_type: String,
-    pub label: String,
+    pub label_str: Option<String>,
+    pub label_int: Option<i64>,
+    pub label_double: Option<f64>,
+    pub label_bool: Option<bool>,
 }
 
 // ========================================================
@@ -176,6 +179,8 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
+
+
     fn ensure_empty_parquet_if_missing(
         &self,
         path: &Path,
@@ -203,7 +208,7 @@ impl<'a> Indexer<'a> {
         &self,
         data_candidates: Option<sea_query::SelectStatement>,
     ) -> Result<()> {
-        let items_path = self.store.path_for_target(TargetTable::ItemEntities);
+        let items_path = self.store.path_for_target(TargetTable::ItemReferences);
         let system_tags_path =
             self.store.path_for_target(TargetTable::SystemTags);
         let items_str = items_path.to_string_lossy();
@@ -260,7 +265,7 @@ impl<'a> Indexer<'a> {
 
     /// ファイルエンティティの現在の最大ID（正の整数）を取得します。
     pub(crate) fn max_file_id(&self) -> Result<i64> {
-        let ents_path = self.store.path_for_target(TargetTable::FileEntities);
+        let ents_path = self.store.path_for_target(TargetTable::FileReferences);
         if !ents_path.exists() {
             return Ok(0);
         }
@@ -270,7 +275,7 @@ impl<'a> Indexer<'a> {
                 Expr::col(Col::ItemId).max().into(),
                 Expr::val(0).into(),
             ]))
-            .from_subquery(util::parquet_query(&ents_str), Tbl::FileEntities)
+            .from_subquery(util::parquet_query(&ents_str), Tbl::FileReferences)
             .to_string(PostgresQueryBuilder);
 
         self.conn
@@ -285,7 +290,7 @@ impl<'a> Indexer<'a> {
                 Expr::col(Col::ItemId).min().into(),
                 Expr::val(0).into(),
             ]))
-            .from_subquery(util::parquet_query(items_path), Tbl::ItemEntities)
+            .from_subquery(util::parquet_query(items_path), Tbl::ItemReferences)
             .to_string(PostgresQueryBuilder);
 
         let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
