@@ -85,6 +85,12 @@ Directly interact with files from the CLI.
     - If the argument does not contain a colon (`:`), it is treated as a relative path to a local file rather than a query.
     - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
 
+### 8. Custom Operators (User-Defined Macros)
+Allow advanced users to define custom query operators.
+- [ ] **Feature**: Support user-defined infix operators in configuration or via tags.
+    - Example: Define `+>` to mean `sum($L) > sum($R)`.
+    - Enables domain-specific query languages (e.g., `similarity`, `contains`).
+
 ---
 
 ## Technical Debt / Refactoring
