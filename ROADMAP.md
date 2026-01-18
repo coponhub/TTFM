@@ -72,7 +72,11 @@ Transition to a robust schema that separates system-generated metadata from user
     - [x] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
     - [x] Implement `Unified View (oneview)` with `name` and `origin` resolution logic.
 
-- [x] **Item Name Abstraction**:
+- **Upcoming Features**:
+    - [ ] **Advanced Query Features**:
+        - [ ] **集約 (Aggregation)**: `sum(size:)`, `count(ext:jpg)` 等の統計値計算。
+        - [ ] **グループ比較 (Grouping Comparison)**: `parentdir:(sum(size:) > 1GB)` 等のグルーピング検索。
+        - [ ] **射影 (Projection)**: `type:` による値の抽出。
     - [x] Implement `name` tag support in query parser and search results.
     - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
