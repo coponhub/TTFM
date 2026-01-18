@@ -354,7 +354,7 @@ fn test_complex_search_combinations() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
-    
+
     // Create deterministic test data
     // 15 .rs files
     for i in 0..15 {
@@ -370,7 +370,7 @@ fn test_complex_search_combinations() {
     std::fs::write(root.join("LICENSE"), "").unwrap();
     std::fs::write(root.join("readme.txt"), "").unwrap();
 
-    let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. Type Glob + Value Glob (exte*:r*)
@@ -384,20 +384,30 @@ fn test_complex_search_combinations() {
     std::fs::write(root.join("main.rs"), "content").unwrap();
     // Re-index to update metadata
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
-    
+
     let results = fm.search("exte*:rs & size:>0").unwrap();
     assert_eq!(results.len(), 1, "exte*:rs & size:>0 should match main.rs");
 
     // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
     let results = fm.search("name:*.toml | name:^LIC").unwrap();
     // Verify correct items are present (ignoring extra matches)
-    assert!(results.iter().any(|r| r.name == "Cargo.toml"), "Should find Cargo.toml");
-    assert!(results.iter().any(|r| r.name == "LICENSE"), "Should find LICENSE");
+    assert!(
+        results.iter().any(|r| r.name == "Cargo.toml"),
+        "Should find Cargo.toml"
+    );
+    assert!(
+        results.iter().any(|r| r.name == "LICENSE"),
+        "Should find LICENSE"
+    );
 
     // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
     let all_rs = fm.search("exte*:rs").unwrap().len();
     let results_diff = fm.search("exte*:rs - name:mod*").unwrap();
-    assert_eq!(results_diff.len(), all_rs - 1, "Difference should remove mod.rs");
+    assert_eq!(
+        results_diff.len(),
+        all_rs - 1,
+        "Difference should remove mod.rs"
+    );
     assert!(results_diff.iter().all(|r| r.name != "mod.rs"));
 
     // 5. Grouping + Glob Types + Comparison
@@ -410,7 +420,7 @@ fn test_complex_search_combinations() {
     let results = fm.search("name:*.rs & name:^mai").unwrap();
     assert!(results.len() >= 1);
     assert!(results.iter().all(|r| r.name == "main.rs"));
-    
+
     // 7. Bracket Glob (name:[m]ain.rs)
     let results = fm.search("name:[m]ain.rs").unwrap();
     assert!(results.len() >= 1);
@@ -436,7 +446,7 @@ fn test_escaping_behavior() {
     // Setup explicit temp dir for file creation
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    
+
     // Create special files
     File::create(root.join("colon:file.txt")).unwrap();
     File::create(root.join("space file.txt")).unwrap();
@@ -444,7 +454,7 @@ fn test_escaping_behavior() {
     File::create(root.join("normal.txt")).unwrap();
 
     let db_dir = root.join(".ttfm/db");
-    let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. Escaped Colon (Using raw string)

@@ -251,6 +251,38 @@ pub fn parquet_query(path: &str) -> SelectStatement {
         .to_owned()
 }
 
+/// 単位付きのサイズ文字列（例: "1.5MB", "100KiB", "2PB"）をバイト数に変換します。
+/// 単位は B, KB, MB, GB, TB, PB (1024累乗) をサポートします。
+pub fn parse_size(s: &str) -> Option<i64> {
+    let s = s.trim().to_uppercase();
+    if s.is_empty() {
+        return None;
+    }
+
+    // 数値部分と単位部分を分離
+    let unit_start = s.find(|c: char| !c.is_numeric() && c != '.');
+
+    let (num_part, unit_part) = match unit_start {
+        Some(idx) => s.split_at(idx),
+        None => (s.as_str(), ""),
+    };
+
+    let val: f64 = num_part.trim().parse().ok()?;
+    let unit = unit_part.trim();
+
+    let multiplier: i64 = match unit {
+        "" | "B" => 1,
+        "KB" | "KIB" | "K" => 1024,
+        "MB" | "MIB" | "M" => 1024 * 1024,
+        "GB" | "GIB" | "G" => 1024 * 1024 * 1024,
+        "TB" | "TIB" | "T" => 1024 * 1024 * 1024 * 1024,
+        "PB" | "PIB" | "P" => 1024 * 1024 * 1024 * 1024 * 1024,
+        _ => return None,
+    };
+
+    Some((val * multiplier as f64) as i64)
+}
+
 /// メタデータ取得エラー時にエラー値を返すためのラッパー。
 pub struct SafeMetadata {
     len: i64,
@@ -353,5 +385,35 @@ mod tests {
         assert_eq!(safe_m.len(), crate::types::METADATA_ERROR);
         assert_eq!(safe_m.modified(), crate::types::METADATA_ERROR);
         assert!(!safe_m.is_dir());
+    }
+
+    #[test]
+    fn test_parse_size() {
+        // 標準単位 (大文字小文字・スペース混在)
+        assert_eq!(parse_size("1024"), Some(1024));
+        assert_eq!(parse_size("1KB"), Some(1024));
+        assert_eq!(parse_size("1 kb"), Some(1024));
+        assert_eq!(parse_size("1.5MB"), Some(1572864));
+        assert_eq!(parse_size("1GB"), Some(1073741824));
+
+        // 巨大サイズ (TB, PB)
+        assert_eq!(parse_size("1TB"), Some(1099511627776));
+        assert_eq!(parse_size("1PB"), Some(1125899906842624));
+
+        // バイナリ接頭辞 (KiB, MiB, ...)
+        assert_eq!(parse_size("1KiB"), Some(1024));
+        assert_eq!(parse_size("1.5MiB"), Some(1572864));
+        assert_eq!(parse_size("1GiB"), Some(1073741824));
+        assert_eq!(parse_size("1 TiB"), Some(1099511627776));
+        assert_eq!(parse_size("1 PiB"), Some(1125899906842624));
+
+        // ショートハンド (K, M, G, ...)
+        assert_eq!(parse_size("1K"), Some(1024));
+        assert_eq!(parse_size("1M"), Some(1048576));
+
+        // 異常系
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("abc"), None);
+        assert_eq!(parse_size("100XYZ"), None);
     }
 }

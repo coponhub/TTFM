@@ -71,7 +71,6 @@ mod tests {
     use super::*;
     use crate::functions::TagFunction;
     use crate::taggers::{ColumnDef, TagValue, Tagger};
-    use crate::types::TypedTag;
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 
     // Mock TagFunction implementation

@@ -1039,16 +1039,9 @@ impl TagFunction for ContentTagFunction {
 mod tests {
     use super::*;
     use crate::db::Col;
-    use crate::types::{Label, TagType, TypedTag};
     use sea_query::{PostgresQueryBuilder, Query};
 
-    // Helper to create a TypedTag
-    fn ttag(key: &str, value: &str) -> TypedTag {
-        TypedTag {
-            tagtype: TagType::Custom(key.to_string()),
-            label: Label::String(value.to_string()),
-        }
-    }
+    // Helper functions for tests...
 
     #[test]
     fn test_extension_tagger_logic() {

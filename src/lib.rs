@@ -268,10 +268,11 @@ impl FileManager {
     pub fn delete_database() -> Result<()> {
         let home = get_ttfm_home()?;
         let db_dir = home.join("db");
-        
+
         if db_dir.exists() {
-            std::fs::remove_dir_all(&db_dir)
-                .with_context(|| format!("Failed to remove database directory: {:?}", db_dir))?;
+            std::fs::remove_dir_all(&db_dir).with_context(|| {
+                format!("Failed to remove database directory: {:?}", db_dir)
+            })?;
         }
         Ok(())
     }

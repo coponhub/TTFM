@@ -1,5 +1,5 @@
 use crate::query::{QueryFunction, QueryNode};
-use crate::types::{Label, SType, TypedTag};
+use crate::types::{Label, SType, TagType, TypedTag};
 use path_slash::PathExt;
 use std::path::Path;
 
@@ -129,7 +129,20 @@ impl QueryFunction for SizeQuery {
         SType::Size.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new("size", label.clone()))
+        let label = self.normalize_label(label);
+        QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
+    }
+    fn normalize_label(&self, label: &Label) -> Label {
+        match label {
+            Label::String(s) | Label::Literal(s) => {
+                if let Some(bytes) = crate::util::parse_size(s) {
+                    Label::Integer(bytes)
+                } else {
+                    label.clone()
+                }
+            }
+            _ => label.clone(),
+        }
     }
 }
 

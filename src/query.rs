@@ -1,11 +1,11 @@
-use crate::db::{Col, CustomFunc, Tbl};
+use crate::db::{Col, Tbl};
 use crate::types::{Label, SType, TagType, TypedTag};
 use crate::util::DotOk;
 use anyhow::{anyhow, Result};
 use pest::Parser;
 use pest_derive::Parser;
 use sea_query::{
-    Alias, BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr,
+    Alias, BinOper, Condition, Expr, Query, SelectStatement,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -304,8 +304,6 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
     }
 }
 
-
-
 fn build_tag_label(pair: Pair<Rule>) -> Result<Label> {
     // tag_label = { quoted_string | number | unquoted_tag_string }
     let inner = pair.into_inner().next().unwrap();
@@ -378,6 +376,12 @@ pub trait QueryFunction: Send + Sync {
     fn name(&self) -> &str;
     /// タグを別のクエリ構造（QueryNode）へ展開します。
     fn expand(&self, label: &Label) -> QueryNode;
+
+    /// ラベルの値を正規化します（例: "1MB" -> 1048576）。
+    /// デフォルトでは元のラベルをそのまま返します。
+    fn normalize_label(&self, label: &Label) -> Label {
+        label.clone()
+    }
 }
 
 /// QueryFunction を管理するレジストリ。
@@ -441,6 +445,18 @@ impl QueryFunctionRegistry {
         // それ以外（カスタムタグまたは未登録の標準タグ）はそのまま TypedTag として保持
         QueryNode::TypedTag(TypedTag { tagtype, label })
     }
+
+    /// 指定された TagType に対応する QueryFunction を返します。
+    pub fn get_function(
+        &self,
+        tagtype: &TagType,
+    ) -> Option<&dyn QueryFunction> {
+        if let TagType::Base(stag) = tagtype {
+            let key_str: &'static str = (*stag).into();
+            return self.functions.get(key_str).map(|f| f.as_ref());
+        }
+        None
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -482,6 +498,43 @@ pub struct ComparisonNode {
     pub rest: Vec<(ComparisonOp, Operand)>,
 }
 
+impl ComparisonNode {
+    /// 比較演算内のリテラルを、関係するタグの QueryFunction に従って正規化します。
+    pub fn expand(mut self, registry: &QueryFunctionRegistry) -> Self {
+        // この比較に関係する代表的な QueryFunction を探す
+        let mut rep_func = None;
+
+        if let Operand::TypeRef(tt) = &self.first {
+            rep_func = registry.get_function(tt);
+        }
+
+        if rep_func.is_none() {
+            for (_, op) in &self.rest {
+                if let Operand::TypeRef(tt) = op {
+                    if let Some(f) = registry.get_function(tt) {
+                        rep_func = Some(f);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 関数が見つかった場合、すべてのリテラルオペランドを正規化する
+        if let Some(f) = rep_func {
+            if let Operand::Literal(label) = &mut self.first {
+                *label = f.normalize_label(label);
+            }
+            for (_, op) in &mut self.rest {
+                if let Operand::Literal(label) = op {
+                    *label = f.normalize_label(label);
+                }
+            }
+        }
+
+        self
+    }
+}
+
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
@@ -519,7 +572,9 @@ impl QueryNode {
             QueryNode::Complement(c) => {
                 QueryNode::Complement(Box::new(c.expand(registry)))
             }
-            QueryNode::Comparison(cmp) => QueryNode::Comparison(cmp),
+            QueryNode::Comparison(cmp) => {
+                QueryNode::Comparison(cmp.expand(registry))
+            }
             QueryNode::ColumnMatch { tag, label } => {
                 QueryNode::ColumnMatch { tag, label }
             }
@@ -709,7 +764,6 @@ impl QueryNode {
         }
     }
 
-
     fn apply_generic_comparison(
         &self,
         mut q: SelectStatement,
@@ -836,8 +890,7 @@ impl QueryNode {
                 };
 
                 cond = cond.add(
-                    Expr::col(Col::LabelStr)
-                        .binary(glob, Expr::val(val_str)),
+                    Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)),
                 );
                 // 数値やブーリアンとしてもチェック
                 if let Ok(i) = s.parse::<i64>() {
