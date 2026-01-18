@@ -26,7 +26,10 @@ factor = {
     "(" ~ expr ~ ")" 
   | typed_tag
   | comparison
+  | projection
 }
+
+projection = { type_ref }
 
 // --- Label Comparison ---
 // Format: operand cmp_op operand [cmp_op operand ...]

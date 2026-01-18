@@ -18,6 +18,12 @@ impl QueryFunction for DirectoryQuery {
             )),
         ])
     }
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::TypedTag(TypedTag::new(
+            <&str>::from(SType::IsDir).to_string(),
+            Label::String("true".to_string()),
+        ))
+    }
 }
 
 /// "filename:name" -> "name:name & is_dir:false" への展開
@@ -34,6 +40,12 @@ impl QueryFunction for FilenameQuery {
                 Label::String("false".to_string()),
             )),
         ])
+    }
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::TypedTag(TypedTag::new(
+            <&str>::from(SType::IsDir).to_string(),
+            Label::String("false".to_string()),
+        ))
     }
 }
 
@@ -144,6 +156,9 @@ impl QueryFunction for SizeQuery {
             _ => label.clone(),
         }
     }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
 }
 
 /// "mtime:label" -> ColumnMatch(SType::Mtime, label)
@@ -154,6 +169,9 @@ impl QueryFunction for MtimeQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new("mtime", label.clone()))
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
     }
 }
 
@@ -168,5 +186,8 @@ impl QueryFunction for OriginQuery {
             tag: SType::Origin,
             label: label.clone(),
         }
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
     }
 }

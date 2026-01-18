@@ -4,9 +4,7 @@ use crate::util::DotOk;
 use anyhow::{anyhow, Result};
 use pest::Parser;
 use pest_derive::Parser;
-use sea_query::{
-    Alias, BinOper, Condition, Expr, Query, SelectStatement,
-};
+use sea_query::{Alias, BinOper, Condition, Expr, Query, SelectStatement};
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Parser)]
@@ -98,6 +96,7 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
                 Rule::expr => build_ast(inner),
                 Rule::typed_tag => build_typed_tag(inner),
                 Rule::comparison => build_comparison(inner),
+                Rule::projection => build_projection(inner),
                 _ => {
                     Err(anyhow!("Unknown factor inner: {:?}", inner.as_rule()))
                 }
@@ -138,6 +137,21 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
         inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
     let label = build_tag_label(label_pair)?;
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
+}
+
+fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
+    // projection = { type_ref }
+    // type_ref = ${ tag_type ~ ":" }
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| anyhow!("Missing projection inner"))?;
+    let mut type_ref_inner = inner.into_inner();
+    let type_pair = type_ref_inner
+        .next()
+        .ok_or_else(|| anyhow!("Missing tag key in projection"))?;
+    let tagtype = build_tag_type(type_pair)?;
+    Ok(QueryNode::Projection(tagtype))
 }
 
 fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
@@ -382,6 +396,11 @@ pub trait QueryFunction: Send + Sync {
     fn normalize_label(&self, label: &Label) -> Label {
         label.clone()
     }
+
+    /// ラベル取得を基本構造へ展開します。
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(_tagtype)
+    }
 }
 
 /// QueryFunction を管理するレジストリ。
@@ -456,6 +475,24 @@ impl QueryFunctionRegistry {
             return self.functions.get(key_str).map(|f| f.as_ref());
         }
         None
+    }
+
+    pub fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        // LiteralCustom の場合は魔法（展開関数）をスキップする
+        if let TagType::LiteralCustom(_) = tagtype {
+            return QueryNode::Projection(tagtype);
+        }
+
+        // Baseタグ（SType）であれば、レジストリから展開関数を探す
+        if let TagType::Base(stag) = tagtype {
+            let key_str: &'static str = stag.into();
+            if let Some(f) = self.functions.get(key_str) {
+                return f.expand_projection(tagtype);
+            }
+        }
+
+        // それ以外（カスタムタグまたは未登録の標準タグ）はそのまま Projection として保持
+        QueryNode::Projection(tagtype)
     }
 }
 
@@ -553,6 +590,8 @@ pub enum QueryNode {
     TypedTag(TypedTag),
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
     ColumnMatch { tag: SType, label: Label },
+    /// ラベル取得 (Projection)
+    Projection(TagType),
 }
 
 impl QueryNode {
@@ -581,6 +620,7 @@ impl QueryNode {
             QueryNode::TypedTag(tt) => {
                 registry.process_tag(tt.tagtype, tt.label)
             }
+            QueryNode::Projection(tt) => registry.expand_projection(tt),
         }
     }
 
@@ -599,6 +639,9 @@ impl QueryNode {
             }
             QueryNode::TypedTag(tt) => {
                 self.build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
+            }
+            QueryNode::Projection(tt) => {
+                self.build_projection_sql(&tt, view_name)
             }
         }
     }
@@ -809,6 +852,29 @@ impl QueryNode {
         q
     }
 
+    fn build_projection_sql(
+        &self,
+        tagtype: &TagType,
+        view: &str,
+    ) -> SelectStatement {
+        let mut q = Query::select();
+        q.column(Col::ItemId).distinct().from(Alias::new(view));
+
+        q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()));
+
+        // ラベル値が NULL でないことを確認する。
+        // oneview は物理カラム（extension, path等）を unpivot するため、
+        // 値がなくても行自体は存在する可能性がある。
+        let mut cond = Condition::any();
+        cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
+
+        q.and_where(cond.into());
+        q
+    }
+
     fn build_column_match_sql(
         &self,
         tag: SType,
@@ -921,6 +987,13 @@ impl QueryNode {
         types.into_iter().collect()
     }
 
+    /// このクエリで投影（Projection）されているタグ型の一覧を取得します。
+    pub fn get_projections(&self) -> Vec<String> {
+        let mut projections = std::collections::HashSet::new();
+        self.collect_projections(&mut projections);
+        projections.into_iter().collect()
+    }
+
     fn collect_types(&self, types: &mut std::collections::HashSet<String>) {
         match self {
             QueryNode::And(nodes) => {
@@ -947,6 +1020,32 @@ impl QueryNode {
             QueryNode::TypedTag(tt) => {
                 types.insert(tt.tagtype.as_str().to_string());
             }
+            QueryNode::Projection(tt) => {
+                types.insert(tt.as_str().to_string());
+            }
+        }
+    }
+
+    fn collect_projections(
+        &self,
+        projections: &mut std::collections::HashSet<String>,
+    ) {
+        match self {
+            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                for node in nodes {
+                    node.collect_projections(projections);
+                }
+            }
+            QueryNode::Difference(l, _) => {
+                l.collect_projections(projections);
+            }
+            QueryNode::Complement(c) => {
+                c.collect_projections(projections);
+            }
+            QueryNode::Projection(tt) => {
+                projections.insert(tt.as_str().to_string());
+            }
+            _ => {}
         }
     }
 }

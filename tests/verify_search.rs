@@ -68,18 +68,18 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     for (query, expected_count) in test_cases {
         print!("Query: '{:<25}' -> ", query);
 
-        let results = fm.search(query).unwrap_or_default();
+        let response = fm.search(query).unwrap_or_default();
 
-        if results.len() == expected_count {
-            println!("OK ({} hits)", results.len());
+        if response.results.len() == expected_count {
+            println!("OK ({} hits)", response.results.len());
         } else {
             println!(
                 "FAIL (Expected {}, got {})",
                 expected_count,
-                results.len()
+                response.results.len()
             );
 
-            for r in &results {
+            for r in &response.results {
                 println!(" - Found: {:?}", r);
             }
 
@@ -117,34 +117,34 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     // 1. 基本的なサイズ比較
     println!("Testing 'size: > 300'...");
     let res = fm.search("size: > 300")?;
-    assert_eq!(res.len(), 2); // medium, large
+    assert_eq!(res.results.len(), 2); // medium, large
 
     // 2. 連鎖比較 (Between)
     println!("Testing '200 < size: < 800'...");
     let res = fm.search("200 < size: < 800")?;
-    assert_eq!(res.len(), 1);
-    assert!(res[0].name.contains("medium.txt"));
+    assert_eq!(res.results.len(), 1);
+    assert!(res.results[0].name.contains("medium.txt"));
 
     // 3. カスタムタグ (TRY_CAST 経由)
     println!("Testing custom tag with TRY_CAST...");
-    let item_id = res[0].id.to_string();
+    let item_id = res.results[0].id.to_string();
     fm.tag_item(&item_id, "width:640")?;
 
     let res = fm.search("width: > 500")?;
-    assert_eq!(res.len(), 1);
-    assert_eq!(res[0].id.to_string(), item_id);
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].id.to_string(), item_id);
 
     // 4. 複数条件の組み合わせ
     println!("Testing multiple conditions...");
     let res = fm.search("size: > 300 & width: > 500")?;
-    assert_eq!(res.len(), 1);
-    assert_eq!(res[0].name, "medium.txt");
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].name, "medium.txt");
 
     // 5. スペースなしフォーマット
     println!("Testing 'width:>500' (no spaces)...");
     let res = fm.search("width:>500")?;
-    assert_eq!(res.len(), 1);
-    assert_eq!(res[0].id.to_string(), item_id);
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].id.to_string(), item_id);
 
     // 6. その他の比較演算子 (>=, <=, ==, ^=)
     println!("Testing other operators...");
@@ -152,31 +152,31 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     // >= (Inclusive)
     println!("Testing 'size: >= 500'...");
     let res = fm.search("size: >= 500")?;
-    assert_eq!(res.len(), 2, "size: >= 500 failed"); // medium(500), large(1000)
+    assert_eq!(res.results.len(), 2, "size: >= 500 failed"); // medium(500), large(1000)
 
     // <= (Inclusive)
     println!("Testing 'size: <= 500'...");
     // 0-byte directory might match <= 500, so exclude directory explicitly
     let res = fm.search("size: <= 500 & is_dir:false")?;
-    assert_eq!(res.len(), 2, "size: <= 500 failed"); // small(100), medium(500)
+    assert_eq!(res.results.len(), 2, "size: <= 500 failed"); // small(100), medium(500)
 
     // == (Equal)
     println!("Testing 'size: == 500'...");
     let res = fm.search("size: == 500")?;
-    assert_eq!(res.len(), 1, "size: == 500 failed"); // medium(500)
+    assert_eq!(res.results.len(), 1, "size: == 500 failed"); // medium(500)
 
     // ^= (Not Equal)
     println!("Testing 'size: ^= 500'...");
     let res = fm.search("size: ^= 500 & is_dir:false")?;
-    assert_eq!(res.len(), 2); // small(100), large(1000)
+    assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // ^ (Not Equal shorthand)
     let res = fm.search("size: ^ 500 & is_dir:false")?;
-    assert_eq!(res.len(), 2); // small(100), large(1000)
+    assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // Custom tag exact match (Cast check)
     let res = fm.search("width: == 640")?;
-    assert_eq!(res.len(), 1);
+    assert_eq!(res.results.len(), 1);
 
     // Custom tag not equal
     let res = fm.search("width: ^= 999")?;
@@ -185,7 +185,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     // Since only one item has 'width' (640), and 640 != 999, it should match that one item.
     // NOTE: The current logic for generic generic tags is: type='...' AND TRY_CAST(label) != ...
     // So it implicitely filters by type='width'.
-    assert_eq!(res.len(), 1);
+    assert_eq!(res.results.len(), 1);
 
     Ok(())
 }
@@ -221,7 +221,7 @@ fn test_or_negation_complex_behavior() {
 
     let mut found_rs_file = false;
 
-    for r in results {
+    for r in results.results {
         if r.item_kind != "file" && r.item_kind == "type" {
             found_type_item = true;
         }
@@ -264,74 +264,77 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     let results = fm.search("filename:*alpha*").unwrap();
 
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
-    assert!(results[0].primary_value().unwrap().contains("alpha"));
+    assert!(results.results[0]
+        .primary_value()
+        .unwrap()
+        .contains("alpha"));
 
     // 2. 複数のワイルドカード
 
     let results = fm.search("filename:project*").unwrap();
 
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.results.len(), 2);
 
     // 3. ワイルドカードなし (完全一致として動作)
 
     let results = fm.search("filename:project").unwrap();
 
-    assert_eq!(results.len(), 0);
+    assert_eq!(results.results.len(), 0);
 
     let results = fm.search("filename:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
     // 4. ? (任意の一文字)
     let results = fm.search("filename:project_alph?.pdf").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name, "project_alpha.pdf");
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(results.results[0].name, "project_alpha.pdf");
 
     // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
     let results = fm.search("filename:project_[ab]*").unwrap();
-    assert_eq!(results.len(), 2); // alpha and beta
+    assert_eq!(results.results.len(), 2); // alpha and beta
 
     // 6. [!...] (否定文字セット) - beta のみを拾う
     let results = fm.search("filename:project_[!a]eta*").unwrap();
-    assert_eq!(results.len(), 1); // beta only
+    assert_eq!(results.results.len(), 1); // beta only
 
     // 7. クォート内でのGlob (無効化されるはず)
     let results = fm.search("filename:\"project_[ab]*\"").unwrap();
-    assert_eq!(results.len(), 0); // リテラル一致を試みるため0件
+    assert_eq!(results.results.len(), 0); // リテラル一致を試みるため0件
 
     // 8. クォートでの完全一致
     let results = fm.search("filename:\"project_alpha.pdf\"").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
     // 9. Type側の引用符
     let results = fm.search("\"filename\":project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
     // 10. Type側のGlob (実装済みか確認)
     // filename が対象になるはず
     let results = fm.search("*name:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.results.len(), 2);
 
     // 11. Type Wildcard + Value Prefix (Regression Test)
     // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
     // This confirms that 'exte*' parses as a typed tag (not comparison) and '^pd' becomes 'pd*' glob.
     let results = fm.search("exte*:^pd").unwrap();
     assert!(
-        results.len() > 0,
+        results.results.len() > 0,
         "Should match .pdf files via 'exte*' type glob and '^pd' value prefix"
     );
 
     // 12. Type側のGlob ([...] / [!...])
     let results = fm.search("[f]ilename:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
     let results = fm.search("[!f]ilename:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 0); // filename にはマッチしないはず
+    assert_eq!(results.results.len(), 0); // filename にはマッチしないはず
 
     // 13. Type側のGlob (?)
     let results = fm.search("file?ame:project_alpha.pdf").unwrap();
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.results.len(), 1);
 
     // 13. バックスラッシュ・エスケープ
     // テスト用の特殊ファイルを作成
@@ -342,8 +345,8 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // バックスラッシュなしだとGlobとして解釈され、マッチしない可能性がある（または意図しないマッチ）
     // ここでは \[WIP\] とすることでリテラルとして扱う
     let results = fm.search(r"filename:\[WIP\]_*").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name, "[WIP]_test.txt");
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(results.results[0].name, "[WIP]_test.txt");
 
     Ok(())
 }
@@ -376,7 +379,10 @@ fn test_complex_search_combinations() {
     // 1. Type Glob + Value Glob (exte*:r*)
     // Should match 15 test_src + main + lib + mod = 18 files. (Extension is "rs")
     let results = fm.search("exte*:r*").unwrap();
-    assert!(results.len() >= 18, "exte*:r* should match all rs files");
+    assert!(
+        results.results.len() >= 18,
+        "exte*:r* should match all rs files"
+    );
 
     // 2. Type Glob + AND + Comparison (exte*:rs & size:>0)
     // All files are empty (size 0), so this should be 0.
@@ -386,58 +392,62 @@ fn test_complex_search_combinations() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     let results = fm.search("exte*:rs & size:>0").unwrap();
-    assert_eq!(results.len(), 1, "exte*:rs & size:>0 should match main.rs");
+    assert_eq!(
+        results.results.len(),
+        1,
+        "exte*:rs & size:>0 should match main.rs"
+    );
 
     // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
     let results = fm.search("name:*.toml | name:^LIC").unwrap();
     // Verify correct items are present (ignoring extra matches)
     assert!(
-        results.iter().any(|r| r.name == "Cargo.toml"),
+        results.results.iter().any(|r| r.name == "Cargo.toml"),
         "Should find Cargo.toml"
     );
     assert!(
-        results.iter().any(|r| r.name == "LICENSE"),
+        results.results.iter().any(|r| r.name == "LICENSE"),
         "Should find LICENSE"
     );
 
     // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
-    let all_rs = fm.search("exte*:rs").unwrap().len();
+    let all_rs = fm.search("exte*:rs").unwrap().results.len();
     let results_diff = fm.search("exte*:rs - name:mod*").unwrap();
     assert_eq!(
-        results_diff.len(),
+        results_diff.results.len(),
         all_rs - 1,
         "Difference should remove mod.rs"
     );
-    assert!(results_diff.iter().all(|r| r.name != "mod.rs"));
+    assert!(results_diff.results.iter().all(|r| r.name != "mod.rs"));
 
     // 5. Grouping + Glob Types + Comparison
     // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
     let results = fm.search("(exte*:rs | exte*:toml) & size:>0").unwrap();
-    assert!(results.len() >= 1);
-    assert!(results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().all(|r| r.name == "main.rs"));
 
     // 6. Value Glob + Value Prefix AND (name:*.rs & name:^mai)
     let results = fm.search("name:*.rs & name:^mai").unwrap();
-    assert!(results.len() >= 1);
-    assert!(results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().all(|r| r.name == "main.rs"));
 
     // 7. Bracket Glob (name:[m]ain.rs)
     let results = fm.search("name:[m]ain.rs").unwrap();
-    assert!(results.len() >= 1);
-    assert!(results.iter().any(|r| r.name == "main.rs"));
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().any(|r| r.name == "main.rs"));
 
     // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
     let results = fm.search("exte*:r?").unwrap();
-    assert!(results.len() >= 18);
+    assert!(results.results.len() >= 18);
 
     // 9. Double Glob (nam*:*.rs)
     let results = fm.search("nam*:*.rs").unwrap();
-    assert!(results.len() >= 18);
+    assert!(results.results.len() >= 18);
 
     // 10. Type Prefix + Value Glob (type:^fi & name:*.rs)
     // Matches 'file' type items which are .rs
     let results = fm.search("type:^fi & name:*.rs").unwrap();
-    assert!(results.len() >= 18);
+    assert!(results.results.len() >= 18);
 }
 
 #[test]
@@ -459,28 +469,28 @@ fn test_escaping_behavior() {
 
     // 1. Escaped Colon (Using raw string)
     let res = fm.search(r"name:colon\:file.txt").unwrap();
-    assert!(res.len() >= 1, "Should match escaped colon");
-    assert!(res.iter().any(|r| r.name == "colon:file.txt"));
+    assert!(res.results.len() >= 1, "Should match escaped colon");
+    assert!(res.results.iter().any(|r| r.name == "colon:file.txt"));
 
     // 2. Escaped Space
     let res = fm.search(r"name:space\ file.txt").unwrap();
-    assert!(res.len() >= 1, "Should match escaped space");
-    assert!(res.iter().any(|r| r.name == "space file.txt"));
+    assert!(res.results.len() >= 1, "Should match escaped space");
+    assert!(res.results.iter().any(|r| r.name == "space file.txt"));
 
     // 3. Escaped Caret
     let res = fm.search(r"name:caret\^file.txt").unwrap();
-    assert!(res.len() >= 1, "Should match escaped caret");
-    assert!(res.iter().any(|r| r.name == "caret^file.txt"));
+    assert!(res.results.len() >= 1, "Should match escaped caret");
+    assert!(res.results.iter().any(|r| r.name == "caret^file.txt"));
 
     // 4. Quoted Colon
     let res = fm.search(r#"name:"colon:file.txt""#).unwrap();
-    assert!(res.len() >= 1, "Should match quoted colon");
+    assert!(res.results.len() >= 1, "Should match quoted colon");
 
     // 5. Double Escape (colon + glob)
     let res = fm.search(r"name:colon\:*.txt").unwrap();
-    assert!(res.len() >= 1, "Should match colon + glob");
+    assert!(res.results.len() >= 1, "Should match colon + glob");
 
     // 6. Mixed Logic
     let res = fm.search(r"name:colon\:* | name:space\ *").unwrap();
-    assert!(res.len() >= 2, "Should match combined");
+    assert!(res.results.len() >= 2, "Should match combined");
 }

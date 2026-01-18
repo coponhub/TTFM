@@ -206,6 +206,15 @@ pub struct SearchResult {
     pub tags: Vec<(String, String)>,
 }
 
+/// 検索クエリの結果全体を表す構造体。
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct SearchResponse {
+    /// ヒットしたアイテムのリスト
+    pub results: Vec<SearchResult>,
+    /// クエリで明示的に投影（Projection）されたタグ型の一覧
+    pub projections: Vec<String>,
+}
+
 impl SearchResult {
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -114,13 +115,13 @@ fn main() -> Result<()> {
         }
         Commands::Search { query } => {
             println!("Searching for: '{}'", query);
-            let results = fm.search(query)?;
-            print_results(&fm, &results);
+            let response = fm.search(query)?;
+            print_results(&fm, &response);
         }
         Commands::List => {
             println!("Listing files...");
-            let results = fm.search("")?;
-            print_results(&fm, &results);
+            let response = fm.search("")?;
+            print_results(&fm, &response);
         }
         Commands::Tag { item, tag } => {
             fm.tag_item(item, tag)?;
@@ -132,13 +133,13 @@ fn main() -> Result<()> {
             println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
-            let results = fm.search(item)?;
-            if results.is_empty() {
+            let response = fm.search(item)?;
+            if response.results.is_empty() {
                 println!("No items matched query: '{}'", item);
                 return Ok(());
             }
 
-            println!("Matched {} items.", results.len());
+            println!("Matched {} items.", response.results.len());
             let do_update = if cli.yes {
                 true
             } else {
@@ -151,8 +152,8 @@ fn main() -> Result<()> {
             };
 
             if do_update {
-                fm.update_ranks(&results, *value)?;
-                println!("Updated {} items.", results.len());
+                fm.update_ranks(&response.results, *value)?;
+                println!("Updated {} items.", response.results.len());
             } else {
                 println!("Aborted.");
             }
@@ -197,7 +198,8 @@ fn get_terminal_width() -> usize {
 }
 
 /// 検索結果の一覧を標準出力に表示します。
-fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
+fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
+    let results = &response.results;
     if results.is_empty() {
         println!("No items found.");
         return;
@@ -241,6 +243,18 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
+            // 投影対象の列があれば最優先
+            let is_proj_a = response.projections.contains(a);
+            let is_proj_b = response.projections.contains(b);
+
+            if is_proj_a != is_proj_b {
+                return if is_proj_a {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+
             let r_a = type_ranks
                 .get(a)
                 .cloned()
@@ -289,6 +303,18 @@ fn print_results(fm: &FileManager, results: &[ttfm::types::SearchResult]) {
 
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
+            // 投影対象の列があれば最優先
+            let is_proj_a = response.projections.contains(a);
+            let is_proj_b = response.projections.contains(b);
+
+            if is_proj_a != is_proj_b {
+                return if is_proj_a {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
+
             let r_a = type_ranks
                 .get(a)
                 .cloned()

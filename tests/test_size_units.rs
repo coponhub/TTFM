@@ -33,19 +33,15 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         // 基本的な比較
         ("size: >= 512KB & is_dir:false", 3), // half, one_half, ten
         ("size: < 1MB & is_dir:false", 2),    // empty, half
-        ("size: == 512KiB", 1),                // half_mb.bin
-        
+        ("size: == 512KiB", 1),               // half_mb.bin
         // 小数点
         ("size: <= 1.5MB & is_dir:false", 3), // empty, half, one_half
         ("size: > 1.5MiB & is_dir:false", 1), // ten_mb.bin
-
         // 連鎖比較
         ("600KB < size: < 11MB & is_dir:false", 2), // one_half, ten
         ("1MB <= size: <= 1.5MB & is_dir:false", 1), // one_half
-
         // 不一致
         ("size: ^= 0B & is_dir:false", 3), // half, one_half, ten
-
         // 単位のバリエーション (大文字小文字・ショートハンド)
         ("size: == 10m & is_dir:false", 1),
         ("size: == 512k & is_dir:false", 1),

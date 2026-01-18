@@ -306,12 +306,14 @@ impl FileManager {
     }
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
-    pub fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
+    pub fn search(&self, query: &str) -> Result<types::SearchResponse> {
         if !self.path_for_target(TargetTable::FileReferences).exists() {
             return Err(anyhow::anyhow!(
                 "Index not found. Please run 'index' command first."
             ));
         }
+
+        let mut projections = Vec::new();
 
         // 1. 検索条件にマッチするIDを抽出するクエリ
         let sub_query = if query.trim().is_empty() {
@@ -323,7 +325,9 @@ impl FileManager {
         } else {
             let node = crate::query::parse(query)?;
             let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-            node.expand(&q_reg).to_sql("oneview")
+            let expanded = node.expand(&q_reg);
+            projections = expanded.get_projections();
+            expanded.to_sql("oneview")
         };
 
         // DuckDBにおいて、複雑なビューに対する集計(MAXなど)と
@@ -484,7 +488,10 @@ impl FileManager {
             results.push(row?);
         }
 
-        results.to_ok()
+        Ok(types::SearchResponse {
+            results,
+            projections,
+        })
     }
 
     /// インデックスディレクトリ全体を削除し、完全にクリーンな状態にします。
