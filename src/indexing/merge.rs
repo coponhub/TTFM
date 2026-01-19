@@ -363,6 +363,7 @@ impl MergeQueryParts {
                 .and_where(Expr::col(col_iden).is_not_null());
             source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
         }
+
         source_q
     }
 

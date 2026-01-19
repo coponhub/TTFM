@@ -19,20 +19,20 @@ fn test_rank_sorting_files() {
     // 2. クエリでランクを設定
     // high.txt を 100 に
     let res_high = fm.search("filename:high.txt").unwrap();
-    fm.update_ranks(&res_high, 100).unwrap();
+    fm.update_ranks(&res_high.results, 100).unwrap();
 
     // mid.txt を 50 に
     let res_mid = fm.search("filename:mid.txt").unwrap();
-    fm.update_ranks(&res_mid, 50).unwrap();
+    fm.update_ranks(&res_mid.results, 50).unwrap();
 
     // 3. 検索して順序を確認
     let results = fm.search("extension:txt").unwrap();
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
-    assert!(results[0].primary_value().unwrap().contains("high.txt"));
-    assert!(results[1].primary_value().unwrap().contains("mid.txt"));
-    assert!(results[2].primary_value().unwrap().contains("low.txt"));
+    assert!(results.results[0].primary_value().unwrap().contains("high.txt"));
+    assert!(results.results[1].primary_value().unwrap().contains("mid.txt"));
+    assert!(results.results[2].primary_value().unwrap().contains("low.txt"));
 }
 
 #[test]
@@ -50,16 +50,16 @@ fn test_rank_batch_update() {
 
     // 1. *.txt のランクを一括で 10 に設定
     let results = fm.search("extension:txt").unwrap();
-    assert_eq!(results.len(), 2);
-    fm.update_ranks(&results, 10).unwrap();
+    assert_eq!(results.results.len(), 2);
+    fm.update_ranks(&results.results, 10).unwrap();
 
     // 2. 結果を確認
     let res = fm.search("extension:txt | extension:rs").unwrap();
     // ランク順に a.txt(10), b.txt(10), c.rs(0) のはず
-    assert_eq!(res.len(), 3);
-    assert!(res[0].primary_value().unwrap().contains(".txt"));
-    assert!(res[1].primary_value().unwrap().contains(".txt"));
-    assert!(res[2].primary_value().unwrap().contains(".rs"));
+    assert_eq!(res.results.len(), 3);
+    assert!(res.results[0].primary_value().unwrap().contains(".txt"));
+    assert!(res.results[1].primary_value().unwrap().contains(".txt"));
+    assert!(res.results[2].primary_value().unwrap().contains(".rs"));
 }
 
 #[test]
@@ -76,6 +76,6 @@ fn test_rank_set_by_id_low_level() {
     fm.set_rank_by_id(id, false, 500).unwrap();
 
     let results = fm.search("item_kind:note").unwrap();
-    assert_eq!(results[0].id, id);
+    assert_eq!(results.results[0].id, id);
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }

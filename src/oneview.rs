@@ -1,7 +1,7 @@
 use crate::db::{Col, SqlType, TargetTable, Tbl, Val};
 use crate::taggers::ColumnDef;
 use duckdb::{Connection, Result};
-use sea_query::{Expr, Iden, PostgresQueryBuilder, Query};
+use sea_query::{Expr, Func, Iden, PostgresQueryBuilder, Query};
 use std::path::Path;
 
 pub struct OneView;
@@ -31,6 +31,19 @@ impl OneView {
         q1.column(Col::ItemId)
             .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
             .columns(basic_cols.clone())
+            .expr_as(
+                Func::cust(crate::db::DuckDbFunc::Concat).args([
+                    Expr::col(Col::Type).into(),
+                    Expr::val(":").into(),
+                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                        Expr::col(Col::LabelStr).into(),
+                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
+                    ]).into()
+                ]),
+                Col::TypedTag,
+            )
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::BaseTags)),
                 Tbl::BaseTags,
@@ -42,6 +55,19 @@ impl OneView {
         q2.column(Col::ItemId)
             .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
             .columns(basic_cols.clone())
+            .expr_as(
+                Func::cust(crate::db::DuckDbFunc::Concat).args([
+                    Expr::col(Col::Type).into(),
+                    Expr::val(":").into(),
+                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                        Expr::col(Col::LabelStr).into(),
+                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
+                    ]).into()
+                ]),
+                Col::TypedTag,
+            )
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::SystemTags)),
                 Tbl::SystemTags,
@@ -53,6 +79,19 @@ impl OneView {
         q3.column(Col::ItemId)
             .expr_as(Expr::val(Val::User.to_string()), Col::Origin)
             .columns(basic_cols.clone())
+            .expr_as(
+                Func::cust(crate::db::DuckDbFunc::Concat).args([
+                    Expr::col(Col::Type).into(),
+                    Expr::val(":").into(),
+                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                        Expr::col(Col::LabelStr).into(),
+                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
+                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
+                    ]).into()
+                ]),
+                Col::TypedTag,
+            )
             .from_subquery(
                 crate::util::parquet_query(&path(TargetTable::UserTags)),
                 Tbl::UserTags,
@@ -85,6 +124,16 @@ impl OneView {
                 } else {
                     q.expr_as(Expr::col(iden), label_col);
                 }
+                
+                // typedtag column
+                q.expr_as(
+                    Func::cust(crate::db::DuckDbFunc::Concat).args([
+                        Expr::val(&cd.name).into(),
+                        Expr::val(":").into(),
+                        Expr::col(crate::util::col_to_iden(&cd.name)).into(),
+                    ]),
+                    Col::TypedTag
+                );
 
                 q.from_subquery(
                     crate::util::parquet_query(&parquet_path),
@@ -100,6 +149,14 @@ impl OneView {
                     .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
                     .expr_as(Expr::val(Val::ItemKind.to_string()), Col::Type)
                     .expr_as(Expr::val(Val::File.to_string()), Col::LabelStr)
+                    .expr_as(
+                        Func::cust(crate::db::DuckDbFunc::Concat).args([
+                            Expr::val(Val::ItemKind.to_string()).into(),
+                            Expr::val(":").into(),
+                            Expr::val(Val::File.to_string()).into(),
+                        ]),
+                        Col::TypedTag,
+                    )
                     .from_subquery(
                         crate::util::parquet_query(&parquet_path),
                         Tbl::FileReferences,
@@ -112,6 +169,14 @@ impl OneView {
                     .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
                     .expr_as(Expr::val(Val::Rank.to_string()), Col::Type)
                     .expr_as(Expr::col(Col::Rank), Col::LabelInt)
+                    .expr_as(
+                        Func::cust(crate::db::DuckDbFunc::Concat).args([
+                            Expr::val(Val::Rank.to_string()).into(),
+                            Expr::val(":").into(),
+                            Expr::col(Col::Rank).into(),
+                        ]),
+                        Col::TypedTag,
+                    )
                     .from_subquery(
                         crate::util::parquet_query(&parquet_path),
                         Tbl::FileReferences,
@@ -127,6 +192,14 @@ impl OneView {
                     .expr_as(
                         Expr::col(Col::Filename), // use specific col not alias_from
                         Col::LabelStr,
+                    )
+                    .expr_as(
+                        Func::cust(crate::db::DuckDbFunc::Concat).args([
+                            Expr::val(Val::Name.to_string()).into(),
+                            Expr::val(":").into(),
+                            Expr::col(Col::Filename).into(),
+                        ]),
+                        Col::TypedTag,
                     )
                     .from_subquery(
                         crate::util::parquet_query(&parquet_path),
@@ -152,12 +225,21 @@ impl OneView {
                 .expr_as(Expr::val(Val::System.to_string()), Col::Origin)
                 .expr_as(Expr::val::<&str>(col.into()), Col::Type)
                 .expr_as(Expr::col(col), label_col)
+                .expr_as(
+                    Func::cust(crate::db::DuckDbFunc::Concat).args([
+                        Expr::val::<&str>(col.into()).into(),
+                        Expr::val(":").into(),
+                        Expr::col(col).into(),
+                    ]),
+                    Col::TypedTag,
+                )
                 .from_subquery(
                     crate::util::parquet_query(&items_path),
                     Tbl::ItemReferences,
                 );
             query_parts.push(q.to_string(PostgresQueryBuilder));
         }
+
 
         create_view_union_by_name(conn, "oneview", &query_parts)?;
 

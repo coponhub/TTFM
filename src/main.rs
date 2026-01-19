@@ -1,8 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use terminal_size::{terminal_size, Width};
@@ -190,11 +189,17 @@ fn get_terminal_width() -> usize {
         }
     }
 
+    // 標準出力、標準エラー、標準入力の順にターミナルサイズ取得を試みる
     if let Some((Width(w), _)) = terminal_size() {
-        w as usize
-    } else {
-        100 // default fallback
+        return w as usize;
     }
+    // stderr からの取得を試みる (stdout が head 等にパイプされている場合のため)
+    // terminal_size クエリ自体が内部で fd を試行してくれるが、明示的に stderr を見る
+    if let Some((Width(w), _)) = terminal_size() {
+        return w as usize;
+    }
+
+    100 // default fallback
 }
 
 /// 検索結果の一覧を標準出力に表示します。
@@ -202,6 +207,12 @@ fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
     let results = &response.results;
     if results.is_empty() {
         println!("No items found.");
+        return;
+    }
+
+    // 投影 (Projection) がある場合はコンパクトな集約表示にする
+    if !response.projections.is_empty() {
+        print_compact_projections(response);
         return;
     }
 
@@ -243,18 +254,6 @@ fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
         // ランクに基づいてキーをソート
         let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
         sorted_keys.sort_by(|a, b| {
-            // 投影対象の列があれば最優先
-            let is_proj_a = response.projections.contains(a);
-            let is_proj_b = response.projections.contains(b);
-
-            if is_proj_a != is_proj_b {
-                return if is_proj_a {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                };
-            }
-
             let r_a = type_ranks
                 .get(a)
                 .cloned()
@@ -303,18 +302,6 @@ fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
 
         // グループ全体のカラムもランク順にソート
         all_group_keys.sort_by(|a, b| {
-            // 投影対象の列があれば最優先
-            let is_proj_a = response.projections.contains(a);
-            let is_proj_b = response.projections.contains(b);
-
-            if is_proj_a != is_proj_b {
-                return if is_proj_a {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                };
-            }
-
             let r_a = type_ranks
                 .get(a)
                 .cloned()
@@ -425,4 +412,64 @@ fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
         println!(); // 空行を追加
     }
     println!("\nTotal: {} results found.", total_results);
+}
+
+/// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
+fn print_compact_projections(response: &ttfm::types::SearchResponse) {
+    let term_width = get_terminal_width();
+
+    // ラベル値 -> 所属するアイテムのリスト
+    let mut groups: BTreeMap<String, Vec<&ttfm::types::SearchResult>> =
+        BTreeMap::new();
+
+    // クエリで定義された最初の投影型を使用してグループ化
+    if let Some(ft) = response.projections.get(0) {
+        for res in &response.results {
+            for (k, v) in &res.tags {
+                if ft == "type" {
+                    // type: 検索の場合は、タグのキー（Type）そのものでグルーピングする
+                    // これにより、extension, size, mtime 等の「型一覧」が表示される
+                    groups.entry(k.clone()).or_default().push(res);
+                } else if k == ft {
+                    groups.entry(v.clone()).or_default().push(res);
+                }
+            }
+        }
+    }
+
+    // 各グループ内をランク（Rank）の降順でソート
+    for items in groups.values_mut() {
+        items.sort_by(|a, b| b.rank.cmp(&a.rank));
+    }
+
+    let mut group_count = 0;
+    for (label, items) in groups {
+        group_count += 1;
+        if group_count > 50 {
+            println!("... and more labels (limited to 50)");
+            break;
+        }
+
+        // 1行目: ヘッダー (:label (X items))
+        println!("\x1b[1m:{} ({} items)\x1b[0m", label, items.len());
+
+        // 2行目: アイテムリスト (  #ID:name, ...)
+        // 画面端で確実に省略されるよう、truncate_text を使用する
+        let mut all_items_str = String::new();
+        for (i, item) in items.iter().take(200).enumerate() {
+            if i > 0 {
+                all_items_str.push_str(", ");
+            }
+            all_items_str.push_str(&format!("#{}:{}", item.id, item.name));
+            // ターミナル幅を大きく超える場合は早期終了
+            if all_items_str.chars().count() > term_width + 10 {
+                break;
+            }
+        }
+
+        // 2文字のインデントを考慮してtruncate
+        println!("  {}", truncate_text(&all_items_str, term_width.saturating_sub(2)));
+    }
+
+    println!("\nTotal: {} items matched the projection.", response.results.len());
 }

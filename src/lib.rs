@@ -459,18 +459,47 @@ impl FileManager {
                 _ => None,
             };
 
-            let extract_tag = |i: usize| -> Option<(String, String)> {
-                let name = val_to_string(tag_lists.get(0)?.get(i)?)?;
-                tag_lists
+            let extract_tags = |i: usize| -> Vec<(String, String)> {
+                let mut extracted = Vec::new();
+                // Typeカラム (tag_lists[0])
+                let type_name = match tag_lists.get(0).and_then(|l| l.get(i)).and_then(val_to_string) {
+                    Some(s) => s,
+                    None => return extracted,
+                };
+
+                // 物理カラム (LabelStr...LabelBool) から値を探す
+                // 最後尾の TypedTag カラムは除外して検索する
+                let label_val = tag_lists
                     .iter()
                     .skip(1)
-                    .find_map(|list| list.get(i).and_then(val_to_string))
-                    .map(|val| (name, val))
+                    .take(tag_lists.len().saturating_sub(2)) // skip Type(1) + exclude TypedTag(1) = len - 2 items to check? No.
+                    // tag_lists: [Type, Str, Int, Dbl, Bool, TypedTag] (len=6)
+                    // skip(1) -> [Str, Int, Dbl, Bool, TypedTag]
+                    // We want to check [Str, Int, Dbl, Bool].
+                    // take(len - 2) is correct if len >= 2.
+                    // But simpler: just iterate up to last-1.
+                     .take(tag_lists.len().saturating_sub(2))
+                    .find_map(|list| list.get(i).and_then(val_to_string));
+                
+                if let Some(val) = label_val {
+                    extracted.push((type_name, val));
+                } else {
+                     // ラベルが無い場合でも、typeだけはあるなら（例えばフラグ的なタグ）、
+                     // 値なしタグとして追加すべきか？ 現状のロジックは値必須。
+                     // 今回は変更しない。
+                }
+
+                // TypedTag カラム (最後尾) を取得し、特別なタグとして追加
+                if let Some(tt_val) = tag_lists.last().and_then(|l| l.get(i)).and_then(val_to_string) {
+                    extracted.push(("typedtag".to_string(), tt_val));
+                }
+                
+                extracted
             };
 
             let tags: Vec<_> = tag_lists
                 .get(0)
-                .map(|types| (0..types.len()).filter_map(extract_tag).collect())
+                .map(|types| (0..types.len()).flat_map(extract_tags).collect())
                 .unwrap_or_default();
 
             SearchResult {

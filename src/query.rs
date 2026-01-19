@@ -436,6 +436,9 @@ impl QueryFunctionRegistry {
         reg.register(Box::new(SizeQuery));
         reg.register(Box::new(MtimeQuery));
         reg.register(Box::new(OriginQuery));
+        reg.register(Box::new(TypeQuery));
+        reg.register(Box::new(LabelQuery));
+        reg.register(Box::new(TypedTagQuery));
         reg
     }
 
@@ -859,19 +862,25 @@ impl QueryNode {
     ) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId).distinct().from(Alias::new(view));
+        
+        // typedtag プロジェクションの場合は、全行が対象（typedtagカラムは全行に存在）なので、
+        // type='typedtag' というフィルタは行わず、typedtagカラムの存在チェックのみ行う。
+        if let TagType::Base(SType::TypedTag) = tagtype {
+             q.and_where(Expr::col(Col::TypedTag).is_not_null());
+        } else {
+            q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()));
 
-        q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()));
+            // ラベル値が NULL でないことを確認する。
+            // oneview は物理カラム（extension, path等）を unpivot するため、
+            // 値がなくても行自体は存在する可能性がある。
+            let mut cond = Condition::any();
+            cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
+            cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
+            cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
+            cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
 
-        // ラベル値が NULL でないことを確認する。
-        // oneview は物理カラム（extension, path等）を unpivot するため、
-        // 値がなくても行自体は存在する可能性がある。
-        let mut cond = Condition::any();
-        cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
-
-        q.and_where(cond.into());
+            q.and_where(cond.into());
+        }
         q
     }
 

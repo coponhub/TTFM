@@ -51,12 +51,12 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         println!("Testing query: '{}'", query);
         let results = fm.search(query)?;
         assert_eq!(
-            results.len(),
+            results.results.len(),
             expected,
             "Query '{}' failed. Expected {}, got {}",
             query,
             expected,
-            results.len()
+            results.results.len()
         );
     }
 

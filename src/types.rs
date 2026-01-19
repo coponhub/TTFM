@@ -283,6 +283,8 @@ pub enum SType {
     Types,
     Labels,
     ScanHash,
+    #[strum(serialize = "typedtag")]
+    TypedTag,
     // 検索専用仮想タグ
     Directory,
     // Typed Label Columns
