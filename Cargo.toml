@@ -30,3 +30,9 @@ pest_derive = "2.7"
 
 [dev-dependencies]
 tempfile = "3.24.0"
+
+# Optimize dependency build times and binary size
+[profile.dev.package."*"]
+debug = 0
+strip = "debuginfo"
+
