@@ -38,9 +38,16 @@ enum Commands {
     Search {
         /// 検索クエリ文字列。論理演算（&, |, -）や型付きタグ（extension:rs等）が使用可能です。
         query: String,
+        /// シンプルな出力モード（機械可読フォーマット）。ヘッダーや装飾を省略し、1行1アイテムで出力します。
+        #[arg(short, long)]
+        short: bool,
     },
     /// インデックスからファイルの一覧を表示します（最大100件）。
-    List,
+    List {
+        /// シンプルな出力モード（機械可読フォーマット）。
+        #[arg(short, long)]
+        short: bool,
+    },
     /// 作成されたインデックスファイルを削除します。
     Clear,
     /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
@@ -93,7 +100,7 @@ fn main() -> Result<()> {
             let pb = ProgressBar::new_spinner();
             pb.set_style(
                 ProgressStyle::default_spinner()
-                    .tick_chars("/|\\-")
+                    .tick_chars(r"/|\-")
                     .template("{spinner:.green} {msg}")?,
             );
             pb.set_message("Scanning...");
@@ -112,15 +119,27 @@ fn main() -> Result<()> {
                 count
             ));
         }
-        Commands::Search { query } => {
-            println!("Searching for: '{}'", query);
+        Commands::Search { query, short } => {
+            if !*short {
+                println!("Searching for: '{}'", query);
+            }
             let response = fm.search(query)?;
-            print_results(&fm, &response);
+            if *short {
+                print_simple_results(&response);
+            } else {
+                print_results(&fm, &response);
+            }
         }
-        Commands::List => {
-            println!("Listing files...");
+        Commands::List { short } => {
+            if !*short {
+                println!("Listing files...");
+            }
             let response = fm.search("")?;
-            print_results(&fm, &response);
+            if *short {
+                print_simple_results(&response);
+            } else {
+                print_results(&fm, &response);
+            }
         }
         Commands::Tag { item, tag } => {
             fm.tag_item(item, tag)?;
@@ -472,4 +491,36 @@ fn print_compact_projections(response: &ttfm::types::SearchResponse) {
     }
 
     println!("\nTotal: {} items matched the projection.", response.results.len());
+}
+
+/// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
+/// パイプライン処理（xargs, grepなど）向けです。
+/// SIGPIPE（Broken Pipe）が発生した場合は静かに終了します。
+fn print_simple_results(response: &ttfm::types::SearchResponse) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+
+
+    for res in &response.results {
+        let line = if response.projections.is_empty() {
+            // プロジェクションなし: パスがあればパス、なければ名前
+            res.get_tag_value("path").unwrap_or(&res.name).to_string()
+        } else {
+            // プロジェクションあり: 指定された順序で値を結合（タブ区切り）
+            let values: Vec<&str> = response
+                .projections
+                .iter()
+                .map(|key| res.get_tag_value(key).unwrap_or(""))
+                .collect();
+            values.join("\t")
+        };
+
+        if let Err(e) = writeln!(stdout, "{}", line) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return; // パイプが閉じられたので終了
+            }
+            // その他のエラーは出力すべきだが、stdoutが死んでいる場合はパニックせず無視が妥当
+            return;
+        }
+    }
 }
