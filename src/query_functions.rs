@@ -248,6 +248,9 @@ impl QueryFunction for LabelQuery {
             label: label.clone(),
         }
     }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
 }
 
 /// "typedtag:label" -> item_kind:typedtag & name:label (タグ自体の検索)

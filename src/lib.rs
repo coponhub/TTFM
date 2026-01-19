@@ -478,6 +478,9 @@ impl FileManager {
                     .find_map(|list| list.get(i).and_then(val_to_string));
                 
                 if let Some(val) = label_val {
+                    if projections.iter().any(|p| p == "label") {
+                         extracted.push(("label".to_string(), val.clone()));
+                    }
                     extracted.push((type_name, val));
                 }
 
