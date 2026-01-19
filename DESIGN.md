@@ -58,7 +58,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ファイルの実体とパス、およびスキャンにより自動抽出されたタグを管理する。
 これらのテーブルは `ttfm index` 実行時に更新・洗い替えされる。
 
-**A. `file_entities` テーブル (実体) (.ttfm/db/file_entities.parquet)**
+**A. `file_references` テーブル (実体) (.ttfm/db/file_references.parquet)**
 - `item_id`: 内部管理用ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `file_id`: OSレベルの識別子 (Inode number / File Index)
@@ -68,23 +68,23 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - `hash`: コンテンツハッシュ (オプション)
 
 **B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)**
-- `item_id`: `file_entities.item_id` への外部キー
+- `item_id`: `file_references.item_id` への外部キー
 - `path`: フルパス (UNIQUE)
 - `filename`: ファイル名
 - `parentdir`: 親ディレクトリパス（検索最適化用）
 - `extension`: 拡張子
 
 **C. `base_tags` テーブル (自動抽出タグ) (.ttfm/db/base_tags.parquet)**
-- `item_id`: `file_entities.item_id` への外部キー
+- `item_id`: `file_references.item_id` への外部キー
 - `type`: タグの種類（例: `size_str`, `type_from_ext`）
-- `label`: タグの値
+- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（型ごとに物理カラムを持ち、適切な型で格納される）
 - ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
 
 #### 2. Item Store (Definition Registry)
 タグの型(Type)や値(Label)の定義自体を管理するID台帳。
 システム定義とユーザー定義の両方が混在するが、IDによって管理される。
 
-**D. `item_entities` テーブル (.ttfm/db/item_entities.parquet)**
+**D. `item_references` テーブル (.ttfm/db/item_references.parquet)**
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
 - `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
@@ -95,15 +95,15 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 データの由来（Origin）によってテーブルを分離することで、ユーザーデータを保護しつつ効率的な更新を実現する。
 
 **E. `system_tags` テーブル (System Tags) (.ttfm/db/system_tags.parquet)**
-- `item_id`: `item_entities.item_id` への外部キー
+- `item_id`: `item_references.item_id` への外部キー
 - `type`: タグの種類
-- `label`: タグの値
+- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
 - ※ システム定義Item（`filename` Type等）に対してシステムが付与するタグ（例: `origin:system`）。
 
 **F. `user_tags` テーブル (User Tags) (.ttfm/db/user_tags.parquet)**
-- `item_id`: 対象のID (`file_entities` または `item_entities` のいずれか)
+- `item_id`: 対象のID (`file_references` または `item_references` のいずれか)
 - `type`: タグの種類
-- `label`: タグの値
+- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
 - ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
 
 #### 4. Unified View (`oneview`)
@@ -113,7 +113,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `rank`: 対象の優先度（ソート用）
 - `origin`: タグの出典 (`system` または `user`)
 - `type`: タグの種類
-- `label`: タグの値
+- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（それぞれの物理カラムから合流）
+- `typedtag`: タグ全体（`type:label`）を表す文字列
 - `name`: アイテムの名称
 
 **Origin & Name Resolution**:
@@ -165,8 +166,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
     - **Reconstruction**: **Moved** のリストに対し、ファイルを開かずにパス情報から場所情報を再構築する。
 
 4.  **Merge Phase (Integration)**:
-    - Existing data, new extraction, and updated Location information are integrated on DuckDB, updating and saving final `file_entities`, `locations`, `file_tags` Parquet files.
-    - To prevent corruption during reading, write to a `.tmp` file first and rename after completion.
+    - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `file_references`, `locations`, `base_tags` 等のParquetファイルを更新・保存する。
 
 #### B. ディレクトリ最適化オプション有効時のトレードオフ(オプション)
 - **メリット**: ファイル数に対してディレクトリ数が少ない場合、システムコールの回数を劇的に削減でき、1億ファイル規模でも数秒〜十数秒での同期が可能になる。
@@ -219,7 +219,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
         - **例**:
             - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
             - `extension:` (全ファイルの拡張子一覧を取得)
-            - `type:` (全アイテムの型一覧を取得)
+            - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
+            - `path:` (各アイテムのパスを取得)
     - **ラベル比較 (Label Comparison)**:
         - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。取得した各ラベルを比較する。
         - **演算対象 (Operand)**:
@@ -283,6 +284,22 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - 2: `content`
 - 1: その他システムタグ
 - 0: 初期値（ユーザータグ等）
+
+### 4.4 出力制御とパイプライン連携
+コマンドラインツールとしての有用性を高めるため、他のLinuxコマンドとの連携をサポートする。
+
+#### シンプル出力モード (`--short` / `-s`)
+`ttfm search` および `ttfm list` コマンドにおいて、`--short` オプションを指定することで、機械可読性の高い形式で結果を出力する。
+- **フォーマット**: ヘッダーや装飾を排除し、1行につき1アイテム（またはプロジェクション結果）を出力する。
+- **デフォルト挙動**: プロジェクション未指定時は `path` (ファイルの場合) または `name` を出力する。
+- **プロジェクション時**: 指定されたプロジェクションの値のみをタブ区切りで出力する。
+- **エラーハンドリング**: パイプ切断 (`EPIPE`/`SIGPIPE`) を検知し、パニックすることなく正常終了コードでプロセスを閉じる。
+
+**例**:
+```bash
+# 特定の拡張子を持つファイルのパス一覧を head に渡す
+ttfm search --short "extension:rs & path:" | head -n 5
+```
 
 ## 5. プラグインシステム設計 (WebAssembly)
 
