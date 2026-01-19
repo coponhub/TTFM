@@ -18,7 +18,7 @@ fn test_integration_file_tagging() {
     let registered_paths = fm.search("extension:txt").unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
-    fm.tag_item(item, "status:reviewed").unwrap();
+    fm.tag_item(&item, "status:reviewed").unwrap();
 
     // 3. 付与したタグで検索
     let results = fm.search("status:reviewed").unwrap();
@@ -40,7 +40,7 @@ fn test_integration_tag_tagging() {
     let registered_paths = fm.search("extension:txt").unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
-    fm.tag_item(item, "project:mars").unwrap();
+    fm.tag_item(&item, "project:mars").unwrap();
 
     // 2. タグ (project:mars) 自体にタグ (priority:high) を付ける
     let tag_id = fm.get_or_create_item("typedtag", "project:mars").unwrap();
@@ -111,11 +111,20 @@ fn test_system_item_metadata_integration() {
     // 4. 代わりにプロジェクションで確認
     // extension: で検索し、test.rs がヒットすること、そのタグに rs が含まれていることを確認
     let results_proj = fm.search("extension:").unwrap();
-    assert!(!results_proj.results.is_empty(), "Should find files via projection");
-    let test_file = results_proj.results.iter().find(|r| r.name == "test.rs").expect("test.rs not found");
+    assert!(
+        !results_proj.results.is_empty(),
+        "Should find files via projection"
+    );
+    let test_file = results_proj
+        .results
+        .iter()
+        .find(|r| r.name == "test.rs")
+        .expect("test.rs not found");
     // SearchResult.tags に (extension, rs) が含まれているはず
     let ext_val = test_file.get_tag_value("extension");
-    assert_eq!(ext_val, Some("rs"), "Projection should return extension value");
-
-
+    assert_eq!(
+        ext_val.as_deref(),
+        Some("rs"),
+        "Projection should return extension value"
+    );
 }

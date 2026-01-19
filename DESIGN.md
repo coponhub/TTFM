@@ -218,7 +218,6 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
             - `typedtag:`: TypedTagを抽出
         - **例**:
             - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
-            - `extension:` (全ファイルの拡張子一覧を取得)
             - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
             - `path:` (各アイテムのパスを取得)
     - **ラベル比較 (Label Comparison)**:

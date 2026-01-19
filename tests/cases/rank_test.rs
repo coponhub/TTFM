@@ -30,9 +30,18 @@ fn test_rank_sorting_files() {
     assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
-    assert!(results.results[0].primary_value().unwrap().contains("high.txt"));
-    assert!(results.results[1].primary_value().unwrap().contains("mid.txt"));
-    assert!(results.results[2].primary_value().unwrap().contains("low.txt"));
+    assert!(results.results[0]
+        .primary_value()
+        .unwrap()
+        .contains("high.txt"));
+    assert!(results.results[1]
+        .primary_value()
+        .unwrap()
+        .contains("mid.txt"));
+    assert!(results.results[2]
+        .primary_value()
+        .unwrap()
+        .contains("low.txt"));
 }
 
 #[test]

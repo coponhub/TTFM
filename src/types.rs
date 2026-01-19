@@ -13,6 +13,27 @@ pub type ItemId = i64;
 /// ファイルの実体（Inode/FileID）を一意に表す 128ビット識別子。
 pub type FileRef = Uuid;
 
+/// アイテムの種類 (file, note 等) を表す型エイリアス。
+pub type ItemKind = String;
+
+/// アイテムの表示名を表す型エイリアス。
+pub type ItemName = String;
+
+/// アイテム内におけるタグの順序（インデックス）を表す型エイリアス。
+pub type TagNumber = usize;
+
+/// データの由来を表す Enum。
+#[derive(
+    Debug, PartialEq, Eq, Hash, Clone, Copy, strum::Display, strum::EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum Origin {
+    /// システムによる自動抽出
+    System,
+    /// ユーザーによる手動付与
+    User,
+}
+
 /// データベース上の型名を取得するためのトレイト。
 pub trait DBType {
     /// 対応する SQL の型を返します。
@@ -84,7 +105,7 @@ impl ToSql for FileTimestamp {
 
 /// タグの「キー（型）」部分を表す SuperType。
 /// システム定義の標準タグ（SType）と、自由なカスタムタグの両方を扱えます。
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum TagType {
     Base(SType),
     Custom(String),
@@ -191,19 +212,44 @@ impl TypedTag {
     }
 }
 
+/// 値と由来をセットで保持する構造体。
+#[derive(Debug, PartialEq, Clone)]
+pub struct TagValue {
+    /// タグの値
+    pub label: Label,
+    /// 由来
+    pub origin: Origin,
+}
+
+/// タグの集合。
+pub type Tags = std::collections::HashMap<TagType, Vec<TagValue>>;
+
+/// アイテム固有の不動の情報をまとめた構造体。
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct Intrinsic {
+    /// ファイルサイズ
+    pub size: Option<FileSize>,
+    /// 更新日時
+    pub mtime: Option<FileTimestamp>,
+    /// コンテンツのハッシュ
+    pub hash: Option<String>,
+}
+
 /// 検索結果を表す構造体。
 #[derive(Debug, PartialEq, Clone)]
 pub struct SearchResult {
     /// アイテムの一意なID
-    pub id: i64,
-    /// アイテムの種類 (file, note, type, label, typedtag)
-    pub item_kind: String,
-    /// 解決済みの名称（ユーザ定義名を優先）
-    pub name: String,
+    pub id: ItemId,
+    /// アイテムの種類
+    pub item_kind: ItemKind,
+    /// 解決済みの名称
+    pub name: ItemName,
     /// アイテムの優先度
     pub rank: Rank,
-    /// アイテムに紐づく全てのタグ (type, value)
-    pub tags: Vec<(String, String)>,
+    /// 固定の固有情報
+    pub intrinsic: Intrinsic,
+    /// アイテムに紐づく動的なタグの集合
+    pub tags: Tags,
 }
 
 /// 検索クエリの結果全体を表す構造体。
@@ -218,10 +264,10 @@ pub struct SearchResponse {
 impl SearchResult {
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
-    pub fn primary_value(&self) -> Option<&str> {
+    pub fn primary_value(&self) -> Option<String> {
         // 抽象化された名前があればそれを最優先
         if !self.name.is_empty() {
-            return Some(&self.name);
+            return Some(self.name.clone());
         }
         // フォールバックとしてタグの中を探す
         self.get_tag_value("path")
@@ -230,12 +276,49 @@ impl SearchResult {
             .or_else(|| self.get_tag_value("filename"))
     }
 
-    /// 指定されたキーのタグ値を取得します。
-    pub fn get_tag_value(&self, key: &str) -> Option<&str> {
+    /// アイテム全体の集約された由来を取得します。
+    /// 一つでもユーザー付与のタグがあれば Origin::User を返します。
+    pub fn origin(&self) -> Origin {
         self.tags
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .values()
+            .flatten()
+            .any(|tv| tv.origin == Origin::User)
+            .then_some(Origin::User)
+            .unwrap_or(Origin::System)
+    }
+
+    /// 指定されたキーのタグ値を文字列として取得します。
+    /// 固定メタデータ (size 等) も透過的にアクセス可能です。
+    pub fn get_tag_value(&self, key: &str) -> Option<String> {
+        let tag_type = TagType::from(key);
+
+        // 1. 固有情報の早期リターン
+        let fixed = match &tag_type {
+            TagType::Base(SType::Size) => {
+                self.intrinsic.size.as_ref().map(|s| s.0.to_string())
+            }
+            TagType::Base(SType::Mtime) => {
+                self.intrinsic.mtime.as_ref().map(|t| t.0.to_string())
+            }
+            TagType::Base(SType::Hash) => self.intrinsic.hash.clone(),
+            TagType::Base(SType::Rank) => Some(self.rank.to_string()),
+            TagType::Base(SType::ItemKind) => Some(self.item_kind.clone()),
+            TagType::Base(SType::Name) => Some(self.name.clone()),
+            TagType::Base(SType::Origin) => Some(self.origin().to_string()),
+            _ => None,
+        };
+
+        if fixed.is_some() {
+            return fixed;
+        }
+
+        // 2. HashMap からのフォールバック
+        self.tags.get(&tag_type)?.get(0).map(|tv| tv.label.as_str())
+    }
+
+    /// 指定されたキーの全てのタグ値を取得します。
+    pub fn get_tag_values(&self, key: &str) -> Option<&[TagValue]> {
+        self.tags.get(&TagType::from(key)).map(|v| v.as_slice())
     }
 }
 
@@ -252,6 +335,7 @@ pub type StaticName = &'static str;
     Copy,
     PartialEq,
     Eq,
+    Hash,
     strum::IntoStaticStr,
     strum::EnumString,
     strum::Display,

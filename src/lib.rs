@@ -451,65 +451,115 @@ impl FileManager {
                 })
                 .collect();
 
-            let val_to_string = |v: &Value| match v {
-                Value::Text(s) => Some(s.clone()),
-                Value::BigInt(n) => Some(n.to_string()),
-                Value::Double(d) => Some(d.to_string()),
-                Value::Boolean(b) => Some(b.to_string()),
-                _ => None,
+            let mut intrinsic = types::Intrinsic::default();
+            let mut tags = types::Tags::new();
+
+            // カラム定義から対象のリストを取得するヘルパー
+            let get_list = |st: crate::db::Col| -> Option<&Vec<Value>> {
+                let col_name = st.to_string();
+                let idx = tag_value_cols.iter().position(|c| c == &col_name)?;
+                tag_lists.get(idx)
             };
 
-            let extract_tags = |i: usize| -> Vec<(String, String)> {
-                let mut extracted = Vec::new();
-                // Typeカラム (tag_lists[0])
-                let type_name = match tag_lists.get(0).and_then(|l| l.get(i)).and_then(val_to_string) {
-                    Some(s) => s,
-                    None => return extracted,
+            // 型名のリスト（Types カラム）を起点に走査
+            let Some(types_list) = get_list(crate::db::Col::Types) else {
+                return Ok(types::SearchResult {
+                    id,
+                    item_kind,
+                    name,
+                    rank,
+                    intrinsic,
+                    tags,
+                });
+            };
+
+            // 1. データ抽出ヘルパーの構成
+            let extract_tag_type = |n: types::TagNumber| {
+                get_list(crate::db::Col::Types).and_then(|l| l.get(n)).and_then(|v| match v {
+                    Value::Text(s) => Some(types::TagType::from(s.clone())),
+                    Value::BigInt(n_val) => Some(types::TagType::from(n_val.to_string())),
+                    _ => None,
+                })
+            };
+
+            let extract_origin = |n: types::TagNumber| {
+                match get_list(crate::db::Col::Origin).and_then(|l| l.get(n)) {
+                    Some(Value::Text(s)) if s == "system" => types::Origin::System,
+                    _ => types::Origin::User,
+                }
+            };
+
+            let extract_label = |n: types::TagNumber| {
+                crate::db::Col::typed_label_columns().into_iter().find_map(|col| {
+                    get_list(col).and_then(|l| l.get(n)).and_then(|v| match v {
+                        Value::Text(s) => Some(types::Label::String(s.clone())),
+                        Value::BigInt(n_val) => Some(types::Label::Integer(*n_val)),
+                        Value::Double(d) => Some(types::Label::String(d.to_string())),
+                        Value::Boolean(b) => Some(types::Label::String(b.to_string())),
+                        _ => None,
+                    })
+                })
+            };
+
+            // 2. 特殊処理: TypedTag の抽出
+            let extract_typedtag = |n: types::TagNumber, origin, tags: &mut types::Tags| {
+                if let Some(Value::Text(tt_val)) = get_list(crate::db::Col::TypedTag).and_then(|l| l.get(n)) {
+                    tags.entry(types::TagType::Base(types::SType::TypedTag))
+                        .or_default()
+                        .push(types::TagValue {
+                            label: types::Label::String(tt_val.clone()),
+                            origin,
+                        });
+                }
+            };
+
+            // 3. 振り分けヘルパー
+            let dispatch_tag = |
+                tag_type: types::TagType, 
+                label: types::Label, 
+                origin: types::Origin, 
+                intrinsic: &mut types::Intrinsic, 
+                tags: &mut types::Tags
+            | {
+                match &tag_type {
+                    types::TagType::Base(types::SType::Size) => {
+                        intrinsic.size = Some(types::FileSize(label.as_i64()))
+                    }
+                    types::TagType::Base(types::SType::Mtime) => {
+                        intrinsic.mtime = Some(types::FileTimestamp(label.as_i64()))
+                    }
+                    types::TagType::Base(types::SType::Hash) => {
+                        intrinsic.hash = Some(label.as_str())
+                    }
+                    types::TagType::Base(types::SType::TypedTag) => {}
+                    _ => {
+                        tags.entry(tag_type)
+                            .or_default()
+                            .push(types::TagValue { label, origin });
+                    }
+                }
+            };
+
+            // 4. メインループ: 走査と振り分け
+            for i in 0..types_list.len() {
+                let n = i as types::TagNumber;
+                let (Some(tag_type), origin, Some(label)) = (extract_tag_type(n), extract_origin(n), extract_label(n)) else {
+                    continue;
                 };
 
-                // 物理カラム (LabelStr...LabelBool) から値を探す
-                // 最後尾の TypedTag カラムは除外して検索する
-                // 物理カラム (LabelStr...LabelBool) から値を探す
-                // 最後尾の TypedTag とその手前の Origin カラムは除外して検索する
-                let label_val = tag_lists
-                    .iter()
-                    .skip(1)
-                    .take(tag_lists.len().saturating_sub(3)) // Type(1) + Origin(1) + TypedTag(1) = 3 excluded
-                    .find_map(|list| list.get(i).and_then(val_to_string));
-                
-                if let Some(val) = label_val {
-                    if projections.iter().any(|p| p == "label") {
-                         extracted.push(("label".to_string(), val.clone()));
-                    }
-                    extracted.push((type_name, val));
-                }
+                // 特殊処理
+                extract_typedtag(n, origin, &mut tags);
 
-                // Origin カラム (TypedTagの手前) を取得
-                if tag_lists.len() >= 2 {
-                     let origin_idx = tag_lists.len().saturating_sub(2);
-                     if let Some(origin_val) = tag_lists.get(origin_idx).and_then(|l| l.get(i)).and_then(val_to_string) {
-                         extracted.push(("origin".to_string(), origin_val));
-                     }
-                }
+                // 振り分け
+                dispatch_tag(tag_type, label, origin, &mut intrinsic, &mut tags);
+            }
 
-                // TypedTag カラム (最後尾) を取得し、特別なタグとして追加
-                if let Some(tt_val) = tag_lists.last().and_then(|l| l.get(i)).and_then(val_to_string) {
-                    extracted.push(("typedtag".to_string(), tt_val));
-                }
-                
-                extracted
-            };
-
-            let tags: Vec<_> = tag_lists
-                .get(0)
-                .map(|types| (0..types.len()).flat_map(extract_tags).collect())
-                .unwrap_or_default();
-
-            SearchResult {
+            types::SearchResult {
                 id,
                 item_kind,
                 name,
                 rank,
+                intrinsic,
                 tags,
             }
             .to_ok()

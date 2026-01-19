@@ -35,12 +35,20 @@ impl OneView {
                 Func::cust(crate::db::DuckDbFunc::Concat).args([
                     Expr::col(Col::Type).into(),
                     Expr::val(":").into(),
-                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                        Expr::col(Col::LabelStr).into(),
-                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
-                    ]).into()
+                    Func::cust(crate::db::DuckDbFunc::Coalesce)
+                        .args([
+                            Expr::col(Col::LabelStr).into(),
+                            Expr::col(Col::LabelInt)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelDouble)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelBool)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                        ])
+                        .into(),
                 ]),
                 Col::TypedTag,
             )
@@ -59,12 +67,20 @@ impl OneView {
                 Func::cust(crate::db::DuckDbFunc::Concat).args([
                     Expr::col(Col::Type).into(),
                     Expr::val(":").into(),
-                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                        Expr::col(Col::LabelStr).into(),
-                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
-                    ]).into()
+                    Func::cust(crate::db::DuckDbFunc::Coalesce)
+                        .args([
+                            Expr::col(Col::LabelStr).into(),
+                            Expr::col(Col::LabelInt)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelDouble)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelBool)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                        ])
+                        .into(),
                 ]),
                 Col::TypedTag,
             )
@@ -83,12 +99,20 @@ impl OneView {
                 Func::cust(crate::db::DuckDbFunc::Concat).args([
                     Expr::col(Col::Type).into(),
                     Expr::val(":").into(),
-                    Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                        Expr::col(Col::LabelStr).into(),
-                        Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelDouble).cast_as(SqlType::VARCHAR).into(),
-                        Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
-                    ]).into()
+                    Func::cust(crate::db::DuckDbFunc::Coalesce)
+                        .args([
+                            Expr::col(Col::LabelStr).into(),
+                            Expr::col(Col::LabelInt)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelDouble)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                            Expr::col(Col::LabelBool)
+                                .cast_as(SqlType::VARCHAR)
+                                .into(),
+                        ])
+                        .into(),
                 ]),
                 Col::TypedTag,
             )
@@ -124,7 +148,7 @@ impl OneView {
                 } else {
                     q.expr_as(Expr::col(iden), label_col);
                 }
-                
+
                 // typedtag column
                 q.expr_as(
                     Func::cust(crate::db::DuckDbFunc::Concat).args([
@@ -132,7 +156,7 @@ impl OneView {
                         Expr::val(":").into(),
                         Expr::col(crate::util::col_to_iden(&cd.name)).into(),
                     ]),
-                    Col::TypedTag
+                    Col::TypedTag,
                 );
 
                 q.from_subquery(
@@ -239,7 +263,6 @@ impl OneView {
                 );
             query_parts.push(q.to_string(PostgresQueryBuilder));
         }
-
 
         create_view_union_by_name(conn, "oneview", &query_parts)?;
 

@@ -261,17 +261,17 @@ impl QueryFunction for TypedTagQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Label, SType, TagType};
     use crate::query::QueryNode;
+    use crate::types::{Label, SType, TagType};
 
     #[test]
     fn test_typedtag_query_expansion() {
         let q = TypedTagQuery;
-        
+
         // 1. expand (通常の検索)
         let label = Label::String("extension:rs".to_string());
         let expanded = q.expand(&label);
-        
+
         if let QueryNode::ColumnMatch { tag, label: l } = expanded {
             assert_eq!(tag, SType::TypedTag);
             assert_eq!(l, label);
@@ -281,7 +281,7 @@ mod tests {
 
         // 2. expand_projection (プロジェクション)
         let expanded_proj = q.expand_projection(SType::TypedTag.into());
-        
+
         if let QueryNode::Projection(tt) = expanded_proj {
             assert_eq!(tt, SType::TypedTag.into());
         } else {
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn test_type_query_expansion() {
         let q = TypeQuery;
-        
+
         // expand_projection
         let expanded_proj = q.expand_projection(SType::Type.into());
         // Projection(Type)

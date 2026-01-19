@@ -411,6 +411,4 @@ fn merge_and_save(
 mod tests {
     use super::*;
     use sea_query::PostgresQueryBuilder;
-
-
 }

@@ -226,11 +226,17 @@ fn test_or_negation_complex_behavior() {
         }
 
         if r.item_kind == "file" {
-            if r.tags.iter().any(|(t, v)| t == "extension" && v == "txt") {
+            if r.get_tag_value("extension")
+                .map(|v| v == "txt")
+                .unwrap_or(false)
+            {
                 found_txt_file = true;
             }
 
-            if r.tags.iter().any(|(t, v)| t == "extension" && v == "rs") {
+            if r.get_tag_value("extension")
+                .map(|v| v == "rs")
+                .unwrap_or(false)
+            {
                 found_rs_file = true;
             }
         }
@@ -267,7 +273,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     assert!(results.results[0]
         .primary_value()
-        .unwrap()
+        .unwrap_or_default()
         .contains("alpha"));
 
     // 2. 複数のワイルドカード
@@ -543,14 +549,14 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
 
     // もし "sub_folder" がヒットしているなら、extension判定がバグっている
     let sub_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or("");
+        let val = p.primary_value().unwrap_or_default();
         val.contains("sub_folder") && !val.ends_with(".rs")
     });
     assert!(!sub_hits, "'sub_folder' directory found in results!");
 
     // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
     let strange_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or("");
+        let val = p.primary_value().unwrap_or_default();
         val.contains("strange.rs") && !val.ends_with("ignored.txt")
     });
     assert!(!strange_hits, "'strange.rs' directory found in results!");

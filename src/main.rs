@@ -260,14 +260,35 @@ fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
         row_data.insert("item_kind".to_string(), res.item_kind.clone());
         keys.insert("item_kind".to_string());
 
+        // 固有情報の追加 (size, mtime, hash)
+        if let Some(s) = &res.intrinsic.size {
+            row_data.insert("size".to_string(), s.0.to_string());
+            keys.insert("size".to_string());
+        }
+        if let Some(t) = &res.intrinsic.mtime {
+            row_data.insert("mtime".to_string(), t.0.to_string());
+            keys.insert("mtime".to_string());
+        }
+        if let Some(h) = &res.intrinsic.hash {
+            row_data.insert("hash".to_string(), h.clone());
+            keys.insert("hash".to_string());
+        }
+
         // 全てのタグを表示対象に含める（Rankシステムに表示順序を委ねる）
-        for (k, v) in &res.tags {
+        for (tag_type, values) in &res.tags {
+            let k = tag_type.as_str();
             // "name" や "item_kind" は既にセット済みなので、タグリストの中に現れてもスキップする
             if k == "name" || k == "item_kind" {
                 continue;
             }
-            row_data.insert(k.clone(), v.clone());
-            keys.insert(k.clone());
+            // 複数値がある場合はカンマ区切りで表示
+            let v = values
+                .iter()
+                .map(|tv| tv.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            row_data.insert(k.to_string(), v);
+            keys.insert(k.to_string());
         }
 
         // ランクに基づいてキーをソート
@@ -444,13 +465,36 @@ fn print_compact_projections(response: &ttfm::types::SearchResponse) {
     // クエリで定義された最初の投影型を使用してグループ化
     if let Some(ft) = response.projections.get(0) {
         for res in &response.results {
-            for (k, v) in &res.tags {
+            // 固有情報のチェック
+            if ft == "size" {
+                if let Some(s) = res.intrinsic.size {
+                    groups.entry(s.0.to_string()).or_default().push(res);
+                }
+                continue;
+            }
+            if ft == "mtime" {
+                if let Some(t) = res.intrinsic.mtime {
+                    groups.entry(t.0.to_string()).or_default().push(res);
+                }
+                continue;
+            }
+            if ft == "hash" {
+                if let Some(h) = &res.intrinsic.hash {
+                    groups.entry(h.clone()).or_default().push(res);
+                }
+                continue;
+            }
+
+            for (tag_type, values) in &res.tags {
+                let k = tag_type.as_str();
                 if ft == "type" {
                     // type: 検索の場合は、タグのキー（Type）そのものでグルーピングする
                     // これにより、extension, size, mtime 等の「型一覧」が表示される
-                    groups.entry(k.clone()).or_default().push(res);
+                    groups.entry(k.to_string()).or_default().push(res);
                 } else if k == ft {
-                    groups.entry(v.clone()).or_default().push(res);
+                    for tv in values {
+                        groups.entry(tv.label.as_str()).or_default().push(res);
+                    }
                 }
             }
         }
@@ -487,10 +531,16 @@ fn print_compact_projections(response: &ttfm::types::SearchResponse) {
         }
 
         // 2文字のインデントを考慮してtruncate
-        println!("  {}", truncate_text(&all_items_str, term_width.saturating_sub(2)));
+        println!(
+            "  {}",
+            truncate_text(&all_items_str, term_width.saturating_sub(2))
+        );
     }
 
-    println!("\nTotal: {} items matched the projection.", response.results.len());
+    println!(
+        "\nTotal: {} items matched the projection.",
+        response.results.len()
+    );
 }
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
@@ -500,17 +550,17 @@ fn print_simple_results(response: &ttfm::types::SearchResponse) {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
 
-
     for res in &response.results {
         let line = if response.projections.is_empty() {
             // プロジェクションなし: パスがあればパス、なければ名前
-            res.get_tag_value("path").unwrap_or(&res.name).to_string()
+            res.get_tag_value("path")
+                .unwrap_or_else(|| res.name.clone())
         } else {
             // プロジェクションあり: 指定された順序で値を結合（タブ区切り）
-            let values: Vec<&str> = response
+            let values: Vec<String> = response
                 .projections
                 .iter()
-                .map(|key| res.get_tag_value(key).unwrap_or(""))
+                .map(|key| res.get_tag_value(key).unwrap_or_default())
                 .collect();
             values.join("\t")
         };

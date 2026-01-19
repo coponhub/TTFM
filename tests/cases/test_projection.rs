@@ -88,20 +88,17 @@ fn test_projection_queries() {
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results = fm.search("type:").unwrap();
-    assert!(
-        results.results.len() >= 3,
-        "type: should match all items"
-    );
+    assert!(results.results.len() >= 3, "type: should match all items");
     assert_eq!(results.projections, vec!["type"]);
 
     // 結果に含まれる全てのタグキー（Type）を収集
     let mut found_types = std::collections::HashSet::new();
     for r in &results.results {
-        for (key, _) in &r.tags {
-            found_types.insert(key.clone());
+        for (tag_type, _) in &r.tags {
+            found_types.insert(tag_type.as_str().to_string());
         }
     }
-    
+
     // 主要なSTypeが含まれているか確認
     // 環境によっては全てのタグが出揃わない可能性があるため、最低限 item_kind と name があれば良しとする。
     let expected_types = vec!["item_kind", "name"];
@@ -116,10 +113,7 @@ fn test_projection_queries() {
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
     let results = fm.search("typedtag:").unwrap();
-    println!(
-        "Matches for 'typedtag:': {} items",
-        results.results.len()
-    );
+    println!("Matches for 'typedtag:': {} items", results.results.len());
     assert!(
         results.results.len() >= 3,
         "typedtag: should match all items"
@@ -127,9 +121,10 @@ fn test_projection_queries() {
     assert_eq!(results.projections, vec!["typedtag"]);
 
     // 検証: アイテムが typedtag タグを持っているか
-    let has_typedtag = results.results.iter().any(|r| {
-        r.tags.iter().any(|(k, v)| k == "typedtag" && !v.is_empty())
-    });
+    let has_typedtag = results
+        .results
+        .iter()
+        .any(|r| r.get_tag_value("typedtag").is_some());
     assert!(
         has_typedtag,
         "Items should have 'typedtag' tag values in SearchResult"
@@ -140,7 +135,9 @@ fn test_projection_queries() {
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.name == "test.rs" {
-            let ext = r.get_tag_value("extension").expect("test.rs should have extension tag");
+            let ext = r
+                .get_tag_value("extension")
+                .expect("test.rs should have extension tag");
             assert_eq!(ext, "rs");
         }
     }

@@ -43,8 +43,11 @@ fn test_incremental_indexing_full_flow() {
         .unwrap();
 
     let res_edit = fm.search("filename:a.txt").unwrap();
-    let files_edit: Vec<_> =
-        res_edit.results.iter().filter(|r| r.item_kind == "file").collect();
+    let files_edit: Vec<_> = res_edit
+        .results
+        .iter()
+        .filter(|r| r.item_kind == "file")
+        .collect();
     assert_eq!(files_edit.len(), 1, "Should find exactly one a.txt");
     assert_eq!(
         files_edit[0].id, old_id,
@@ -58,8 +61,11 @@ fn test_incremental_indexing_full_flow() {
     assert_eq!(fm.search(all_files).unwrap().results.len(), 2);
 
     let res_b_del = fm.search("filename:b.rs").unwrap();
-    let files_b_del: Vec<_> =
-        res_b_del.results.iter().filter(|r| r.item_kind == "file").collect();
+    let files_b_del: Vec<_> = res_b_del
+        .results
+        .iter()
+        .filter(|r| r.item_kind == "file")
+        .collect();
     assert_eq!(
         files_b_del.len(),
         0,
@@ -95,8 +101,11 @@ fn test_incremental_indexing_full_flow() {
     let query = format!("file_id:\"{}\"", uuid_str);
 
     let res_inode = fm.search(&query).unwrap();
-    let files_inode: Vec<_> =
-        res_inode.results.iter().filter(|r| r.item_kind == "file").collect();
+    let files_inode: Vec<_> = res_inode
+        .results
+        .iter()
+        .filter(|r| r.item_kind == "file")
+        .collect();
 
     // 検証：1つの実体に対して a.txt と c.txt の 2つの場所がヒットすること
     assert_eq!(
@@ -126,32 +135,60 @@ fn test_system_items_registration() {
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
-    let results_physical = fm.search("item_kind:typedtag & name:extension:txt").unwrap();
-    assert!(results_physical.results.is_empty(), "Physical typedtag item should NOT be created automatically");
+    let results_physical = fm
+        .search("item_kind:typedtag & name:extension:txt")
+        .unwrap();
+    assert!(
+        results_physical.results.is_empty(),
+        "Physical typedtag item should NOT be created automatically"
+    );
 
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
     let results_projection = fm.search("typedtag:").unwrap();
-    
+
     // プロジェクション配下に typedtag が含まれているか確認
-    assert_eq!(results_projection.projections, vec!["typedtag"], "Query should project 'typedtag' field");
+    assert_eq!(
+        results_projection.projections,
+        vec!["typedtag"],
+        "Query should project 'typedtag' field"
+    );
     assert!(!results_projection.results.is_empty(), "Should find items");
 
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.tags.iter().any(|(k, v)| k == "typedtag" && v == "extension:txt")
+        r.get_tag_values("typedtag")
+            .map(|vals| {
+                vals.iter().any(|tv| tv.label.as_str() == "extension:txt")
+            })
+            .unwrap_or(false)
     });
-    assert!(has_target_val, "Should contain 'extension:txt' in projected typedtag values");
+    assert!(
+        has_target_val,
+        "Should contain 'extension:txt' in projected typedtag values"
+    );
 
     // 3. origin のプロジェクションも確認
     let results_origin = fm.search("origin:").unwrap();
-    assert_eq!(results_origin.projections, vec!["origin"], "Query should project 'origin' field");
+    assert_eq!(
+        results_origin.projections,
+        vec!["origin"],
+        "Query should project 'origin' field"
+    );
     assert!(!results_origin.results.is_empty());
-    
-    let file_item_origin = results_origin.results.iter().find(|r| r.name == "hello.txt").expect("hello.txt not found for origin check");
+
+    let file_item_origin = results_origin
+        .results
+        .iter()
+        .find(|r| r.name == "hello.txt")
+        .expect("hello.txt not found for origin check");
     let origin_val = file_item_origin.get_tag_value("origin");
-    assert_eq!(origin_val, Some("system"), "File item should have 'system' origin via projection");
+    assert_eq!(
+        origin_val.as_deref(),
+        Some("system"),
+        "File item should have 'system' origin via projection"
+    );
 }
 
 #[test]
@@ -181,8 +218,11 @@ fn test_typedtag_listing_via_type_query() {
     // 2. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
     // オリジナル通りのフィルタロジックに戻す
     let results = fm.search("extension:txt").unwrap();
-    let files: Vec<_> =
-        results.results.iter().filter(|r| r.item_kind == "file").collect();
+    let files: Vec<_> = results
+        .results
+        .iter()
+        .filter(|r| r.item_kind == "file")
+        .collect();
     let tags: Vec<_> = results
         .results
         .iter()
@@ -228,7 +268,11 @@ fn test_definition_only_items_registration() {
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    assert!(!fm.search("item_kind:type & name:name").unwrap().results.is_empty());
+    assert!(!fm
+        .search("item_kind:type & name:name")
+        .unwrap()
+        .results
+        .is_empty());
     assert!(!fm
         .search("item_kind:type & name:item_kind")
         .unwrap()
