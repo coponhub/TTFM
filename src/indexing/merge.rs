@@ -1,12 +1,12 @@
 use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
-use crate::taggers::{ColumnDef, TagValue};
+use crate::taggers::TagValue;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use crate::FunctionRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    Condition, Expr, Func, Iden, JoinType, Query, SelectStatement, SimpleExpr,
+    Condition, Expr, Iden, JoinType, Query, SelectStatement, SimpleExpr,
 };
 use std::path::Path;
 
@@ -57,15 +57,14 @@ pub(crate) fn run_merge(
     .ingest(&results)?
     .sync(&deleted_ids)?;
 
-    if !results.is_empty() || !moved.is_empty() {
-        let tags = MergeQueryParts::diff_tags(&registry.get_all_columns());
-        let candidates_data = MergeQueryParts::expand_variants(tags);
-        update_sys_fn(Some(candidates_data))?;
-    }
-
     ent.cleanup()?;
     loc.cleanup()?;
     tag.cleanup()?;
+
+    // システムアイテム（基本Type定義のみ）の更新
+    // 以前はここで type/label/typedtag の全バリエーションを登録していたが、
+    // oneview のプロジェクションにより不要になったため廃止した。
+    update_sys_fn(None)?;
 
     // クリーンアップ
     std::fs::remove_file(temp_scan_path).ok();
@@ -290,107 +289,11 @@ impl ItemRow {
             label: util::null_as(SqlType::VARCHAR),
         }
     }
-
-    pub(crate) fn new_label(content: SimpleExpr) -> Self {
-        Self {
-            kind: Expr::val("label").into(),
-            content: content.clone(),
-            name: content.clone(),
-            rank: Expr::val(0).into(),
-            type_: util::null_as(SqlType::VARCHAR),
-            label: content,
-        }
-    }
-
-    pub(crate) fn new_typedtag(
-        type_expr: SimpleExpr,
-        label_expr: SimpleExpr,
-    ) -> Self {
-        let content = Func::cust(crate::db::DuckDbFunc::Concat).args([
-            Expr::col(Col::Type).into(),
-            Expr::val(":").into(),
-            label_expr.clone(),
-        ]);
-        Self {
-            kind: Expr::val("typedtag").into(),
-            content: content.clone().into(),
-            name: content.into(),
-            rank: Expr::val(0).into(),
-            type_: type_expr,
-            label: label_expr,
-        }
-    }
-
-    pub(crate) fn variant_col(kind: &str, col: Col) -> Self {
-        match kind {
-            "type" => Self::new_type(Expr::col(col).into(), 0),
-            "label" => Self::new_label(Expr::col(col).into()),
-            _ => panic!("Unsupported tag kind for col builder"),
-        }
-    }
 }
 
 impl MergeQueryParts {
-    pub(crate) fn diff_tags(all_cols: &[ColumnDef]) -> SelectStatement {
-        let mut source_q = Query::select();
-        source_q
-            .expr_as(Expr::col(Col::Type), Col::Type)
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                    Expr::col(Col::LabelStr).into(),
-                    Expr::col(Col::LabelInt).cast_as(SqlType::VARCHAR).into(),
-                    Expr::col(Col::LabelDouble)
-                        .cast_as(SqlType::VARCHAR)
-                        .into(),
-                    Expr::col(Col::LabelBool).cast_as(SqlType::VARCHAR).into(),
-                ]),
-                Col::Label,
-            )
-            .from(Tbl::BaseTagsDiff);
-
-        for col in all_cols
-            .iter()
-            .filter(|c| c.target_table == TargetTable::Locations)
-        {
-            let mut sub = Query::select();
-            let col_iden = util::col_to_iden(&col.name);
-            sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
-                .expr_as(
-                    Expr::col(col_iden.clone()).cast_as(SqlType::VARCHAR),
-                    Col::Label,
-                )
-                .from(Tbl::LocationsDiff)
-                .and_where(Expr::col(col_iden).is_not_null());
-            source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
-        }
-
-        source_q
-    }
-
     pub(crate) fn item_columns() -> [Col; 6] {
         ItemRow::all_columns()
-    }
-
-    pub(crate) fn expand_variants(tags: SelectStatement) -> SelectStatement {
-        // --- Branch 1: Tag Types ('type' tags) ---
-        let mut cand_q = ItemRow::variant_col("type", Col::Type).select();
-        cand_q.from_subquery(tags.clone(), Tbl::Diff);
-
-        // --- Branch 2: Labels ('label' tags) ---
-        let mut label_q = ItemRow::variant_col("label", Col::Label).select();
-        label_q.from_subquery(tags.clone(), Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
-
-        // --- Branch 3: Typed Tags ('typedtag' tags) ---
-        let mut tt_q = ItemRow::new_typedtag(
-            Expr::col(Col::Type).into(),
-            Expr::col(Col::Label).into(),
-        )
-        .select();
-        tt_q.from_subquery(tags, Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
-
-        cand_q
     }
 
     pub(crate) fn registry_variants(
@@ -509,17 +412,5 @@ mod tests {
     use super::*;
     use sea_query::PostgresQueryBuilder;
 
-    #[test]
-    fn test_query_parts_expand_variants_structure() {
-        let tags = Query::select()
-            .expr_as(Expr::val("extension"), Col::Type)
-            .expr_as(Expr::val("rs"), Col::Label)
-            .from(Tbl::Diff)
-            .to_owned();
-        let sql = MergeQueryParts::expand_variants(tags)
-            .to_string(PostgresQueryBuilder);
-        assert!(sql.contains("'type'"));
-        assert!(sql.contains("'label'"));
-        assert!(sql.contains("'typedtag'"));
-    }
+
 }

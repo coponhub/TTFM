@@ -180,6 +180,7 @@ impl Col {
     pub fn tag_value_columns() -> Vec<Self> {
         std::iter::once(Self::Types)
             .chain(Self::typed_label_columns())
+            .chain(std::iter::once(Self::Origin))
             .chain(std::iter::once(Self::TypedTag))
             .collect()
     }

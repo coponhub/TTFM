@@ -101,18 +101,21 @@ fn test_system_item_metadata_integration() {
         "Empty extension tag should not exist"
     );
 
-    // 3. 'extension:rs' という typedtag が 'label:rs' タグを持っていることを確認
-    // item_kind:typedtag と label:rs の AND 検索でヒットするはず
-    let results = fm.search("item_kind:typedtag & label:rs").unwrap();
+    // 3. 'extension:rs' という typedtag Item（物理）は自動生成されないことを確認
+    let results_physical = fm.search("item_kind:typedtag & label:rs").unwrap();
     assert!(
-        results.results.iter().any(|r| r.name == "extension:rs"),
-        "typedtag should have label metadata tag"
+        results_physical.results.is_empty(),
+        "Physical typedtag item should NOT be created automatically"
     );
 
-    // 4. 'label:rs' 自体は冗長な 'label:rs' タグを持っていないことを確認
-    let self_label = fm.search("item_kind:label & label:rs").unwrap();
-    assert!(
-        !self_label.results.is_empty(),
-        "label item SHOULD have self-referential tag (metadata as data)"
-    );
+    // 4. 代わりにプロジェクションで確認
+    // extension: で検索し、test.rs がヒットすること、そのタグに rs が含まれていることを確認
+    let results_proj = fm.search("extension:").unwrap();
+    assert!(!results_proj.results.is_empty(), "Should find files via projection");
+    let test_file = results_proj.results.iter().find(|r| r.name == "test.rs").expect("test.rs not found");
+    // SearchResult.tags に (extension, rs) が含まれているはず
+    let ext_val = test_file.get_tag_value("extension");
+    assert_eq!(ext_val, Some("rs"), "Projection should return extension value");
+
+
 }

@@ -1,6 +1,6 @@
 use file_id::get_file_id;
 use tempfile::tempdir;
-use ttfm::{FileManager, TargetTable};
+use ttfm::FileManager;
 
 #[test]
 fn test_incremental_indexing_full_flow() {
@@ -125,12 +125,33 @@ fn test_system_items_registration() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
-    let _items_path_buf = fm.path_for_target(TargetTable::ItemReferences);
+    // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
+    let results_physical = fm.search("item_kind:typedtag & name:extension:txt").unwrap();
+    assert!(results_physical.results.is_empty(), "Physical typedtag item should NOT be created automatically");
 
-    // 内部DB接続へのアクセスが必要なため、 search 等で代用するか、
-    // オリジナルのテストが意図していた「システムへの登録確認」を search で行う。
-    let results = fm.search("name:extension:txt & origin:system").unwrap();
-    assert!(!results.results.is_empty());
+    // 2. しかし、プロジェクション（oneview）経由では検索できること
+    // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
+    let results_projection = fm.search("typedtag:").unwrap();
+    
+    // プロジェクション配下に typedtag が含まれているか確認
+    assert_eq!(results_projection.projections, vec!["typedtag"], "Query should project 'typedtag' field");
+    assert!(!results_projection.results.is_empty(), "Should find items");
+
+    // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
+    // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
+    let has_target_val = results_projection.results.iter().any(|r| {
+        r.tags.iter().any(|(k, v)| k == "typedtag" && v == "extension:txt")
+    });
+    assert!(has_target_val, "Should contain 'extension:txt' in projected typedtag values");
+
+    // 3. origin のプロジェクションも確認
+    let results_origin = fm.search("origin:").unwrap();
+    assert_eq!(results_origin.projections, vec!["origin"], "Query should project 'origin' field");
+    assert!(!results_origin.results.is_empty());
+    
+    let file_item_origin = results_origin.results.iter().find(|r| r.name == "hello.txt").expect("hello.txt not found for origin check");
+    let origin_val = file_item_origin.get_tag_value("origin");
+    assert_eq!(origin_val, Some("system"), "File item should have 'system' origin via projection");
 }
 
 #[test]

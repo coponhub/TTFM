@@ -469,24 +469,24 @@ impl FileManager {
 
                 // 物理カラム (LabelStr...LabelBool) から値を探す
                 // 最後尾の TypedTag カラムは除外して検索する
+                // 物理カラム (LabelStr...LabelBool) から値を探す
+                // 最後尾の TypedTag とその手前の Origin カラムは除外して検索する
                 let label_val = tag_lists
                     .iter()
                     .skip(1)
-                    .take(tag_lists.len().saturating_sub(2)) // skip Type(1) + exclude TypedTag(1) = len - 2 items to check? No.
-                    // tag_lists: [Type, Str, Int, Dbl, Bool, TypedTag] (len=6)
-                    // skip(1) -> [Str, Int, Dbl, Bool, TypedTag]
-                    // We want to check [Str, Int, Dbl, Bool].
-                    // take(len - 2) is correct if len >= 2.
-                    // But simpler: just iterate up to last-1.
-                     .take(tag_lists.len().saturating_sub(2))
+                    .take(tag_lists.len().saturating_sub(3)) // Type(1) + Origin(1) + TypedTag(1) = 3 excluded
                     .find_map(|list| list.get(i).and_then(val_to_string));
                 
                 if let Some(val) = label_val {
                     extracted.push((type_name, val));
-                } else {
-                     // ラベルが無い場合でも、typeだけはあるなら（例えばフラグ的なタグ）、
-                     // 値なしタグとして追加すべきか？ 現状のロジックは値必須。
-                     // 今回は変更しない。
+                }
+
+                // Origin カラム (TypedTagの手前) を取得
+                if tag_lists.len() >= 2 {
+                     let origin_idx = tag_lists.len().saturating_sub(2);
+                     if let Some(origin_val) = tag_lists.get(origin_idx).and_then(|l| l.get(i)).and_then(val_to_string) {
+                         extracted.push(("origin".to_string(), origin_val));
+                     }
                 }
 
                 // TypedTag カラム (最後尾) を取得し、特別なタグとして追加

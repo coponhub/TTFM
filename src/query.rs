@@ -867,6 +867,8 @@ impl QueryNode {
         // type='typedtag' というフィルタは行わず、typedtagカラムの存在チェックのみ行う。
         if let TagType::Base(SType::TypedTag) = tagtype {
              q.and_where(Expr::col(Col::TypedTag).is_not_null());
+        } else if let TagType::Base(SType::Origin) = tagtype {
+             q.and_where(Expr::col(Col::Origin).is_not_null());
         } else {
             q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()));
 

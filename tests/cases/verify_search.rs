@@ -59,7 +59,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
 
         // Folder specific searches (directories are also entries with filenames)
         ("filename:work_docs", 0),            // filename no longer matches directories
-        ("name:work_docs", 2),                // name matches both directory and label item
+        ("name:work_docs", 1),                // name matches directory only (label item removed)
         ("filename:personal_photos | filename:temp_backup | filename:backup_2023.zip", 1),
         ("name:work_docs & directory:work_docs", 1),     
     ];
@@ -313,7 +313,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // 10. Type側のGlob (実装済みか確認)
     // filename が対象になるはず
     let results = fm.search("*name:project_alpha.pdf").unwrap();
-    assert_eq!(results.results.len(), 2);
+    assert_eq!(results.results.len(), 1);
 
     // 11. Type Wildcard + Value Prefix (Regression Test)
     // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
