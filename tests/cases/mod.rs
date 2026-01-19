@@ -1,4 +1,3 @@
-pub mod debug_issue;
 pub mod indexing_integration;
 pub mod integration_tags;
 pub mod rank_test;
