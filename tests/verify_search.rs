@@ -444,9 +444,9 @@ fn test_complex_search_combinations() {
     let results = fm.search("nam*:*.rs").unwrap();
     assert!(results.results.len() >= 18);
 
-    // 10. Type Prefix + Value Glob (type:^fi & name:*.rs)
+    // 10. Type Prefix + Value Glob (item_kind:^fi & name:*.rs)
     // Matches 'file' type items which are .rs
-    let results = fm.search("type:^fi & name:*.rs").unwrap();
+    let results = fm.search("item_kind:^fi & name:*.rs").unwrap();
     assert!(results.results.len() >= 18);
 }
 
