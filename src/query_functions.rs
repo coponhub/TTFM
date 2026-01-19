@@ -216,23 +216,8 @@ impl QueryFunction for TypeQuery {
             label: label.clone(),
         }
     }
-    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
-        // type: プロジェクション時は、全アイテムを対象にしたい。
-        // 単に Projection だけを返すと、検索ロジックによってはフィルタなしとして扱われるはずだが、
-        // 念のため「全アイテム」を意味する条件（originがあるもの＝全て）を付加する。
-        QueryNode::And(vec![
-            QueryNode::Or(vec![
-                QueryNode::ColumnMatch {
-                    tag: SType::Origin,
-                    label: Label::String("system".to_string()),
-                },
-                QueryNode::ColumnMatch {
-                    tag: SType::Origin,
-                    label: Label::String("user".to_string()),
-                },
-            ]),
-            QueryNode::Projection(SType::Type.into()),
-        ])
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
     }
 }
 
@@ -310,25 +295,11 @@ mod tests {
         
         // expand_projection
         let expanded_proj = q.expand_projection(SType::Type.into());
-        // And([Or(system, user), Projection(Type)])
-        match expanded_proj {
-            QueryNode::And(nodes) => {
-                assert_eq!(nodes.len(), 2);
-                match &nodes[0] {
-                    QueryNode::Or(or_nodes) => {
-                         // system or user
-                         assert_eq!(or_nodes.len(), 2);
-                    },
-                    _ => panic!("Expected Or node as first element"),
-                }
-                match &nodes[1] {
-                    QueryNode::Projection(tt) => {
-                        assert_eq!(tt, &TagType::Base(SType::Type));
-                    },
-                    _ => panic!("Expected Projection node as second element"),
-                }
-            },
-            _ => panic!("Expected And node, got {:?}", expanded_proj),
+        // Projection(Type)
+        if let QueryNode::Projection(tt) = expanded_proj {
+            assert_eq!(tt, TagType::Base(SType::Type));
+        } else {
+            panic!("Expected Projection node, got {:?}", expanded_proj);
         }
     }
 }

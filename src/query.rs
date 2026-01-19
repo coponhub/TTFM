@@ -869,6 +869,9 @@ impl QueryNode {
              q.and_where(Expr::col(Col::TypedTag).is_not_null());
         } else if let TagType::Base(SType::Origin) = tagtype {
              q.and_where(Expr::col(Col::Origin).is_not_null());
+        } else if let TagType::Base(SType::Type) = tagtype {
+             // type: プロジェクション。Typeカラムの値が欲しい。全行が対象。
+             q.and_where(Expr::col(Col::Type).is_not_null());
         } else if let TagType::Base(SType::Label) = tagtype {
              // label: プロジェクションの場合は、全アイテムのラベル値が対象。
              // 特定の type で絞り込まず、ラベル値が存在する行を全て返す。
