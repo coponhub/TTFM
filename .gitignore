@@ -4,4 +4,4 @@ target/
 *.parquet
 *~
 *MEMO.md
-src/gemini_sandbox.rs
+.agent/

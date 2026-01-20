@@ -475,75 +475,103 @@ impl FileManager {
 
             // 1. データ抽出ヘルパーの構成
             let extract_tag_type = |n: types::TagNumber| {
-                get_list(crate::db::Col::Types).and_then(|l| l.get(n)).and_then(|v| match v {
-                    Value::Text(s) => Some(types::TagType::from(s.clone())),
-                    Value::BigInt(n_val) => Some(types::TagType::from(n_val.to_string())),
-                    _ => None,
-                })
-            };
-
-            let extract_origin = |n: types::TagNumber| {
-                match get_list(crate::db::Col::Origin).and_then(|l| l.get(n)) {
-                    Some(Value::Text(s)) if s == "system" => types::Origin::System,
-                    _ => types::Origin::User,
-                }
-            };
-
-            let extract_label = |n: types::TagNumber| {
-                crate::db::Col::typed_label_columns().into_iter().find_map(|col| {
-                    get_list(col).and_then(|l| l.get(n)).and_then(|v| match v {
-                        Value::Text(s) => Some(types::Label::String(s.clone())),
-                        Value::BigInt(n_val) => Some(types::Label::Integer(*n_val)),
-                        Value::Double(d) => Some(types::Label::String(d.to_string())),
-                        Value::Boolean(b) => Some(types::Label::String(b.to_string())),
+                get_list(crate::db::Col::Types)
+                    .and_then(|l| l.get(n))
+                    .and_then(|v| match v {
+                        Value::Text(s) => Some(types::TagType::from(s.clone())),
+                        Value::BigInt(n_val) => {
+                            Some(types::TagType::from(n_val.to_string()))
+                        }
                         _ => None,
                     })
-                })
+            };
+
+            let extract_origin =
+                |n: types::TagNumber| match get_list(crate::db::Col::Origin)
+                    .and_then(|l| l.get(n))
+                {
+                    Some(Value::Text(s)) if s == "system" => {
+                        types::Origin::System
+                    }
+                    _ => types::Origin::User,
+                };
+
+            let extract_label = |n: types::TagNumber| {
+                crate::db::Col::typed_label_columns().into_iter().find_map(
+                    |col| {
+                        get_list(col).and_then(|l| l.get(n)).and_then(|v| {
+                            match v {
+                                Value::Text(s) => {
+                                    Some(types::Label::String(s.clone()))
+                                }
+                                Value::BigInt(n_val) => {
+                                    Some(types::Label::Integer(*n_val))
+                                }
+                                Value::Double(d) => {
+                                    Some(types::Label::String(d.to_string()))
+                                }
+                                Value::Boolean(b) => {
+                                    Some(types::Label::String(b.to_string()))
+                                }
+                                _ => None,
+                            }
+                        })
+                    },
+                )
             };
 
             // 2. 特殊処理: TypedTag の抽出
-            let extract_typedtag = |n: types::TagNumber, origin, tags: &mut types::Tags| {
-                if let Some(Value::Text(tt_val)) = get_list(crate::db::Col::TypedTag).and_then(|l| l.get(n)) {
-                    tags.entry(types::TagType::Base(types::SType::TypedTag))
+            let extract_typedtag =
+                |n: types::TagNumber, origin, tags: &mut types::Tags| {
+                    if let Some(Value::Text(tt_val)) =
+                        get_list(crate::db::Col::TypedTag)
+                            .and_then(|l| l.get(n))
+                    {
+                        tags.entry(types::TagType::Base(
+                            types::SType::TypedTag,
+                        ))
                         .or_default()
                         .push(types::TagValue {
                             label: types::Label::String(tt_val.clone()),
                             origin,
                         });
-                }
-            };
+                    }
+                };
 
             // 3. 振り分けヘルパー
-            let dispatch_tag = |
-                tag_type: types::TagType, 
-                label: types::Label, 
-                origin: types::Origin, 
-                intrinsic: &mut types::Intrinsic, 
-                tags: &mut types::Tags
-            | {
-                match &tag_type {
-                    types::TagType::Base(types::SType::Size) => {
-                        intrinsic.size = Some(types::FileSize(label.as_i64()))
+            let dispatch_tag =
+                |tag_type: types::TagType,
+                 label: types::Label,
+                 origin: types::Origin,
+                 intrinsic: &mut types::Intrinsic,
+                 tags: &mut types::Tags| {
+                    match &tag_type {
+                        types::TagType::Base(types::SType::Size) => {
+                            intrinsic.size =
+                                Some(types::FileSize(label.as_i64()))
+                        }
+                        types::TagType::Base(types::SType::Mtime) => {
+                            intrinsic.mtime =
+                                Some(types::FileTimestamp(label.as_i64()))
+                        }
+                        types::TagType::Base(types::SType::Hash) => {
+                            intrinsic.hash = Some(label.as_str())
+                        }
+                        types::TagType::Base(types::SType::TypedTag) => {}
+                        _ => {
+                            tags.entry(tag_type)
+                                .or_default()
+                                .push(types::TagValue { label, origin });
+                        }
                     }
-                    types::TagType::Base(types::SType::Mtime) => {
-                        intrinsic.mtime = Some(types::FileTimestamp(label.as_i64()))
-                    }
-                    types::TagType::Base(types::SType::Hash) => {
-                        intrinsic.hash = Some(label.as_str())
-                    }
-                    types::TagType::Base(types::SType::TypedTag) => {}
-                    _ => {
-                        tags.entry(tag_type)
-                            .or_default()
-                            .push(types::TagValue { label, origin });
-                    }
-                }
-            };
+                };
 
             // 4. メインループ: 走査と振り分け
             for i in 0..types_list.len() {
                 let n = i as types::TagNumber;
-                let (Some(tag_type), origin, Some(label)) = (extract_tag_type(n), extract_origin(n), extract_label(n)) else {
+                let (Some(tag_type), origin, Some(label)) =
+                    (extract_tag_type(n), extract_origin(n), extract_label(n))
+                else {
                     continue;
                 };
 
@@ -551,7 +579,13 @@ impl FileManager {
                 extract_typedtag(n, origin, &mut tags);
 
                 // 振り分け
-                dispatch_tag(tag_type, label, origin, &mut intrinsic, &mut tags);
+                dispatch_tag(
+                    tag_type,
+                    label,
+                    origin,
+                    &mut intrinsic,
+                    &mut tags,
+                );
             }
 
             types::SearchResult {
