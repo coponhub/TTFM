@@ -1,12 +1,40 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::{BTreeMap, HashMap, HashSet};
+// std::collections は不要になったため削除
 use std::path::PathBuf;
 use std::time::Duration;
 use terminal_size::{terminal_size, Width};
 use ttfm::config::Config;
 use ttfm::FileManager;
+
+macro_rules! safe_print {
+    ($($arg:tt)*) => {
+        {
+            use std::io::Write;
+            write!(std::io::stdout(), $($arg)*).unwrap_or_else(|e| {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    std::process::exit(0);
+                }
+                panic!("failed printing to stdout: {}", e);
+            });
+        }
+    };
+}
+
+macro_rules! safe_println {
+    ($($arg:tt)*) => {
+        {
+            use std::io::Write;
+            writeln!(std::io::stdout(), $($arg)*).unwrap_or_else(|e| {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    std::process::exit(0);
+                }
+                panic!("failed printing to stdout: {}", e);
+            });
+        }
+    };
+}
 
 /// TTFM (Typed Tag File Manager) のメインCLI構造体。
 #[derive(Parser)]
@@ -78,7 +106,7 @@ fn main() -> Result<()> {
     // Clear コマンドの場合は完全な初期化をスキップし、破損したDBでも削除できるようにする
     if matches!(cli.command, Commands::Clear) {
         FileManager::delete_database()?;
-        println!("Database cleared successfully.");
+        safe_println!("Database cleared successfully.");
         return Ok(());
     }
 
@@ -95,7 +123,7 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Index { path, dry_run } => {
-            println!("Indexing directory: {:?} (dry-run: {})", path, dry_run);
+            safe_println!("Indexing directory: {:?} (dry-run: {})", path, dry_run);
 
             let pb = ProgressBar::new_spinner();
             pb.set_style(
@@ -121,7 +149,7 @@ fn main() -> Result<()> {
         }
         Commands::Search { query, short } => {
             if !*short {
-                println!("Searching for: '{}'", query);
+                safe_println!("Searching for: '{}'", query);
             }
             let response = fm.search(query)?;
             if *short {
@@ -132,7 +160,7 @@ fn main() -> Result<()> {
         }
         Commands::List { short } => {
             if !*short {
-                println!("Listing files...");
+                safe_println!("Listing files...");
             }
             let response = fm.search("")?;
             if *short {
@@ -143,25 +171,25 @@ fn main() -> Result<()> {
         }
         Commands::Tag { item, tag } => {
             fm.tag_item(item, tag)?;
-            println!("Tagged '{}' with '{}'", item, tag);
+            safe_println!("Tagged '{}' with '{}'", item, tag);
         }
         Commands::Clear => unreachable!("Handled early"),
         Commands::Note { content } => {
             let id = fm.add_item("note", content)?;
-            println!("Created note (ID: {})", id);
+            safe_println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
             let response = fm.search(item)?;
             if response.results.is_empty() {
-                println!("No items matched query: '{}'", item);
+                safe_println!("No items matched query: '{}'", item);
                 return Ok(());
             }
 
-            println!("Matched {} items.", response.results.len());
+            safe_println!("Matched {} items.", response.results.len());
             let do_update = if cli.yes {
                 true
             } else {
-                print!("Set rank to {}? [y/N]: ", value);
+                safe_print!("Set rank to {}? [y/N]: ", value);
                 use std::io::{self, Write};
                 std::io::stdout().flush()?;
                 let mut input = String::new();
@@ -171,9 +199,9 @@ fn main() -> Result<()> {
 
             if do_update {
                 fm.update_ranks(&response.results, *value)?;
-                println!("Updated {} items.", response.results.len());
+                safe_println!("Updated {} items.", response.results.len());
             } else {
-                println!("Aborted.");
+                safe_println!("Aborted.");
             }
         }
     }
@@ -222,355 +250,186 @@ fn get_terminal_width() -> usize {
 }
 
 /// 検索結果の一覧を標準出力に表示します。
-fn print_results(fm: &FileManager, response: &ttfm::types::SearchResponse) {
-    let results = &response.results;
-    if results.is_empty() {
-        println!("No items found.");
+fn print_results(fm: &FileManager, response: &ttfm::SearchResponse) {
+    if response.results.is_empty() {
+        safe_println!("No items found.");
         return;
     }
 
     // 投影 (Projection) がある場合はコンパクトな集約表示にする
-    if !response.projections.is_empty() {
+    if response.type_for_projection.is_some() {
         print_compact_projections(response);
         return;
     }
 
     // データベースからタグ型のランクを取得
     let type_ranks = fm.get_type_ranks().unwrap_or_default();
-
-    struct DisplayRow {
-        id: i64,
-        columns: HashMap<String, String>,
-        all_keys: Vec<String>,
-    }
-
-    let mut groups: HashMap<(String, Vec<String>), Vec<DisplayRow>> =
-        HashMap::new();
     let term_width = get_terminal_width();
 
-    for res in results {
-        let mut row_data = HashMap::new();
-        let mut keys = HashSet::new();
-
-        // 解決済みの名前（最優先列）
-        row_data.insert("name".to_string(), res.name.clone());
-        keys.insert("name".to_string());
-
-        // アイテムの種類
-        row_data.insert("item_kind".to_string(), res.item_kind.clone());
-        keys.insert("item_kind".to_string());
-
-        // 固有情報の追加 (size, mtime, hash)
-        if let Some(s) = &res.intrinsic.size {
-            row_data.insert("size".to_string(), s.0.to_string());
-            keys.insert("size".to_string());
-        }
-        if let Some(t) = &res.intrinsic.mtime {
-            row_data.insert("mtime".to_string(), t.0.to_string());
-            keys.insert("mtime".to_string());
-        }
-        if let Some(h) = &res.intrinsic.hash {
-            row_data.insert("hash".to_string(), h.clone());
-            keys.insert("hash".to_string());
-        }
-
-        // 全てのタグを表示対象に含める（Rankシステムに表示順序を委ねる）
-        for (tag_type, values) in &res.tags {
-            let k = tag_type.as_str();
-            // "name" や "item_kind" は既にセット済みなので、タグリストの中に現れてもスキップする
-            if k == "name" || k == "item_kind" {
-                continue;
-            }
-            // 複数値がある場合はカンマ区切りで表示
-            let v = values
-                .iter()
-                .map(|tv| tv.label.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            row_data.insert(k.to_string(), v);
-            keys.insert(k.to_string());
-        }
-
-        // ランクに基づいてキーをソート
-        let mut sorted_keys: Vec<String> = keys.iter().cloned().collect();
+    // TypeGroup ごとに表示を行う
+    for group in response.iter_type_groups() {
+        // カラム（TagType）をランク順に並び替え
+        let mut sorted_keys = group.keys.clone();
         sorted_keys.sort_by(|a, b| {
             let r_a = type_ranks
-                .get(a)
+                .get(a.as_str())
                 .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(a));
+                .unwrap_or_else(|| fm.get_default_rank(a.as_str()));
             let r_b = type_ranks
-                .get(b)
+                .get(b.as_str())
                 .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(b));
+                .unwrap_or_else(|| fm.get_default_rank(b.as_str()));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
 
-        // 優先表示される（ランクが高い）カラムをグループキーの識別に使う
-        let priority_threshold = 1; // ランクが設定されているものを優先
-        let priority_intersection: Vec<String> = sorted_keys
-            .iter()
-            .filter(|&k| {
-                type_ranks.get(k).cloned().unwrap_or(0) >= priority_threshold
-            })
-            .cloned()
-            .collect();
+        // 「name」カラムがあれば先頭に持ってきたいが、BTreeSetソートにより元々順序はある。
+        // ここでは純粋にランク順を優先する。
 
-        let group_key = (res.item_kind.clone(), priority_intersection);
-
-        groups.entry(group_key).or_default().push(DisplayRow {
-            id: res.id,
-            columns: row_data,
-            all_keys: sorted_keys,
-        });
-    }
-
-    let total_results = results.len();
-
-    // グループごとに表示
-    for ((_kind, _visible_keys), rows) in groups {
-        let mut seen_keys = HashSet::new();
-        let mut all_group_keys = Vec::new();
-
-        for row in &rows {
-            for k in &row.all_keys {
-                if !seen_keys.contains(k) {
-                    all_group_keys.push(k.clone());
-                    seen_keys.insert(k.clone());
-                }
-            }
-        }
-
-        // グループ全体のカラムもランク順にソート
-        all_group_keys.sort_by(|a, b| {
-            let r_a = type_ranks
-                .get(a)
-                .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(a));
-            let r_b = type_ranks
-                .get(b)
-                .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(b));
-            r_b.cmp(&r_a).then_with(|| a.cmp(b))
-        });
-
-        let final_columns = all_group_keys;
-
+        // テーブル幅の計算
         let mut item_id_width = 7; // "item_id"
-        let mut col_widths = vec![0; final_columns.len()];
+        let mut col_widths = vec![0; sorted_keys.len()];
 
-        for row in &rows {
-            item_id_width = item_id_width.max(row.id.to_string().len());
-            for (i, col_name) in final_columns.iter().enumerate() {
-                let val_len = row
-                    .columns
-                    .get(col_name)
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                col_widths[i] = col_widths[i].max(val_len);
+        for res in &group.results {
+            item_id_width = item_id_width.max(res.id.to_string().len());
+            for (i, key) in sorted_keys.iter().enumerate() {
+                let val = res.get_tag_value(key.as_str()).unwrap_or_default();
+                col_widths[i] = col_widths[i].max(val.chars().count());
             }
         }
-        for (i, col_name) in final_columns.iter().enumerate() {
-            col_widths[i] = col_widths[i].max(col_name.len());
+        for (i, key) in sorted_keys.iter().enumerate() {
+            col_widths[i] = col_widths[i].max(key.as_str().len());
         }
 
-        let print_line = |row_vals: Option<&DisplayRow>| {
+        // 行の出力ヘルパー
+        let print_line = |res_opt: Option<&ttfm::SearchResult>| {
             let mut current_width = 0;
-            let sep = "  "; // 2 spaces
+            let sep = "  ";
             let sep_len = sep.len();
-            let is_header = row_vals.is_none();
+            let is_header = res_opt.is_none();
 
             // item_id
-            let id_str = if let Some(r) = row_vals {
-                r.id.to_string()
-            } else {
-                "item_id".to_string()
-            };
-            let available_for_id = term_width.saturating_sub(current_width);
-            if available_for_id == 0 {
+            let id_str = res_opt
+                .map(|r| r.id.to_string())
+                .unwrap_or_else(|| "item_id".to_string());
+            let available = term_width.saturating_sub(current_width);
+            if available == 0 {
                 return;
             }
 
-            let id_disp = if item_id_width <= available_for_id {
+            let id_disp = if item_id_width <= available {
                 format!("{:<width$}", id_str, width = item_id_width)
             } else {
-                truncate_text(&id_str, available_for_id)
+                truncate_text(&id_str, available)
             };
 
             if is_header {
-                print!("\x1b[1m{}\x1b[0m", id_disp);
+                safe_print!("\x1b[1m{}\x1b[0m", id_disp);
             } else {
-                print!("{}", id_disp);
+                safe_print!("{}", id_disp);
             }
             current_width += id_disp.chars().count();
 
-            for (i, col_name) in final_columns.iter().enumerate() {
+            // 各属性カラム
+            for (i, key) in sorted_keys.iter().enumerate() {
                 if current_width + sep_len >= term_width {
-                    print!("...");
+                    safe_print!("...");
                     break;
                 }
-                print!("{}", sep);
+                safe_print!("{}", sep);
                 current_width += sep_len;
 
-                let val_str = if let Some(r) = row_vals {
-                    r.columns.get(col_name).map(|s| s.as_str()).unwrap_or("")
-                } else {
-                    col_name
-                };
+                let val_str = res_opt
+                    .and_then(|r| r.get_tag_value(key.as_str()))
+                    .unwrap_or_else(|| {
+                        if is_header {
+                            key.as_str().to_string()
+                        } else {
+                            "".to_string()
+                        }
+                    });
 
-                let available = term_width.saturating_sub(current_width);
-                if available == 0 {
+                let avail = term_width.saturating_sub(current_width);
+                if avail == 0 {
                     break;
                 }
 
                 let target_width = col_widths[i];
-                if target_width <= available {
-                    let val_disp =
-                        format!("{:<width$}", val_str, width = target_width);
-                    if is_header {
-                        print!("\x1b[1m{}\x1b[0m", val_disp);
-                    } else {
-                        print!("{}", val_disp);
-                    }
-                    current_width += target_width;
+                let out = if target_width <= avail {
+                    format!("{:<width$}", val_str, width = target_width)
                 } else {
-                    let truncated = truncate_text(val_str, available);
-                    if is_header {
-                        print!("\x1b[1m{}\x1b[0m", truncated);
-                    } else {
-                        print!("{}", truncated);
-                    }
-                    break;
+                    truncate_text(&val_str, avail)
+                };
+
+                if is_header {
+                    safe_print!("\x1b[1m{}\x1b[0m", out);
+                } else {
+                    safe_print!("{}", out);
                 }
+                current_width += out.chars().count();
             }
-            println!();
+            safe_println!();
         };
 
-        print_line(None); // Header (Bold)
-        for row in rows {
-            print_line(Some(&row)); // Data
+        print_line(None); // Header
+        for res in group.results {
+            print_line(Some(res));
         }
-        println!(); // 空行を追加
+        safe_println!();
     }
-    println!("\nTotal: {} results found.", total_results);
+    safe_println!("\nTotal: {} results found.", response.results.len());
 }
 
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
-fn print_compact_projections(response: &ttfm::types::SearchResponse) {
+fn print_compact_projections(response: &ttfm::SearchResponse) {
     let term_width = get_terminal_width();
 
-    // ラベル値 -> 所属するアイテムのリスト
-    let mut groups: BTreeMap<String, Vec<&ttfm::types::SearchResult>> =
-        BTreeMap::new();
+    // iter_label_groups ですでに一意化されているため、それを利用
+    let groups = response.iter_label_groups();
 
-    // クエリで定義された最初の投影型を使用してグループ化
-    if let Some(ft) = response.projections.get(0) {
-        for res in &response.results {
-            // 固有情報のチェック
-            if ft == "size" {
-                if let Some(s) = res.intrinsic.size {
-                    groups.entry(s.0.to_string()).or_default().push(res);
-                }
-                continue;
-            }
-            if ft == "mtime" {
-                if let Some(t) = res.intrinsic.mtime {
-                    groups.entry(t.0.to_string()).or_default().push(res);
-                }
-                continue;
-            }
-            if ft == "hash" {
-                if let Some(h) = &res.intrinsic.hash {
-                    groups.entry(h.clone()).or_default().push(res);
-                }
-                continue;
-            }
-
-            for (tag_type, values) in &res.tags {
-                let k = tag_type.as_str();
-                if ft == "type" {
-                    // type: 検索の場合は、タグのキー（Type）そのものでグルーピングする
-                    // これにより、extension, size, mtime 等の「型一覧」が表示される
-                    groups.entry(k.to_string()).or_default().push(res);
-                } else if k == ft {
-                    for tv in values {
-                        groups.entry(tv.label.as_str()).or_default().push(res);
-                    }
-                }
-            }
-        }
-    }
-
-    // 各グループ内をランク（Rank）の降順でソート
-    for items in groups.values_mut() {
-        items.sort_by(|a, b| b.rank.cmp(&a.rank));
-    }
-
-    let mut group_count = 0;
-    for (label, items) in groups {
-        group_count += 1;
-        if group_count > 50 {
-            println!("... and more labels (limited to 50)");
-            break;
-        }
+    for group in groups {
+        let label = group.label;
+        let items = group.results;
 
         // 1行目: ヘッダー (:label (X items))
-        println!("\x1b[1m:{} ({} items)\x1b[0m", label, items.len());
+        safe_println!("\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m", label, items.len());
 
         // 2行目: アイテムリスト (  #ID:name, ...)
-        // 画面端で確実に省略されるよう、truncate_text を使用する
         let mut all_items_str = String::new();
         for (i, item) in items.iter().take(200).enumerate() {
             if i > 0 {
                 all_items_str.push_str(", ");
             }
             all_items_str.push_str(&format!("#{}:{}", item.id, item.name));
-            // ターミナル幅を大きく超える場合は早期終了
             if all_items_str.chars().count() > term_width + 10 {
                 break;
             }
         }
 
-        // 2文字のインデントを考慮してtruncate
-        println!(
+        safe_println!(
             "  {}",
             truncate_text(&all_items_str, term_width.saturating_sub(2))
         );
     }
 
-    println!(
+    safe_println!(
         "\nTotal: {} items matched the projection.",
         response.results.len()
     );
 }
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
-/// パイプライン処理（xargs, grepなど）向けです。
-/// SIGPIPE（Broken Pipe）が発生した場合は静かに終了します。
-fn print_simple_results(response: &ttfm::types::SearchResponse) {
-    use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-
-    for res in &response.results {
-        let line = if response.projections.is_empty() {
-            // プロジェクションなし: パスがあればパス、なければ名前
-            res.get_tag_value("path")
-                .unwrap_or_else(|| res.name.clone())
-        } else {
-            // プロジェクションあり: 指定された順序で値を結合（タブ区切り）
-            let values: Vec<String> = response
-                .projections
-                .iter()
-                .map(|key| res.get_tag_value(key).unwrap_or_default())
-                .collect();
-            values.join("\t")
-        };
-
-        if let Err(e) = writeln!(stdout, "{}", line) {
-            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                return; // パイプが閉じられたので終了
-            }
-            // その他のエラーは出力すべきだが、stdoutが死んでいる場合はパニックせず無視が妥当
-            return;
+fn print_simple_results(response: &ttfm::SearchResponse) {
+    if response.type_for_projection.is_none() {
+        // プロジェクションなし: アイテムごとに解決済みの名前を出力
+        for res in &response.results {
+            let line = res.primary_value().unwrap_or_else(|| res.name.clone());
+            safe_println!("{}", line);
+        }
+    } else {
+        // プロジェクションあり: LabelGroup を用いて一意な値の一覧を出力
+        let groups = response.iter_label_groups();
+        for group in groups {
+            safe_println!("{}", group.label);
         }
     }
 }

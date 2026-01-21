@@ -149,8 +149,8 @@ fn test_system_items_registration() {
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert_eq!(
-        results_projection.projections,
-        vec!["typedtag"],
+        results_projection.type_for_projection,
+        Some(ttfm::types::TagType::from("typedtag")),
         "Query should project 'typedtag' field"
     );
     assert!(!results_projection.results.is_empty(), "Should find items");
@@ -158,11 +158,9 @@ fn test_system_items_registration() {
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.get_tag_values("typedtag")
-            .map(|vals| {
-                vals.iter().any(|tv| tv.label.as_str() == "extension:txt")
-            })
-            .unwrap_or(false)
+        r.get_all_values("typedtag")
+            .iter()
+            .any(|val| val == "extension:txt")
     });
     assert!(
         has_target_val,
@@ -172,8 +170,8 @@ fn test_system_items_registration() {
     // 3. origin のプロジェクションも確認
     let results_origin = fm.search("origin:").unwrap();
     assert_eq!(
-        results_origin.projections,
-        vec!["origin"],
+        results_origin.type_for_projection,
+        Some(ttfm::types::TagType::from("origin")),
         "Query should project 'origin' field"
     );
     assert!(!results_origin.results.is_empty());

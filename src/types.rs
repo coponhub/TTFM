@@ -62,7 +62,7 @@ impl DBType for bool {
 }
 
 /// ファイルサイズ（バイト単位）を表す型。
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct FileSize(pub i64);
 impl DBType for FileSize {
     fn db_type() -> crate::db::SqlType {
@@ -83,7 +83,7 @@ impl ToSql for FileSize {
 }
 
 /// UNIXタイムスタンプ（秒単位）を表す型。
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct FileTimestamp(pub i64);
 impl DBType for FileTimestamp {
     fn db_type() -> crate::db::SqlType {
@@ -105,7 +105,7 @@ impl ToSql for FileTimestamp {
 
 /// タグの「キー（型）」部分を表す SuperType。
 /// システム定義の標準タグ（SType）と、自由なカスタムタグの両方を扱えます。
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum TagType {
     Base(SType),
     Custom(String),
@@ -146,12 +146,18 @@ impl From<&str> for TagType {
 
 /// タグの「値」部分（例: "rs", "1024"）。
 /// 文字列と数値のどちらかを取り得ます。
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum Label {
     String(String),
     Integer(i64),
     /// 引用符で囲まれたリテラル文字列。Globを無効化する。
     Literal(String),
+}
+
+impl std::fmt::Display for Label {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl Label {
@@ -202,6 +208,12 @@ pub struct TypedTag {
     pub label: Label,
 }
 
+impl std::fmt::Display for TypedTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.tagtype.as_str(), self.label.as_str())
+    }
+}
+
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
     pub fn new(tagtype: impl Into<TagType>, label: impl Into<Label>) -> Self {
@@ -222,7 +234,104 @@ pub struct TagValue {
 }
 
 /// タグの集合。
-pub type Tags = std::collections::HashMap<TagType, Vec<TagValue>>;
+/// 並列リスト（Stream）ベースの Lazy な構造で、情報の解決をアクセス時まで遅延させます。
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct Tags {
+    pub types: Vec<String>,
+    pub labels: Vec<Label>,
+    pub origins: Vec<Origin>,
+}
+
+impl Tags {
+    pub fn new() -> Self {
+        Self {
+            types: Vec::new(),
+            labels: Vec::new(),
+            origins: Vec::new(),
+        }
+    }
+
+    /// 新しいタグを追加します。
+    pub fn push(&mut self, tagtype: TagType, label: Label, origin: Origin) {
+        self.types.push(tagtype.as_str().to_string());
+        self.labels.push(label);
+        self.origins.push(origin);
+    }
+
+    /// 「型:値」のペアを生成するイテレータを返します。
+    pub fn iter_typed_tags(&self) -> impl Iterator<Item = TypedTag> + '_ {
+        self.types
+            .iter()
+            .zip(self.labels.iter())
+            .map(|(t, l)| TypedTag {
+                tagtype: TagType::from(t.as_str()),
+                label: l.clone(),
+            })
+    }
+
+    /// 指定された型のタグ値をリストとして取得します（リニアスキャン）。
+    pub fn get_values(&self, key: &TagType) -> Vec<TagValue> {
+        let key_str = key.as_str();
+        self.types
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| *t == key_str)
+            .map(|(i, _)| TagValue {
+                label: self.labels[i].clone(),
+                origin: self.origins[i],
+            })
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.types.len()
+    }
+}
+
+// 既存コードとの互換性のためのイテレーション対応（所有権を消費）
+impl IntoIterator for Tags {
+    type Item = (TagType, Vec<TagValue>);
+    type IntoIter = std::collections::hash_map::IntoIter<TagType, Vec<TagValue>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        // 必要に応じて HashMap に詰め直して返す（Lazy 化の恩恵は受けられないが、互換性は保つ）
+        let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
+            std::collections::HashMap::new();
+        for i in 0..self.types.len() {
+            map.entry(TagType::from(self.types[i].as_str()))
+                .or_default()
+                .push(TagValue {
+                    label: self.labels[i].clone(),
+                    origin: self.origins[i],
+                });
+        }
+        map.into_iter()
+    }
+}
+
+// 共有参照によるイテレーション（HashMap への詰め直しを避けるため、(TagType, Vec<TagValue>) 形式は限定的に）
+impl<'a> IntoIterator for &'a Tags {
+    type Item = (TagType, Vec<TagValue>);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
+            std::collections::HashMap::new();
+        for i in 0..self.types.len() {
+            map.entry(TagType::from(self.types[i].as_str()))
+                .or_default()
+                .push(TagValue {
+                    label: self.labels[i].clone(),
+                    origin: self.origins[i],
+                });
+        }
+        map.into_iter().collect::<Vec<_>>().into_iter()
+    }
+}
 
 /// アイテム固有の不動の情報をまとめた構造体。
 #[derive(Debug, PartialEq, Clone, Default)]
@@ -235,92 +344,6 @@ pub struct Intrinsic {
     pub hash: Option<String>,
 }
 
-/// 検索結果を表す構造体。
-#[derive(Debug, PartialEq, Clone)]
-pub struct SearchResult {
-    /// アイテムの一意なID
-    pub id: ItemId,
-    /// アイテムの種類
-    pub item_kind: ItemKind,
-    /// 解決済みの名称
-    pub name: ItemName,
-    /// アイテムの優先度
-    pub rank: Rank,
-    /// 固定の固有情報
-    pub intrinsic: Intrinsic,
-    /// アイテムに紐づく動的なタグの集合
-    pub tags: Tags,
-}
-
-/// 検索クエリの結果全体を表す構造体。
-#[derive(Debug, PartialEq, Clone, Default)]
-pub struct SearchResponse {
-    /// ヒットしたアイテムのリスト
-    pub results: Vec<SearchResult>,
-    /// クエリで明示的に投影（Projection）されたタグ型の一覧
-    pub projections: Vec<String>,
-}
-
-impl SearchResult {
-    /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
-    /// ファイルならパス、Noteならコンテンツなどを返します。
-    pub fn primary_value(&self) -> Option<String> {
-        // 抽象化された名前があればそれを最優先
-        if !self.name.is_empty() {
-            return Some(self.name.clone());
-        }
-        // フォールバックとしてタグの中を探す
-        self.get_tag_value("path")
-            .or_else(|| self.get_tag_value("content"))
-            .or_else(|| self.get_tag_value("value"))
-            .or_else(|| self.get_tag_value("filename"))
-    }
-
-    /// アイテム全体の集約された由来を取得します。
-    /// 一つでもユーザー付与のタグがあれば Origin::User を返します。
-    pub fn origin(&self) -> Origin {
-        self.tags
-            .values()
-            .flatten()
-            .any(|tv| tv.origin == Origin::User)
-            .then_some(Origin::User)
-            .unwrap_or(Origin::System)
-    }
-
-    /// 指定されたキーのタグ値を文字列として取得します。
-    /// 固定メタデータ (size 等) も透過的にアクセス可能です。
-    pub fn get_tag_value(&self, key: &str) -> Option<String> {
-        let tag_type = TagType::from(key);
-
-        // 1. 固有情報の早期リターン
-        let fixed = match &tag_type {
-            TagType::Base(SType::Size) => {
-                self.intrinsic.size.as_ref().map(|s| s.0.to_string())
-            }
-            TagType::Base(SType::Mtime) => {
-                self.intrinsic.mtime.as_ref().map(|t| t.0.to_string())
-            }
-            TagType::Base(SType::Hash) => self.intrinsic.hash.clone(),
-            TagType::Base(SType::Rank) => Some(self.rank.to_string()),
-            TagType::Base(SType::ItemKind) => Some(self.item_kind.clone()),
-            TagType::Base(SType::Name) => Some(self.name.clone()),
-            TagType::Base(SType::Origin) => Some(self.origin().to_string()),
-            _ => None,
-        };
-
-        if fixed.is_some() {
-            return fixed;
-        }
-
-        // 2. HashMap からのフォールバック
-        self.tags.get(&tag_type)?.get(0).map(|tv| tv.label.as_str())
-    }
-
-    /// 指定されたキーの全てのタグ値を取得します。
-    pub fn get_tag_values(&self, key: &str) -> Option<&[TagValue]> {
-        self.tags.get(&TagType::from(key)).map(|v| v.as_slice())
-    }
-}
 
 /// ライフタイムに制約のないタグ名（参照）。
 pub type Name<'a> = &'a str;
@@ -335,6 +358,8 @@ pub type StaticName = &'static str;
     Copy,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     strum::IntoStaticStr,
     strum::EnumString,
@@ -378,4 +403,49 @@ pub enum SType {
     LabelBool,
     // Schema Table Columns
     DataType,
+}
+
+#[cfg(test)]
+mod tests_types {
+    use super::*;
+
+    #[test]
+    fn test_typed_tag_display() {
+        let tt = TypedTag::new("extension", "rs");
+        assert_eq!(tt.to_string(), "extension:rs");
+
+        let tt_int = TypedTag::new("size", 1024);
+        assert_eq!(tt_int.to_string(), "size:1024");
+    }
+
+    #[test]
+    fn test_tags_iter_typed_tags() {
+        let mut tags = Tags::new();
+        tags.push(
+            TagType::from("project"),
+            Label::from("A"),
+            Origin::User,
+        );
+        tags.push(
+            TagType::from("project"),
+            Label::from("B"),
+            Origin::User,
+        );
+        tags.push(
+            TagType::from("extension"),
+            Label::from("rs"),
+            Origin::User,
+        );
+
+        let mut results: Vec<String> = tags
+            .iter_typed_tags()
+            .map(|tt| tt.to_string())
+            .collect();
+        results.sort();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&"project:A".to_string()));
+        assert!(results.contains(&"project:B".to_string()));
+        assert!(results.contains(&"extension:rs".to_string()));
+    }
 }

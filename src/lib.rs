@@ -22,6 +22,7 @@ pub mod query;
 pub mod query_functions;
 pub mod rank;
 mod taggers;
+pub mod response;
 pub mod types;
 pub mod util;
 
@@ -34,7 +35,8 @@ use functions::{
 };
 pub use query::{parse, QueryNode};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use types::{FileRef, Label, SearchResult, TagType, TypedTag};
+pub use response::{SearchResponse, SearchResult};
+pub use types::{FileRef, Label, TagType, TypedTag};
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
 pub fn get_file_ref(path: &Path) -> Result<FileRef> {
@@ -306,7 +308,7 @@ impl FileManager {
     }
 
     /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
-    pub fn search(&self, query: &str) -> Result<types::SearchResponse> {
+    pub fn search(&self, query: &str) -> Result<SearchResponse> {
         if !self.path_for_target(TargetTable::FileReferences).exists() {
             return Err(anyhow::anyhow!(
                 "Index not found. Please run 'index' command first."
@@ -463,7 +465,7 @@ impl FileManager {
 
             // 型名のリスト（Types カラム）を起点に走査
             let Some(types_list) = get_list(crate::db::Col::Types) else {
-                return Ok(types::SearchResult {
+                return Ok(SearchResult {
                     id,
                     item_kind,
                     name,
@@ -520,25 +522,20 @@ impl FileManager {
                 )
             };
 
-            // 2. 特殊処理: TypedTag の抽出
             let extract_typedtag =
                 |n: types::TagNumber, origin, tags: &mut types::Tags| {
                     if let Some(Value::Text(tt_val)) =
                         get_list(crate::db::Col::TypedTag)
                             .and_then(|l| l.get(n))
                     {
-                        tags.entry(types::TagType::Base(
-                            types::SType::TypedTag,
-                        ))
-                        .or_default()
-                        .push(types::TagValue {
-                            label: types::Label::String(tt_val.clone()),
+                        tags.push(
+                            types::TagType::Base(types::SType::TypedTag),
+                            types::Label::String(tt_val.clone()),
                             origin,
-                        });
+                        );
                     }
                 };
 
-            // 3. 振り分けヘルパー
             let dispatch_tag =
                 |tag_type: types::TagType,
                  label: types::Label,
@@ -559,9 +556,7 @@ impl FileManager {
                         }
                         types::TagType::Base(types::SType::TypedTag) => {}
                         _ => {
-                            tags.entry(tag_type)
-                                .or_default()
-                                .push(types::TagValue { label, origin });
+                            tags.push(tag_type, label, origin);
                         }
                     }
                 };
@@ -588,7 +583,7 @@ impl FileManager {
                 );
             }
 
-            types::SearchResult {
+            SearchResult {
                 id,
                 item_kind,
                 name,
@@ -604,9 +599,12 @@ impl FileManager {
             results.push(row?);
         }
 
-        Ok(types::SearchResponse {
+        Ok(SearchResponse {
             results,
-            projections,
+            type_for_projection: projections
+                .into_iter()
+                .next()
+                .map(types::TagType::from),
         })
     }
 

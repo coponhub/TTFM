@@ -31,7 +31,10 @@ fn test_projection_queries() {
     );
     assert!(results.results.iter().any(|r| r.name == "test.rs"));
     assert!(results.results.iter().any(|r| r.name == "test.txt"));
-    assert_eq!(results.projections, vec!["extension"]);
+    assert_eq!(
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("extension"))
+    );
 
     // 2. directory: (投影 -> is_dir:true + projection:filename)
     let results = fm.search("directory:").unwrap();
@@ -47,8 +50,8 @@ fn test_projection_queries() {
     assert!(results.results.iter().any(|r| r.name == "test_dir"));
     // 仮想ラベル directory: は内部で filename を投影する
     assert_eq!(
-        results.projections,
-        vec!["filename"],
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("filename")),
         "directory: projection should resolve to filename"
     );
 
@@ -68,8 +71,8 @@ fn test_projection_queries() {
     assert!(results.results.iter().all(|r| r.item_kind == "file"));
     // 仮想ラベル filename: は内部で filename を投影する
     assert_eq!(
-        results.projections,
-        vec!["filename"],
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("filename")),
         "filename: projection should resolve to filename"
     );
 
@@ -89,7 +92,10 @@ fn test_projection_queries() {
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results = fm.search("type:").unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
-    assert_eq!(results.projections, vec!["type"]);
+    assert_eq!(
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("type"))
+    );
 
     // 結果に含まれる全てのタグキー（Type）を収集
     let mut found_types = std::collections::HashSet::new();
@@ -118,7 +124,10 @@ fn test_projection_queries() {
         results.results.len() >= 3,
         "typedtag: should match all items"
     );
-    assert_eq!(results.projections, vec!["typedtag"]);
+    assert_eq!(
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("typedtag"))
+    );
 
     // 検証: アイテムが typedtag タグを持っているか
     let has_typedtag = results
