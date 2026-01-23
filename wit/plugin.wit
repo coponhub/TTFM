@@ -3,7 +3,7 @@ package ttfm:plugin;
 // プラグインの基本情報を定義する共通インターフェース
 interface core {
     enum plugin-kind {
-        tag-function,
+        indexing-function,
     }
 
     record plugin-info {
@@ -16,8 +16,8 @@ interface core {
     get-info: func() -> plugin-info;
 }
 
-// TagFunction (メタデータ抽出) 固有のインターフェース
-interface tag-function {
+// IndexingFunction (メタデータ抽出) 固有のインターフェース
+interface indexing-function {
     // カラム定義の型
     record column-def {
         name: string,
@@ -41,5 +41,5 @@ interface tag-function {
 
 world plugin {
     export core;
-    export tag-function;
+    export indexing-function;
 }

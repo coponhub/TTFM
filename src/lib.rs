@@ -28,10 +28,10 @@ pub mod util;
 
 pub use db::TargetTable;
 use functions::{
-    ContentTagFunction, DirectoryFunction, ExtensionFunction, FilenameFunction,
-    InodeFunction, KindTagFunction, ModifiedStrFunction, ModifiedTsFunction,
-    NameTagFunction, ParentDirFunction, PathFunction, SizeBytesFunction,
-    SizeStrFunction, StemFunction, TagFunction, TypeFromExtFunction,
+    ContentIndexingFunction, DirectoryFunction, ExtensionFunction, FilenameFunction,
+    InodeFunction, KindIndexingFunction, ModifiedStrFunction, ModifiedTsFunction,
+    NameIndexingFunction, ParentDirFunction, PathFunction, SizeBytesFunction,
+    SizeStrFunction, StemFunction, IndexingFunction, TypeFromExtFunction,
 };
 pub use query::{parse, QueryNode};
 pub use response::{SearchResponse, SearchResult};
@@ -96,10 +96,10 @@ pub fn get_ttfm_plugins_dir() -> Result<std::path::PathBuf> {
     Ok(get_ttfm_home()?.join("plugins"))
 }
 
-/// 全ての `TagFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
+/// 全ての `IndexingFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
 pub struct FunctionRegistry {
     /// 登録されている機能のリスト
-    functions: Vec<Box<dyn TagFunction>>,
+    functions: Vec<Box<dyn IndexingFunction>>,
 }
 
 impl Default for FunctionRegistry {
@@ -116,9 +116,9 @@ impl FunctionRegistry {
         }
     }
 
-    /// 新しい機能（`TagFunction`）をレジストリに追加します。
+    /// 新しい機能（`IndexingFunction`）をレジストリに追加します。
     /// 同名の機能が既に登録されている場合はスキップします。
-    pub fn register(&mut self, func: Box<dyn TagFunction>) {
+    pub fn register(&mut self, func: Box<dyn IndexingFunction>) {
         let name = func.name();
         if self.functions.iter().any(|f| f.name() == name) {
             return;
@@ -144,15 +144,15 @@ impl FunctionRegistry {
         reg.register(Box::new(ModifiedStrFunction::new()));
 
         // 定義のみの機能（ランク付けや検索用）
-        reg.register(Box::new(NameTagFunction));
-        reg.register(Box::new(KindTagFunction));
-        reg.register(Box::new(ContentTagFunction));
+        reg.register(Box::new(NameIndexingFunction));
+        reg.register(Box::new(KindIndexingFunction));
+        reg.register(Box::new(ContentIndexingFunction));
 
         reg
     }
 
     /// 全ての登録済み関数への参照を返します。
-    pub fn all_functions(&self) -> &[Box<dyn TagFunction>] {
+    pub fn all_functions(&self) -> &[Box<dyn IndexingFunction>] {
         &self.functions
     }
 

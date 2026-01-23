@@ -16,7 +16,7 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
   - `parent:` (normalized path match)
   - `type_from_ext:Folder` (directory filtering)
 - [x] **Plugin System (WebAssembly)**: 
-  - **WIT Interface**: Standardized plugin interface for `TagFunction`.
+  - **WIT Interface**: Standardized plugin interface for `IndexingFunction`.
   - **Wasm Runtime**: High-speed plugin execution via `wasmtime`.
   - **MIME Type Plugin**: Proof-of-concept plugin with directory detection (`inode/directory`).
 - [x] **User-Defined Tags & Persistence**:
@@ -103,7 +103,7 @@ Directly interact with files from the CLI.
 
   - [x] Improved error handling by replacing silent failures with `Result` propagation and logging.
 
-  - [x] Unified static (`TagDefinition`) and dynamic (`TagFunction`) tag systems using `ScanRole`.
+  - [x] Unified static (`TagDefinition`) and dynamic (`IndexingFunction`) tag systems using `ScanRole`.
 
   - [x] Generalized file move detection logic to be implementation-agnostic.
 
@@ -118,7 +118,7 @@ Directly interact with files from the CLI.
 
 - [ ] **Phase 3: Database & Search Refinement**:
 
-  - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
+  - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `IndexingFunction`.
   - [ ] **Schema Optimization (Phase E)**: 
     - Separate `label` column into stored typed columns:
       - `label_str` (VARCHAR): Text data, extensions, paths.

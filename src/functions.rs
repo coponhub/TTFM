@@ -13,7 +13,7 @@ use std::path::Path;
 ///
 /// 新しいタグ機能（例：Exif情報、Gitステータスなど）を追加する場合は、
 /// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
-pub trait TagFunction: Send + Sync {
+pub trait IndexingFunction: Send + Sync {
     /// この機能の識別子名を取得します。
     fn name(&self) -> Name;
 
@@ -144,7 +144,7 @@ impl PathFunction {
     }
 }
 
-impl TagFunction for PathFunction {
+impl IndexingFunction for PathFunction {
     fn name(&self) -> Name {
         SType::Path.into()
     }
@@ -217,7 +217,7 @@ impl ParentDirFunction {
     }
 }
 
-impl TagFunction for ParentDirFunction {
+impl IndexingFunction for ParentDirFunction {
     fn name(&self) -> Name {
         SType::Parentdir.into()
     }
@@ -298,7 +298,7 @@ impl FilenameFunction {
     }
 }
 
-impl TagFunction for FilenameFunction {
+impl IndexingFunction for FilenameFunction {
     fn name(&self) -> Name {
         SType::Filename.into()
     }
@@ -376,7 +376,7 @@ impl StemFunction {
     }
 }
 
-impl TagFunction for StemFunction {
+impl IndexingFunction for StemFunction {
     fn name(&self) -> Name {
         SType::Stem.into()
     }
@@ -447,7 +447,7 @@ impl ExtensionFunction {
     }
 }
 
-impl TagFunction for ExtensionFunction {
+impl IndexingFunction for ExtensionFunction {
     fn name(&self) -> Name {
         SType::Extension.into()
     }
@@ -518,7 +518,7 @@ impl DirectoryFunction {
     }
 }
 
-impl TagFunction for DirectoryFunction {
+impl IndexingFunction for DirectoryFunction {
     fn name(&self) -> Name {
         SType::IsDir.into()
     }
@@ -586,7 +586,7 @@ impl SizeBytesFunction {
     }
 }
 
-impl TagFunction for SizeBytesFunction {
+impl IndexingFunction for SizeBytesFunction {
     fn name(&self) -> Name {
         SType::Size.into()
     }
@@ -657,7 +657,7 @@ impl ModifiedTsFunction {
     }
 }
 
-impl TagFunction for ModifiedTsFunction {
+impl IndexingFunction for ModifiedTsFunction {
     fn name(&self) -> Name {
         SType::Mtime.into()
     }
@@ -716,7 +716,7 @@ impl InodeFunction {
     }
 }
 
-impl TagFunction for InodeFunction {
+impl IndexingFunction for InodeFunction {
     fn name(&self) -> Name {
         SType::FileId.into()
     }
@@ -810,7 +810,7 @@ impl TypeFromExtFunction {
     }
 }
 
-impl TagFunction for TypeFromExtFunction {
+impl IndexingFunction for TypeFromExtFunction {
     fn name(&self) -> Name {
         SType::TypeFromExt.into()
     }
@@ -898,7 +898,7 @@ impl SizeStrFunction {
     }
 }
 
-impl TagFunction for SizeStrFunction {
+impl IndexingFunction for SizeStrFunction {
     fn name(&self) -> Name {
         SType::SizeStr.into()
     }
@@ -976,7 +976,7 @@ impl ModifiedStrFunction {
     }
 }
 
-impl TagFunction for ModifiedStrFunction {
+impl IndexingFunction for ModifiedStrFunction {
     fn name(&self) -> Name {
         SType::ModifiedStr.into()
     }
@@ -992,8 +992,8 @@ impl TagFunction for ModifiedStrFunction {
 // 12. Definition Only Functions
 // ========================================================
 
-pub struct NameTagFunction;
-impl TagFunction for NameTagFunction {
+pub struct NameIndexingFunction;
+impl IndexingFunction for NameIndexingFunction {
     fn name(&self) -> Name {
         SType::Name.into()
     }
@@ -1005,8 +1005,8 @@ impl TagFunction for NameTagFunction {
     }
 }
 
-pub struct KindTagFunction;
-impl TagFunction for KindTagFunction {
+pub struct KindIndexingFunction;
+impl IndexingFunction for KindIndexingFunction {
     fn name(&self) -> Name {
         SType::ItemKind.into()
     }
@@ -1018,8 +1018,8 @@ impl TagFunction for KindTagFunction {
     }
 }
 
-pub struct ContentTagFunction;
-impl TagFunction for ContentTagFunction {
+pub struct ContentIndexingFunction;
+impl IndexingFunction for ContentIndexingFunction {
     fn name(&self) -> Name {
         SType::Content.into()
     }

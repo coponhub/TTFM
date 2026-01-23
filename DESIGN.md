@@ -121,22 +121,22 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
 - **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
 
-### 3.3 プラグイン・コンポーネント設計 (TagFunction パターン)
+### 3.3 プラグイン・コンポーネント設計 (IndexingFunction パターン)
 新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
 
-#### A. `TagFunction` trait (`src/functions.rs`)
+#### A. `IndexingFunction` trait (`src/functions.rs`)
 特定の TypedTag に関する**定義・抽出の統合単位**。
 - **タグ名の管理**: 担当する識別子（例: `"path"`, `"extension"`) を `NAME` 定数として保持する。
 - **Taggerの提供**: 内部に `Tagger` を必ず持ち、インデックス作成時の抽出ロジックをシステムへ提供する。 
 
 #### B. `Tagger` trait (`src/taggers.rs`)
-**「実際のタグ付け」を行う実行部**。`TagFunction` に内包される。
+**「実際のタグ付け」を行う実行部**。`IndexingFunction` に内包される。
 - **DB定義**: そのタグをインデックス登録する際に必要なデータベースカラム（名前、型）を定義する (`get_columns`)。
 - **タグ付けロジック**: ファイルパスを受け取り、具体的な抽出・生成ロジックを実行して値を生成する (`tag_file`)。
 
 #### C. `FunctionRegistry` (`src/lib.rs`)
-個別の `TagFunction` を一括管理するハブ。
-- インデックス作成時は `TagFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `TagFunction` にSQL変換を委譲する。
+個別の `IndexingFunction` を一括管理するハブ。
+- インデックス作成時は `IndexingFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `IndexingFunction` にSQL変換を委譲する。
 
 ### 4. プロセス設計
 
@@ -320,8 +320,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 バイナリを再コンパイルすることなく機能を拡張するため、`wasmtime` を用いた WebAssembly (Wasm) プラグシステムを導入する。
 
 ### 5.1 アーキテクチャ概要
-Wasmモジュールはホスト（Rust）から見て1つの `TagFunction` として振る舞う。
-ホスト側で `WasmPluginAdapter`（仮称）を作成し、これが `TagFunction` トレイトを実装することで、既存の `FunctionRegistry` にそのまま登録可能とする。
+Wasmモジュールはホスト（Rust）から見て1つの `IndexingFunction` として振る舞う。
+ホスト側で `WasmPluginAdapter`（仮称）を作成し、これが `IndexingFunction` トレイトを実装することで、既存の `FunctionRegistry` にそのまま登録可能とする。
 
 ### 5.2 インターフェース定義 (WIT: Wasm Interface Type)
 Wasmコンポーネントモデルを採用し、`wit` ファイルでインターフェースを定義する。将来的な拡張性を考慮し、プラグイン種別を特定する `core` インターフェースを設ける。
@@ -332,7 +332,7 @@ package ttfm:plugin
 // プラグインの基本情報を定義する共通インターフェース
 interface core {
     enum plugin-kind {
-        tag-function,
+        indexing-function,
     }
 
     record plugin-info {
@@ -345,8 +345,8 @@ interface core {
     get-info: func() -> plugin-info
 }
 
-// TagFunction (メタデータ抽出) 固有のインターフェース
-interface tag-function {
+// IndexingFunction (メタデータ抽出) 固有のインターフェース
+interface indexing-function {
     // カラム定義の型
     record column-def {
         name: string,
@@ -370,7 +370,7 @@ interface tag-function {
 
 world plugin {
     export core
-    export tag-function
+    export indexing-function
 }
 ```
 

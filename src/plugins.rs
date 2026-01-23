@@ -9,7 +9,7 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::db::{SqlType, TargetTable};
-use crate::functions::TagFunction;
+use crate::functions::IndexingFunction;
 use crate::taggers::{ColumnDef, TagValue, Tagger};
 
 // WIT定義から自動生成
@@ -20,7 +20,7 @@ bindgen!({
 
 // 生成された型のパスを短縮
 use exports::ttfm::plugin::core::PluginKind;
-use exports::ttfm::plugin::tag_function::TagValue as WasmVal;
+use exports::ttfm::plugin::indexing_function::TagValue as WasmVal;
 
 /// Wasmプラグインを管理するための共有ストア。
 /// WASIの実行コンテキストとリソーステーブルを保持します。
@@ -85,7 +85,7 @@ impl WasmPlugin {
             .call_get_info(&mut store)
             .context("Failed to call get_info")?;
 
-        let interface = plugin.ttfm_plugin_tag_function();
+        let interface = plugin.ttfm_plugin_indexing_function();
         let wasm_cols = interface
             .call_get_columns(&mut store)
             .context("Failed to call get_columns")?;
@@ -139,7 +139,7 @@ impl WasmPlugin {
     }
 }
 
-/// Wasmプラグインを `TagFunction` として扱うためのアダプター。
+/// Wasmプラグインを `IndexingFunction` として扱うためのアダプター。
 pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
     /// プラグインの名前（タグ名）
@@ -178,7 +178,7 @@ impl Tagger for WasmPluginAdapter {
                 cache.get_mut(&self.name).ok_or_else(|| {
                     anyhow::anyhow!("Plugin instance missing from cache")
                 })?;
-            let interface = plugin.ttfm_plugin_tag_function();
+            let interface = plugin.ttfm_plugin_indexing_function();
 
             interface.call_tag_file(store, &path_str).with_context(|| {
                 format!("Wasm execution error for file: {}", path_str)
@@ -193,7 +193,7 @@ impl Tagger for WasmPluginAdapter {
     }
 }
 
-impl TagFunction for WasmPluginAdapter {
+impl IndexingFunction for WasmPluginAdapter {
     fn name(&self) -> &str {
         &self.name
     }

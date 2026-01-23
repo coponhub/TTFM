@@ -22,7 +22,7 @@ impl SystemRank {
 /// FunctionRegistry の情報に基づき、ランク決定用の SQL 式を構築します。
 ///
 /// # Arguments
-/// * `registry` - TagFunction の定義（名前とデフォルトランク）を持つレジストリ
+/// * `registry` - IndexingFunction の定義（名前とデフォルトランク）を持つレジストリ
 /// * `guard_condition` - ランク付けルールを適用するための条件（例: `ItemKind == "type"`）
 /// * `key_expr` - ランク決定のキーとなる値を持つ式（例: `Content`）
 /// * `default_rank` - 条件に合致しない、またはキーに対応するランクがない場合のデフォルト値
@@ -69,11 +69,11 @@ pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::functions::TagFunction;
+    use crate::functions::IndexingFunction;
     use crate::taggers::{ColumnDef, TagValue, Tagger};
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 
-    // Mock TagFunction implementation
+    // Mock IndexingFunction implementation
     struct MockTagger;
     impl Tagger for MockTagger {
         fn get_columns(&self) -> Vec<ColumnDef> {
@@ -91,7 +91,7 @@ mod tests {
         name: String,
         rank: Rank,
     }
-    impl TagFunction for MockFunc {
+    impl IndexingFunction for MockFunc {
         fn name(&self) -> &str {
             &self.name
         }
