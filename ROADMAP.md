@@ -38,9 +38,9 @@ Enable tagging multiple files at once using search queries.
 
 ### 2. Search Result Control
 Improve flexibility in viewing search results.
-- [ ] **Pagination/Limit**: Allow users to specify result limits (currently fixed at 100).
+- [x] **Pagination/Limit**: Allow users to specify result limits (currently fixed at 100).
 - [ ] **Sorting**: Add options to sort by Size, Date Modified, or Name.
-- [ ] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals in query parser.
+- [x] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals in query parser.
 - [ ] **Rank Display Scaling**: Represent internal BigInt ranks as user-friendly decimals (e.g., 2 decimal places).
 - [ ] **Output Formats**: Support JSON output for integration with other tools.
 
@@ -76,7 +76,7 @@ Transition to a robust schema that separates system-generated metadata from user
     - [ ] **Advanced Query Features**:
         - [ ] **集約 (Aggregation)**: `sum(size:)`, `count(ext:jpg)` 等の統計値計算。
         - [ ] **グループ比較 (Grouping Comparison)**: `parentdir:(sum(size:) > 1GB)` 等のグルーピング検索。
-        - [ ] **射影 (Projection)**: `type:` による値の抽出。
+        - [x] **射影 (Projection)**: `type:` による値の抽出。
     - [x] Implement `name` tag support in query parser and search results.
     - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
@@ -89,11 +89,9 @@ Directly interact with files from the CLI.
     - If the argument does not contain a colon (`:`), it is treated as a relative path to a local file rather than a query.
     - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
 
-### 8. Custom Operators (User-Defined Macros)
-Allow advanced users to define custom query operators.
-- [ ] **Feature**: Support user-defined infix operators in configuration or via tags.
-    - Example: Define `+>` to mean `sum($L) > sum($R)`.
-    - Enables domain-specific query languages (e.g., `similarity`, `contains`).
+### 9. Interactive Mode
+- [ ] **Feature**: Support `ttfm search -i`.
+    - Interactive results browser (TUI) allowing navigation and opening files directly.
 
 ---
 
@@ -142,3 +140,9 @@ Allow advanced users to define custom query operators.
 - [x] **Benchmark**: Validate performance on extreme datasets (1M+ files).
 
 - [ ] **Test Coverage**: Add more edge cases for Windows paths and complex boolean logic.
+
+- [ ] **Observability & Error Handling**:
+  - [ ] **Async Error Visualization**: Implement a mechanism to track and display errors from background cache workers (e.g., via a status command or log file).
+
+- [ ] **Code Refinement**:
+  - [ ] **DRY Refactoring**: Consolidate redundant logic for handling empty node sets in `build_and_sql` and `build_or_sql`.
