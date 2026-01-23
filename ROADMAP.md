@@ -90,8 +90,8 @@ Directly interact with files from the CLI.
     - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
 
 ### 9. Interactive Mode
-- [ ] **Feature**: Support `ttfm search -i`.
-    - Interactive results browser (TUI) allowing navigation and opening files directly.
+- [ ] **Feature**: Support `ttfm -i`.
+    - fdisk-like REPL interface for managing files and tags interactively.
 
 ---
 
