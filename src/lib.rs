@@ -4,11 +4,11 @@
 //! DuckDBをバックエンドに使用し、Parquet形式でのインデックス保存と高速な検索を実現します。
 
 use crate::db::{Col, Tbl};
-use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
+use crate::util::{ExecuteSql, IdenExt, SelectExt};
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use file_id::get_file_id;
-use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query};
+use sea_query::{Expr, PostgresQueryBuilder, Query};
 use std::path::Path;
 
 pub mod config;
@@ -34,9 +34,14 @@ use functions::{
     SizeStrFunction, StemFunction, TagFunction, TypeFromExtFunction,
 };
 pub use query::{parse, QueryNode};
-pub use taggers::{ColumnDef, TagValue, Tagger};
 pub use response::{SearchResponse, SearchResult};
-pub use types::{FileRef, Label, TagType, TypedTag};
+pub use taggers::{ColumnDef, TagValue, Tagger};
+pub use types::{FileRef, Label, Progress, TagType, TypedTag};
+
+mod cache;
+pub use cache::CacheManager;
+mod search;
+pub use search::SearchOptions;
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
 pub fn get_file_ref(path: &Path) -> Result<FileRef> {
@@ -198,6 +203,8 @@ pub struct FileManager {
     db_dir: std::path::PathBuf,
     /// 利用可能な機能のレジストリ
     registry: FunctionRegistry,
+    /// キャッシュマネージャ
+    cache_manager: CacheManager,
 }
 
 impl FileManager {
@@ -241,6 +248,10 @@ impl FileManager {
             ))?;
         }
 
+        let cache_dir = db_dir.join("cache");
+        // デフォルトのキャッシュ上限は 3GB
+        let cache_manager = CacheManager::new(cache_dir, 3 * 1024 * 1024 * 1024);
+
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
 
@@ -257,6 +268,7 @@ impl FileManager {
             conn,
             db_dir,
             registry,
+            cache_manager,
         })
     }
 
@@ -307,308 +319,6 @@ impl FileManager {
         indexer.run(root_path, on_progress, dry_run)
     }
 
-    /// クエリ文字列を使用してインデックスを検索し、結果のリストを返します。
-    pub fn search(&self, query: &str) -> Result<SearchResponse> {
-        if !self.path_for_target(TargetTable::FileReferences).exists() {
-            return Err(anyhow::anyhow!(
-                "Index not found. Please run 'index' command first."
-            ));
-        }
-
-        let mut projections = Vec::new();
-
-        // 1. 検索条件にマッチするIDを抽出するクエリ
-        let sub_query = if query.trim().is_empty() {
-            Query::select()
-                .column(Col::ItemId)
-                .distinct()
-                .from(Tbl::OneView)
-                .to_owned()
-        } else {
-            let node = crate::query::parse(query)?;
-            let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-            let expanded = node.expand(&q_reg);
-            projections = expanded.get_projections();
-            expanded.to_sql("oneview")
-        };
-
-        // DuckDBにおいて、複雑なビューに対する集計(MAXなど)と
-        // 相関サブクエリやIN/EXISTSを組み合わせた際、「WHERE句に集計関数を含められない」
-        // といった意図しないオプティマイザの挙動を回避するため、一時テーブルに隔離する。
-        Tbl::Sub.drop_table(&self.conn).ok();
-        sub_query.create_table_as(&self.conn, Tbl::Sub)?;
-
-        // 2. マッチしたIDの全タグを取得して集計
-        // アイテムごとの全タグを集約した CTE
-        let mut tag_agg = Query::select();
-        tag_agg
-            .column(Col::ItemId)
-            .expr_as(
-                crate::db::CustomFunc::max_filter(
-                    Expr::col(Col::LabelStr),
-                    Expr::col(Col::Type).eq("item_kind"),
-                ),
-                Col::ItemKind,
-            )
-            .expr_as(
-                crate::db::CustomFunc::max_filter(
-                    Expr::col(Col::LabelInt),
-                    Expr::col(Col::Type).eq("rank"),
-                ),
-                Col::Rank,
-            );
-
-        for col in crate::db::Col::tag_value_columns() {
-            let source = if col == crate::db::Col::Types {
-                crate::db::Col::Type
-            } else {
-                col
-            };
-            tag_agg
-                .expr_as(crate::db::CustomFunc::list(Expr::col(source)), col);
-        }
-
-        tag_agg
-            .from(Tbl::OneView)
-            .and_where(
-                Expr::col((Tbl::OneView, Col::ItemId)).in_subquery(
-                    Query::select()
-                        .column(Col::ItemId)
-                        .from(Tbl::Sub)
-                        .to_owned(),
-                ),
-            )
-            .group_by_col(Col::ItemId);
-
-        // 各アイテムの「名前(場所)」ごとに独立した結果行を生成
-        let mut query = Query::select();
-        query
-            .column((Tbl::Identities, Col::ItemId))
-            .column((Tbl::AggTags, Col::ItemKind))
-            .column((Tbl::Identities, Col::Name))
-            .column((Tbl::AggTags, Col::Rank));
-
-        for col in crate::db::Col::tag_value_columns() {
-            query.column((Tbl::AggTags, col));
-        }
-
-        query
-            .from_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .expr_as(Expr::col(Col::LabelStr), Col::Name)
-                    .from(Tbl::OneView)
-                    .and_where(Expr::col(Col::Type).eq("name"))
-                    .to_owned(),
-                Tbl::Identities,
-            )
-            .join_subquery(
-                JoinType::InnerJoin,
-                tag_agg,
-                Tbl::AggTags,
-                Expr::col((Tbl::Identities, Col::ItemId))
-                    .eq(Expr::col((Tbl::AggTags, Col::ItemId))),
-            )
-            .order_by_expr(
-                Expr::col((Tbl::AggTags, Col::Rank)).into(),
-                sea_query::Order::Desc,
-            )
-            .limit(100);
-
-        let sql = query.to_string(PostgresQueryBuilder);
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        let c_id: &str = Col::ItemId.into();
-        let c_kind: &str = Col::ItemKind.into();
-        let c_name: &str = Col::Name.into();
-        let c_rank: &str = Col::Rank.into();
-
-        let tag_value_cols: Vec<String> = crate::db::Col::tag_value_columns()
-            .into_iter()
-            .map(|c| c.to_string())
-            .collect();
-
-        let rows = stmt.query_map([], |row| {
-            let id: i64 = row.get(c_id)?;
-            // Aggregation result might be Null if no tag found, handle gracefully
-            let item_kind: String =
-                row.get(c_kind).unwrap_or_else(|_| "unknown".to_string());
-            let name: String = row.get(c_name).unwrap_or_default();
-            let rank: i64 = row.get(c_rank).unwrap_or(0);
-
-            use duckdb::types::Value;
-
-            fn to_vec(v: Value) -> Vec<Value> {
-                if let Value::List(vec) = v {
-                    vec
-                } else {
-                    Vec::new()
-                }
-            }
-
-            let tag_lists: Vec<Vec<Value>> = tag_value_cols
-                .iter()
-                .map(|col_name| {
-                    to_vec(row.get(col_name as &str).unwrap_or(Value::Null))
-                })
-                .collect();
-
-            let mut intrinsic = types::Intrinsic::default();
-            let mut tags = types::Tags::new();
-
-            // カラム定義から対象のリストを取得するヘルパー
-            let get_list = |st: crate::db::Col| -> Option<&Vec<Value>> {
-                let col_name = st.to_string();
-                let idx = tag_value_cols.iter().position(|c| c == &col_name)?;
-                tag_lists.get(idx)
-            };
-
-            // 型名のリスト（Types カラム）を起点に走査
-            let Some(types_list) = get_list(crate::db::Col::Types) else {
-                return Ok(SearchResult {
-                    id,
-                    item_kind,
-                    name,
-                    rank,
-                    intrinsic,
-                    tags,
-                });
-            };
-
-            // 1. データ抽出ヘルパーの構成
-            let extract_tag_type = |n: types::TagNumber| {
-                get_list(crate::db::Col::Types)
-                    .and_then(|l| l.get(n))
-                    .and_then(|v| match v {
-                        Value::Text(s) => Some(types::TagType::from(s.clone())),
-                        Value::BigInt(n_val) => {
-                            Some(types::TagType::from(n_val.to_string()))
-                        }
-                        _ => None,
-                    })
-            };
-
-            let extract_origin =
-                |n: types::TagNumber| match get_list(crate::db::Col::Origin)
-                    .and_then(|l| l.get(n))
-                {
-                    Some(Value::Text(s)) if s == "system" => {
-                        types::Origin::System
-                    }
-                    _ => types::Origin::User,
-                };
-
-            let extract_label = |n: types::TagNumber| {
-                crate::db::Col::typed_label_columns().into_iter().find_map(
-                    |col| {
-                        get_list(col).and_then(|l| l.get(n)).and_then(|v| {
-                            match v {
-                                Value::Text(s) => {
-                                    Some(types::Label::String(s.clone()))
-                                }
-                                Value::BigInt(n_val) => {
-                                    Some(types::Label::Integer(*n_val))
-                                }
-                                Value::Double(d) => {
-                                    Some(types::Label::String(d.to_string()))
-                                }
-                                Value::Boolean(b) => {
-                                    Some(types::Label::String(b.to_string()))
-                                }
-                                _ => None,
-                            }
-                        })
-                    },
-                )
-            };
-
-            let extract_typedtag =
-                |n: types::TagNumber, origin, tags: &mut types::Tags| {
-                    if let Some(Value::Text(tt_val)) =
-                        get_list(crate::db::Col::TypedTag)
-                            .and_then(|l| l.get(n))
-                    {
-                        tags.push(
-                            types::TagType::Base(types::SType::TypedTag),
-                            types::Label::String(tt_val.clone()),
-                            origin,
-                        );
-                    }
-                };
-
-            let dispatch_tag =
-                |tag_type: types::TagType,
-                 label: types::Label,
-                 origin: types::Origin,
-                 intrinsic: &mut types::Intrinsic,
-                 tags: &mut types::Tags| {
-                    match &tag_type {
-                        types::TagType::Base(types::SType::Size) => {
-                            intrinsic.size =
-                                Some(types::FileSize(label.as_i64()))
-                        }
-                        types::TagType::Base(types::SType::Mtime) => {
-                            intrinsic.mtime =
-                                Some(types::FileTimestamp(label.as_i64()))
-                        }
-                        types::TagType::Base(types::SType::Hash) => {
-                            intrinsic.hash = Some(label.as_str())
-                        }
-                        types::TagType::Base(types::SType::TypedTag) => {}
-                        _ => {
-                            tags.push(tag_type, label, origin);
-                        }
-                    }
-                };
-
-            // 4. メインループ: 走査と振り分け
-            for i in 0..types_list.len() {
-                let n = i as types::TagNumber;
-                let (Some(tag_type), origin, Some(label)) =
-                    (extract_tag_type(n), extract_origin(n), extract_label(n))
-                else {
-                    continue;
-                };
-
-                // 特殊処理
-                extract_typedtag(n, origin, &mut tags);
-
-                // 振り分け
-                dispatch_tag(
-                    tag_type,
-                    label,
-                    origin,
-                    &mut intrinsic,
-                    &mut tags,
-                );
-            }
-
-            SearchResult {
-                id,
-                item_kind,
-                name,
-                rank,
-                intrinsic,
-                tags,
-            }
-            .to_ok()
-        })?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-
-        Ok(SearchResponse {
-            results,
-            type_for_projection: projections
-                .into_iter()
-                .next()
-                .map(types::TagType::from),
-        })
-    }
-
-    /// インデックスディレクトリ全体を削除し、完全にクリーンな状態にします。
     pub fn clear_index(&self) -> Result<()> {
         if self.db_dir.exists() {
             std::fs::remove_dir_all(&self.db_dir)
@@ -658,6 +368,7 @@ impl FileManager {
         temp_table.write_parquet(&self.conn, &path)?;
         temp_table.drop_table(&self.conn)?;
 
+        self.refresh_view()?;
         Ok(new_id)
     }
 
@@ -717,6 +428,8 @@ impl FileManager {
             value,
         )?;
 
+        self.refresh_view()?;
+
         Ok(())
     }
 
@@ -743,6 +456,7 @@ impl FileManager {
         if !item_ids.is_empty() {
             self.batch_update_rank(&item_ids, false, rank)?;
         }
+        self.refresh_view()?;
         Ok(())
     }
 
@@ -919,16 +633,20 @@ impl FileManager {
                         let is_enabled =
                             *status.get(&adapter.name).unwrap_or(&true);
                         if is_enabled {
-                            println!(
-                                "Loaded plugin: {} from {:?}",
-                                adapter.name, path
-                            );
+                            if cfg!(debug_assertions) && std::env::var("TTFM_DEBUG").is_ok() {
+                                println!(
+                                    "Loaded plugin: {} from {:?}",
+                                    adapter.name, path
+                                );
+                            }
                             self.registry.register(Box::new(adapter));
                         } else {
-                            println!(
-                                "Plugin {} is disabled via config. Skipping.",
-                                adapter.name
-                            );
+                            if cfg!(debug_assertions) && std::env::var("TTFM_DEBUG").is_ok() {
+                                println!(
+                                    "Plugin {} is disabled via config. Skipping.",
+                                    adapter.name
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -940,6 +658,13 @@ impl FileManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// OneView を再構築し、最新の Parquet ファイルの状態を反映させます。
+    pub fn refresh_view(&self) -> Result<()> {
+        let all_columns = self.registry.get_all_columns();
+        crate::oneview::OneView::recreate(&self.conn, &all_columns, &self.db_dir)?;
         Ok(())
     }
 }

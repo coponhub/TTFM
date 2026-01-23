@@ -25,7 +25,7 @@ fn test_metadata_error_recovery_integration() {
     // 3. エラー値がセットされたアイテムを検索して検証
     // 数値型のエラー値 (-1) で検索
     let results = fm
-        .search("size:-1")
+        .search("size:-1", Default::default())
         .expect("Search for size:-1 should succeed");
 
     // 検証: loop_link がエラー値で登録されてヒットするはず
@@ -41,7 +41,7 @@ fn test_metadata_error_recovery_integration() {
 
     // 文字列表現のエラー値 ("-") も検証
     let results_str = fm
-        .search("size_str:-")
+        .search("size_str:-", Default::default())
         .expect("Search for size_str:- should succeed");
 
     // type_from_ext:Folder も "-" になるため、名前でフィルタリングして確認

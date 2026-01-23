@@ -5,6 +5,7 @@ use sea_query::{
     PostgresQueryBuilder, Query, SelectStatement, SimpleExpr,
     TableCreateStatement, TableDropStatement, UpdateStatement,
 };
+use std::collections::HashMap;
 use std::path::Path;
 
 // --- 1. 通常の関数 (ロジックの実体) ---
@@ -23,14 +24,28 @@ pub fn save_parquet(
     conn: &Connection,
     query: &SelectStatement,
     path: &Path,
+    metadata: Option<&HashMap<String, String>>,
 ) -> Result<()> {
     let sql = query.to_string(PostgresQueryBuilder);
     let path_str = path.to_string_lossy();
     let tmp_path = format!("{}.tmp", path_str);
 
+    let mut kv_part = String::new();
+    if let Some(meta) = metadata {
+        if !meta.is_empty() {
+            let pairs: Vec<String> = meta
+                .iter()
+                .map(|(k, v)| {
+                    format!("'{}': '{}'", k.replace("'", "''"), v.replace("'", "''"))
+                })
+                .collect();
+            kv_part = format!(", KV_METADATA {{{}}}", pairs.join(", "));
+        }
+    }
+
     let copy_sql = format!(
-        "COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd')",
-        sql, tmp_path
+        "COPY ({}) TO '{}' (FORMAT 'parquet', COMPRESSION 'zstd'{})",
+        sql, tmp_path, kv_part
     );
     conn.execute(&copy_sql, [])?;
     std::fs::rename(&tmp_path, path)?;
@@ -47,7 +62,7 @@ pub fn write_parquet<I: Iden + Clone + 'static>(
         .column(sea_query::Asterisk)
         .from(table.clone())
         .to_owned();
-    save_parquet(conn, &query, path)
+    save_parquet(conn, &query, path, None)
 }
 
 /// CAST(NULL AS type) を生成します。
@@ -97,7 +112,7 @@ pub trait ParquetExt {
 
 impl ParquetExt for SelectStatement {
     fn save_parquet(&self, conn: &Connection, path: &Path) -> Result<()> {
-        save_parquet(conn, self, path)
+        save_parquet(conn, self, path, None)
     }
 }
 
@@ -243,7 +258,7 @@ pub fn parquet_query(path: &str) -> SelectStatement {
     use crate::db::{DuckDbFunc, Tbl};
     use sea_query::Func;
     Query::select()
-        .expr(Expr::cust("*"))
+        .column(sea_query::Asterisk)
         .from_function(
             Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(path)),
             Tbl::Diff,

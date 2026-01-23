@@ -1,0 +1,49 @@
+    Checking ttfm v0.1.0 (/home/aki/ttfm)
+warning: unused import: `DotOk`
+ --> src/lib.rs:7:19
+  |
+7 | use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
+  |                   ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `JoinType`
+  --> src/lib.rs:11:23
+   |
+11 | use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query};
+   |                       ^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src/cache.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::db::Col`
+ --> src/cache.rs:5:5
+  |
+5 | use crate::db::Col;
+  |     ^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/lib.rs:408:47
+    |
+408 |             self.spawn_cache_worker(&new_cid, query.to_string())?;
+    |                  ------------------           ^^^^^^^^^^^^^^^^^ expected `&str`, found `String`
+    |                  |
+    |                  arguments to this method are incorrect
+    |
+note: method defined here
+   --> src/lib.rs:496:8
+    |
+496 |     fn spawn_cache_worker(&self, cid: &str, query: &str) -> Result<()> {
+    |        ^^^^^^^^^^^^^^^^^^                   -----------
+help: try removing the method call
+    |
+408 -             self.spawn_cache_worker(&new_cid, query.to_string())?;
+408 +             self.spawn_cache_worker(&new_cid, query)?;
+    |
+
+For more information about this error, try `rustc --explain E0308`.
+warning: `ttfm` (lib) generated 4 warnings
+error: could not compile `ttfm` (lib) due to 1 previous error; 4 warnings emitted

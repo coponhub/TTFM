@@ -18,15 +18,15 @@ fn test_rank_sorting_files() {
 
     // 2. クエリでランクを設定
     // high.txt を 100 に
-    let res_high = fm.search("filename:high.txt").unwrap();
+    let res_high = fm.search("filename:high.txt", Default::default()).unwrap();
     fm.update_ranks(&res_high.results, 100).unwrap();
 
     // mid.txt を 50 に
-    let res_mid = fm.search("filename:mid.txt").unwrap();
+    let res_mid = fm.search("filename:mid.txt", Default::default()).unwrap();
     fm.update_ranks(&res_mid.results, 50).unwrap();
 
     // 3. 検索して順序を確認
-    let results = fm.search("extension:txt").unwrap();
+    let results = fm.search("extension:txt", Default::default()).unwrap();
     assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
@@ -58,12 +58,12 @@ fn test_rank_batch_update() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
-    let results = fm.search("extension:txt").unwrap();
+    let results = fm.search("extension:txt", Default::default()).unwrap();
     assert_eq!(results.results.len(), 2);
     fm.update_ranks(&results.results, 10).unwrap();
 
     // 2. 結果を確認
-    let res = fm.search("extension:txt | extension:rs").unwrap();
+    let res = fm.search("extension:txt | extension:rs", Default::default()).unwrap();
     // ランク順に a.txt(10), b.txt(10), c.rs(0) のはず
     assert_eq!(res.results.len(), 3);
     assert!(res.results[0].primary_value().unwrap().contains(".txt"));
@@ -84,7 +84,7 @@ fn test_rank_set_by_id_low_level() {
     let id = fm.add_item("note", "test note").unwrap();
     fm.set_rank_by_id(id, false, 500).unwrap();
 
-    let results = fm.search("item_kind:note").unwrap();
+    let results = fm.search("item_kind:note", Default::default()).unwrap();
     assert_eq!(results.results[0].id, id);
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }

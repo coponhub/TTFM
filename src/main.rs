@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use terminal_size::{terminal_size, Width};
 use ttfm::config::Config;
-use ttfm::FileManager;
+use ttfm::{FileManager, SearchOptions};
 
 macro_rules! safe_print {
     ($($arg:tt)*) => {
@@ -64,17 +64,35 @@ enum Commands {
     },
     /// クエリを使用してファイルを検索します。
     Search {
-        /// 検索クエリ文字列。論理演算（&, |, -）や型付きタグ（extension:rs等）が使用可能です。
+        /// 検索クエリ文字列。
         query: String,
-        /// シンプルな出力モード（機械可読フォーマット）。ヘッダーや装飾を省略し、1行1アイテムで出力します。
+        /// シンプルな出力モード。
         #[arg(short, long)]
         short: bool,
+        /// 取得件数 (None または 0 は全件)
+        #[arg(short, long)]
+        n: Option<usize>,
+        /// 開始位置
+        #[arg(long)]
+        offset: Option<usize>,
+        /// キャッシュID (ページング用)
+        #[arg(long)]
+        cid: Option<String>,
     },
-    /// インデックスからファイルの一覧を表示します（最大100件）。
+    /// インデックスからファイルの一覧を表示します。
     List {
-        /// シンプルな出力モード（機械可読フォーマット）。
+        /// シンプルな出力モード。
         #[arg(short, long)]
         short: bool,
+        /// 取得件数
+        #[arg(short, long)]
+        n: Option<usize>,
+        /// 開始位置
+        #[arg(long)]
+        offset: Option<usize>,
+        /// キャッシュID
+        #[arg(long)]
+        cid: Option<String>,
     },
     /// 作成されたインデックスファイルを削除します。
     Clear,
@@ -147,26 +165,36 @@ fn main() -> Result<()> {
                 count
             ));
         }
-        Commands::Search { query, short } => {
+        Commands::Search { query, short, n, offset, cid } => {
             if !*short {
                 safe_println!("Searching for: '{}'", query);
             }
-            let response = fm.search(query)?;
+            let opts = ttfm::SearchOptions {
+                n: *n,
+                offset: *offset,
+                cid: cid.clone(),
+            };
+            let response = fm.search(query, opts)?;
             if *short {
                 print_simple_results(&response);
             } else {
-                print_results(&fm, &response);
+                print_results(&fm, &response, query, n.unwrap_or(100));
             }
         }
-        Commands::List { short } => {
+        Commands::List { short, n, offset, cid } => {
             if !*short {
                 safe_println!("Listing files...");
             }
-            let response = fm.search("")?;
+            let opts = ttfm::SearchOptions {
+                n: *n,
+                offset: *offset,
+                cid: cid.clone(),
+            };
+            let response = fm.search("", opts)?;
             if *short {
                 print_simple_results(&response);
             } else {
-                print_results(&fm, &response);
+                print_results(&fm, &response, "list", n.unwrap_or(100));
             }
         }
         Commands::Tag { item, tag } => {
@@ -179,7 +207,8 @@ fn main() -> Result<()> {
             safe_println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
-            let response = fm.search(item)?;
+            let response =
+                fm.search(item, SearchOptions::default())?;
             if response.results.is_empty() {
                 safe_println!("No items matched query: '{}'", item);
                 return Ok(());
@@ -250,15 +279,29 @@ fn get_terminal_width() -> usize {
 }
 
 /// 検索結果の一覧を標準出力に表示します。
-fn print_results(fm: &FileManager, response: &ttfm::SearchResponse) {
+fn print_results(
+    fm: &FileManager,
+    response: &ttfm::SearchResponse,
+    query: &str,
+    current_n: usize,
+) {
+    if !response.progress.is_finished() {
+        safe_println!(
+            "\x1b[1;33mSearching... (Background cache generating: {})\x1b[0m",
+            response.progress.current
+        );
+    }
+
     if response.results.is_empty() {
-        safe_println!("No items found.");
+        if response.progress.is_finished() {
+            safe_println!("No items found.");
+        }
         return;
     }
 
     // 投影 (Projection) がある場合はコンパクトな集約表示にする
     if response.type_for_projection.is_some() {
-        print_compact_projections(response);
+        print_compact_projections(response, query, current_n);
         return;
     }
 
@@ -376,11 +419,29 @@ fn print_results(fm: &FileManager, response: &ttfm::SearchResponse) {
         }
         safe_println!();
     }
-    safe_println!("\nTotal: {} results found.", response.results.len());
+
+    safe_println!("Total: {} results displayed.", response.results.len());
+
+    if response.has_more {
+        if let Some(cid) = &response.cid {
+            safe_println!(
+                "\x1b[1;32mMore results available.\x1b[0m To see next page, run:"
+            );
+            safe_println!(
+                "  ttfm search \"{}\" --cid {}",
+                query,
+                cid
+            );
+        }
+    }
 }
 
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
-fn print_compact_projections(response: &ttfm::SearchResponse) {
+fn print_compact_projections(
+    response: &ttfm::SearchResponse,
+    query: &str,
+    _current_n: usize,
+) {
     let term_width = get_terminal_width();
 
     // iter_label_groups ですでに一意化されているため、それを利用
@@ -412,9 +473,22 @@ fn print_compact_projections(response: &ttfm::SearchResponse) {
     }
 
     safe_println!(
-        "\nTotal: {} items matched the projection.",
+        "Total: {} unique items matched the projection.",
         response.results.len()
     );
+
+    if response.has_more {
+        if let Some(cid) = &response.cid {
+            safe_println!(
+                "\n\x1b[1;32mMore items available.\x1b[0m To see next page, run:"
+            );
+            safe_println!(
+                "  ttfm search \"{}\" --cid {}",
+                query,
+                cid
+            );
+        }
+    }
 }
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。

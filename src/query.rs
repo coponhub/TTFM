@@ -655,7 +655,15 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut it = nodes.iter();
-        let first = it.next().expect("And nodes must not be empty");
+        let Some(first) = it.next() else {
+            // Empty AND = everything
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
+            return q;
+        };
+
         // Precedence Safety: Wrap children in subqueries to enforce (A | B) & C logic
         let mut q = self.wrap_in_subquery(first.to_sql(view));
         for node in it {
@@ -669,7 +677,15 @@ impl QueryNode {
 
     fn build_or_sql(&self, nodes: &[QueryNode], view: &str) -> SelectStatement {
         let mut it = nodes.iter();
-        let first = it.next().expect("Or nodes must not be empty");
+        let Some(first) = it.next() else {
+            // Empty OR = nothing
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
+            q.and_where(Expr::val(1).eq(0));
+            return q;
+        };
         let mut q = first.to_sql(view);
         for node in it {
             q.union(sea_query::UnionType::Distinct, node.to_sql(view));
@@ -693,7 +709,7 @@ impl QueryNode {
 
     fn wrap_in_subquery(&self, q: SelectStatement) -> SelectStatement {
         Query::select()
-            .column(Col::ItemId)
+            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
             .from_subquery(q, Tbl::Sub)
             .to_owned()
     }
@@ -701,12 +717,12 @@ impl QueryNode {
     fn build_comp_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
         let types = c.get_all_types();
         let mut q = Query::select();
-        q.column(Col::ItemId).distinct().from(Alias::new(view));
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind]).distinct().from(Alias::new(view));
         if !types.is_empty() {
             q.and_where(Expr::col(Col::Type).is_in(types));
         }
         let mut eq = Query::select();
-        eq.column(Col::ItemId)
+        eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
             .from_subquery(c.to_sql(view), Tbl::NotSide);
         q.union(sea_query::UnionType::Except, eq);
         q
@@ -749,7 +765,7 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).distinct().from(Alias::new(view));
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind]).distinct().from(Alias::new(view));
 
         let bin_op = self.to_bin_op(op);
 
@@ -861,7 +877,7 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).distinct().from(Alias::new(view));
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind]).distinct().from(Alias::new(view));
 
         // typedtag プロジェクションの場合は、全行が対象（typedtagカラムは全行に存在）なので、
         // type='typedtag' というフィルタは行わず、typedtagカラムの存在チェックのみ行う。
@@ -882,11 +898,13 @@ impl QueryNode {
             cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
             q.and_where(cond.into());
         } else {
-            q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()));
+            let tag_name = tagtype.as_str();
+            // typedtag や type: など、特定の type で絞り込みたくない場合はここでフィルタをスキップ
+            if tag_name != "*" && tag_name != "typedtag" && tag_name != "type" && tag_name != "origin" {
+                q.and_where(Expr::col(Col::Type).eq(tag_name));
+            }
 
             // ラベル値が NULL でないことを確認する。
-            // oneview は物理カラム（extension, path等）を unpivot するため、
-            // 値がなくても行自体は存在する可能性がある。
             let mut cond = Condition::any();
             cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
             cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
@@ -905,7 +923,7 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).distinct().from(Alias::new(view));
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind]).distinct().from(Alias::new(view));
 
         // Logic handles SType::Label redirection internally
 
@@ -924,9 +942,16 @@ impl QueryNode {
                 } else {
                     tag
                 };
+                
+                let val_str = if s.starts_with('^') {
+                    format!("{}*", &s[1..])
+                } else {
+                    s.clone()
+                };
+
                 q.and_where(
                     Expr::col(t)
-                        .binary(BinOper::Custom("GLOB"), Expr::val(s.as_str())),
+                        .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
                 );
             }
             Label::Literal(s) => {
@@ -948,7 +973,7 @@ impl QueryNode {
         view: &str,
     ) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).distinct().from(Alias::new(view));
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind]).distinct().from(Alias::new(view));
         let glob = BinOper::Custom("GLOB");
 
         // Type side: LiteralCustom uses '='
@@ -1001,6 +1026,48 @@ impl QueryNode {
         }
         q.and_where(cond.into());
         q
+    }
+
+    /// クエリに使用されている、または投影されている型のリストを元に
+    /// OneView から特定のタグ行のみを抽出するための Condition を生成します。
+    pub fn to_tag_condition(&self) -> sea_query::Condition {
+        let mut types = self.get_all_types();
+
+        if types.iter().any(|t| t == "*") {
+            return sea_query::Condition::all();
+        }
+
+        // 特別な扱いの推奨タグを追加 (DESIGN.md / DESIGN_CLI.md)
+        // デフォルトでは主要なメタデータは常に取得対象とする
+        let defaults = ["name", "path", "size", "mtime", "rank", "item_kind", "content", "value", "typedtag"];
+        for def in defaults {
+            if !types.iter().any(|t| t == def) {
+                types.push(def.to_string());
+            }
+        }
+        
+        // typedtag が要求されている場合は実質的に全タグが必要
+        if types.iter().any(|t| t == "*" || t == "typedtag") {
+            return sea_query::Condition::all();
+        }
+
+        let mut cond = sea_query::Condition::any();
+        let mut fixed_types = Vec::new();
+        let glob_op = sea_query::BinOper::Custom("GLOB");
+
+        for t in types {
+            if t.contains('*') || t.contains('?') || t.contains('[') {
+                cond = cond.add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
+            } else {
+                fixed_types.push(t);
+            }
+        }
+
+        if !fixed_types.is_empty() {
+            cond = cond.add(Expr::col(Col::Type).is_in(fixed_types));
+        }
+
+        cond
     }
 
     /// このノードおよび子ノードに含まれるすべてのタグの型（`key`）を収集します。
@@ -1189,5 +1256,31 @@ mod tests {
         parse(q)
             .map_err(|e| panic!("Failed to parse math query '{}': {}", q, e))
             .unwrap();
+    }
+
+    #[test]
+    fn test_query_to_sql_ranking() {
+        use sea_query::PostgresQueryBuilder;
+        let q = parse("extension:rs").unwrap();
+        let sql = q.to_sql("oneview").to_string(PostgresQueryBuilder);
+        
+        // rank, item_id, item_kind が選択されていることを確認
+        assert!(sql.contains("\"rank\""), "SQL should select rank column: {}", sql);
+        assert!(sql.contains("\"item_id\""), "SQL should select item_id column: {}", sql);
+        assert!(sql.contains("\"item_kind\""), "SQL should select item_kind column: {}", sql);
+        assert!(sql.contains("DISTINCT"), "SQL should contain DISTINCT for leaf nodes: {}", sql);
+    }
+
+    #[test]
+    fn test_query_to_sql_and_precedence() {
+        use sea_query::PostgresQueryBuilder;
+        let q = parse("type:file & extension:rs").unwrap();
+        let sql = q.to_sql("oneview").to_string(PostgresQueryBuilder);
+        
+        // INTERSECT が使用されていることを確認
+        assert!(sql.contains("INTERSECT"), "AND query should use INTERSECT: {}", sql);
+        // 各項がサブクエリでラップされ、Rank, ItemKind が引き継がれていることを確認
+        assert!(sql.contains("\"rank\""), "Subqueries should select rank: {}", sql);
+        assert!(sql.contains("\"item_kind\""), "Subqueries should select item_kind: {}", sql);
     }
 }

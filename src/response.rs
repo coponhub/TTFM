@@ -17,13 +17,57 @@ pub struct SearchResult {
     pub tags: Tags,
 }
 
+/// データベースから取得した生のタグ情報の断片。
+pub struct RawTagRow {
+    pub id: ItemId,
+    pub item_kind: ItemKind,
+    pub tag_type: String,
+    pub label_str: Option<String>,
+    pub label_int: Option<i64>,
+    pub label_double: Option<f64>,
+    pub label_bool: Option<bool>,
+    pub origin: String,
+}
+
+impl RawTagRow {
+    pub fn from_row(r: &duckdb::Row) -> duckdb::Result<Self> {
+        use crate::db::Col;
+        use sea_query::Iden;
+
+        let col = |c: Col| {
+            let mut s = String::new();
+            c.unquoted(&mut s);
+            s
+        };
+
+        Ok(Self {
+            id: r.get(col(Col::ItemId).as_str())?,
+            item_kind: r.get(col(Col::ItemKind).as_str())?,
+            tag_type: r.get(col(Col::Type).as_str())?,
+            label_str: r.get(col(Col::LabelStr).as_str())?,
+            label_int: r.get(col(Col::LabelInt).as_str())?,
+            label_double: r.get(col(Col::LabelDouble).as_str())?,
+            label_bool: r.get(col(Col::LabelBool).as_str())?,
+            origin: r.get(col(Col::Origin).as_str())?,
+        })
+    }
+}
+
 /// 検索クエリの結果全体を表す構造体。
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct SearchResponse {
     /// ヒットしたアイテムのリスト
     pub results: Vec<SearchResult>,
-    /// クエリで明示的に投影（Projection）されたタグ型。
+    /// クエリで明示的に投影（Projection）されたタグ型（互換性のため維持）。
     pub type_for_projection: Option<TagType>,
+    /// キャッシュ ID（続きがある場合のみ有効）
+    pub cid: Option<String>,
+    /// 検索結果の総件数（確定している場合）
+    pub total_count: Option<usize>,
+    /// まだ続き（Next Page）があるかどうか
+    pub has_more: bool,
+    /// キャッシュ生成等の進捗状況
+    pub progress: crate::types::Progress,
 }
 
 /// 同一の属性（カラム）構成を持つアイテムのグループ。
@@ -118,7 +162,110 @@ impl SearchResponse {
     }
 }
 
+impl SearchResponse {
+    /// 空の検索結果（初期状態）を作成します。
+    pub fn new_empty(cid: Option<String>, has_more: bool) -> Self {
+        Self {
+            results: Vec::new(),
+            cid,
+            has_more,
+            total_count: Some(0),
+            progress: crate::types::Progress {
+                current: 0,
+                total: Some(0),
+            },
+            type_for_projection: None,
+        }
+    }
+
+    /// キャッシュ生成が進行中のレスポンスを作成します。
+    pub fn new_unfinished(cid: &str, progress: crate::types::Progress) -> Self {
+        Self {
+            results: Vec::new(),
+            cid: Some(cid.to_string()),
+            has_more: true,
+            total_count: None,
+            progress,
+            type_for_projection: None,
+        }
+    }
+}
+
 impl SearchResult {
+    /// 指定された ID で空の検索結果を作成します。
+    pub fn new_empty(id: ItemId) -> Self {
+        Self {
+            id,
+            item_kind: String::new(),
+            name: String::new(),
+            rank: 0,
+            intrinsic: Intrinsic::default(),
+            tags: Tags::new(),
+        }
+    }
+
+    /// 生のタグ行データをアイテムに適用します。
+    pub fn apply_raw_tag(&mut self, row: RawTagRow) {
+        use crate::types::{Label, Origin, SType, TagType};
+
+        // 検索結果に必要な基本属性を RawRow から補完
+        if self.item_kind.is_empty() {
+            self.item_kind = row.item_kind.clone();
+        }
+
+        let origin = if row.origin == "system" {
+            Origin::System
+        } else {
+            Origin::User
+        };
+
+        let label = if let Some(i) = row.label_int {
+            Label::Integer(i)
+        } else if let Some(s) = row.label_str {
+            Label::String(s)
+        } else if let Some(b) = row.label_bool {
+            Label::String(b.to_string())
+        } else if let Some(d) = row.label_double {
+            Label::String(d.to_string())
+        } else {
+            return;
+        };
+
+        let tag_type = TagType::from(row.tag_type.clone());
+
+        // 特殊属性の解決
+        match &tag_type {
+            TagType::Base(SType::Name) => {
+                self.name = label.as_str();
+                self.tags.push(tag_type, label, origin);
+            }
+            TagType::Base(SType::Rank) => {
+                self.rank = label.as_i64();
+                self.tags.push(tag_type, label, origin);
+            }
+            TagType::Base(SType::Size) => {
+                self.intrinsic.size =
+                    Some(crate::types::FileSize(label.as_i64()));
+                self.tags.push(tag_type, label, origin);
+            }
+            TagType::Base(SType::Mtime) => {
+                self.intrinsic.mtime =
+                    Some(crate::types::FileTimestamp(label.as_i64()));
+                self.tags.push(tag_type, label, origin);
+            }
+            TagType::Base(SType::Hash) => {
+                self.intrinsic.hash = Some(label.as_str());
+                self.tags.push(tag_type, label, origin);
+            }
+            TagType::Base(SType::ItemKind) => {
+                self.item_kind = label.as_str();
+                self.tags.push(tag_type, label, origin);
+            }
+            _ => {
+                self.tags.push(tag_type, label, origin);
+            }
+        }
+    }
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
     pub fn primary_value(&self) -> Option<String> {
@@ -248,6 +395,7 @@ impl SearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Progress;
     use crate::types::{FileSize, Intrinsic, Label, Origin, TagType};
 
     fn create_test_result() -> SearchResult {
@@ -318,6 +466,10 @@ mod tests {
         let response = SearchResponse {
             results: vec![res1, res2],
             type_for_projection: None,
+            cid: None,
+            total_count: None,
+            has_more: false,
+            progress: Progress::default(),
         };
 
         let groups = response.iter_type_groups();
@@ -338,6 +490,10 @@ mod tests {
         let response = SearchResponse {
             results: vec![res1, res2],
             type_for_projection: Some(TagType::from("extension")),
+            cid: None,
+            total_count: None,
+            has_more: false,
+            progress: Progress::default(),
         };
 
         let groups = response.iter_label_groups();
@@ -360,6 +516,10 @@ mod tests {
         let response = SearchResponse {
             results: vec![res1, res2],
             type_for_projection: Some(TagType::from("size")),
+            cid: None,
+            total_count: None,
+            has_more: false,
+            progress: Progress::default(),
         };
 
         let groups = response.iter_label_groups();
@@ -374,6 +534,10 @@ mod tests {
         let response = SearchResponse {
             results: vec![create_test_result()],
             type_for_projection: None,
+            cid: None,
+            total_count: None,
+            has_more: false,
+            progress: Progress::default(),
         };
 
         let groups = response.iter_label_groups();

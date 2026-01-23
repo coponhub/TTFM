@@ -18,7 +18,7 @@ fn test_projection_queries() {
 
     // 1. extension: (投影)
     // 拡張子を持つファイル（test.rs, test.txt）がヒットするはず。
-    let results = fm.search("extension:").unwrap();
+    let results = fm.search("extension:", Default::default()).unwrap();
     println!(
         "Matches for 'extension:': {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
@@ -37,7 +37,7 @@ fn test_projection_queries() {
     );
 
     // 2. directory: (投影 -> is_dir:true + projection:filename)
-    let results = fm.search("directory:").unwrap();
+    let results = fm.search("directory:", Default::default()).unwrap();
     println!(
         "Matches for 'directory:': {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
@@ -56,7 +56,7 @@ fn test_projection_queries() {
     );
 
     // 3. filename: (投影 -> is_dir:false + projection:filename)
-    let results = fm.search("filename:").unwrap();
+    let results = fm.search("filename:", Default::default()).unwrap();
     println!(
         "Matches for 'filename:': {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
@@ -78,11 +78,11 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results = fm.search("origin:system").unwrap();
+    let results = fm.search("origin:system", Default::default()).unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
-    let results = fm.search("extension: & directory:").unwrap();
+    let results = fm.search("extension: & directory:", Default::default()).unwrap();
     assert_eq!(
         results.results.len(),
         0,
@@ -90,7 +90,7 @@ fn test_projection_queries() {
     );
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
-    let results = fm.search("type:").unwrap();
+    let results = fm.search("type:", Default::default()).unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert_eq!(
         results.type_for_projection,
@@ -118,7 +118,7 @@ fn test_projection_queries() {
     }
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
-    let results = fm.search("typedtag:").unwrap();
+    let results = fm.search("typedtag:", Default::default()).unwrap();
     println!("Matches for 'typedtag:': {} items", results.results.len());
     assert!(
         results.results.len() >= 3,
@@ -140,7 +140,7 @@ fn test_projection_queries() {
     );
 
     // 追加検証: extension: 結果の中身
-    let ext_results = fm.search("extension:").unwrap();
+    let ext_results = fm.search("extension:", Default::default()).unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.name == "test.rs" {

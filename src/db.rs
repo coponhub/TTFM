@@ -45,7 +45,7 @@ impl Store {
 }
 
 /// データベースのテーブル名を表す識別子。
-#[derive(Iden, Clone, Copy)]
+#[derive(Iden, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tbl {
     FileReferences,
     Locations,
@@ -75,6 +75,7 @@ pub enum Tbl {
     Diff,
     Master,
     Sub,
+    InnerSub,
 
     // --- Set Operation Aliases ---
     LeftSide,
@@ -125,22 +126,29 @@ impl SqlType {
 
 /// 値として使用される定数文字列の識別子。
 /// マジックストリングを排除するために使用します。
-#[derive(Iden, Clone, Copy, Debug)]
+#[derive(
+    Clone, Copy, Debug, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum Val {
-    #[iden = "system"]
     System,
-    #[iden = "user"]
     User,
-    #[iden = "file"]
     File,
-    #[iden = "note"]
     Note,
-    #[iden = "item_kind"]
     ItemKind,
-    #[iden = "rank"]
     Rank,
-    #[iden = "name"]
+    Filename,
     Name,
+    Unknown,
+    Key,
+    Value,
+}
+
+impl sea_query::Iden for Val {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        let val: &'static str = (*self).into();
+        write!(s, "{}", val).unwrap();
+    }
 }
 
 /// 共通で使用されるカラム名を表す識別子。
@@ -185,6 +193,19 @@ impl Col {
             .collect()
     }
 
+    pub fn raw_tag_row_columns() -> [Self; 8] {
+        [
+            Self::ItemId,
+            Self::ItemKind,
+            Self::Type,
+            Self::LabelStr,
+            Self::LabelInt,
+            Self::LabelDouble,
+            Self::LabelBool,
+            Self::Origin,
+        ]
+    }
+
     pub fn from_sql_type(st: SqlType) -> Self {
         match st {
             SqlType::VARCHAR | SqlType::UUID => Self::LabelStr,
@@ -218,6 +239,8 @@ pub enum DuckDbFunc {
     List,
     #[iden = "concat"]
     Concat,
+    #[iden = "parquet_kv_metadata"]
+    ParquetKvMetadata,
 }
 
 #[derive(Iden, Clone, Copy)]

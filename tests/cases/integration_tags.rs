@@ -15,13 +15,13 @@ fn test_integration_file_tagging() {
         .unwrap();
 
     // 2. タグ付与
-    let registered_paths = fm.search("extension:txt").unwrap();
+    let registered_paths = fm.search("extension:txt", Default::default()).unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     fm.tag_item(&item, "status:reviewed").unwrap();
 
     // 3. 付与したタグで検索
-    let results = fm.search("status:reviewed").unwrap();
+    let results = fm.search("status:reviewed", Default::default()).unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].primary_value().unwrap(), item);
 }
@@ -37,7 +37,7 @@ fn test_integration_tag_tagging() {
     File::create(&file_path).unwrap();
     fm.index_directory(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
-    let registered_paths = fm.search("extension:txt").unwrap();
+    let registered_paths = fm.search("extension:txt", Default::default()).unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     fm.tag_item(&item, "project:mars").unwrap();
@@ -48,13 +48,13 @@ fn test_integration_tag_tagging() {
 
     // 3. 確認
     // 対象のタグ定義(typedtag)のみを検証するため、item_kindで絞り込む
-    let results = fm.search("priority:high & item_kind:typedtag").unwrap();
+    let results = fm.search("priority:high & item_kind:typedtag", Default::default()).unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, tag_id);
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
     // さらに、ファイル検索に影響しないことも確認
-    let file_results = fm.search("project:mars").unwrap();
+    let file_results = fm.search("project:mars", Default::default()).unwrap();
     assert!(file_results.results.iter().any(|r| r.item_kind == "file"));
 }
 
@@ -73,7 +73,7 @@ fn test_integration_note_tagging() {
 
     // 3. 検索 (Noteがヒットすることを確認)
     // Note以外のアイテム（タグ定義など）を除外するため、item_kind:note で絞り込む
-    let results = fm.search("category:meeting & item_kind:note").unwrap();
+    let results = fm.search("category:meeting & item_kind:note", Default::default()).unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, note_id);
     assert_eq!(results.results[0].item_kind, "note");
@@ -95,14 +95,14 @@ fn test_system_item_metadata_integration() {
 
     // 2. 拡張子なしファイルによって 'extension:' タグが作られていないことを確認
     // type:extension 検索に 'extension:' という文字列が含まれないことをチェック
-    let ext_list = fm.search("type:extension").unwrap();
+    let ext_list = fm.search("type:extension", Default::default()).unwrap();
     assert!(
         !ext_list.results.iter().any(|r| r.name == "extension:"),
         "Empty extension tag should not exist"
     );
 
     // 3. 'extension:rs' という typedtag Item（物理）は自動生成されないことを確認
-    let results_physical = fm.search("item_kind:typedtag & label:rs").unwrap();
+    let results_physical = fm.search("item_kind:typedtag & label:rs", Default::default()).unwrap();
     assert!(
         results_physical.results.is_empty(),
         "Physical typedtag item should NOT be created automatically"
@@ -110,7 +110,7 @@ fn test_system_item_metadata_integration() {
 
     // 4. 代わりにプロジェクションで確認
     // extension: で検索し、test.rs がヒットすること、そのタグに rs が含まれていることを確認
-    let results_proj = fm.search("extension:").unwrap();
+    let results_proj = fm.search("extension:", Default::default()).unwrap();
     assert!(
         !results_proj.results.is_empty(),
         "Should find files via projection"

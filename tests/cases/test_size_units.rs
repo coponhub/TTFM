@@ -49,7 +49,7 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
 
     for (query, expected) in cases {
         println!("Testing query: '{}'", query);
-        let results = fm.search(query)?;
+        let results = fm.search(query, Default::default())?;
         assert_eq!(
             results.results.len(),
             expected,
@@ -72,11 +72,11 @@ fn test_large_size_normalization() -> anyhow::Result<()> {
 
     // 実際にPBファイルは作れないので、parse_sizeが生成する値が
     // 正しくi64として扱われることを確認（ここではエラーにならないことを確認）
-    let res = fm.search("size: > 1PB");
+    let res = fm.search("size: > 1PB", Default::default());
     assert!(res.is_ok()); // 結果は0件で良いが、パースエラーにならないことが重要
 
     // 1TB = 1099511627776
-    let res = fm.search("size: == 1TB");
+    let res = fm.search("size: == 1TB", Default::default());
     assert!(res.is_ok());
 
     Ok(())

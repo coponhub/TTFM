@@ -40,10 +40,15 @@ impl QueryFunction for FilenameQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::Filename).to_string(),
-                label.clone(),
-            )),
+            QueryNode::ColumnMatch {
+                tag: SType::Type,
+                label: Label::String(SType::Filename.to_string()),
+            },
+            QueryNode::ColumnMatch {
+                tag: SType::Label,
+                label: label.clone(),
+            },
+            // ディレクトリを除外
             QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::IsDir).to_string(),
                 Label::String("false".to_string()),
@@ -131,7 +136,10 @@ impl QueryFunction for ItemKindQuery {
         SType::ItemKind.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new("item_kind", label.clone()))
+        QueryNode::ColumnMatch {
+            tag: SType::ItemKind,
+            label: label.clone(),
+        }
     }
 }
 

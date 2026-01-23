@@ -132,9 +132,13 @@ impl From<SType> for TagType {
 
 impl From<String> for TagType {
     fn from(s: String) -> Self {
-        SType::from_str(&s)
-            .map(TagType::Base)
-            .unwrap_or(TagType::Custom(s))
+        // Clean up the string (trim whitespace) just in case
+        let s = s.trim().to_string();
+        // Fully qualified syntax to ensure we use the Trait implementation which returns Result
+        match <SType as std::str::FromStr>::from_str(&s) {
+            Ok(st) => TagType::Base(st),
+            Err(_) => TagType::Custom(s),
+        }
     }
 }
 
@@ -342,6 +346,33 @@ pub struct Intrinsic {
     pub mtime: Option<FileTimestamp>,
     /// コンテンツのハッシュ
     pub hash: Option<String>,
+}
+
+/// キャッシュ生成等の進捗状況を表す構造体。
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub struct Progress {
+    /// 現在の完了件数
+    pub current: usize,
+    /// 全体の予定件数（不明な場合は None）
+    pub total: Option<usize>,
+}
+
+impl Progress {
+    /// 完了率（0.0 〜 1.0）を取得します。
+    pub fn ratio(&self) -> f32 {
+        match self.total {
+            Some(t) if t > 0 => self.current as f32 / t as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// 全て完了しているかどうかを判定します。
+    pub fn is_finished(&self) -> bool {
+        match self.total {
+            Some(t) => self.current >= t,
+            None => false,
+        }
+    }
 }
 
 

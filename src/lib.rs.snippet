@@ -1,0 +1,390 @@
+use crate::db::{Col, Tbl};
+use crate::util::{ExecuteSql, IdenExt, SelectExt};
+use crate::{FileManager, FunctionRegistry};
+use crate::query::{QueryNode, TagType};
+use crate::response::{SearchResponse, SearchResult, RawTagRow};
+use crate::types::{Progress};
+use crate::db::TargetTable;
+use anyhow::{Context, Result};
+use duckdb::Connection;
+use sea_query::{Alias, Expr, PostgresQueryBuilder, Query};
+use std::collections::HashMap;
+use std::path::Path;
+
+/// 検索オプションを制御する構造体。
+#[derive(Debug, Default, Clone)]
+pub struct SearchOptions {
+    /// 取得件数 (None または 0 は全件)
+    pub n: Option<usize>,
+    /// 開始位置 (None は自動または0)
+    pub offset: Option<usize>,
+    /// 利用するキャッシュ ID
+    pub cid: Option<String>,
+}
+
+impl FileManager {
+    /// クエリ文字列を使用してインデックスを検索します。
+    pub fn search(
+        &self,
+        query: &str,
+        options: SearchOptions,
+    ) -> Result<SearchResponse> {
+        if !self.path_for_target(TargetTable::FileReferences).exists() {
+            return Err(anyhow::anyhow!(
+                "Index not found. Please run 'index' command first."
+            ));
+        }
+
+        // 1. キャッシュの解決
+        if let Some(res) = self.try_resolve_cache(query, &options)? {
+            return Ok(res);
+        }
+
+        // 2. 新規検索の実行
+        let n = options.n.unwrap_or(100);
+        let offset = options.offset.unwrap_or(0);
+        let limit = if n > 0 { n + 1 } else { 0 };
+
+        let node = if query.trim().is_empty() {
+            QueryNode::And(vec![])
+        } else {
+            crate::query::parse(query)?
+        };
+
+        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
+        let expanded = node.expand(&q_reg);
+
+        // Item Selector による ID 抽出
+        let mut item_sql = expanded.to_sql("oneview");
+        item_sql.order_by_expr(
+            Expr::col(Col::Rank).into(),
+            sea_query::Order::Desc,
+        );
+        item_sql.order_by_expr(
+            Expr::col(Col::ItemId).into(),
+            sea_query::Order::Desc,
+        );
+        
+        if offset > 0 {
+            item_sql.offset(offset as u64);
+        }
+        if limit > 0 {
+            item_sql.limit(limit as u64);
+        }
+
+        // DuckDB の隔離された環境で ID を抽出
+        Tbl::Sub.drop_table(&self.conn).ok();
+        item_sql.create_table_as(&self.conn, Tbl::Sub)?;
+
+        let id_rows = self.conn
+            .prepare("SELECT item_id FROM sub")?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+
+        let has_more = n > 0 && id_rows.len() > n;
+        let mut target_ids = id_rows;
+        if has_more {
+            target_ids.truncate(n);
+        }
+
+        let cid = if has_more {
+            let new_cid = uuid::Uuid::new_v4().to_string();
+            self.spawn_cache_worker(&new_cid, query)?;
+            Some(new_cid)
+        } else {
+            None
+        };
+
+        // 3. Tag Selector による属性取得 (Bulk Fetch)
+        if target_ids.is_empty() {
+            return Ok(SearchResponse::new_empty(cid, has_more));
+        }
+
+        let tag_cond = expanded.to_tag_condition();
+        let mut fetch_sql = Query::select();
+        fetch_sql
+            .columns([
+                Col::ItemId,
+                Col::ItemKind,
+                Col::Type,
+                Col::LabelStr,
+                Col::LabelInt,
+                Col::LabelDouble,
+                Col::LabelBool,
+                Col::Origin,
+            ])
+            .from(Tbl::OneView)
+            .and_where(Expr::col(Col::ItemId).is_in(target_ids.clone()))
+            .and_where(tag_cond.into());
+
+        self.fetch_and_build(
+            target_ids,
+            fetch_sql.to_string(PostgresQueryBuilder),
+            cid,
+            has_more,
+            n,
+            expanded.get_projections().first(),
+        )
+    }
+
+    fn try_resolve_cache(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<Option<SearchResponse>> {
+        let Some(cid) = &options.cid else {
+            return Ok(None);
+        };
+
+        let cache_path = self.cache_manager.path_for(cid);
+        if !cache_path.exists() {
+            return Ok(None);
+        }
+
+        let progress = self.cache_manager.get_progress(cid)?;
+        let meta = match self.read_cache_metadata(cid) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+
+        let Some(cached_query) = meta.get(crate::cache::META_QUERY) else {
+            return Ok(None);
+        };
+
+        if cached_query != query {
+            return Ok(None);
+        }
+
+        if !progress.is_finished() {
+            return Ok(Some(SearchResponse::new_unfinished(cid, progress)));
+        }
+
+        Ok(Some(self.search_from_cache(&cache_path, options.clone(), cid)?))
+    }
+
+    fn search_from_cache(
+        &self,
+        path: &Path,
+        options: SearchOptions,
+        cid: &str,
+    ) -> Result<SearchResponse> {
+        let n = options.n.unwrap_or(100);
+        let offset = options.offset.unwrap_or(0);
+        let limit = if n > 0 { n + 1 } else { 0 };
+        let path_str = path.to_string_lossy();
+
+        let id_sql = format!(
+            "SELECT DISTINCT item_id, rank FROM read_parquet('{}') \
+             ORDER BY rank DESC, item_id DESC LIMIT {} OFFSET {}",
+            path_str, limit, offset
+        );
+        
+        let id_rows = self.conn
+            .prepare(&id_sql)?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+
+        let has_more = n > 0 && id_rows.len() > n;
+        let mut target_ids = id_rows;
+        if has_more {
+            target_ids.truncate(n);
+        }
+
+        if target_ids.is_empty() {
+            return Ok(SearchResponse::new_empty(Some(cid.to_string()), has_more));
+        }
+
+        let id_list = target_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetch_sql = format!(
+            "SELECT * FROM read_parquet('{}') WHERE item_id IN ({})",
+            path_str, id_list
+        );
+
+        self.fetch_and_build(
+            target_ids,
+            fetch_sql,
+            Some(cid.to_string()),
+            has_more,
+            n,
+            None,
+        )
+    }
+
+    fn fetch_and_build(
+        &self,
+        target_ids: Vec<i64>,
+        fetch_sql: String,
+        cid: Option<String>,
+        has_more: bool,
+        current_n: usize,
+        projection: Option<&String>,
+    ) -> Result<SearchResponse> {
+        let raw_results = self.conn
+            .prepare(&fetch_sql)?
+            .query_map([], |r| {
+                Ok(RawTagRow {
+                    id: r.get(0)?,
+                    item_kind: r.get(1)?,
+                    tag_type: r.get(2)?,
+                    label_str: r.get(3)?,
+                    label_int: r.get(4)?,
+                    label_double: r.get(5)?,
+                    label_bool: r.get(6)?,
+                    origin: r.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<RawTagRow>, _>>()?;
+
+        let mut results_map: HashMap<i64, SearchResult> = HashMap::new();
+        for &id in &target_ids {
+            results_map.insert(id, SearchResult::new_empty(id));
+        }
+
+        for row in raw_results {
+            if let Some(res) = results_map.get_mut(&row.id) {
+                res.apply_raw_tag(row);
+            }
+        }
+
+        let final_results: Vec<SearchResult> = target_ids
+            .into_iter()
+            .filter_map(|id| results_map.remove(&id))
+            .collect();
+
+        Ok(SearchResponse {
+            results: final_results,
+            cid,
+            has_more,
+            total_count: None,
+            progress: Progress {
+                current: current_n,
+                total: None,
+            },
+            type_for_projection: projection.map(|s| TagType::from(s.as_str())),
+        })
+    }
+
+    fn spawn_cache_worker(&self, cid: &str, query: &str) -> Result<()> {
+        let db_dir = self.db_dir.clone();
+        let cache_path = self.cache_manager.path_for(cid);
+        let cache_path_tmp = format!("{}.tmp", cache_path.to_string_lossy());
+
+        let cid_owned = cid.to_string();
+        let query_owned = query.to_string();
+
+        std::thread::spawn(move || {
+            let res = (|| -> Result<()> {
+                let conn = Connection::open_in_memory()?;
+                
+                let node = if query_owned.trim().is_empty() {
+                    QueryNode::And(vec![])
+                } else {
+                    crate::query::parse(&query_owned)?
+                };
+                let registry = crate::query::QueryFunctionRegistry::with_standard();
+                let expanded = node.expand(&registry);
+
+                let mut item_ids_query = expanded.to_sql("oneview");
+                item_ids_query.order_by_expr(
+                    Expr::col(Col::Rank).into(),
+                    sea_query::Order::Desc,
+                );
+                item_ids_query.order_by_expr(
+                    Expr::col(Col::ItemId).into(),
+                    sea_query::Order::Desc,
+                );
+
+                let mut sub_select = Query::select();
+                sub_select.column(Col::ItemId).from_subquery(
+                    item_ids_query,
+                    Alias::new("inner_sub"),
+                );
+
+                let tag_cond = expanded.to_tag_condition();
+                let mut cache_select = Query::select();
+                cache_select
+                    .columns([
+                        Col::ItemId,
+                        Col::Rank,
+                        Col::ItemKind,
+                        Col::Type,
+                        Col::LabelStr,
+                        Col::LabelInt,
+                        Col::LabelDouble,
+                        Col::LabelBool,
+                        Col::Origin,
+                    ])
+                    .from(Alias::new("oneview"))
+                    .and_where(
+                        Expr::col(Col::ItemId).in_subquery(sub_select),
+                    )
+                    .and_where(tag_cond.into());
+
+                let sql = cache_select.to_string(PostgresQueryBuilder);
+
+                let registry_full = FunctionRegistry::with_standard();
+                let all_columns = registry_full.get_all_columns();
+                crate::oneview::OneView::recreate(&conn, &all_columns, &db_dir)?;
+
+                let created_at = chrono::Utc::now().to_rfc3339();
+                let esc_query = query_owned.replace("'", "''");
+                let esc_created = created_at.replace("'", "''");
+                
+                let copy_sql = format!(
+                    "COPY ({}) TO '{}' (FORMAT 'parquet', \
+                     KV_METADATA {{'{}': '{}', '{}': '{}', '{}': '{}'}})",
+                    sql,
+                    cache_path_tmp,
+                    crate::cache::META_QUERY,
+                    esc_query,
+                    crate::cache::META_CREATED_AT,
+                    esc_created,
+                    crate::cache::META_INDEX_VERSION,
+                    "1",
+                );
+
+                conn.execute(&copy_sql, []).with_context(|| {
+                    format!("COPY failed with SQL:\n{}", copy_sql)
+                })?;
+
+                std::fs::rename(&cache_path_tmp, &cache_path)?;
+                Ok(())
+            })();
+
+            if let Err(e) = res {
+                eprintln!("Cache worker error for {}: {}", cid_owned, e);
+                let _ = std::fs::remove_file(&cache_path_tmp);
+            }
+        });
+        Ok(())
+    }
+
+    pub fn read_cache_metadata(
+        &self,
+        cid: &str,
+    ) -> Result<HashMap<String, String>> {
+        let path = self.cache_manager.path_for(cid);
+        if !path.exists() {
+            return Err(anyhow::anyhow!("Cache file not found: {:?}", path));
+        }
+        let path_str = path.to_string_lossy();
+        
+        let sql = format!(
+            "SELECT key, value FROM parquet_kv_metadata('{}')",
+            path_str
+        );
+        
+        let map: HashMap<String, String> = self.conn
+            .prepare(&sql)?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<Result<HashMap<String, String>, _>>()?;
+            
+        Ok(map)
+    }
+}

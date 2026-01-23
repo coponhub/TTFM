@@ -1,0 +1,80 @@
+   Compiling ttfm v0.1.0 (/home/aki/ttfm)
+error[E0433]: failed to resolve: use of undeclared type `Progress`
+   --> src/response.rs:400:23
+    |
+400 |             progress: Progress::default(),
+    |                       ^^^^^^^^ use of undeclared type `Progress`
+    |
+help: consider importing this struct through its public re-export
+    |
+326 +     use crate::Progress;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Progress`
+   --> src/response.rs:424:23
+    |
+424 |             progress: Progress::default(),
+    |                       ^^^^^^^^ use of undeclared type `Progress`
+    |
+help: consider importing this struct through its public re-export
+    |
+326 +     use crate::Progress;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Progress`
+   --> src/response.rs:450:23
+    |
+450 |             progress: Progress::default(),
+    |                       ^^^^^^^^ use of undeclared type `Progress`
+    |
+help: consider importing this struct through its public re-export
+    |
+326 +     use crate::Progress;
+    |
+
+error[E0433]: failed to resolve: use of undeclared type `Progress`
+   --> src/response.rs:468:23
+    |
+468 |             progress: Progress::default(),
+    |                       ^^^^^^^^ use of undeclared type `Progress`
+    |
+help: consider importing this struct through its public re-export
+    |
+326 +     use crate::Progress;
+    |
+
+warning: unused import: `DotOk`
+ --> src/lib.rs:7:19
+  |
+7 | use crate::util::{DotOk, ExecuteSql, IdenExt, SelectExt};
+  |                   ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `JoinType`
+  --> src/lib.rs:11:23
+   |
+11 | use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query};
+   |                       ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> src/indexing/merge.rs:412:9
+    |
+412 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `sea_query::PostgresQueryBuilder`
+   --> src/indexing/merge.rs:413:9
+    |
+413 |     use sea_query::PostgresQueryBuilder;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> src/cache.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0433`.
+warning: `ttfm` (lib test) generated 5 warnings
+error: could not compile `ttfm` (lib test) due to 4 previous errors; 5 warnings emitted

@@ -6,3 +6,5 @@ pub mod test_projection;
 pub mod test_size_units;
 pub mod verify_search;
 pub mod wasm_plugin_test;
+pub mod cache_paged_test;
+pub mod verify_search_all;
