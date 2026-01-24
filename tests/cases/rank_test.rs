@@ -63,7 +63,9 @@ fn test_rank_batch_update() {
     fm.update_ranks(&results.results, 10).unwrap();
 
     // 2. 結果を確認
-    let res = fm.search("extension:txt | extension:rs", Default::default()).unwrap();
+    let res = fm
+        .search("extension:txt | extension:rs", Default::default())
+        .unwrap();
     // ランク順に a.txt(10), b.txt(10), c.rs(0) のはず
     assert_eq!(res.results.len(), 3);
     assert!(res.results[0].primary_value().unwrap().contains(".txt"));

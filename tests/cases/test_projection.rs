@@ -82,7 +82,9 @@ fn test_projection_queries() {
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
-    let results = fm.search("extension: & directory:", Default::default()).unwrap();
+    let results = fm
+        .search("extension: & directory:", Default::default())
+        .unwrap();
     assert_eq!(
         results.results.len(),
         0,

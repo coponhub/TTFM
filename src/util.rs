@@ -36,7 +36,11 @@ pub fn save_parquet(
             let pairs: Vec<String> = meta
                 .iter()
                 .map(|(k, v)| {
-                    format!("'{}': '{}'", k.replace("'", "''"), v.replace("'", "''"))
+                    format!(
+                        "'{}': '{}'",
+                        k.replace("'", "''"),
+                        v.replace("'", "''")
+                    )
                 })
                 .collect();
             kv_part = format!(", KV_METADATA {{{}}}", pairs.join(", "));

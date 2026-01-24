@@ -141,7 +141,11 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Index { path, dry_run } => {
-            safe_println!("Indexing directory: {:?} (dry-run: {})", path, dry_run);
+            safe_println!(
+                "Indexing directory: {:?} (dry-run: {})",
+                path,
+                dry_run
+            );
 
             let pb = ProgressBar::new_spinner();
             pb.set_style(
@@ -165,7 +169,13 @@ fn main() -> Result<()> {
                 count
             ));
         }
-        Commands::Search { query, short, n, offset, cid } => {
+        Commands::Search {
+            query,
+            short,
+            n,
+            offset,
+            cid,
+        } => {
             if !*short {
                 safe_println!("Searching for: '{}'", query);
             }
@@ -181,7 +191,12 @@ fn main() -> Result<()> {
                 print_results(&fm, &response, query, n.unwrap_or(100));
             }
         }
-        Commands::List { short, n, offset, cid } => {
+        Commands::List {
+            short,
+            n,
+            offset,
+            cid,
+        } => {
             if !*short {
                 safe_println!("Listing files...");
             }
@@ -207,8 +222,7 @@ fn main() -> Result<()> {
             safe_println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
-            let response =
-                fm.search(item, SearchOptions::default())?;
+            let response = fm.search(item, SearchOptions::default())?;
             if response.results.is_empty() {
                 safe_println!("No items matched query: '{}'", item);
                 return Ok(());
@@ -427,11 +441,7 @@ fn print_results(
             safe_println!(
                 "\x1b[1;32mMore results available.\x1b[0m To see next page, run:"
             );
-            safe_println!(
-                "  ttfm search \"{}\" --cid {}",
-                query,
-                cid
-            );
+            safe_println!("  ttfm search \"{}\" --cid {}", query, cid);
         }
     }
 }
@@ -452,7 +462,11 @@ fn print_compact_projections(
         let items = group.results;
 
         // 1行目: ヘッダー (:label (X items))
-        safe_println!("\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m", label, items.len());
+        safe_println!(
+            "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
+            label,
+            items.len()
+        );
 
         // 2行目: アイテムリスト (  #ID:name, ...)
         let mut all_items_str = String::new();
@@ -482,11 +496,7 @@ fn print_compact_projections(
             safe_println!(
                 "\n\x1b[1;32mMore items available.\x1b[0m To see next page, run:"
             );
-            safe_println!(
-                "  ttfm search \"{}\" --cid {}",
-                query,
-                cid
-            );
+            safe_println!("  ttfm search \"{}\" --cid {}", query, cid);
         }
     }
 }

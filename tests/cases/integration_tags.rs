@@ -15,7 +15,8 @@ fn test_integration_file_tagging() {
         .unwrap();
 
     // 2. タグ付与
-    let registered_paths = fm.search("extension:txt", Default::default()).unwrap();
+    let registered_paths =
+        fm.search("extension:txt", Default::default()).unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     fm.tag_item(&item, "status:reviewed").unwrap();
@@ -37,7 +38,8 @@ fn test_integration_tag_tagging() {
     File::create(&file_path).unwrap();
     fm.index_directory(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
-    let registered_paths = fm.search("extension:txt", Default::default()).unwrap();
+    let registered_paths =
+        fm.search("extension:txt", Default::default()).unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     fm.tag_item(&item, "project:mars").unwrap();
@@ -48,7 +50,9 @@ fn test_integration_tag_tagging() {
 
     // 3. 確認
     // 対象のタグ定義(typedtag)のみを検証するため、item_kindで絞り込む
-    let results = fm.search("priority:high & item_kind:typedtag", Default::default()).unwrap();
+    let results = fm
+        .search("priority:high & item_kind:typedtag", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, tag_id);
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
@@ -73,7 +77,9 @@ fn test_integration_note_tagging() {
 
     // 3. 検索 (Noteがヒットすることを確認)
     // Note以外のアイテム（タグ定義など）を除外するため、item_kind:note で絞り込む
-    let results = fm.search("category:meeting & item_kind:note", Default::default()).unwrap();
+    let results = fm
+        .search("category:meeting & item_kind:note", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, note_id);
     assert_eq!(results.results[0].item_kind, "note");
@@ -102,7 +108,9 @@ fn test_system_item_metadata_integration() {
     );
 
     // 3. 'extension:rs' という typedtag Item（物理）は自動生成されないことを確認
-    let results_physical = fm.search("item_kind:typedtag & label:rs", Default::default()).unwrap();
+    let results_physical = fm
+        .search("item_kind:typedtag & label:rs", Default::default())
+        .unwrap();
     assert!(
         results_physical.results.is_empty(),
         "Physical typedtag item should NOT be created automatically"

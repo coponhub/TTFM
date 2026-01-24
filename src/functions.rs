@@ -276,7 +276,7 @@ impl Tagger for FilenameTagger {
             }
             Err(_) => SafeMetadata::recovered(),
         };
-        let name = FilenameFunction::generate(path, &m)?; 
+        let name = FilenameFunction::generate(path, &m)?;
         Ok(vec![TagValue::Text(name)])
     }
 }

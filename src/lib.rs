@@ -21,17 +21,18 @@ pub mod plugins;
 pub mod query;
 pub mod query_functions;
 pub mod rank;
-mod taggers;
 pub mod response;
+mod taggers;
 pub mod types;
 pub mod util;
 
 pub use db::TargetTable;
 use functions::{
-    ContentIndexingFunction, DirectoryFunction, ExtensionFunction, FilenameFunction,
-    InodeFunction, KindIndexingFunction, ModifiedStrFunction, ModifiedTsFunction,
-    NameIndexingFunction, ParentDirFunction, PathFunction, SizeBytesFunction,
-    SizeStrFunction, StemFunction, IndexingFunction, TypeFromExtFunction,
+    ContentIndexingFunction, DirectoryFunction, ExtensionFunction,
+    FilenameFunction, IndexingFunction, InodeFunction, KindIndexingFunction,
+    ModifiedStrFunction, ModifiedTsFunction, NameIndexingFunction,
+    ParentDirFunction, PathFunction, SizeBytesFunction, SizeStrFunction,
+    StemFunction, TypeFromExtFunction,
 };
 pub use query::{parse, QueryNode};
 pub use response::{SearchResponse, SearchResult};
@@ -250,7 +251,8 @@ impl FileManager {
 
         let cache_dir = db_dir.join("cache");
         // デフォルトのキャッシュ上限は 3GB
-        let cache_manager = CacheManager::new(cache_dir, 3 * 1024 * 1024 * 1024);
+        let cache_manager =
+            CacheManager::new(cache_dir, 3 * 1024 * 1024 * 1024);
 
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
@@ -633,7 +635,9 @@ impl FileManager {
                         let is_enabled =
                             *status.get(&adapter.name).unwrap_or(&true);
                         if is_enabled {
-                            if cfg!(debug_assertions) && std::env::var("TTFM_DEBUG").is_ok() {
+                            if cfg!(debug_assertions)
+                                && std::env::var("TTFM_DEBUG").is_ok()
+                            {
                                 println!(
                                     "Loaded plugin: {} from {:?}",
                                     adapter.name, path
@@ -641,7 +645,9 @@ impl FileManager {
                             }
                             self.registry.register(Box::new(adapter));
                         } else {
-                            if cfg!(debug_assertions) && std::env::var("TTFM_DEBUG").is_ok() {
+                            if cfg!(debug_assertions)
+                                && std::env::var("TTFM_DEBUG").is_ok()
+                            {
                                 println!(
                                     "Plugin {} is disabled via config. Skipping.",
                                     adapter.name
@@ -664,7 +670,11 @@ impl FileManager {
     /// OneView を再構築し、最新の Parquet ファイルの状態を反映させます。
     pub fn refresh_view(&self) -> Result<()> {
         let all_columns = self.registry.get_all_columns();
-        crate::oneview::OneView::recreate(&self.conn, &all_columns, &self.db_dir)?;
+        crate::oneview::OneView::recreate(
+            &self.conn,
+            &all_columns,
+            &self.db_dir,
+        )?;
         Ok(())
     }
 }

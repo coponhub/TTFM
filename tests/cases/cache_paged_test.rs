@@ -1,8 +1,8 @@
 use std::fs::File;
-use tempfile::tempdir;
-use ttfm::{FileManager, SearchOptions};
 use std::thread::sleep;
 use std::time::Duration;
+use tempfile::tempdir;
+use ttfm::{FileManager, SearchOptions};
 
 #[test]
 fn test_search_cache_flow() -> anyhow::Result<()> {
@@ -39,13 +39,17 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
 
     // 2. Wait for Cache Worker
     let mut finished = false;
-    for _ in 0..100 { // max 10s
-        let res_cid = fm.search("extension:txt", SearchOptions {
-            cid: Some(cid.clone()),
-            n: Some(10),
-            ..Default::default()
-        })?;
-        
+    for _ in 0..100 {
+        // max 10s
+        let res_cid = fm.search(
+            "extension:txt",
+            SearchOptions {
+                cid: Some(cid.clone()),
+                n: Some(10),
+                ..Default::default()
+            },
+        )?;
+
         if res_cid.progress.is_finished() {
             finished = true;
             break;
@@ -63,21 +67,35 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     };
     let res_page2 = fm.search("extension:txt", options_page2)?;
 
-    assert_eq!(res_page2.results.len(), 10, "Page 2 should have 10 items from cache");
-    assert!(res_page2.cid.is_some(), "CID should persist for cache-based paging");
+    assert_eq!(
+        res_page2.results.len(),
+        10,
+        "Page 2 should have 10 items from cache"
+    );
+    assert!(
+        res_page2.cid.is_some(),
+        "CID should persist for cache-based paging"
+    );
     assert_eq!(res_page2.cid.unwrap(), cid, "CID should remain same");
 
     // 4. Verify data consistency (Sort order should be rank DESC, item_id DESC)
     // Results from cache should match what we expect from a fresh search
-    let res_fresh_page2 = fm.search("extension:txt", SearchOptions {
-        n: Some(10),
-        offset: Some(10),
-        ..Default::default()
-    })?;
+    let res_fresh_page2 = fm.search(
+        "extension:txt",
+        SearchOptions {
+            n: Some(10),
+            offset: Some(10),
+            ..Default::default()
+        },
+    )?;
 
     assert_eq!(res_page2.results.len(), res_fresh_page2.results.len());
     for i in 0..10 {
-        assert_eq!(res_page2.results[i].id, res_fresh_page2.results[i].id, "Mismatch at index {}", i);
+        assert_eq!(
+            res_page2.results[i].id, res_fresh_page2.results[i].id,
+            "Mismatch at index {}",
+            i
+        );
     }
 
     Ok(())

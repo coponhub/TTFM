@@ -299,7 +299,8 @@ impl Tags {
 // 既存コードとの互換性のためのイテレーション対応（所有権を消費）
 impl IntoIterator for Tags {
     type Item = (TagType, Vec<TagValue>);
-    type IntoIter = std::collections::hash_map::IntoIter<TagType, Vec<TagValue>>;
+    type IntoIter =
+        std::collections::hash_map::IntoIter<TagType, Vec<TagValue>>;
 
     fn into_iter(self) -> Self::IntoIter {
         // 必要に応じて HashMap に詰め直して返す（Lazy 化の恩恵は受けられないが、互換性は保つ）
@@ -374,7 +375,6 @@ impl Progress {
         }
     }
 }
-
 
 /// ライフタイムに制約のないタグ名（参照）。
 pub type Name<'a> = &'a str;
@@ -452,26 +452,12 @@ mod tests_types {
     #[test]
     fn test_tags_iter_typed_tags() {
         let mut tags = Tags::new();
-        tags.push(
-            TagType::from("project"),
-            Label::from("A"),
-            Origin::User,
-        );
-        tags.push(
-            TagType::from("project"),
-            Label::from("B"),
-            Origin::User,
-        );
-        tags.push(
-            TagType::from("extension"),
-            Label::from("rs"),
-            Origin::User,
-        );
+        tags.push(TagType::from("project"), Label::from("A"), Origin::User);
+        tags.push(TagType::from("project"), Label::from("B"), Origin::User);
+        tags.push(TagType::from("extension"), Label::from("rs"), Origin::User);
 
-        let mut results: Vec<String> = tags
-            .iter_typed_tags()
-            .map(|tt| tt.to_string())
-            .collect();
+        let mut results: Vec<String> =
+            tags.iter_typed_tags().map(|tt| tt.to_string()).collect();
         results.sort();
 
         assert_eq!(results.len(), 3);

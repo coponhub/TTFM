@@ -18,13 +18,31 @@ fn test_incremental_indexing_full_flow() {
     std::fs::write(&path_a, "initial content").unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false)
         .unwrap();
-    assert_eq!(fm.search(all_files, Default::default()).unwrap().results.len(), 2);
-    assert_eq!(fm.search("filename:a.txt", Default::default()).unwrap().results.len(), 1);
+    assert_eq!(
+        fm.search(all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
+        2
+    );
+    assert_eq!(
+        fm.search("filename:a.txt", Default::default())
+            .unwrap()
+            .results
+            .len(),
+        1
+    );
 
     // 2. 変更なし: そのまま再スキャン (2)
     fm.index_directory(&root, None::<&fn(usize)>, false)
         .unwrap();
-    assert_eq!(fm.search(all_files, Default::default()).unwrap().results.len(), 2);
+    assert_eq!(
+        fm.search(all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
+        2
+    );
 
     // 3. 追加: b.rs を作成 (root + a.txt + b.rs = 3)
     let path_b = root.join("b.rs");
@@ -37,7 +55,11 @@ fn test_incremental_indexing_full_flow() {
 
     // 4. 更新: a.txt の内容を変更 (サイズ変更)
     // 実体(ID)が変わらないことを確認
-    let old_id = fm.search("filename:a.txt", Default::default()).unwrap().results[0].id;
+    let old_id = fm
+        .search("filename:a.txt", Default::default())
+        .unwrap()
+        .results[0]
+        .id;
     std::fs::write(&path_a, "updated content with more bytes").unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false)
         .unwrap();
@@ -58,7 +80,13 @@ fn test_incremental_indexing_full_flow() {
     std::fs::remove_file(&path_b).unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false)
         .unwrap();
-    assert_eq!(fm.search(all_files, Default::default()).unwrap().results.len(), 2);
+    assert_eq!(
+        fm.search(all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
+        2
+    );
 
     let res_b_del = fm.search("filename:b.rs", Default::default()).unwrap();
     let files_b_del: Vec<_> = res_b_del
@@ -133,7 +161,10 @@ fn test_system_items_registration() {
     // 1. item_entities に extension:txt 関連のItemがあるか確認
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
     let results_physical = fm
-        .search("item_kind:typedtag & name:extension:txt", Default::default())
+        .search(
+            "item_kind:typedtag & name:extension:txt",
+            Default::default(),
+        )
         .unwrap();
     assert!(
         results_physical.results.is_empty(),
@@ -142,7 +173,8 @@ fn test_system_items_registration() {
 
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
-    let results_projection = fm.search("typedtag:", Default::default()).unwrap();
+    let results_projection =
+        fm.search("typedtag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert_eq!(
@@ -244,7 +276,10 @@ fn test_no_empty_extension_system_item() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     let results = fm
-        .search("item_kind:typedtag & name:\"extension:\"", Default::default())
+        .search(
+            "item_kind:typedtag & name:\"extension:\"",
+            Default::default(),
+        )
         .unwrap();
     assert!(
         results.results.is_empty(),

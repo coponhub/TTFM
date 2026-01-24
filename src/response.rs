@@ -1,4 +1,6 @@
-use crate::types::{Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags};
+use crate::types::{
+    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags,
+};
 
 /// 検索結果を表す構造体。
 #[derive(Debug, PartialEq, Clone)]
@@ -93,8 +95,10 @@ impl SearchResponse {
     pub fn iter_type_groups(&self) -> Vec<TypeGroup> {
         use std::collections::{BTreeSet, HashMap};
 
-        let mut groups: HashMap<(String, BTreeSet<TagType>), Vec<&SearchResult>> =
-            HashMap::new();
+        let mut groups: HashMap<
+            (String, BTreeSet<TagType>),
+            Vec<&SearchResult>,
+        > = HashMap::new();
 
         for res in &self.results {
             let mut keys = BTreeSet::new();
@@ -147,7 +151,8 @@ impl SearchResponse {
         };
 
         // BTreeMap を使うことで、Label 型の Ord 実装に基づいたソート済みの結果が得られる
-        let mut groups: BTreeMap<crate::types::Label, Vec<&SearchResult>> = BTreeMap::new();
+        let mut groups: BTreeMap<crate::types::Label, Vec<&SearchResult>> =
+            BTreeMap::new();
 
         for res in &self.results {
             for label in res.get_all_labels(key_type) {
@@ -307,7 +312,10 @@ impl SearchResult {
 
     /// 指定されたキーの全てのラベルを Label 型として取得します。
     /// 固定メタデータや仮想ラベルも透過的にアクセス可能です。
-    pub fn get_all_labels(&self, tag_type: &TagType) -> Vec<crate::types::Label> {
+    pub fn get_all_labels(
+        &self,
+        tag_type: &TagType,
+    ) -> Vec<crate::types::Label> {
         use crate::types::Label;
 
         // 1. 固定メタデータの解決
@@ -371,8 +379,11 @@ impl SearchResult {
             }
             // 仮想ラベル: typedtag: (type:label 形式の全タグ)
             TagType::Base(SType::TypedTag) => {
-                let mut tts: Vec<String> =
-                    self.tags.iter_typed_tags().map(|tt| tt.to_string()).collect();
+                let mut tts: Vec<String> = self
+                    .tags
+                    .iter_typed_tags()
+                    .map(|tt| tt.to_string())
+                    .collect();
                 // 固定属性も TypedTag として扱う
                 if let Some(s) = &self.intrinsic.size {
                     tts.push(format!("{}:{}", SType::Size, s.0));

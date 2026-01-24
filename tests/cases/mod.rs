@@ -1,3 +1,4 @@
+pub mod cache_paged_test;
 pub mod indexing_integration;
 pub mod integration_tags;
 pub mod rank_test;
@@ -5,6 +6,5 @@ pub mod robustness_test;
 pub mod test_projection;
 pub mod test_size_units;
 pub mod verify_search;
-pub mod wasm_plugin_test;
-pub mod cache_paged_test;
 pub mod verify_search_all;
+pub mod wasm_plugin_test;

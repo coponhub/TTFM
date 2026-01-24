@@ -288,37 +288,53 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     assert_eq!(results.results.len(), 0);
 
-    let results = fm.search("filename:project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("filename:project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 4. ? (任意の一文字)
-    let results = fm.search("filename:project_alph?.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("filename:project_alph?.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].name, "project_alpha.pdf");
 
     // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
-    let results = fm.search("filename:project_[ab]*", Default::default()).unwrap();
+    let results = fm
+        .search("filename:project_[ab]*", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 2); // alpha and beta
 
     // 6. [!...] (否定文字セット) - beta のみを拾う
-    let results = fm.search("filename:project_[!a]eta*", Default::default()).unwrap();
+    let results = fm
+        .search("filename:project_[!a]eta*", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1); // beta only
 
     // 7. クォート内でのGlob (無効化されるはず)
-    let results = fm.search("filename:\"project_[ab]*\"", Default::default()).unwrap();
+    let results = fm
+        .search("filename:\"project_[ab]*\"", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 0); // リテラル一致を試みるため0件
 
     // 8. クォートでの完全一致
-    let results = fm.search("filename:\"project_alpha.pdf\"", Default::default()).unwrap();
+    let results = fm
+        .search("filename:\"project_alpha.pdf\"", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 9. Type側の引用符
-    let results = fm.search("\"filename\":project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("\"filename\":project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 10. Type側のGlob (実装済みか確認)
     // filename が対象になるはず
-    let results = fm.search("*name:project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("*name:project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 11. Type Wildcard + Value Prefix (Regression Test)
@@ -331,14 +347,20 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     );
 
     // 12. Type側のGlob ([...] / [!...])
-    let results = fm.search("[f]ilename:project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("[f]ilename:project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
-    let results = fm.search("[!f]ilename:project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("[!f]ilename:project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 0); // filename にはマッチしないはず
 
     // 13. Type側のGlob (?)
-    let results = fm.search("file?ame:project_alpha.pdf", Default::default()).unwrap();
+    let results = fm
+        .search("file?ame:project_alpha.pdf", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 13. バックスラッシュ・エスケープ
@@ -349,7 +371,9 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     // バックスラッシュなしだとGlobとして解釈され、マッチしない可能性がある（または意図しないマッチ）
     // ここでは \[WIP\] とすることでリテラルとして扱う
-    let results = fm.search(r"filename:\[WIP\]_*", Default::default()).unwrap();
+    let results = fm
+        .search(r"filename:\[WIP\]_*", Default::default())
+        .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].name, "[WIP]_test.txt");
 
@@ -404,7 +428,9 @@ fn test_complex_search_combinations() {
     );
 
     // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
-    let results = fm.search("name:*.toml | name:^LIC", Default::default()).unwrap();
+    let results = fm
+        .search("name:*.toml | name:^LIC", Default::default())
+        .unwrap();
     // Verify correct items are present (ignoring extra matches)
     assert!(
         results.results.iter().any(|r| r.name == "Cargo.toml"),
@@ -416,8 +442,14 @@ fn test_complex_search_combinations() {
     );
 
     // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
-    let all_rs = fm.search("exte*:rs", Default::default()).unwrap().results.len();
-    let results_diff = fm.search("exte*:rs - name:mod*", Default::default()).unwrap();
+    let all_rs = fm
+        .search("exte*:rs", Default::default())
+        .unwrap()
+        .results
+        .len();
+    let results_diff = fm
+        .search("exte*:rs - name:mod*", Default::default())
+        .unwrap();
     assert_eq!(
         results_diff.results.len(),
         all_rs - 1,
@@ -427,12 +459,16 @@ fn test_complex_search_combinations() {
 
     // 5. Grouping + Glob Types + Comparison
     // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
-    let results = fm.search("(exte*:rs | exte*:toml) & size:>0", Default::default()).unwrap();
+    let results = fm
+        .search("(exte*:rs | exte*:toml) & size:>0", Default::default())
+        .unwrap();
     assert!(results.results.len() >= 1);
     assert!(results.results.iter().all(|r| r.name == "main.rs"));
 
     // 6. Value Glob + Value Prefix AND (name:*.rs & name:^mai)
-    let results = fm.search("name:*.rs & name:^mai", Default::default()).unwrap();
+    let results = fm
+        .search("name:*.rs & name:^mai", Default::default())
+        .unwrap();
     assert!(results.results.len() >= 1);
     assert!(results.results.iter().all(|r| r.name == "main.rs"));
 
@@ -451,7 +487,9 @@ fn test_complex_search_combinations() {
 
     // 10. Type Prefix + Value Glob (item_kind:^fi & name:*.rs)
     // Matches 'file' type items which are .rs
-    let results = fm.search("item_kind:^fi & name:*.rs", Default::default()).unwrap();
+    let results = fm
+        .search("item_kind:^fi & name:*.rs", Default::default())
+        .unwrap();
     assert!(results.results.len() >= 18);
 }
 
@@ -473,22 +511,30 @@ fn test_escaping_behavior() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. Escaped Colon (Using raw string)
-    let res = fm.search(r"name:colon\:file.txt", Default::default()).unwrap();
+    let res = fm
+        .search(r"name:colon\:file.txt", Default::default())
+        .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped colon");
     assert!(res.results.iter().any(|r| r.name == "colon:file.txt"));
 
     // 2. Escaped Space
-    let res = fm.search(r"name:space\ file.txt", Default::default()).unwrap();
+    let res = fm
+        .search(r"name:space\ file.txt", Default::default())
+        .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped space");
     assert!(res.results.iter().any(|r| r.name == "space file.txt"));
 
     // 3. Escaped Caret
-    let res = fm.search(r"name:caret\^file.txt", Default::default()).unwrap();
+    let res = fm
+        .search(r"name:caret\^file.txt", Default::default())
+        .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped caret");
     assert!(res.results.iter().any(|r| r.name == "caret^file.txt"));
 
     // 4. Quoted Colon
-    let res = fm.search(r#"name:"colon:file.txt""#, Default::default()).unwrap();
+    let res = fm
+        .search(r#"name:"colon:file.txt""#, Default::default())
+        .unwrap();
     assert!(res.results.len() >= 1, "Should match quoted colon");
 
     // 5. Double Escape (colon + glob)
@@ -496,7 +542,9 @@ fn test_escaping_behavior() {
     assert!(res.results.len() >= 1, "Should match colon + glob");
 
     // 6. Mixed Logic
-    let res = fm.search(r"name:colon\:* | name:space\ *", Default::default()).unwrap();
+    let res = fm
+        .search(r"name:colon\:* | name:space\ *", Default::default())
+        .unwrap();
     assert!(res.results.len() >= 2, "Should match combined");
 }
 
@@ -534,7 +582,8 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
     // 3. 検索実行: parentdir:src & extension:rs
-    let results = fm.search("parentdir:src & extension:rs", Default::default())?;
+    let results =
+        fm.search("parentdir:src & extension:rs", Default::default())?;
 
     for path in &results.results {
         println!("Hit: {:?}", path);

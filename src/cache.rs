@@ -1,6 +1,6 @@
+use crate::types::Progress;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use crate::types::Progress;
 
 /// キャッシュファイルのメタデータキー
 pub const META_QUERY: &str = "ttfm.query";
@@ -18,7 +18,10 @@ impl CacheManager {
         if !cache_dir.exists() {
             let _ = std::fs::create_dir_all(&cache_dir);
         }
-        Self { cache_dir, max_size_bytes }
+        Self {
+            cache_dir,
+            max_size_bytes,
+        }
     }
 
     /// 指定された CID に対応するキャッシュファイルのパスを返します。
@@ -34,8 +37,15 @@ impl CacheManager {
         for entry in entries {
             let entry = entry?;
             let metadata = entry.metadata()?;
-            if metadata.is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("parquet") {
-                let accessed = metadata.accessed().unwrap_or_else(|_| metadata.modified().unwrap_or_else(|_| std::time::SystemTime::now()));
+            if metadata.is_file()
+                && entry.path().extension().and_then(|s| s.to_str())
+                    == Some("parquet")
+            {
+                let accessed = metadata.accessed().unwrap_or_else(|_| {
+                    metadata
+                        .modified()
+                        .unwrap_or_else(|_| std::time::SystemTime::now())
+                });
                 files.push((entry.path(), metadata.len(), accessed));
             }
         }
@@ -50,7 +60,8 @@ impl CacheManager {
             if current_size <= self.max_size_bytes as u64 {
                 break;
             }
-            std::fs::remove_file(&path).context(format!("Failed to remove old cache: {:?}", path))?;
+            std::fs::remove_file(&path)
+                .context(format!("Failed to remove old cache: {:?}", path))?;
             current_size -= size;
         }
 
@@ -95,8 +106,8 @@ impl CacheManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn test_cache_path_for() {
@@ -117,7 +128,7 @@ mod tests {
         let f1 = cache_dir.join("a.parquet");
         let f2 = cache_dir.join("b.parquet");
         fs::write(&f1, vec![0u8; 60]).unwrap();
-        
+
         // 少し時間を空けるか、アクセス時刻を細工する（ここでは単純に作成順）
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(&f2, vec![0u8; 60]).unwrap();
@@ -180,7 +191,7 @@ mod tests {
 
         let f_parquet = cache_dir.join("a.parquet");
         let f_other = cache_dir.join("important.txt");
-        
+
         // 20バイトのファイルをそれぞれ作成
         fs::write(&f_parquet, vec![0u8; 20]).unwrap();
         fs::write(&f_other, vec![0u8; 20]).unwrap();
@@ -189,6 +200,9 @@ mod tests {
 
         // パケットファイルはサイズオーバーで削除されるはずだが、他は無視されるべき
         assert!(!f_parquet.exists(), "Parquet should be cleaned up");
-        assert!(f_other.exists(), "Non-parquet file should be ignored by cleanup");
+        assert!(
+            f_other.exists(),
+            "Non-parquet file should be ignored by cleanup"
+        );
     }
 }
