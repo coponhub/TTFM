@@ -165,7 +165,22 @@ impl std::fmt::Display for Label {
 }
 
 impl Label {
-    /// 文字列としての値を取得します。
+    /// データベースの行から指定されたオフセットのカラムを Label として読み取ります。
+    /// LabelStr, LabelInt, LabelDouble, LabelBool の順に並んでいることを想定します。
+    pub fn from_row_at(r: &duckdb::Row, offset: usize) -> Self {
+        if let Ok(i) = r.get::<_, i64>(offset + 1) {
+            Self::Integer(i)
+        } else if let Ok(s) = r.get::<_, String>(offset) {
+            Self::String(s)
+        } else if let Ok(b) = r.get::<_, bool>(offset + 3) {
+            Self::String(b.to_string())
+        } else if let Ok(d) = r.get::<_, f64>(offset + 2) {
+            Self::String(d.to_string())
+        } else {
+            Self::String(String::new())
+        }
+    }
+
     pub fn as_str(&self) -> String {
         match self {
             Label::String(s) => s.clone(),

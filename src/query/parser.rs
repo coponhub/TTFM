@@ -154,6 +154,12 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
         .next()
         .ok_or_else(|| anyhow!(errors::MISSING_TAG_LABEL))?;
     let label = build_label(label_pair)?;
+    
+    // Empty label implies projection (e.g. "extension:")
+    if label.as_str().is_empty() {
+        return Ok(QueryNode::Projection(tagtype));
+    }
+    
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
 
@@ -484,6 +490,15 @@ mod tests {
         match node {
             QueryNode::Or(nodes) => assert_eq!(nodes.len(), 2),
             _ => panic!("Expected Or, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_origin_projection() {
+        let node = parse("origin:").expect("Failed to parse origin:");
+        match node {
+            QueryNode::Projection(tt) => assert_eq!(tt.as_str(), "origin"),
+            _ => panic!("Expected Projection(origin), got {:?}", node),
         }
     }
 }

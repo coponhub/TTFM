@@ -17,9 +17,12 @@ pub struct SearchResult {
     pub intrinsic: Intrinsic,
     /// アイテムに紐づく動的なタグの集合
     pub tags: Tags,
+    /// プロジェクション時に、この結果が代表しているラベル
+    pub projected_label: Option<crate::types::Label>,
 }
 
 /// データベースから取得した生のタグ情報の断片。
+#[derive(Clone)]
 pub struct RawTagRow {
     pub id: ItemId,
     pub item_kind: ItemKind,
@@ -60,6 +63,8 @@ impl RawTagRow {
 pub struct SearchResponse {
     /// ヒットしたアイテムのリスト
     pub results: Vec<SearchResult>,
+    /// プロジェクション時の構造化された結果
+    pub label_results: Vec<LabelGroup>,
     /// クエリで明示的に投影（Projection）されたタグ型（互換性のため維持）。
     pub type_for_projection: Option<TagType>,
     /// キャッシュ ID（続きがある場合のみ有効）
@@ -81,13 +86,13 @@ pub struct TypeGroup<'a> {
     pub results: Vec<&'a SearchResult>,
 }
 
-/// 投影された「一意な値（ラベル）」とそのアイテム集合。
-#[derive(Debug, Clone)]
-pub struct LabelGroup<'a> {
+/// 投影された「一意な値（ラベル）」とそのアイテム集合（所有権あり）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelGroup {
     /// 投影されたラベルの値
     pub label: crate::types::Label,
     /// このラベルを持つアイテムの集合
-    pub results: Vec<&'a SearchResult>,
+    pub results: Vec<SearchResult>,
 }
 
 impl SearchResponse {
@@ -142,36 +147,22 @@ impl SearchResponse {
         sorted_groups
     }
 
-    /// クエリで指定された投影項目（type_for_projection）に基づき、ラベルごとのグループを返します。
+    /// クエリで指定された投影項目に基づき、ラベルごとのグループを返します。
     pub fn iter_label_groups(&self) -> Vec<LabelGroup> {
-        use std::collections::BTreeMap;
-
-        let Some(ref key_type) = self.type_for_projection else {
-            return Vec::new();
-        };
-
-        // BTreeMap を使うことで、Label 型の Ord 実装に基づいたソート済みの結果が得られる
-        let mut groups: BTreeMap<crate::types::Label, Vec<&SearchResult>> =
-            BTreeMap::new();
-
-        for res in &self.results {
-            for label in res.get_all_labels(key_type) {
-                groups.entry(label).or_default().push(res);
-            }
-        }
-
-        groups
-            .into_iter()
-            .map(|(label, results)| LabelGroup { label, results })
-            .collect()
+        self.label_results.clone()
     }
 }
 
 impl SearchResponse {
     /// 空の検索結果（初期状態）を作成します。
-    pub fn new_empty(cid: Option<String>, has_more: bool) -> Self {
+    pub fn new_empty(
+        cid: Option<String>,
+        has_more: bool,
+        type_for_projection: Option<TagType>,
+    ) -> Self {
         Self {
             results: Vec::new(),
+            label_results: Vec::new(),
             cid,
             has_more,
             total_count: Some(0),
@@ -179,7 +170,7 @@ impl SearchResponse {
                 current: 0,
                 total: Some(0),
             },
-            type_for_projection: None,
+            type_for_projection,
         }
     }
 
@@ -187,6 +178,7 @@ impl SearchResponse {
     pub fn new_unfinished(cid: &str, progress: crate::types::Progress) -> Self {
         Self {
             results: Vec::new(),
+            label_results: Vec::new(),
             cid: Some(cid.to_string()),
             has_more: true,
             total_count: None,
@@ -206,6 +198,7 @@ impl SearchResult {
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
+            projected_label: None,
         }
     }
 
@@ -438,6 +431,7 @@ mod tests {
                 hash: None,
             },
             tags,
+            projected_label: None,
         }
     }
 
@@ -476,6 +470,7 @@ mod tests {
 
         let response = SearchResponse {
             results: vec![res1, res2],
+            label_results: Vec::new(),
             type_for_projection: None,
             cid: None,
             total_count: None,
@@ -494,17 +489,21 @@ mod tests {
     #[test]
     fn test_iter_label_groups() {
         use crate::types::Label;
-        let res1 = create_test_result(); // extension: rs
+        let mut res1 = create_test_result();
+        res1.projected_label = Some(Label::from("rs"));
         let mut res2 = create_test_result();
-        res2.name = "other.rs".to_string(); // extension: rs
+        res2.name = "other.rs".to_string();
+        res2.projected_label = Some(Label::from("rs"));
+
+        let label_group = LabelGroup {
+            label: Label::from("rs"),
+            results: vec![res1.clone(), res2.clone()],
+        };
 
         let response = SearchResponse {
             results: vec![res1, res2],
-            type_for_projection: Some(TagType::from("extension")),
-            cid: None,
-            total_count: None,
-            has_more: false,
-            progress: Progress::default(),
+            label_results: vec![label_group],
+            ..Default::default()
         };
 
         let groups = response.iter_label_groups();
@@ -516,26 +515,31 @@ mod tests {
 
     #[test]
     fn test_iter_label_groups_numeric_sort() {
-        use crate::types::{FileSize, Label};
+        use crate::types::Label;
         let mut res1 = create_test_result();
-        res1.intrinsic.size = Some(FileSize(20)); // "20"
+        res1.projected_label = Some(Label::from(20));
 
         let mut res2 = create_test_result();
-        res2.intrinsic.size = Some(FileSize(100)); // "100"
+        res2.projected_label = Some(Label::from(100));
 
-        // 文字列ソートの場合 "100" < "20" となるが、数値ソート（Label::Integer）なら 20 < 100 となる
+        let group1 = LabelGroup {
+            label: Label::from(20),
+            results: vec![res1.clone()],
+        };
+        let group2 = LabelGroup {
+            label: Label::from(100),
+            results: vec![res2.clone()],
+        };
+
         let response = SearchResponse {
             results: vec![res1, res2],
-            type_for_projection: Some(TagType::from("size")),
-            cid: None,
-            total_count: None,
-            has_more: false,
-            progress: Progress::default(),
+            label_results: vec![group1, group2],
+            ..Default::default()
         };
 
         let groups = response.iter_label_groups();
         assert_eq!(groups.len(), 2);
-        // 数値順なので 20 が先に来る
+        // DBから届いた順序（20, 100）が維持される
         assert_eq!(groups[0].label, Label::from(20));
         assert_eq!(groups[1].label, Label::from(100));
     }
@@ -544,6 +548,7 @@ mod tests {
     fn test_empty_projection_handling() {
         let response = SearchResponse {
             results: vec![create_test_result()],
+            label_results: Vec::new(),
             type_for_projection: None,
             cid: None,
             total_count: None,

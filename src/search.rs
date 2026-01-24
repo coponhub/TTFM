@@ -52,8 +52,10 @@ impl FileManager {
         };
 
         let q_reg = crate::query::QueryFunctionRegistry::with_standard();
+        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
         let expanded = node.expand(&q_reg);
-
+        let projection = expanded.get_projections().first().cloned();
+        
         // Item Selector による ID 抽出
         let mut item_sql = expanded.to_sql("oneview");
         item_sql
@@ -63,33 +65,85 @@ impl FileManager {
             sea_query::Order::Desc,
         );
 
-        if offset > 0 {
-            item_sql.offset(offset as u64);
+        // プロジェクション時は、ユニークラベルを取得する際に offset/limit をかけるため、
+        // ここでの絞り込みには適用しない。
+        if projection.is_none() {
+            if offset > 0 {
+                item_sql.offset(offset as u64);
+            }
+            if limit > 0 {
+                item_sql.limit(limit as u64);
+            }
         }
-        if limit > 0 {
-            item_sql.limit(limit as u64);
-        }
-
         // DuckDB の隔離された環境で ID を抽出
         Tbl::Sub.drop_table(&self.conn).ok();
         item_sql.create_table_as(&self.conn, Tbl::Sub)?;
+        
+        // Count total matching (before limit) if needed.
+        // For accurate total_count with projection, we might need a separate query,
+        // but exact matches are in `Sub` now.
+        // The `cid` (Cache ID) logic would use `Sub` content.
 
-        let id_select = Query::select()
-            .column(Col::ItemId)
-            .from(Tbl::Sub)
-            .to_owned();
-
-        let id_rows = self
+        // Get candidate IDs from Sub for simple non-projection results
+        let candidate_ids = self
             .conn
-            .prepare(&id_select.to_string(PostgresQueryBuilder))?
+            .prepare("SELECT item_id FROM sub")?
             .query_map([], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<i64>, _>>()?;
 
-        let has_more = n > 0 && id_rows.len() > n;
-        let mut target_ids = id_rows;
-        if has_more {
-            target_ids.truncate(n);
+        if candidate_ids.is_empty() {
+             return Ok(SearchResponse {
+                results: vec![],
+                type_for_projection: projection.map(|p| p.into()),
+                cid: None,
+                total_count: Some(0),
+                has_more: false,
+                progress: Progress::default(),
+                label_results: Vec::new(),
+            });
         }
+
+        let (target_entries, has_more) = if let Some(ref proj_name) = projection
+        {
+            let proj_type = TagType::from(proj_name.as_str());
+            let labels =
+                self.get_unique_labels(true, None, &proj_type, n, offset)?;
+            let has_more = n > 0 && labels.len() > n;
+            let final_labels =
+                if has_more { &labels[..n] } else { &labels[..] };
+
+            let entries = self.expand_labels_to_entries(
+                true,
+                None,
+                &proj_type,
+                final_labels,
+            )?;
+            (entries, has_more)
+        } else {
+            let id_select = Query::select()
+                .column(Col::ItemId)
+                .from(Tbl::Sub)
+                .to_owned();
+
+            let id_rows = self
+                .conn
+                .prepare(&id_select.to_string(PostgresQueryBuilder))?
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<i64>, _>>()?;
+
+            let has_more = n > 0 && id_rows.len() > n;
+            let mut target_ids = id_rows;
+            if has_more {
+                target_ids.truncate(n);
+            }
+            (
+                target_ids
+                    .into_iter()
+                    .map(|id| (id, None))
+                    .collect::<Vec<_>>(),
+                has_more,
+            )
+        };
 
         let cid = if has_more {
             let new_cid = uuid::Uuid::new_v4().to_string();
@@ -100,25 +154,32 @@ impl FileManager {
         };
 
         // 3. Tag Selector による属性取得 (Bulk Fetch)
-        if target_ids.is_empty() {
-            return Ok(SearchResponse::new_empty(cid, has_more));
+        if target_entries.is_empty() {
+            return Ok(SearchResponse::new_empty(
+                cid,
+                has_more,
+                projection.map(|p| p.into()),
+            ));
         }
+
+        let fetch_ids: Vec<i64> =
+            target_entries.iter().map(|(id, _)| *id).collect();
 
         let tag_cond = expanded.to_tag_condition();
         let mut fetch_sql = Query::select();
         fetch_sql
             .columns(Col::raw_tag_row_columns())
             .from(Tbl::OneView)
-            .and_where(Expr::col(Col::ItemId).is_in(target_ids.clone()))
+            .and_where(Expr::col(Col::ItemId).is_in(fetch_ids))
             .and_where(tag_cond.into());
 
         self.fetch_and_build(
-            target_ids,
+            target_entries,
             fetch_sql.to_string(PostgresQueryBuilder),
             cid,
             has_more,
             n,
-            expanded.get_projections().first(),
+            projection.as_ref(),
         )
     }
 
@@ -172,7 +233,6 @@ impl FileManager {
     ) -> Result<SearchResponse> {
         let n = options.n.unwrap_or(100);
         let offset = options.offset.unwrap_or(0);
-        // n=0 (全件) の場合は limit を設定しない
         let limit = if options.n.is_some() || n > 0 {
             n + 1
         } else {
@@ -180,46 +240,94 @@ impl FileManager {
         };
         let path_str = path.to_string_lossy().to_string();
 
-        let mut id_query = Query::select();
-        id_query
-            .distinct()
-            .columns([Col::ItemId, Col::Rank])
-            .from_function(
-                sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
-                    .arg(Expr::val(path_str.clone())),
-                Tbl::Diff,
+        // キャッシュメタデータから元のクエリを復元してプロジェクションを判定
+        let meta = self.read_cache_metadata(cid)?;
+        let query = meta
+            .get(crate::cache::META_QUERY)
+            .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
+        let node = if query.trim().is_empty() {
+            crate::query::QueryNode::And(vec![])
+        } else {
+            crate::query::parse(query)?
+        };
+        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
+        let expanded = node.expand(&q_reg);
+        let projection = expanded.get_projections().first().cloned();
+
+        let (target_entries, has_more) = if let Some(ref proj_name) = projection
+        {
+            let proj_type = TagType::from(proj_name.as_str());
+            let labels = self.get_unique_labels(
+                false,
+                Some(path_str.clone()),
+                &proj_type,
+                n,
+                offset,
+            )?;
+            let has_more = n > 0 && labels.len() > n;
+            let final_labels =
+                if has_more { &labels[..n] } else { &labels[..] };
+
+            let entries = self.expand_labels_to_entries(
+                false,
+                Some(path_str.clone()),
+                &proj_type,
+                final_labels,
+            )?;
+            (entries, has_more)
+        } else {
+            let mut id_query = Query::select();
+            id_query
+                .distinct()
+                .columns([Col::ItemId, Col::Rank])
+                .from_function(
+                    sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
+                        .arg(Expr::val(path_str.clone())),
+                    Tbl::Diff,
+                )
+                .order_by_expr(
+                    Expr::col(Col::Rank).into(),
+                    sea_query::Order::Desc,
+                )
+                .order_by_expr(
+                    Expr::col(Col::ItemId).into(),
+                    sea_query::Order::Desc,
+                );
+
+            if limit > 0 {
+                id_query.limit(limit as u64);
+            }
+            if offset > 0 {
+                id_query.offset(offset as u64);
+            }
+
+            let id_rows = self
+                .conn
+                .prepare(&id_query.to_string(PostgresQueryBuilder))?
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<i64>, _>>()?;
+
+            let has_more = n > 0 && id_rows.len() > n;
+            let mut target_ids = id_rows;
+            if has_more {
+                target_ids.truncate(n);
+            }
+            (
+                target_ids.into_iter().map(|id| (id, None)).collect(),
+                has_more,
             )
-            .order_by_expr(Expr::col(Col::Rank).into(), sea_query::Order::Desc)
-            .order_by_expr(
-                Expr::col(Col::ItemId).into(),
-                sea_query::Order::Desc,
-            );
+        };
 
-        if limit > 0 {
-            id_query.limit(limit as u64);
-        }
-        if offset > 0 {
-            id_query.offset(offset as u64);
-        }
-
-        let id_rows = self
-            .conn
-            .prepare(&id_query.to_string(PostgresQueryBuilder))?
-            .query_map([], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<i64>, _>>()?;
-
-        let has_more = n > 0 && id_rows.len() > n;
-        let mut target_ids = id_rows;
-        if has_more {
-            target_ids.truncate(n);
-        }
-
-        if target_ids.is_empty() {
+        if target_entries.is_empty() {
             return Ok(SearchResponse::new_empty(
                 Some(cid.to_string()),
                 has_more,
+                projection.clone().map(|p| p.into()),
             ));
         }
+
+        let fetch_ids: Vec<i64> =
+            target_entries.iter().map(|(id, _)| *id).collect();
 
         let mut fetch_query = Query::select();
         fetch_query
@@ -229,15 +337,15 @@ impl FileManager {
                     .arg(Expr::val(path_str)),
                 Tbl::Diff,
             )
-            .and_where(Expr::col(Col::ItemId).is_in(target_ids.clone()));
+            .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
 
         let mut response = self.fetch_and_build(
-            target_ids,
+            target_entries,
             fetch_query.to_string(PostgresQueryBuilder),
             Some(cid.to_string()),
             has_more,
             n,
-            None,
+            projection.as_ref(),
         )?;
 
         // キャッシュから読み込んだ場合、生成自体は完了している（または進行中状態を正しく反映する）
@@ -248,9 +356,65 @@ impl FileManager {
         Ok(response)
     }
 
+    fn get_unique_labels(
+        &self,
+        from_table: bool,
+        path_str: Option<String>,
+        proj_type: &TagType,
+        n: usize,
+        offset: usize,
+    ) -> Result<Vec<crate::types::Label>> {
+        let label_query = crate::query::sql::build_label_aggregation_sql(
+            proj_type,
+            from_table,
+            path_str.as_deref(),
+            n,
+            offset,
+        );
+
+
+        let labels = self
+            .conn
+            .prepare(&label_query.to_string(PostgresQueryBuilder))?
+            .query_map([], |r| Ok(crate::types::Label::from_row_at(r, 0)))?
+            .collect::<Result<Vec<crate::types::Label>, _>>()?;
+
+        Ok(labels)
+    }
+
+    fn expand_labels_to_entries(
+        &self,
+        from_table: bool,
+        path_str: Option<String>,
+        proj_type: &TagType,
+        labels: &[crate::types::Label],
+    ) -> Result<Vec<(i64, Option<crate::types::Label>)>> {
+        let mut entries = Vec::new();
+
+        for label in labels {
+            let id_query = crate::query::sql::build_label_expansion_sql(
+                proj_type,
+                label,
+                from_table,
+                path_str.as_deref(),
+            );
+
+            let ids = self
+                .conn
+                .prepare(&id_query.to_string(PostgresQueryBuilder))?
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<i64>, _>>()?;
+
+            for id in ids {
+                entries.push((id, Some(label.clone())));
+            }
+        }
+        Ok(entries)
+    }
+
     fn fetch_and_build(
         &self,
-        target_ids: Vec<i64>,
+        target_entries: Vec<(i64, Option<crate::types::Label>)>,
         fetch_sql: String,
         cid: Option<String>,
         has_more: bool,
@@ -263,24 +427,44 @@ impl FileManager {
             .query_map([], |r| RawTagRow::from_row(r))?
             .collect::<Result<Vec<RawTagRow>, _>>()?;
 
-        let mut results_map: HashMap<i64, SearchResult> = HashMap::new();
-        for &id in &target_ids {
-            results_map.insert(id, SearchResult::new_empty(id));
-        }
-
+        let mut tag_cache: HashMap<i64, Vec<RawTagRow>> = HashMap::new();
         for row in raw_results {
-            if let Some(res) = results_map.get_mut(&row.id) {
-                res.apply_raw_tag(row);
-            }
+            tag_cache.entry(row.id).or_default().push(row);
         }
 
-        let final_results: Vec<SearchResult> = target_ids
+        let mut label_map: std::collections::BTreeMap<
+            crate::types::Label,
+            Vec<SearchResult>,
+        > = std::collections::BTreeMap::new();
+
+        let final_results: Vec<SearchResult> = target_entries
             .into_iter()
-            .filter_map(|id| results_map.remove(&id))
+            .map(|(id, label)| {
+                let mut res = SearchResult::new_empty(id);
+                res.projected_label = label.clone();
+                if let Some(tags) = tag_cache.get(&id) {
+                    for tag in tags {
+                        res.apply_raw_tag(tag.clone());
+                    }
+                }
+                if let Some(l) = label {
+                    label_map.entry(l).or_default().push(res.clone());
+                }
+                res
+            })
+            .collect();
+
+        let label_results: Vec<crate::response::LabelGroup> = label_map
+            .into_iter()
+            .map(|(label, results)| crate::response::LabelGroup {
+                label,
+                results,
+            })
             .collect();
 
         Ok(SearchResponse {
             results: final_results,
+            label_results,
             cid,
             has_more,
             total_count: None,
@@ -713,3 +897,4 @@ mod tests {
         Ok(())
     }
 }
+

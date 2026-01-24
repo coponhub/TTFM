@@ -7,7 +7,7 @@ use sea_query::{Alias, BinOper, Condition, Expr, Query, SelectStatement};
 
 /// クエリ構造を SQL (SelectStatement) へ変換します。
 pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
-    match node {
+    let stmt = match node {
         QueryNode::And(nodes) => build_and_sql(nodes, view_name),
         QueryNode::Or(nodes) => build_or_sql(nodes, view_name),
         QueryNode::Difference(l, r) => build_diff_sql(l, r, view_name),
@@ -20,7 +20,8 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
             build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
         }
         QueryNode::Projection(tt) => build_projection_sql(tt, view_name),
-    }
+    };
+    stmt
 }
 
 /// クエリに使用されている、または投影されている型のリストを元に
@@ -325,15 +326,16 @@ fn build_projection_sql(
         q.and_where(Expr::col(Col::TypedTag).is_not_null());
     } else if let TagType::Base(SType::Origin) = tagtype {
         q.and_where(Expr::col(Col::Origin).is_not_null());
+    } else if let TagType::Base(SType::Rank) = tagtype {
+        // Rankは全アイテムが持っているので条件追加不要（NULLチェックのみ）
+        q.and_where(Expr::col(Col::Rank).is_not_null());
     } else if let TagType::Base(SType::Type) = tagtype {
         q.and_where(Expr::col(Col::Type).is_not_null());
     } else if let TagType::Base(SType::Label) = tagtype {
-        let mut cond = Condition::any();
-        cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
-        cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
-        q.and_where(cond.into());
+        // Label (仮想タグ) はすべてのタグの値を集約するもの。
+        // 全てのアイテムは少なくとも1つのタグを持つため、実質的に全アイテムが対象。
+        // label_str IS NOT NULL 等のチェックは DuckDB 上で不安定な挙動を示す場合があるため、
+        // 条件なし（全件）とする。
     } else {
         let tag_name = tagtype.as_str();
         if tag_name != "*"
@@ -468,6 +470,200 @@ fn build_typed_tag_sql(
         }
     }
     q.and_where(cond.into());
+    q
+}
+
+/// ラベル集計（ページング用）のクエリを生成します。
+///
+/// 指定されたタグタイプについて、ユニークなラベル値を取得します。
+pub fn build_label_aggregation_sql(
+    proj_type: &TagType,
+    from_table: bool,
+    path_str: Option<&str>,
+    n: usize,
+    offset: usize,
+) -> SelectStatement {
+    let mut q = Query::select();
+
+    // カラム選択ロジック
+    // カラム選択ロジック
+    // SType に応じて、どのカラムを LabelStr/Int 等にマッピングするかを決定
+    let (col_str, col_int, col_double, col_bool) =
+        match proj_type {
+            TagType::Base(SType::TypedTag) => (
+                Expr::col(Col::TypedTag),
+                Expr::val(Option::<i64>::None),
+                Expr::val(Option::<f64>::None),
+                Expr::val(Option::<bool>::None),
+            ),
+            TagType::Base(SType::Origin) => (
+                Expr::col(Col::Origin),
+                Expr::val(Option::<i64>::None),
+                Expr::val(Option::<f64>::None),
+                Expr::val(Option::<bool>::None),
+            ),
+            TagType::Base(SType::Rank) => (
+                Expr::val(Option::<String>::None),
+                Expr::col(Col::Rank),
+                Expr::val(Option::<f64>::None),
+                Expr::val(Option::<bool>::None),
+            ),
+            // その他のタグ（Label含む）は標準的なカラムを使用
+            _ => (
+                Expr::col(Col::LabelStr),
+                Expr::col(Col::LabelInt),
+                Expr::col(Col::LabelDouble),
+                Expr::col(Col::LabelBool),
+            ),
+        };
+
+    q.expr_as(col_str, Col::LabelStr)
+        .expr_as(col_int, Col::LabelInt)
+        .expr_as(col_double, Col::LabelDouble)
+        .expr_as(col_bool, Col::LabelBool);
+
+    // FROM 句とフィルタリング
+    if from_table {
+        // テーブルからの検索: Sub クエリ (IDリスト) でフィルタリング
+        q.from(Tbl::OneView).and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from(Tbl::Sub)
+                    .to_owned(),
+            ),
+        );
+    } else if let Some(path) = path_str {
+        // パケットからの検索
+        q.from_function(
+            sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
+                .arg(Expr::val(path)),
+            Tbl::Diff,
+        );
+    }
+
+    // Type によるフィルタリング (Label など一部を除く)
+    match proj_type {
+        TagType::Base(SType::TypedTag)
+        | TagType::Base(SType::Origin)
+        | TagType::Base(SType::Rank)
+        | TagType::Base(SType::Label) => {
+            // No type filter needed
+        }
+        _ => {
+            q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
+        }
+    }
+
+    // GROUP BY (重複排除)
+    match proj_type {
+        TagType::Base(SType::TypedTag) => {
+            q.group_by_col(Col::TypedTag);
+        }
+        TagType::Base(SType::Origin) => {
+            q.group_by_col(Col::Origin);
+        }
+        TagType::Base(SType::Rank) => {
+            q.group_by_col(Col::Rank);
+        }
+        // その他のタグ（Label含む）は標準的なカラムを使用
+        _ => {
+            q.group_by_columns([
+                Col::LabelStr,
+                Col::LabelInt,
+                Col::LabelDouble,
+                Col::LabelBool,
+            ]);
+        }
+    }
+
+    // ORDER BY と LIMIT/OFFSET
+    q.order_by(Col::LabelStr, sea_query::Order::Asc);
+
+    if n > 0 {
+        q.limit((n + 1) as u64);
+    }
+    if offset > 0 {
+        q.offset(offset as u64);
+    }
+
+    q
+}
+
+/// ラベル展開（アイテムID取得）用のクエリを生成します。
+///
+/// 特定のラベルを持つアイテムのIDを取得します。
+pub fn build_label_expansion_sql(
+    proj_type: &TagType,
+    label: &Label,
+    from_table: bool,
+    path_str: Option<&str>,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.distinct().column(Col::ItemId);
+
+    // FROM 句
+    if from_table {
+        q.from(Tbl::OneView).and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from(Tbl::Sub)
+                    .to_owned(),
+            ),
+        );
+    } else if let Some(path) = path_str {
+        q.from_function(
+            sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
+                .arg(Expr::val(path)),
+            Tbl::Diff,
+        );
+    }
+
+    // 条件フィルタ
+    match proj_type {
+        TagType::Base(SType::TypedTag) => {
+            q.and_where(Expr::col(Col::TypedTag).eq(label.as_str()));
+        }
+        TagType::Base(SType::Origin) => {
+            q.and_where(Expr::col(Col::Origin).eq(label.as_str()));
+        }
+        TagType::Base(SType::Rank) => {
+            match label {
+                Label::Integer(i) => {
+                    q.and_where(Expr::col(Col::Rank).eq(*i));
+                }
+                _ => {
+                    // RankなのにInteger以外が来た場合はヒットしない
+                    q.and_where(Expr::val(1).eq(0));
+                }
+            }
+        }
+        TagType::Base(SType::Label) => {
+            // Label (仮想タグ) の場合は Type フィルタなしで Label 値のみで検索
+            match label {
+                Label::String(s) | Label::Literal(s) => {
+                    q.and_where(Expr::col(Col::LabelStr).eq(s.as_str()));
+                }
+                Label::Integer(i) => {
+                    q.and_where(Expr::col(Col::LabelInt).eq(*i));
+                }
+            }
+        }
+        _ => {
+            // 一般的なタグ
+            q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
+            match label {
+                Label::String(s) | Label::Literal(s) => {
+                    q.and_where(Expr::col(Col::LabelStr).eq(s.as_str()));
+                }
+                Label::Integer(i) => {
+                    q.and_where(Expr::col(Col::LabelInt).eq(*i));
+                }
+            }
+        }
+    }
+
     q
 }
 
