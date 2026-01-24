@@ -499,6 +499,7 @@ impl QueryFunctionRegistry {
     }
 }
 
+/// 比較演算子の種類。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ComparisonOp {
     Eq,
@@ -509,6 +510,7 @@ pub enum ComparisonOp {
     Le,
 }
 
+/// 算術演算子の種類。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ArithmeticOp {
     Add,
@@ -518,6 +520,9 @@ pub enum ArithmeticOp {
     Mod,
 }
 
+/// 比較演算または算術演算のオペランド。
+///
+/// タグへの参照（TypeRef）またはリテラル値（Literal）のいずれか。
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
     Literal(Label),
@@ -525,6 +530,7 @@ pub enum Operand {
     Calculation(Box<CalculationNode>),
 }
 
+/// 算術演算ノード（加算、減算、乗算、除算）。
 #[derive(Debug, PartialEq, Clone)]
 pub struct CalculationNode {
     pub left: Operand,
@@ -532,6 +538,9 @@ pub struct CalculationNode {
     pub right: Operand,
 }
 
+/// 比較演算ノード（`a == b`, `a < b < c` など）。
+///
+/// 最初のオペランドと、それに続く比較演算子とオペランドのチェーン。
 #[derive(Debug, PartialEq, Clone)]
 pub struct ComparisonNode {
     pub first: Operand,
@@ -577,6 +586,9 @@ impl ComparisonNode {
 
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
+/// クエリの抽象構文木（AST）を表す列挙型。
+///
+/// パーサーによって構築され、SQL生成関数によってSELECT文に変換されます。
 #[derive(Debug, PartialEq, Clone)]
 pub enum QueryNode {
     /// AND条件 (`A & B` または `A B`)。多分木構造。
@@ -770,7 +782,9 @@ impl QueryNode {
 
 // ========== SQL Generation Helper Functions ==========
 
-/// サブクエリをラップする共通ヘルパー関数
+/// サブクエリをラップする共通ヘルパー関数。
+///
+/// 優先順位を保証するため、サブクエリとしてラップします。
 fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
     Query::select()
         .columns([Col::ItemId, Col::Rank, Col::ItemKind])
@@ -778,6 +792,9 @@ fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
         .to_owned()
 }
 
+/// AND演算（積集合）のSQLを生成します。
+///
+/// 各ノードをサブクエリとして INTERSECT で結合します。
 fn build_and_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
     let mut it = nodes.iter();
     let Some(first) = it.next() else {
@@ -800,6 +817,9 @@ fn build_and_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
     q
 }
 
+/// OR演算（和集合）のSQLを生成します。
+///
+/// 各ノードを UNION DISTINCT で結合します。
 fn build_or_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
     let mut it = nodes.iter();
     let Some(first) = it.next() else {
@@ -818,6 +838,9 @@ fn build_or_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
     q
 }
 
+/// 差集合演算のSQLを生成します。
+///
+/// 左のノードから右のノードを EXCEPT で除外します。
 fn build_diff_sql(l: &QueryNode, r: &QueryNode, view: &str) -> SelectStatement {
     let mut q = wrap_in_subquery(l.to_sql(view));
     q.union(
@@ -827,6 +850,9 @@ fn build_diff_sql(l: &QueryNode, r: &QueryNode, view: &str) -> SelectStatement {
     q
 }
 
+/// 補集合演算のSQLを生成します。
+///
+/// 指定されたタグタイプの全アイテムから、クエリ結果を除外します。
 fn build_comp_sql(c: &QueryNode, view: &str) -> SelectStatement {
     let types = c.get_all_types();
     let mut q = Query::select();
@@ -892,6 +918,7 @@ fn build_binary_comparison_sql(
     apply_generic_comparison(q, tt, effective_op, lab)
 }
 
+/// ComparisonOp を sea_query の BinOper に変換します。
 fn to_bin_op(op: ComparisonOp) -> BinOper {
     match op {
         ComparisonOp::Eq => BinOper::Equal,
@@ -969,6 +996,9 @@ fn apply_generic_comparison(
     q
 }
 
+/// プロジェクションクエリのSQLを生成します。
+///
+/// 指定されたタグタイプの値を持つ全アイテムを返します。
 fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
@@ -1009,6 +1039,9 @@ fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
     q
 }
 
+/// カラムマッチクエリのSQLを生成します。
+///
+/// 特定のカラム（物理カラム）の値に対する直接マッチング。
 fn build_column_match_sql(
     tag: SType,
     label: &Label,
@@ -1058,6 +1091,9 @@ fn build_column_match_sql(
     q
 }
 
+/// TypedTagクエリのSQLを生成します。
+///
+/// タグタイプとラベルの両方を指定した検索（例: `name:test.txt`）。
 fn build_typed_tag_sql(
     tagtype: &TagType,
     label: &Label,
