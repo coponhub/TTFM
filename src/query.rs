@@ -70,90 +70,79 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
     match pair.as_rule() {
-        Rule::expr => {
-            let pairs = pair.into_inner();
-            get_parser()
-                .map_primary(|primary| build_ast(primary))
-                .map_infix(|lhs, op, rhs| {
-                    let lhs = lhs?;
-                    let rhs = rhs?;
-                    match op.as_rule() {
-                        Rule::ampersand => {
-                            // Combine And nodes if possible, but strict binary is fine for now.
-                            // Wait, previously And was Vec.
-                            // Binary reduction: And(vec![l, r])
-                            // If lhs is And, we can flatten?
-                            // Pratt reduces binary. A & B & C -> ((A & B) & C).
-                            // We can merge if we want, or just build nested binary trees and flatten later,
-                            // OR check types here.
-                            // For simplicity and matching prior multi-child structure:
-                            match lhs {
-                                QueryNode::And(mut v) => {
-                                    v.push(rhs);
-                                    Ok(QueryNode::And(v))
-                                }
-                                _ => Ok(QueryNode::And(vec![lhs, rhs])),
-                            }
-                        }
-                        Rule::pipe => match lhs {
-                            QueryNode::Or(mut v) => {
-                                v.push(rhs);
-                                Ok(QueryNode::Or(v))
-                            }
-                            _ => Ok(QueryNode::Or(vec![lhs, rhs])),
-                        },
-                        Rule::minus => Ok(QueryNode::Difference(
-                            Box::new(lhs),
-                            Box::new(rhs),
-                        )),
-                        _ => Err(anyhow!(
-                            "{}: {:?}",
-                            errors::UNKNOWN_INFIX_RULE,
-                            op.as_rule()
-                        )),
-                    }
-                })
-                .parse(pairs)
-        }
-        Rule::primary => {
-            let inner = pair.into_inner().next().unwrap();
-            build_ast(inner)
-        }
-        Rule::factor => {
-            // factor = { "(" ~ expr ~ ")" | typed_tag | comparison }
-            let inner = pair.into_inner().next().unwrap();
-            match inner.as_rule() {
-                Rule::expr => build_ast(inner),
-                Rule::typed_tag => build_typed_tag(inner),
-                Rule::comparison => build_comparison(inner),
-                Rule::projection => build_projection(inner),
-                _ => Err(anyhow!(
-                    "{}: {:?}",
-                    errors::UNKNOWN_FACTOR_INNER,
-                    inner.as_rule()
-                )),
-            }
-        }
-        Rule::complement => {
-            let mut inner = pair.into_inner();
-            let _ = inner.next(); // ^
-                                  // The grammar for complement: "^" ~ "(" ~ expr ~ ")"
-                                  // inner pairs: (expr)
-                                  // Wait. `complement = { "^" ~ "(" ~ expr ~ ")" }`
-                                  // Pest pairs: Literal "^", Literal "(", Rule expr, Literal ")"
-                                  // If rules are atomic or silent, it changes.
-                                  // complement is normal rule.
-                                  // Literals don't show up in `into_inner()` unless strict coverage?
-                                  // Default: no.
-                                  // So `inner` contains `expr`.
-                                  // Let's debug if needed, but usually inner.next() is expr.
-            let expr_pair = inner
-                .next()
-                .ok_or_else(|| anyhow!(errors::COMPLEMENT_MISSING_EXPR))?;
-            Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
-        }
+        Rule::expr => build_expr(pair),
+        Rule::primary => build_primary(pair),
+        Rule::factor => build_factor(pair),
+        Rule::complement => build_complement(pair),
         _ => Err(anyhow!("{}: {:?}", errors::UNEXPECTED_RULE, pair.as_rule())),
     }
+}
+
+fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
+    let pairs = pair.into_inner();
+    get_parser()
+        .map_primary(|primary| build_ast(primary))
+        .map_infix(|lhs, op, rhs| {
+            let lhs = lhs?;
+            let rhs = rhs?;
+            match op.as_rule() {
+                Rule::ampersand => {
+                    // Combine And nodes if possible
+                    match lhs {
+                        QueryNode::And(mut v) => {
+                            v.push(rhs);
+                            Ok(QueryNode::And(v))
+                        }
+                        _ => Ok(QueryNode::And(vec![lhs, rhs])),
+                    }
+                }
+                Rule::pipe => match lhs {
+                    QueryNode::Or(mut v) => {
+                        v.push(rhs);
+                        Ok(QueryNode::Or(v))
+                    }
+                    _ => Ok(QueryNode::Or(vec![lhs, rhs])),
+                },
+                Rule::minus => {
+                    Ok(QueryNode::Difference(Box::new(lhs), Box::new(rhs)))
+                }
+                _ => Err(anyhow!(
+                    "{}: {:?}",
+                    errors::UNKNOWN_INFIX_RULE,
+                    op.as_rule()
+                )),
+            }
+        })
+        .parse(pairs)
+}
+
+fn build_primary(pair: Pair<Rule>) -> Result<QueryNode> {
+    let inner = pair.into_inner().next().unwrap();
+    build_ast(inner)
+}
+
+fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::expr => build_ast(inner),
+        Rule::typed_tag => build_typed_tag(inner),
+        Rule::comparison => build_comparison(inner),
+        Rule::projection => build_projection(inner),
+        _ => Err(anyhow!(
+            "{}: {:?}",
+            errors::UNKNOWN_FACTOR_INNER,
+            inner.as_rule()
+        )),
+    }
+}
+
+fn build_complement(pair: Pair<Rule>) -> Result<QueryNode> {
+    let mut inner = pair.into_inner();
+    let _ = inner.next(); // Skip '^' token
+    let expr_pair = inner
+        .next()
+        .ok_or_else(|| anyhow!(errors::COMPLEMENT_MISSING_EXPR))?;
+    Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
 }
 
 fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
@@ -261,63 +250,36 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
 }
 
 fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
-    // calculation = { "(" ~ calculation_inner ~ ")" }
-    // calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
-    // NOTE: This implementation only supports simple binary calculation for now or left-associative chain.
-    // But CalculationNode definition is binary: left, op, right.
-    // If the grammar allows chaining (A + B + C), current AST doesn't fully support clean chaining unless nested.
-    // Grammar: operand_calc ~ (arith_op ~ operand_calc)+
-    // For MVP, handling first binary op chain as nested.
-
-    let inner_pair = pair.into_inner().next().unwrap(); // calculation_inner
+    let inner_pair = pair.into_inner().next().unwrap();
     let mut pairs = inner_pair.into_inner();
 
     let first_pair = pairs.next().unwrap();
     let mut left = build_operand_calc(first_pair)?;
 
     while let Some(op_pair) = pairs.next() {
-        let op = match op_pair.as_str() {
-            "+" => ArithmeticOp::Add,
-            "-" => ArithmeticOp::Sub,
-            "*" => ArithmeticOp::Mul,
-            "/" => ArithmeticOp::Div,
-            "%" => ArithmeticOp::Mod,
-            _ => return Err(anyhow!(errors::UNKNOWN_ARITHMETIC_OP)),
-        };
+        let op = parse_arithmetic_op(op_pair.as_str())?;
         let right_pair = pairs.next().unwrap();
         let right = build_operand_calc(right_pair)?;
 
-        // Nesting for left associativity: (left op right)
-        // But `Operand::Calculation` holds `CalculationNode`.
-        // We wrap the current `left` (which might be an Operand) into a new CalculationNode as needed?
-        // Wait, CalculationNode { left: Operand, ... }.
-        // If we have A + B + C -> (A + B) + C
-        // left = A. right = B. new_node = Calc(A, +, B).
-        // Next op: +. right = C.
-        // We need 'left' to reference the previous result.
-        // Operand has `Calculation(Box<CalculationNode>)`.
-
+        // Build left-associative chain: (A + B) + C
         left =
             Operand::Calculation(Box::new(CalculationNode { left, op, right }));
     }
 
-    // The result is an Operand. But we need to return CalculationNode?
-    // Wait, build_calculation returns Result<CalculationNode>.
-    // But my loop potentially wrapped everything in Operand::Calculation.
-    // If left is Operand::Calculation(box node), verify content.
     match left {
         Operand::Calculation(node) => Ok(*node),
-        // If there was no operation (just one operand), grammar says (op ~ operand)+ so at least one op?
-        // No, grammar: operand_calc ~ (arith_op ~ operand_calc)+
-        // Actually, if there is NO op, it's just an operand_calc.
-        // But `calculation` rule implies it's a calculation.
-        // If "label" is passed as calculation, logic above handles it?
-        // If only one operand and no ops, logic returns the operand.
-        // But we must return CalculationNode.
-        // This implies we can't represent a single operand as CalculationNode plainly.
-        // Or maybe we treat (A) as A + 0? No.
-        // Assuming valid calculation always has op.
         _ => Err(anyhow!(errors::CALC_REQUIRES_OP)),
+    }
+}
+
+fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
+    match s {
+        "+" => Ok(ArithmeticOp::Add),
+        "-" => Ok(ArithmeticOp::Sub),
+        "*" => Ok(ArithmeticOp::Mul),
+        "/" => Ok(ArithmeticOp::Div),
+        "%" => Ok(ArithmeticOp::Mod),
+        _ => Err(anyhow!(errors::UNKNOWN_ARITHMETIC_OP)),
     }
 }
 
@@ -841,7 +803,9 @@ impl QueryNode {
         }
     }
 
-    fn flip_bin_op(&self, op: BinOper) -> BinOper {
+    /// 比較演算子を反転します（オペランドの順序が逆転した時に使用）。
+    /// 例: `a < b` を `b > a` に変換する際、`<` を `>` に反転
+    fn flip_bin_op(op: BinOper) -> BinOper {
         match op {
             BinOper::GreaterThan => BinOper::SmallerThan,
             BinOper::GreaterThanOrEqual => BinOper::SmallerThanOrEqual,
@@ -850,7 +814,6 @@ impl QueryNode {
             other => other,
         }
     }
-
     fn normalize_comparison(
         &self,
         left: &Operand,
@@ -862,7 +825,7 @@ impl QueryNode {
                 Some((tt.clone(), lab.clone(), op))
             }
             (Operand::Literal(lab), Operand::TypeRef(tt)) => {
-                Some((tt.clone(), lab.clone(), self.flip_bin_op(op)))
+                Some((tt.clone(), lab.clone(), Self::flip_bin_op(op)))
             }
             _ => None,
         }
