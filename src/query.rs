@@ -630,9 +630,9 @@ impl QueryNode {
     /// クエリ構造を SQL (SelectStatement) へ変換します。
     pub fn to_sql(&self, view_name: &str) -> SelectStatement {
         match self {
-            QueryNode::And(nodes) => self.build_and_sql(nodes, view_name),
-            QueryNode::Or(nodes) => self.build_or_sql(nodes, view_name),
-            QueryNode::Difference(l, r) => self.build_diff_sql(l, r, view_name),
+            QueryNode::And(nodes) => build_and_sql(nodes, view_name),
+            QueryNode::Or(nodes) => build_or_sql(nodes, view_name),
+            QueryNode::Difference(l, r) => build_diff_sql(l, r, view_name),
             QueryNode::Complement(c) => self.build_comp_sql(c, view_name),
             QueryNode::Comparison(cmp) => {
                 self.build_comparison_sql(cmp, view_name)
@@ -647,71 +647,6 @@ impl QueryNode {
                 self.build_projection_sql(&tt, view_name)
             }
         }
-    }
-
-    fn build_and_sql(
-        &self,
-        nodes: &[QueryNode],
-        view: &str,
-    ) -> SelectStatement {
-        let mut it = nodes.iter();
-        let Some(first) = it.next() else {
-            // Empty AND = everything
-            let mut q = Query::select();
-            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-                .distinct()
-                .from(Alias::new(view));
-            return q;
-        };
-
-        // Precedence Safety: Wrap children in subqueries to enforce (A | B) & C logic
-        let mut q = self.wrap_in_subquery(first.to_sql(view));
-        for node in it {
-            q.union(
-                sea_query::UnionType::Intersect,
-                self.wrap_in_subquery(node.to_sql(view)),
-            );
-        }
-        q
-    }
-
-    fn build_or_sql(&self, nodes: &[QueryNode], view: &str) -> SelectStatement {
-        let mut it = nodes.iter();
-        let Some(first) = it.next() else {
-            // Empty OR = nothing
-            let mut q = Query::select();
-            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-                .distinct()
-                .from(Alias::new(view));
-            q.and_where(Expr::val(1).eq(0));
-            return q;
-        };
-        let mut q = first.to_sql(view);
-        for node in it {
-            q.union(sea_query::UnionType::Distinct, node.to_sql(view));
-        }
-        q
-    }
-
-    fn build_diff_sql(
-        &self,
-        l: &QueryNode,
-        r: &QueryNode,
-        view: &str,
-    ) -> SelectStatement {
-        let mut q = self.wrap_in_subquery(l.to_sql(view));
-        q.union(
-            sea_query::UnionType::Except,
-            self.wrap_in_subquery(r.to_sql(view)),
-        );
-        q
-    }
-
-    fn wrap_in_subquery(&self, q: SelectStatement) -> SelectStatement {
-        Query::select()
-            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .from_subquery(q, Tbl::Sub)
-            .to_owned()
     }
 
     fn build_comp_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
@@ -1164,6 +1099,65 @@ impl QueryNode {
             _ => {}
         }
     }
+}
+
+// ========== SQL Generation Helper Functions ==========
+
+/// サブクエリをラップする共通ヘルパー関数
+fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
+    Query::select()
+        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .from_subquery(q, Tbl::Sub)
+        .to_owned()
+}
+
+fn build_and_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
+    let mut it = nodes.iter();
+    let Some(first) = it.next() else {
+        // Empty AND = everything
+        let mut q = Query::select();
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+            .distinct()
+            .from(Alias::new(view));
+        return q;
+    };
+
+    // Precedence Safety: Wrap children in subqueries to enforce (A | B) & C logic
+    let mut q = wrap_in_subquery(first.to_sql(view));
+    for node in it {
+        q.union(
+            sea_query::UnionType::Intersect,
+            wrap_in_subquery(node.to_sql(view)),
+        );
+    }
+    q
+}
+
+fn build_or_sql(nodes: &[QueryNode], view: &str) -> SelectStatement {
+    let mut it = nodes.iter();
+    let Some(first) = it.next() else {
+        // Empty OR = nothing
+        let mut q = Query::select();
+        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+            .distinct()
+            .from(Alias::new(view));
+        q.and_where(Expr::val(1).eq(0));
+        return q;
+    };
+    let mut q = first.to_sql(view);
+    for node in it {
+        q.union(sea_query::UnionType::Distinct, node.to_sql(view));
+    }
+    q
+}
+
+fn build_diff_sql(l: &QueryNode, r: &QueryNode, view: &str) -> SelectStatement {
+    let mut q = wrap_in_subquery(l.to_sql(view));
+    q.union(
+        sea_query::UnionType::Except,
+        wrap_in_subquery(r.to_sql(view)),
+    );
+    q
 }
 
 // --- Type Collection Helpers ---
