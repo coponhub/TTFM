@@ -633,349 +633,16 @@ impl QueryNode {
             QueryNode::And(nodes) => build_and_sql(nodes, view_name),
             QueryNode::Or(nodes) => build_or_sql(nodes, view_name),
             QueryNode::Difference(l, r) => build_diff_sql(l, r, view_name),
-            QueryNode::Complement(c) => self.build_comp_sql(c, view_name),
-            QueryNode::Comparison(cmp) => {
-                self.build_comparison_sql(cmp, view_name)
-            }
+            QueryNode::Complement(c) => build_comp_sql(c, view_name),
+            QueryNode::Comparison(cmp) => build_comparison_sql(cmp, view_name),
             QueryNode::ColumnMatch { tag, label } => {
-                self.build_column_match_sql(*tag, label, view_name)
+                build_column_match_sql(*tag, label, view_name)
             }
             QueryNode::TypedTag(tt) => {
-                self.build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
+                build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
             }
-            QueryNode::Projection(tt) => {
-                self.build_projection_sql(&tt, view_name)
-            }
+            QueryNode::Projection(tt) => build_projection_sql(tt, view_name),
         }
-    }
-
-    fn build_comp_sql(&self, c: &QueryNode, view: &str) -> SelectStatement {
-        let types = c.get_all_types();
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-        if !types.is_empty() {
-            q.and_where(Expr::col(Col::Type).is_in(types));
-        }
-        let mut eq = Query::select();
-        eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .from_subquery(c.to_sql(view), Tbl::NotSide);
-        q.union(sea_query::UnionType::Except, eq);
-        q
-    }
-
-    fn build_comparison_sql(
-        &self,
-        node: &ComparisonNode,
-        view: &str,
-    ) -> SelectStatement {
-        let mut operands = vec![&node.first];
-        for (_, opd) in &node.rest {
-            operands.push(opd);
-        }
-
-        let mut subqueries = Vec::new();
-        for (i, (op, _)) in node.rest.iter().enumerate() {
-            let left = operands[i];
-            let right = operands[i + 1];
-            subqueries
-                .push(self.build_binary_comparison_sql(left, *op, right, view));
-        }
-
-        if subqueries.len() == 1 {
-            subqueries.pop().unwrap()
-        } else {
-            let mut first = subqueries.remove(0);
-            for next in subqueries {
-                first.union(sea_query::UnionType::Intersect, next);
-            }
-            first
-        }
-    }
-
-    fn build_binary_comparison_sql(
-        &self,
-        left: &Operand,
-        op: ComparisonOp,
-        right: &Operand,
-        view: &str,
-    ) -> SelectStatement {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-
-        let bin_op = self.to_bin_op(op);
-
-        // オペランドを (TagType, Label, 補正済み演算子) の形に正規化
-        let (tt, lab, effective_op) =
-            match self.normalize_comparison(left, bin_op, right) {
-                Some(res) => res,
-                None => {
-                    q.and_where(Expr::val(1).eq(0));
-                    return q;
-                }
-            };
-
-        // 特権カラム（物理カラム）への最適化パスは廃止。
-        // OneView は全てのメタデータを EAV (type, label) 形式で提供するため、
-        // 物理カラムへの直接アクセスは行わない。
-        // すべて apply_generic_comparison にフォールバックさせる。
-
-        // 一般的なタグへのフォールバックパス
-        self.apply_generic_comparison(q, tt, effective_op, lab)
-    }
-
-    fn to_bin_op(&self, op: ComparisonOp) -> BinOper {
-        match op {
-            ComparisonOp::Eq => BinOper::Equal,
-            ComparisonOp::Ne => BinOper::NotEqual,
-            ComparisonOp::Gt => BinOper::GreaterThan,
-            ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
-            ComparisonOp::Lt => BinOper::SmallerThan,
-            ComparisonOp::Le => BinOper::SmallerThanOrEqual,
-        }
-    }
-
-    /// 比較演算子を反転します（オペランドの順序が逆転した時に使用）。
-    /// 例: `a < b` を `b > a` に変換する際、`<` を `>` に反転
-    fn flip_bin_op(op: BinOper) -> BinOper {
-        match op {
-            BinOper::GreaterThan => BinOper::SmallerThan,
-            BinOper::GreaterThanOrEqual => BinOper::SmallerThanOrEqual,
-            BinOper::SmallerThan => BinOper::GreaterThan,
-            BinOper::SmallerThanOrEqual => BinOper::GreaterThanOrEqual,
-            other => other,
-        }
-    }
-    fn normalize_comparison(
-        &self,
-        left: &Operand,
-        op: BinOper,
-        right: &Operand,
-    ) -> Option<(TagType, Label, BinOper)> {
-        match (left, right) {
-            (Operand::TypeRef(tt), Operand::Literal(lab)) => {
-                Some((tt.clone(), lab.clone(), op))
-            }
-            (Operand::Literal(lab), Operand::TypeRef(tt)) => {
-                Some((tt.clone(), lab.clone(), Self::flip_bin_op(op)))
-            }
-            _ => None,
-        }
-    }
-
-    fn apply_generic_comparison(
-        &self,
-        mut q: SelectStatement,
-        tagtype: TagType,
-        op: BinOper,
-        label: Label,
-    ) -> SelectStatement {
-        let mut condition = Condition::any();
-        match label {
-            Label::Integer(i) => {
-                condition = condition
-                    .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
-                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
-            }
-            Label::String(s) | Label::Literal(s) => {
-                condition = condition.add(
-                    Expr::col(Col::LabelStr).binary(op, Expr::val(s.as_str())),
-                );
-
-                // もし文字列が数値やブーリアンとして解釈可能なら、それらのカラムも対象にする
-                if let Ok(i) = s.parse::<i64>() {
-                    condition = condition
-                        .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
-                        .add(
-                            Expr::col(Col::LabelDouble)
-                                .binary(op, Expr::val(i)),
-                        );
-                } else if let Ok(f) = s.parse::<f64>() {
-                    condition = condition.add(
-                        Expr::col(Col::LabelDouble).binary(op, Expr::val(f)),
-                    );
-                } else if s == "true" || s == "false" {
-                    let b = s == "true";
-                    condition = condition.add(
-                        Expr::col(Col::LabelBool).binary(op, Expr::val(b)),
-                    );
-                }
-            }
-        };
-
-        q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()))
-            .and_where(condition.into());
-        q
-    }
-
-    fn build_projection_sql(
-        &self,
-        tagtype: &TagType,
-        view: &str,
-    ) -> SelectStatement {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-
-        // typedtag プロジェクションの場合は、全行が対象（typedtagカラムは全行に存在）なので、
-        // type='typedtag' というフィルタは行わず、typedtagカラムの存在チェックのみ行う。
-        if let TagType::Base(SType::TypedTag) = tagtype {
-            q.and_where(Expr::col(Col::TypedTag).is_not_null());
-        } else if let TagType::Base(SType::Origin) = tagtype {
-            q.and_where(Expr::col(Col::Origin).is_not_null());
-        } else if let TagType::Base(SType::Type) = tagtype {
-            // type: プロジェクション。Typeカラムの値が欲しい。全行が対象。
-            q.and_where(Expr::col(Col::Type).is_not_null());
-        } else if let TagType::Base(SType::Label) = tagtype {
-            // label: プロジェクションの場合は、全アイテムのラベル値が対象。
-            // 特定の type で絞り込まず、ラベル値が存在する行を全て返す。
-            let mut cond = Condition::any();
-            cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
-            q.and_where(cond.into());
-        } else {
-            let tag_name = tagtype.as_str();
-            // typedtag や type: など、特定の type で絞り込みたくない場合はここでフィルタをスキップ
-            if tag_name != "*"
-                && tag_name != "typedtag"
-                && tag_name != "type"
-                && tag_name != "origin"
-            {
-                q.and_where(Expr::col(Col::Type).eq(tag_name));
-            }
-
-            // ラベル値が NULL でないことを確認する。
-            let mut cond = Condition::any();
-            cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
-            cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
-
-            q.and_where(cond.into());
-        }
-        q
-    }
-
-    fn build_column_match_sql(
-        &self,
-        tag: SType,
-        label: &Label,
-        view: &str,
-    ) -> SelectStatement {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-
-        // Logic handles SType::Label redirection internally
-
-        match label {
-            Label::Integer(i) => {
-                let t = if matches!(tag, SType::Label) {
-                    Col::LabelInt.into()
-                } else {
-                    tag
-                };
-                q.and_where(Expr::col(t).eq(*i));
-            }
-            Label::String(s) => {
-                let t = if matches!(tag, SType::Label) {
-                    Col::LabelStr.into()
-                } else {
-                    tag
-                };
-
-                let val_str = if s.starts_with('^') {
-                    format!("{}*", &s[1..])
-                } else {
-                    s.clone()
-                };
-
-                q.and_where(
-                    Expr::col(t)
-                        .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
-                );
-            }
-            Label::Literal(s) => {
-                let t = if matches!(tag, SType::Label) {
-                    Col::LabelStr.into()
-                } else {
-                    tag
-                };
-                q.and_where(Expr::col(t).eq(s.as_str()));
-            }
-        }
-        q
-    }
-
-    fn build_typed_tag_sql(
-        &self,
-        tagtype: &TagType,
-        label: &Label,
-        view: &str,
-    ) -> SelectStatement {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-        let glob = BinOper::Custom("GLOB");
-
-        // Type side: LiteralCustom uses '='
-        match tagtype {
-            TagType::LiteralCustom(s) => {
-                q.and_where(Expr::col(Col::Type).eq(s.as_str()));
-            }
-            _ => {
-                q.and_where(
-                    Expr::col(Col::Type)
-                        .binary(glob.clone(), Expr::val(tagtype.as_str())),
-                );
-            }
-        }
-
-        let mut cond = Condition::any();
-        match label {
-            Label::Integer(i) => {
-                cond = cond
-                    .add(Expr::col(Col::LabelInt).eq(*i))
-                    .add(Expr::col(Col::LabelDouble).eq(*i as f64));
-            }
-            Label::String(s) => {
-                let val_str = if s.starts_with('^') {
-                    format!("{}*", &s[1..])
-                } else {
-                    s.clone()
-                };
-
-                cond = cond.add(
-                    Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)),
-                );
-                // 数値やブーリアンとしてもチェック
-                if let Ok(i) = s.parse::<i64>() {
-                    cond = cond.add(Expr::col(Col::LabelInt).eq(i));
-                }
-                if s == "true" || s == "false" {
-                    cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
-                }
-            }
-            Label::Literal(s) => {
-                cond = cond.add(Expr::col(Col::LabelStr).eq(s.as_str()));
-                if let Ok(i) = s.parse::<i64>() {
-                    cond = cond.add(Expr::col(Col::LabelInt).eq(i));
-                }
-                if s == "true" || s == "false" {
-                    cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
-                }
-            }
-        }
-        q.and_where(cond.into());
-        q
     }
 
     /// クエリに使用されている、または投影されている型のリストを元に
@@ -1157,6 +824,297 @@ fn build_diff_sql(l: &QueryNode, r: &QueryNode, view: &str) -> SelectStatement {
         sea_query::UnionType::Except,
         wrap_in_subquery(r.to_sql(view)),
     );
+    q
+}
+
+fn build_comp_sql(c: &QueryNode, view: &str) -> SelectStatement {
+    let types = c.get_all_types();
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+    if !types.is_empty() {
+        q.and_where(Expr::col(Col::Type).is_in(types));
+    }
+    let mut eq = Query::select();
+    eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .from_subquery(c.to_sql(view), Tbl::NotSide);
+    q.union(sea_query::UnionType::Except, eq);
+    q
+}
+
+fn build_comparison_sql(node: &ComparisonNode, view: &str) -> SelectStatement {
+    let mut operands = vec![&node.first];
+    for (_, opd) in &node.rest {
+        operands.push(opd);
+    }
+
+    let mut subqueries = Vec::new();
+    for (i, (op, _)) in node.rest.iter().enumerate() {
+        let left = operands[i];
+        let right = operands[i + 1];
+        subqueries.push(build_binary_comparison_sql(left, *op, right, view));
+    }
+
+    if subqueries.len() == 1 {
+        subqueries.pop().unwrap()
+    } else {
+        let mut first = subqueries.remove(0);
+        for next in subqueries {
+            first.union(sea_query::UnionType::Intersect, next);
+        }
+        first
+    }
+}
+
+fn build_binary_comparison_sql(
+    left: &Operand,
+    op: ComparisonOp,
+    right: &Operand,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+
+    let bin_op = to_bin_op(op);
+
+    let (tt, lab, effective_op) =
+        match normalize_comparison(left, bin_op, right) {
+            Some(res) => res,
+            None => {
+                q.and_where(Expr::val(1).eq(0));
+                return q;
+            }
+        };
+
+    apply_generic_comparison(q, tt, effective_op, lab)
+}
+
+fn to_bin_op(op: ComparisonOp) -> BinOper {
+    match op {
+        ComparisonOp::Eq => BinOper::Equal,
+        ComparisonOp::Ne => BinOper::NotEqual,
+        ComparisonOp::Gt => BinOper::GreaterThan,
+        ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
+        ComparisonOp::Lt => BinOper::SmallerThan,
+        ComparisonOp::Le => BinOper::SmallerThanOrEqual,
+    }
+}
+
+/// 比較演算子を反転します（オペランドの順序が逆転した時に使用）。
+/// 例: `a < b` を `b > a` に変換する際、`<` を `>` に反転
+fn flip_bin_op(op: BinOper) -> BinOper {
+    match op {
+        BinOper::GreaterThan => BinOper::SmallerThan,
+        BinOper::GreaterThanOrEqual => BinOper::SmallerThanOrEqual,
+        BinOper::SmallerThan => BinOper::GreaterThan,
+        BinOper::SmallerThanOrEqual => BinOper::GreaterThanOrEqual,
+        other => other,
+    }
+}
+
+fn normalize_comparison(
+    left: &Operand,
+    op: BinOper,
+    right: &Operand,
+) -> Option<(TagType, Label, BinOper)> {
+    match (left, right) {
+        (Operand::TypeRef(tt), Operand::Literal(lab)) => {
+            Some((tt.clone(), lab.clone(), op))
+        }
+        (Operand::Literal(lab), Operand::TypeRef(tt)) => {
+            Some((tt.clone(), lab.clone(), flip_bin_op(op)))
+        }
+        _ => None,
+    }
+}
+
+fn apply_generic_comparison(
+    mut q: SelectStatement,
+    tagtype: TagType,
+    op: BinOper,
+    label: Label,
+) -> SelectStatement {
+    let mut condition = Condition::any();
+    match label {
+        Label::Integer(i) => {
+            condition = condition
+                .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
+                .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
+        }
+        Label::String(s) | Label::Literal(s) => {
+            condition = condition.add(
+                Expr::col(Col::LabelStr).binary(op, Expr::val(s.as_str())),
+            );
+
+            if let Ok(i) = s.parse::<i64>() {
+                condition = condition
+                    .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
+            } else if let Ok(f) = s.parse::<f64>() {
+                condition = condition
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)));
+            } else if s == "true" || s == "false" {
+                let b = s == "true";
+                condition = condition
+                    .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)));
+            }
+        }
+    };
+
+    q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()))
+        .and_where(condition.into());
+    q
+}
+
+fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+
+    if let TagType::Base(SType::TypedTag) = tagtype {
+        q.and_where(Expr::col(Col::TypedTag).is_not_null());
+    } else if let TagType::Base(SType::Origin) = tagtype {
+        q.and_where(Expr::col(Col::Origin).is_not_null());
+    } else if let TagType::Base(SType::Type) = tagtype {
+        q.and_where(Expr::col(Col::Type).is_not_null());
+    } else if let TagType::Base(SType::Label) = tagtype {
+        let mut cond = Condition::any();
+        cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
+        q.and_where(cond.into());
+    } else {
+        let tag_name = tagtype.as_str();
+        if tag_name != "*"
+            && tag_name != "typedtag"
+            && tag_name != "type"
+            && tag_name != "origin"
+        {
+            q.and_where(Expr::col(Col::Type).eq(tag_name));
+        }
+
+        let mut cond = Condition::any();
+        cond = cond.add(Expr::col(Col::LabelStr).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelInt).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelDouble).is_not_null());
+        cond = cond.add(Expr::col(Col::LabelBool).is_not_null());
+
+        q.and_where(cond.into());
+    }
+    q
+}
+
+fn build_column_match_sql(
+    tag: SType,
+    label: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+
+    match label {
+        Label::Integer(i) => {
+            let t = if matches!(tag, SType::Label) {
+                Col::LabelInt.into()
+            } else {
+                tag
+            };
+            q.and_where(Expr::col(t).eq(*i));
+        }
+        Label::String(s) => {
+            let t = if matches!(tag, SType::Label) {
+                Col::LabelStr.into()
+            } else {
+                tag
+            };
+
+            let val_str = if s.starts_with('^') {
+                format!("{}*", &s[1..])
+            } else {
+                s.clone()
+            };
+
+            q.and_where(
+                Expr::col(t)
+                    .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
+            );
+        }
+        Label::Literal(s) => {
+            let t = if matches!(tag, SType::Label) {
+                Col::LabelStr.into()
+            } else {
+                tag
+            };
+            q.and_where(Expr::col(t).eq(s.as_str()));
+        }
+    }
+    q
+}
+
+fn build_typed_tag_sql(
+    tagtype: &TagType,
+    label: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+    let glob = BinOper::Custom("GLOB");
+
+    match tagtype {
+        TagType::LiteralCustom(s) => {
+            q.and_where(Expr::col(Col::Type).eq(s.as_str()));
+        }
+        _ => {
+            q.and_where(
+                Expr::col(Col::Type)
+                    .binary(glob.clone(), Expr::val(tagtype.as_str())),
+            );
+        }
+    }
+
+    let mut cond = Condition::any();
+    match label {
+        Label::Integer(i) => {
+            cond = cond
+                .add(Expr::col(Col::LabelInt).eq(*i))
+                .add(Expr::col(Col::LabelDouble).eq(*i as f64));
+        }
+        Label::String(s) => {
+            let val_str = if s.starts_with('^') {
+                format!("{}*", &s[1..])
+            } else {
+                s.clone()
+            };
+
+            cond = cond
+                .add(Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)));
+            if let Ok(i) = s.parse::<i64>() {
+                cond = cond.add(Expr::col(Col::LabelInt).eq(i));
+            }
+            if s == "true" || s == "false" {
+                cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
+            }
+        }
+        Label::Literal(s) => {
+            cond = cond.add(Expr::col(Col::LabelStr).eq(s.as_str()));
+            if let Ok(i) = s.parse::<i64>() {
+                cond = cond.add(Expr::col(Col::LabelInt).eq(i));
+            }
+            if s == "true" || s == "false" {
+                cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
+            }
+        }
+    }
+    q.and_where(cond.into());
     q
 }
 
