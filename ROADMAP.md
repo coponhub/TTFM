@@ -115,6 +115,7 @@ Directly interact with files from the CLI.
   - [ ] Optimize WASM instance management to prevent initialization bottlenecks during parallel indexing.
 
   - [ ] Enhance WASI security by restricting `preopened_dir` to specific scan targets.
+  - [ ] **Conditional Plugin Updates**: Implement version checking for plugins. Only update/overwrite default plugins if the embedded version is newer than the installed version, preserving user customizations while ensuring compatibility.
 
 - [ ] **Phase 3: Database & Search Refinement**:
 
