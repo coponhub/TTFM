@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod functions;
 pub mod indexer;
 pub mod merge;
 pub mod scan;

@@ -9,7 +9,7 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::db::{SqlType, TargetTable};
-use crate::functions::IndexingFunction;
+use crate::indexing::functions::IndexingFunction;
 use crate::taggers::{ColumnDef, TagValue, Tagger};
 
 // WIT定義から自動生成

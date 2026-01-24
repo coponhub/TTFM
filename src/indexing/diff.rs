@@ -1,6 +1,6 @@
 use super::indexer::{ScanEntryLoader, TempScanEntry};
 use crate::db::{Col, Store, TargetTable, Tbl};
-use crate::functions::ScanEntry;
+use crate::indexing::functions::ScanEntry;
 use crate::types::ItemId;
 use crate::util::{self};
 use anyhow::Result;

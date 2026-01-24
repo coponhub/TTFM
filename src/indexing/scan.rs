@@ -1,6 +1,6 @@
 use super::indexer::{calc_scanhash, ScanHash, TempScanEntry};
 use crate::db::{Col, Tbl};
-use crate::functions::ScanEntry;
+use crate::indexing::functions::ScanEntry;
 use crate::types::ItemId;
 use crate::util::{ExecuteSql, ParquetExt, SafeMetadata, TableCreateExt};
 use anyhow::Result;

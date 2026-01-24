@@ -69,7 +69,7 @@ pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::functions::IndexingFunction;
+    use crate::indexing::functions::IndexingFunction;
     use crate::taggers::{ColumnDef, TagValue, Tagger};
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 

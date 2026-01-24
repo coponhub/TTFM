@@ -1,5 +1,5 @@
 use crate::db::Col;
-use crate::functions::{Field, ScanColumn, TagDefinition};
+use crate::indexing::functions::{Field, ScanColumn, TagDefinition};
 use crate::types::DBType;
 use crate::util::alias_from;
 use anyhow::Result;
@@ -53,7 +53,7 @@ macro_rules! define_scan_entry {
     ( $( $name:ident : $func:ty ),* $(,)? ) => {
         /// スキャン時に取得されるファイルの基本情報の構造体。
         pub struct ScanEntry {
-            $( pub $name: $crate::functions::Field<$func>, )*
+            $( pub $name: $crate::indexing::functions::Field<$func>, )*
         }
 
         impl std::fmt::Debug for ScanEntry {
@@ -101,7 +101,7 @@ macro_rules! define_scan_entry {
             }
 
             /// スキャン時に作成される `temp_scan` テーブルのカラム構成を定義します。
-            pub fn schema() -> Vec<$crate::functions::ScanColumn> {
+            pub fn schema() -> Vec<$crate::indexing::functions::ScanColumn> {
                 vec![ $( $crate::macros::get_column_def::<$func>() ),* ]
             }
 

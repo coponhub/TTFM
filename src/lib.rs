@@ -13,7 +13,6 @@ use std::path::Path;
 
 pub mod config;
 pub mod db;
-mod functions;
 pub mod indexing;
 pub mod macros;
 pub mod oneview;
@@ -27,7 +26,7 @@ pub mod types;
 pub mod util;
 
 pub use db::TargetTable;
-use functions::{
+use indexing::functions::{
     ContentIndexingFunction, DirectoryFunction, ExtensionFunction,
     FilenameFunction, IndexingFunction, InodeFunction, KindIndexingFunction,
     ModifiedStrFunction, ModifiedTsFunction, NameIndexingFunction,
