@@ -197,15 +197,18 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
     - **集約 (Aggregation)**:
         - 形式: `[aggregator]([query])`
         - aggregator: `count`, `sum`, `avg`, `max`, `min`
-        - query: 任意の検索クエリ
+        - query: 任意の検索クエリ。ただし、数値集計（sum, avg等）を行う場合は、数値のProjectionを返すクエリとする
         - 戻り値: クエリ結果を集約した数値（スカラー）。
         - 例: `sum(size:)`
-    - **グループ比較 (Grouping Comparison)**:
-        - 形式: `[key]:( [Comparison] )`
-        - key: グルーピングのキーとなるtype。
-        - Comparison: **集約** を含む比較式。
+            - `sum(project:A & size:>1GB & size:)`
+            - `count(filename:)` ファイル名の種類をカウント
+        - count()でプロジェクションを数える場合projection(ラベルの種類)をカウントする
+    - **分割比較 (Nested Comparison)**:
+        - 形式: `[type]:( [Scalar Comparison])`
+        - type: グルーピングのキーとなるtype。
+        - Scalar Comparison: スカラー同士の計算。集約はスカラーを返すため集約が来ても良い。type毎に分割した値を用いて比較する
         - 演算子: `==` (一致), `^` または `^=` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
-        - 挙動: 指定されたキーでグルーピングし、条件を満たすグループ（に対応するItem）を返す。キーと括弧を省略した場合は全体の合計が返る
+        - 挙動: 指定されたキーでグルーピングし、条件を満たすグループ（に対応するItem）を返す。キーと括弧を省略した場合は全体に対して適用する
         - **例**
             - `sum(project:A & size:) > 1GB` (キー省略時は全体の合計)
             - `parentdir:( sum(size:) > 1GB )` (フォルダ毎の合計サイズが1GB超)

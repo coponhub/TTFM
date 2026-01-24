@@ -144,5 +144,7 @@ Directly interact with files from the CLI.
 - [ ] **Observability & Error Handling**:
   - [ ] **Async Error Visualization**: Implement a mechanism to track and display errors from background cache workers (e.g., via a status command or log file).
 
-- [ ] **Code Refinement**:
-  - [ ] **DRY Refactoring**: Consolidate redundant logic for handling empty node sets in `build_and_sql` and `build_or_sql`.
+- [ ] **Phase 4: Modularization and Decoupling (Maintenance & Scalability)**:
+  - [ ] **Split `src/query.rs`**: Decouple AST, Parser, and SQL generation into a `query/` module.
+  - [ ] **Decompose `FileManager`**: Extract indexing logic and plugin management from `lib.rs` into dedicated modules.
+  - [ ] **Common SQL Logic**: Finalize the consolidation of redundant SQL generation patterns (empty sets, common CTEs).
