@@ -180,3 +180,150 @@ pub fn expand_query_node(node: QueryNode, registry: &QueryFunctionRegistry) -> Q
         QueryNode::Projection(tt) => registry.expand_projection(tt),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::ast::{ComparisonOp, Operand};
+    use crate::types::{Label, TagType};
+
+    struct MockSizeQuery;
+    impl QueryFunction for MockSizeQuery {
+        fn name(&self) -> &str {
+            "size"
+        }
+        fn expand(&self, _label: &Label) -> QueryNode {
+            QueryNode::And(vec![]) // Dummy
+        }
+        fn normalize_label(&self, label: &Label) -> Label {
+            // Mock: multiply by 1024
+            match label {
+                Label::Integer(i) => Label::Integer(i * 1024),
+                _ => label.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_registry_registration() {
+        let mut reg = QueryFunctionRegistry::new();
+        reg.register(Box::new(MockSizeQuery));
+        assert!(reg.get_function(&TagType::from("size")).is_some());
+        assert!(reg.get_function(&TagType::from("unknown")).is_none());
+    }
+
+    #[test]
+    fn test_expand_comparison_node_normalization() {
+        let mut reg = QueryFunctionRegistry::new();
+        reg.register(Box::new(MockSizeQuery));
+
+        // size > 1
+        let node = crate::query::ast::ComparisonNode {
+            first: Operand::TypeRef(TagType::from("size")),
+            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(1)))]
+        };
+
+        let expanded = expand_comparison_node(node, &reg);
+        
+        match &expanded.rest[0].1 {
+            Operand::Literal(Label::Integer(val)) => assert_eq!(*val, 1024),
+            _ => panic!("Expected Literal Integer"),
+        }
+    }
+
+    #[test]
+    fn test_expand_projection_mock() {
+        struct MockProjQuery;
+        impl QueryFunction for MockProjQuery {
+            fn name(&self) -> &str { "size" } // Must be a valid SType (Base) to trigger expansion
+            fn expand(&self, _: &Label) -> QueryNode { QueryNode::And(vec![]) }
+            // Mock: projection size -> projection rank
+            fn expand_projection(&self, _: TagType) -> QueryNode {
+                QueryNode::Projection(TagType::from("rank"))
+            }
+        }
+
+        let mut reg = QueryFunctionRegistry::new();
+        reg.register(Box::new(MockProjQuery));
+
+        let tag = TagType::from("size");
+        let expanded = reg.expand_projection(tag);
+        
+        if let QueryNode::Projection(t) = expanded {
+            assert_eq!(t.as_str(), "rank");
+        } else {
+            panic!("Expected Projection rank, got {:?}", expanded);
+        }
+    }
+
+    #[test]
+    fn test_process_tag() {
+        let mut reg = QueryFunctionRegistry::new();
+        struct MockTagQuery;
+        impl QueryFunction for MockTagQuery {
+             fn name(&self) -> &str { "size" } // Use valid SType "size"
+             fn expand(&self, _label: &Label) -> QueryNode {
+                 QueryNode::Comparison(crate::query::ast::ComparisonNode {
+                     first: Operand::TypeRef(TagType::from("size")),
+                     rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(0)))]
+                 })
+             }
+        }
+        reg.register(Box::new(MockTagQuery));
+
+        // Registered ("size")
+        let node = reg.process_tag(TagType::from("size"), Label::from("foo"));
+        match node {
+            QueryNode::Comparison(_) => {},
+            _ => panic!("Expected Comparison from expansion, got {:?}", node),
+        }
+
+        // Unregistered
+        let node2 = reg.process_tag(TagType::from("unknown"), Label::from("foo"));
+        match node2 {
+            QueryNode::TypedTag(tt) => assert_eq!(tt.tagtype.as_str(), "unknown"),
+            _ => panic!("Expected TypedTag for unknown, got {:?}", node2),
+        }
+    }
+
+    #[test]
+    fn test_expand_query_node_recursive() {
+        let mut reg = QueryFunctionRegistry::new();
+        struct MockRecursive;
+        impl QueryFunction for MockRecursive {
+            fn name(&self) -> &str { "name" } // Use valid SType "name"
+            fn expand(&self, _: &Label) -> QueryNode {
+                 QueryNode::TypedTag(crate::types::TypedTag::new("expanded", "rec"))
+            }
+        }
+        reg.register(Box::new(MockRecursive));
+
+        // And(TypedTag(name:1), TypedTag(other:1))
+        let node = QueryNode::And(vec![
+            QueryNode::TypedTag(crate::types::TypedTag::new("name", "1")),
+            QueryNode::TypedTag(crate::types::TypedTag::new("other", "1")),
+        ]);
+
+        let expanded = expand_query_node(node, &reg);
+        match expanded {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                // First should be expanded
+                match &nodes[0] {
+                     QueryNode::TypedTag(tt) => {
+                         assert_eq!(tt.tagtype.as_str(), "expanded");
+                         assert_eq!(tt.label.as_str(), "rec");
+                     }
+                     _ => panic!("Expected expanded TypedTag in first node, got {:?}", nodes[0]),
+                }
+                // Second should be same
+                match &nodes[1] {
+                     QueryNode::TypedTag(tt) => assert_eq!(tt.tagtype.as_str(), "other"),
+                     _ => panic!("Expected original TypedTag in second node, got {:?}", nodes[1]),
+                }
+            }
+            _ => panic!("Expected And node, got {:?}", expanded),
+        }
+    }
+}
+

@@ -177,3 +177,105 @@ impl Operand {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SType, TagType};
+
+    #[test]
+    fn test_get_all_types_simple() {
+        // Simple TypedTag
+        let node = QueryNode::TypedTag(TypedTag::new("size", "100"));
+        let types = node.get_all_types();
+        assert_eq!(types.len(), 1);
+        assert!(types.contains(&"size".to_string()));
+
+        // Projection
+        let node = QueryNode::Projection(TagType::from("rank"));
+        let types = node.get_all_types();
+        assert_eq!(types.len(), 1);
+        assert!(types.contains(&"rank".to_string()));
+    }
+
+    #[test]
+    fn test_get_all_types_nested() {
+        // And(TypedTag(name), Or(TypedTag(size), TypedTag(mtime)))
+        let node = QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new("name", "foo")),
+            QueryNode::Or(vec![
+                QueryNode::TypedTag(TypedTag::new("size", "100")),
+                QueryNode::TypedTag(TypedTag::new("mtime", "today")),
+            ]),
+        ]);
+        let types = node.get_all_types();
+        assert_eq!(types.len(), 3);
+        assert!(types.contains(&"name".to_string()));
+        assert!(types.contains(&"size".to_string()));
+        assert!(types.contains(&"mtime".to_string()));
+    }
+
+    #[test]
+    fn test_get_all_types_ops() {
+        // Comparison
+        // size > 100
+        let node = QueryNode::Comparison(ComparisonNode {
+            first: Operand::TypeRef(TagType::from("size")),
+            rest: vec![(ComparisonOp::Gt, Operand::Literal("100".into()))],
+        });
+        let types = node.get_all_types();
+        assert_eq!(types.len(), 1);
+        assert!(types.contains(&"size".to_string()));
+
+        // Difference
+        // name:foo - extension:txt
+        let node = QueryNode::Difference(
+            Box::new(QueryNode::TypedTag(TypedTag::new("name", "foo"))),
+            Box::new(QueryNode::TypedTag(TypedTag::new("extension", "txt"))),
+        );
+        let types = node.get_all_types();
+        assert!(types.contains(&"name".to_string()));
+        assert!(types.contains(&"extension".to_string()));
+    }
+
+    #[test]
+    fn test_get_projections() {
+        // Projection only
+        let node = QueryNode::Projection(TagType::from("path"));
+        let projs = node.get_projections();
+        assert_eq!(projs.len(), 1);
+        assert!(projs.contains(&"path".to_string()));
+
+        // Mixed with filters (projections should still be collected)
+        // name:foo AND project:size
+        let node = QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new("name", "foo")),
+            QueryNode::Projection(TagType::from("size")),
+        ]);
+        let projs = node.get_projections();
+        assert_eq!(projs.len(), 1);
+        assert!(projs.contains(&"size".to_string()));
+    }
+
+    #[test]
+    fn test_operand_calculation_collect() {
+        // Arithmetic operand using types: width * height
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::from("width")),
+            op: ArithmeticOp::Mul,
+            right: Operand::TypeRef(TagType::from("height")),
+        };
+        let op = Operand::Calculation(Box::new(calc));
+        
+        // Wrap in a comparison to test via QueryNode or manually helper
+        // Let's test helper directly via ComparisonNode
+        let node = QueryNode::Comparison(ComparisonNode {
+            first: op,
+            rest: vec![(ComparisonOp::Gt, Operand::Literal("100".into()))],
+        });
+        
+        let types = node.get_all_types();
+        assert!(types.contains(&"width".to_string()));
+        assert!(types.contains(&"height".to_string()));
+    }
+}

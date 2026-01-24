@@ -380,3 +380,110 @@ fn unescape_unquoted(s: &str) -> Result<String> {
     .collect::<String>()
     .to_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::ast::{ComparisonOp, QueryNode};
+
+    #[test]
+    fn test_unescape_string_basic() {
+        assert_eq!(unescape_string("foo").unwrap(), "foo");
+        assert_eq!(unescape_string("foo bar").unwrap(), "foo bar");
+    }
+
+    #[test]
+    fn test_unescape_string_escapes() {
+        assert_eq!(unescape_string(r"foo\nbar").unwrap(), "foo\nbar");
+        assert_eq!(unescape_string(r"foo\rbar").unwrap(), "foo\rbar");
+        assert_eq!(unescape_string(r"foo\tbar").unwrap(), "foo\tbar");
+        assert_eq!(unescape_string(r"foo\\bar").unwrap(), "foo\\bar");
+        assert_eq!(unescape_string(r#"foo\"bar"#).unwrap(), "foo\"bar");
+        assert_eq!(unescape_string(r"foo\'bar").unwrap(), "foo'bar");
+    }
+
+    #[test]
+    fn test_unescape_unquoted_basic() {
+        assert_eq!(unescape_unquoted("foo").unwrap(), "foo");
+        assert_eq!(unescape_unquoted("foo.txt").unwrap(), "foo.txt");
+    }
+
+    #[test]
+    fn test_unescape_unquoted_special_chars() {
+        // Glob patterns handling: \* -> [*]
+        assert_eq!(unescape_unquoted(r"foo\*bar").unwrap(), "foo[*]bar");
+        assert_eq!(unescape_unquoted(r"foo\?bar").unwrap(), "foo[?]bar");
+        assert_eq!(unescape_unquoted(r"foo\[bar").unwrap(), "foo[[]bar");
+        assert_eq!(unescape_unquoted(r"foo\]bar").unwrap(), "foo[]]bar");
+        // ! is NOT escaped by simple logic mostly, but let's check input
+        // Standard globs: [!] is one thing.
+        // implementation details in unescape_unquoted: 
+        // "DuckDB GLOB pattern ... characters (*, ?, [, ], !) ... escape with [char]"
+        assert_eq!(unescape_unquoted(r"foo\!bar").unwrap(), "foo[!]bar");
+    }
+
+    #[test]
+    fn test_parse_arithmetic_op_basic() {
+        assert_eq!(parse_arithmetic_op("+").unwrap(), ArithmeticOp::Add);
+        assert_eq!(parse_arithmetic_op("-").unwrap(), ArithmeticOp::Sub);
+        assert_eq!(parse_arithmetic_op("*").unwrap(), ArithmeticOp::Mul);
+        assert_eq!(parse_arithmetic_op("/").unwrap(), ArithmeticOp::Div);
+        assert_eq!(parse_arithmetic_op("%").unwrap(), ArithmeticOp::Mod);
+        assert!(parse_arithmetic_op("&").is_err());
+    }
+
+    #[test]
+    fn test_parse_typed_tag() {
+        let node = parse("name:test.txt").expect("Failed to parse typed tag");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.tagtype.as_str(), "name");
+                assert_eq!(tt.label.as_str(), "test.txt");
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_comparison_simple() {
+        let node = parse("size > 100").expect("Failed to parse comparison");
+        match node {
+            QueryNode::Comparison(cmp) => {
+                // first should be 'size' (Operand::TypeRef)
+                // op should be Gt
+                // operand should be '100' (Operand::Literal)
+                // first should be 'size' (Operand::Literal) - conversion happens in expand phase
+                match cmp.first {
+                    Operand::Literal(ref l) => assert_eq!(l.as_str(), "size"),
+                    _ => panic!("Expected Literal for first operand, got {:?}", cmp.first),
+                }
+                assert_eq!(cmp.rest.len(), 1);
+                assert_eq!(cmp.rest[0].0, ComparisonOp::Gt);
+                match &cmp.rest[0].1 {
+                    Operand::Literal(l) => assert_eq!(l.as_str(), "100"),
+                    _ => panic!("Expected Literal for second operand"),
+                }
+            }
+            _ => panic!("Expected Comparison, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_logical_ops() {
+        // AND
+        let node = parse("a:1 & b:2").expect("Failed to parse AND");
+        match node {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+            }
+            _ => panic!("Expected And, got {:?}", node),
+        }
+
+        // Parentheses
+        let node = parse("(a:1 | b:2)").expect("Failed to parse parentheses");
+        match node {
+            QueryNode::Or(nodes) => assert_eq!(nodes.len(), 2),
+            _ => panic!("Expected Or, got {:?}", node),
+        }
+    }
+}

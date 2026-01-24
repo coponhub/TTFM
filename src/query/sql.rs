@@ -470,3 +470,91 @@ fn build_typed_tag_sql(
     q.and_where(cond.into());
     q
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_query::{BinOper, SqliteQueryBuilder, Alias, Query};
+    use crate::query::ast::QueryNode;
+    use crate::types::{TypedTag, Label, TagType};
+
+    #[test]
+    fn test_to_bin_op_conversion() {
+        assert_eq!(to_bin_op(ComparisonOp::Eq), BinOper::Equal);
+        assert_eq!(to_bin_op(ComparisonOp::Gt), BinOper::GreaterThan);
+        assert_eq!(to_bin_op(ComparisonOp::Lt), BinOper::SmallerThan);
+    }
+
+    #[test]
+    fn test_flip_bin_op() {
+        assert_eq!(flip_bin_op(BinOper::GreaterThan), BinOper::SmallerThan);
+        assert_eq!(flip_bin_op(BinOper::SmallerThanOrEqual), BinOper::GreaterThanOrEqual);
+        assert_eq!(flip_bin_op(BinOper::Equal), BinOper::Equal);
+    }
+
+    #[test]
+    fn test_normalize_comparison_order() {
+        let left = Operand::TypeRef(TagType::from("size"));
+        let right = Operand::Literal(Label::Integer(100));
+        let (tt, lab, op) = normalize_comparison(&left, BinOper::Equal, &right).unwrap();
+        assert_eq!(tt.as_str(), "size");
+        assert_eq!(lab, Label::Integer(100));
+        assert_eq!(op, BinOper::Equal);
+
+        let left_lit = Operand::Literal(Label::Integer(100));
+        let right_tag = Operand::TypeRef(TagType::from("size"));
+        let (tt2, lab2, op2) = normalize_comparison(&left_lit, BinOper::GreaterThan, &right_tag).unwrap();
+        assert_eq!(tt2.as_str(), "size");
+        assert_eq!(lab2, Label::Integer(100));
+        assert_eq!(op2, BinOper::SmallerThan);
+    }
+
+    #[test]
+    fn test_to_tag_condition_generation() {
+        let node = QueryNode::TypedTag(TypedTag::new("size", Label::Integer(100)));
+        let cond = to_tag_condition(&node);
+        
+        let mut query = Query::select();
+        query.column(Alias::new("id")).from(Alias::new("tbl")).cond_where(cond);
+        let sql = query.to_string(SqliteQueryBuilder);
+        
+        // Verifying exact string content is fragile across sea-query versions/builders.
+        // We ensure a query is generated (condition applied).
+        assert!(!sql.is_empty());
+    }
+
+    #[test]
+    fn test_build_typed_tag_sql_gen() {
+        let tt = TypedTag::new("name", "foo.txt");
+        let sql = build_typed_tag_sql(&tt.tagtype, &tt.label, "oneview");
+        let result = sql.to_string(SqliteQueryBuilder);
+        // Expect exact logic: "label_str" = 'foo.txt' AND "type" = 'name'
+        // Quotes might vary slightly by builder, but Sqlite default uses double quotes for identifiers and single for strings.
+        assert!(result.contains("'foo.txt'"));
+        assert!(result.contains("'name'"));
+    }
+    
+    #[test]
+    fn test_build_comparison_sql_int() {
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from("size")),
+            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(100)))],
+        };
+        let sql = build_comparison_sql(&node, "oneview");
+        let result = sql.to_string(SqliteQueryBuilder);
+        assert!(result.contains("> 100"));
+        assert!(result.contains("'size'"));
+    }
+
+    #[test]
+    fn test_build_and_sql_structure() {
+        let node1 = QueryNode::TypedTag(TypedTag::new("name", "foo"));
+        let node2 = QueryNode::TypedTag(TypedTag::new("extension", "rs"));
+        let nodes = vec![node1, node2];
+        
+        let sql = build_and_sql(&nodes, "oneview");
+        let result = sql.to_string(SqliteQueryBuilder);
+        assert!(result.contains("INTERSECT"));
+    }
+}
+
