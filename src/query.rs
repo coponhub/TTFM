@@ -17,6 +17,35 @@ use std::sync::OnceLock;
 
 static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
 
+// ========== Type Aliases ==========
+/// 比較演算子とオペランドのペアのリスト（連鎖比較用）
+type ComparisonChain = Vec<(ComparisonOp, Operand)>;
+
+// ========== Error Messages ==========
+mod errors {
+    pub const PARSE_ERROR: &str = "Parse error";
+    pub const NO_QUERY_FOUND: &str = "No query found";
+    pub const NO_EXPRESSION_FOUND: &str = "No expression found";
+    pub const UNKNOWN_INFIX_RULE: &str = "Unknown infix rule";
+    pub const UNKNOWN_FACTOR_INNER: &str = "Unknown factor inner";
+    pub const COMPLEMENT_MISSING_EXPR: &str = "Complement missing expr";
+    pub const UNEXPECTED_RULE: &str = "Unexpected rule in build_ast";
+    pub const MISSING_TAG_KEY: &str = "Missing tag key";
+    pub const MISSING_TAG_LABEL: &str = "Missing tag label";
+    pub const MISSING_PROJECTION_INNER: &str = "Missing projection inner";
+    pub const MISSING_TAG_KEY_IN_PROJECTION: &str =
+        "Missing tag key in projection";
+    pub const UNEXPECTED_TAG_TYPE_RULE: &str = "Unexpected tag_type rule";
+    pub const UNKNOWN_COMPARISON_OP: &str = "Unknown comparison op";
+    pub const MISSING_COMPARISON_OPERAND: &str = "Missing comparison operand";
+    pub const UNKNOWN_OPERAND_RULE: &str = "Unknown operand rule";
+    pub const UNKNOWN_ARITHMETIC_OP: &str = "Unknown arithmetic op";
+    pub const CALC_REQUIRES_OP: &str =
+        "Calculation must contain at least one operation";
+    pub const UNKNOWN_OPERAND_CALC_RULE: &str = "Unknown operand_calc rule";
+    pub const UNKNOWN_LABEL_RULE: &str = "Unknown label rule";
+}
+
 fn get_parser() -> &'static PrattParser<Rule> {
     PRATT_PARSER.get_or_init(|| {
         PrattParser::new()
@@ -29,13 +58,13 @@ fn get_parser() -> &'static PrattParser<Rule> {
 /// クエリ文字列を解析し、QueryNode AST を構築します。
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
-        .map_err(|e| anyhow!("Parse error: {}", e))?;
+        .map_err(|e| anyhow!("{}: {}", errors::PARSE_ERROR, e))?;
     let expr_pair = pairs
         .next()
-        .ok_or_else(|| anyhow!("No query found"))?
+        .ok_or_else(|| anyhow!(errors::NO_QUERY_FOUND))?
         .into_inner()
         .next()
-        .ok_or_else(|| anyhow!("No expression found"))?;
+        .ok_or_else(|| anyhow!(errors::NO_EXPRESSION_FOUND))?;
     build_ast(expr_pair)
 }
 
@@ -78,7 +107,8 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
                             Box::new(rhs),
                         )),
                         _ => Err(anyhow!(
-                            "Unknown infix rule: {:?}",
+                            "{}: {:?}",
+                            errors::UNKNOWN_INFIX_RULE,
                             op.as_rule()
                         )),
                     }
@@ -97,9 +127,11 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
                 Rule::typed_tag => build_typed_tag(inner),
                 Rule::comparison => build_comparison(inner),
                 Rule::projection => build_projection(inner),
-                _ => {
-                    Err(anyhow!("Unknown factor inner: {:?}", inner.as_rule()))
-                }
+                _ => Err(anyhow!(
+                    "{}: {:?}",
+                    errors::UNKNOWN_FACTOR_INNER,
+                    inner.as_rule()
+                )),
             }
         }
         Rule::complement => {
@@ -117,24 +149,24 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
                                   // Let's debug if needed, but usually inner.next() is expr.
             let expr_pair = inner
                 .next()
-                .ok_or_else(|| anyhow!("Complement missing expr"))?;
+                .ok_or_else(|| anyhow!(errors::COMPLEMENT_MISSING_EXPR))?;
             Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
         }
-        _ => Err(anyhow!(
-            "Unexpected rule in build_ast: {:?}",
-            pair.as_rule()
-        )),
+        _ => Err(anyhow!("{}: {:?}", errors::UNEXPECTED_RULE, pair.as_rule())),
     }
 }
 
 fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
     // typed_tag = ${ tag_type ~ ":" ~ label }
     let mut inner = pair.into_inner();
-    let type_pair = inner.next().ok_or_else(|| anyhow!("Missing tag key"))?;
+    let type_pair = inner
+        .next()
+        .ok_or_else(|| anyhow!(errors::MISSING_TAG_KEY))?;
     let tagtype = build_tag_type(type_pair)?;
 
-    let label_pair =
-        inner.next().ok_or_else(|| anyhow!("Missing tag label"))?;
+    let label_pair = inner
+        .next()
+        .ok_or_else(|| anyhow!(errors::MISSING_TAG_LABEL))?;
     let label = build_label(label_pair)?;
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
@@ -145,11 +177,11 @@ fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
     let inner = pair
         .into_inner()
         .next()
-        .ok_or_else(|| anyhow!("Missing projection inner"))?;
+        .ok_or_else(|| anyhow!(errors::MISSING_PROJECTION_INNER))?;
     let mut type_ref_inner = inner.into_inner();
     let type_pair = type_ref_inner
         .next()
-        .ok_or_else(|| anyhow!("Missing tag key in projection"))?;
+        .ok_or_else(|| anyhow!(errors::MISSING_TAG_KEY_IN_PROJECTION))?;
     let tagtype = build_tag_type(type_pair)?;
     Ok(QueryNode::Projection(tagtype))
 }
@@ -168,7 +200,11 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
             let s = unescape_unquoted(inner.as_str())?;
             TagType::from(s).to_ok()
         }
-        _ => Err(anyhow!("Unexpected tag_type rule: {:?}", inner.as_rule())),
+        _ => Err(anyhow!(
+            "{}: {:?}",
+            errors::UNEXPECTED_TAG_TYPE_RULE,
+            inner.as_rule()
+        )),
     }
 }
 
@@ -187,11 +223,13 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
             ">=" => ComparisonOp::Ge,
             "<" => ComparisonOp::Lt,
             "<=" => ComparisonOp::Le,
-            s => return Err(anyhow!("Unknown comparison op: {}", s)),
+            s => {
+                return Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s))
+            }
         };
         let right_pair = inner
             .next()
-            .ok_or_else(|| anyhow!("Missing comparison operand"))?;
+            .ok_or_else(|| anyhow!(errors::MISSING_COMPARISON_OPERAND))?;
         let right_op = build_operand(right_pair)?;
         rest.push((op, right_op));
     }
@@ -214,7 +252,11 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
         Rule::label => Ok(Operand::Literal(build_label(inner)?)),
-        _ => Err(anyhow!("Unknown operand rule: {:?}", inner.as_rule())),
+        _ => Err(anyhow!(
+            "{}: {:?}",
+            errors::UNKNOWN_OPERAND_RULE,
+            inner.as_rule()
+        )),
     }
 }
 
@@ -240,7 +282,7 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
             "*" => ArithmeticOp::Mul,
             "/" => ArithmeticOp::Div,
             "%" => ArithmeticOp::Mod,
-            _ => return Err(anyhow!("Unknown arithmetic op")),
+            _ => return Err(anyhow!(errors::UNKNOWN_ARITHMETIC_OP)),
         };
         let right_pair = pairs.next().unwrap();
         let right = build_operand_calc(right_pair)?;
@@ -275,7 +317,7 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
         // This implies we can't represent a single operand as CalculationNode plainly.
         // Or maybe we treat (A) as A + 0? No.
         // Assuming valid calculation always has op.
-        _ => Err(anyhow!("Calculation must contain at least one operation")),
+        _ => Err(anyhow!(errors::CALC_REQUIRES_OP)),
     }
 }
 
@@ -292,7 +334,7 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         Rule::calculation => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
-        _ => Err(anyhow!("Unknown operand_calc rule")),
+        _ => Err(anyhow!(errors::UNKNOWN_OPERAND_CALC_RULE)),
     }
 }
 
@@ -316,10 +358,18 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             let s = unescape_unquoted(inner.as_str())?;
             Ok(Label::String(s))
         }
-        _ => Err(anyhow!("Unknown label rule: {:?}", inner.as_rule())),
+        _ => Err(anyhow!(
+            "{}: {:?}",
+            errors::UNKNOWN_LABEL_RULE,
+            inner.as_rule()
+        )),
     }
 }
 
+/// 引用符で囲まれた文字列内のエスケープシーケンスを展開します。
+///
+/// 標準的なエスケープシーケンス（\n, \r, \t, \\, \', \"）を処理します。
+/// クエリ文法の `quoted_string` ルールで使用されます。
 fn unescape_string(s: &str) -> Result<String> {
     let mut chars = s.chars();
     std::iter::from_fn(move || match chars.next()? {
@@ -339,6 +389,13 @@ fn unescape_string(s: &str) -> Result<String> {
     .to_ok()
 }
 
+/// 引用符なし文字列のエスケープシーケンスを展開します。
+///
+/// DuckDB の GLOB パターンで特殊な意味を持つ文字（*, ?, [, ], !）を
+/// エスケープするため、バックスラッシュ付きの文字を `[char]` 形式に変換します。
+/// 例: `\*` → `[*]`（リテラルのアスタリスク）
+///
+/// クエリ文法の `unquoted_string` および `unquoted_tag_string` ルールで使用されます。
 fn unescape_unquoted(s: &str) -> Result<String> {
     let mut chars = s.chars();
     let mut pending = VecDeque::new();
@@ -516,7 +573,7 @@ pub struct CalculationNode {
 #[derive(Debug, PartialEq, Clone)]
 pub struct ComparisonNode {
     pub first: Operand,
-    pub rest: Vec<(ComparisonOp, Operand)>,
+    pub rest: ComparisonChain,
 }
 
 impl ComparisonNode {
