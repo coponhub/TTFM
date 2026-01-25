@@ -1,9 +1,10 @@
 use crate::db::Col;
-use crate::query::QueryFunction;
-use crate::query::functions::*;
 use crate::query::ast::ComparisonOp;
+use crate::query::functions::*;
+use crate::query::QueryFunction;
 use crate::types::{Label, SType, TagType};
 use anyhow::Result;
+use sea_query::{BinOper, Condition, Expr, SimpleExpr};
 use std::collections::HashMap;
 
 /// タグの物理的な格納場所
@@ -15,6 +16,28 @@ pub enum StorageMapping {
     RowTag { column: Col, tag_key: String },
     /// 他のタグに展開される論理タグ
     Virtual,
+}
+
+impl StorageMapping {
+    /// このストレージマッピングに基づき、指定された演算子とラベルに対する SQL 条件を生成します。
+    pub fn to_condition(
+        &self,
+        op: ComparisonOp,
+        label: &Label,
+        sql_type: crate::db::SqlType,
+    ) -> Condition {
+        match self {
+            StorageMapping::Column(col) => {
+                build_column_condition(*col, op, label, sql_type, false)
+            }
+            StorageMapping::RowTag { column, tag_key } => Condition::all()
+                .add(check_tag_match(tag_key))
+                .add(build_column_condition(
+                    *column, op, label, sql_type, true,
+                )),
+            StorageMapping::Virtual => Condition::any(),
+        }
+    }
 }
 
 /// 物理マッピングが解決された後のクエリノード。
@@ -39,6 +62,236 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         label: Label,
     },
+}
+
+impl ResolvedNode {
+    /// このノードを sea_query::Condition に変換します。
+    /// このノードを sea_query::Condition に変換します。
+    pub fn to_condition(&self) -> Condition {
+        match self {
+            ResolvedNode::And(nodes) => cond_and(nodes),
+            ResolvedNode::Or(nodes) => cond_or(nodes),
+            ResolvedNode::Difference(l, _r) => {
+                // DIFFERENCE は WHERE 句単体では表現しきれない（通常 EXCEPT を使用）
+                // ただしサブクエリ等で使用するための基本的な条件を返す
+                l.to_condition()
+            }
+            ResolvedNode::Complement(_c) => {
+                // COMPLEMENT も同様
+                Condition::any()
+            }
+            ResolvedNode::Projection(_tt, storage) => cond_projection(storage),
+            ResolvedNode::ColumnMatch { tag, label } => {
+                cond_column_match(*tag, label)
+            }
+            ResolvedNode::Match {
+                storage,
+                sql_type,
+                op,
+                label,
+                ..
+            } => storage.to_condition(*op, label, *sql_type),
+        }
+    }
+}
+
+fn cond_and(nodes: &[ResolvedNode]) -> Condition {
+    let mut cond = Condition::all();
+    for n in nodes {
+        cond = cond.add(n.to_condition());
+    }
+    cond
+}
+
+fn cond_or(nodes: &[ResolvedNode]) -> Condition {
+    let mut cond = Condition::any();
+    for n in nodes {
+        cond = cond.add(n.to_condition());
+    }
+    cond
+}
+
+fn cond_projection(storage: &StorageMapping) -> Condition {
+    // Projection は「存在する」ことが条件
+    match storage {
+        StorageMapping::Column(col) => {
+            Condition::all().add(Expr::col(*col).is_not_null())
+        }
+        StorageMapping::RowTag { tag_key, .. } => {
+            Condition::all().add(check_tag_match(tag_key))
+        }
+        StorageMapping::Virtual => Condition::any(),
+    }
+}
+
+fn cond_column_match(tag: SType, label: &Label) -> Condition {
+    // 直接の物理カラム指定
+    let col = tag;
+    let val = match label {
+        Label::String(s) | Label::Literal(s) => Expr::val(s.as_str()),
+        Label::Integer(i) => Expr::val(*i),
+    };
+    // ColumnMatch の場合は型固有のルールは適用せず、単純にマッピング
+    Condition::all().add(Expr::col(col).eq(val))
+}
+
+fn check_tag_match(tag_key: &str) -> SimpleExpr {
+    let mut tag_op = BinOper::Equal;
+    if tag_key.contains('*') || tag_key.contains('?') || tag_key.contains('[') {
+        tag_op = BinOper::Custom("GLOB");
+    }
+    Expr::col(crate::db::Col::Type).binary(tag_op, tag_key)
+}
+
+fn build_column_condition(
+    col: Col,
+    op: ComparisonOp,
+    label: &Label,
+    sql_type: crate::db::SqlType,
+    is_generic_context: bool,
+) -> Condition {
+    let bin_op = to_bin_op(op);
+
+    // 汎用カラムか？ (oneviewのRowTag用カラム)
+    let is_generic_row_col = col == Col::LabelStr
+        || col == Col::LabelInt
+        || col == Col::LabelDouble
+        || col == Col::LabelBool;
+
+    match label {
+        Label::Integer(i) => {
+            build_int_condition(col, bin_op, *i, is_generic_row_col)
+        }
+        Label::String(s) => {
+            build_str_condition(col, bin_op, s, sql_type, is_generic_row_col)
+        }
+        Label::Literal(s) => {
+            build_literal_condition(col, bin_op, s, is_generic_row_col)
+        }
+    }
+}
+
+fn build_int_condition(
+    col: Col,
+    op: BinOper,
+    val: i64,
+    is_generic: bool,
+) -> Condition {
+    let mut cond = Condition::any();
+    if col != Col::LabelStr {
+        cond = cond.add(Expr::col(col).binary(op, Expr::val(val)));
+    }
+    if is_generic {
+        cond = cond
+            .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(val as f64)));
+        if col == Col::LabelStr {
+            cond =
+                cond.add(Expr::col(Col::LabelInt).binary(op, Expr::val(val)));
+        }
+    }
+    cond
+}
+
+fn build_str_condition(
+    col: Col,
+    op: BinOper,
+    val: &str,
+    sql_type: crate::db::SqlType,
+    is_generic: bool,
+) -> Condition {
+    let string_cond = check_string_match(col, op, val, sql_type).map(|expr| Condition::any().add(expr));
+    let generic_conds = if is_generic {
+        try_parse_generic_value_as_cond(col, op, val)
+    } else {
+        None
+    };
+
+    [string_cond, generic_conds]
+        .into_iter()
+        .flatten() // None を除去
+        .fold(Condition::any(), |acc, cond| acc.add(cond))
+}
+
+fn check_string_match(
+    col: Col,
+    op: BinOper,
+    val: &str,
+    sql_type: crate::db::SqlType,
+) -> Option<sea_query::SimpleExpr> {
+    let is_numeric_field = matches!(
+        sql_type,
+        crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE
+    );
+
+    if is_numeric_field {
+        return None;
+    }
+
+    let (val_str, effective_op) = if val.starts_with('^') {
+        (format!("{}*", &val[1..]), BinOper::Custom("GLOB"))
+    } else if val.contains('*') || val.contains('?') || val.contains('[') {
+        (val.to_string(), BinOper::Custom("GLOB"))
+    } else {
+        (val.to_string(), op)
+    };
+
+    Some(Expr::col(col).binary(effective_op, val_str))
+}
+
+fn try_parse_generic_value_as_cond(
+    col: Col,
+    op: BinOper,
+    val: &str,
+) -> Option<Condition> {
+    // Try Integer -> Float -> Boolean chain
+    val.parse::<i64>()
+        .ok()
+        .map(|i| {
+            let mut c = Condition::any()
+                .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
+                .add(
+                    Expr::col(Col::LabelDouble).binary(op, Expr::val(i as f64)),
+                );
+            if col == Col::LabelStr {
+                c = c.add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)));
+            }
+            c
+        })
+        .or_else(|| {
+            val.parse::<f64>().ok().map(|f| {
+                Condition::any()
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)))
+            })
+        })
+        .or_else(|| {
+            match val {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+            .map(|b| {
+                Condition::any()
+                    .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)))
+            })
+        })
+}
+
+fn build_literal_condition(
+    col: Col,
+    op: BinOper,
+    val: &str,
+    is_generic: bool,
+) -> Condition {
+    let literal_cond = Expr::col(col).binary(op, Expr::val(val));
+    let generic_conds = if is_generic {
+        try_parse_generic_value_as_cond(col, op, val)
+    } else {
+        None
+    };
+
+    std::iter::once(Condition::any().add(literal_cond))
+        .chain(generic_conds)
+        .fold(Condition::any(), |acc, cond| acc.add(cond))
 }
 
 /// タグのメタデータ記述
@@ -115,7 +368,8 @@ impl Lens {
                 existing.logical_function = descriptor.logical_function;
             }
         } else {
-            self.registry.insert(descriptor.tag_type.clone(), descriptor);
+            self.registry
+                .insert(descriptor.tag_type.clone(), descriptor);
         }
     }
 
@@ -125,22 +379,36 @@ impl Lens {
     }
 
     /// 特定の標準タグ（SType）に対応する物理カラムを解決します。
-    pub fn resolve_col(&self, stype: crate::types::SType) -> anyhow::Result<crate::db::Col> {
+    pub fn resolve_col(
+        &self,
+        stype: crate::types::SType,
+    ) -> anyhow::Result<crate::db::Col> {
         let tag = TagType::Base(stype);
-        let desc = self.look_up(&tag).ok_or_else(|| anyhow::anyhow!("Tag definition not found: {:?}", tag))?;
+        let desc = self.look_up(&tag).ok_or_else(|| {
+            anyhow::anyhow!("Tag definition not found: {:?}", tag)
+        })?;
         if let StorageMapping::Column(col) = desc.storage {
             Ok(col)
         } else {
-            Err(anyhow::anyhow!("Tag {:?} is not mapped to a direct column", tag))
+            Err(anyhow::anyhow!(
+                "Tag {:?} is not mapped to a direct column",
+                tag
+            ))
         }
     }
 
     /// 論理的なクエリタグを、Lens の定義に基づいて展開（Expand）します。
-    pub fn expand(&self, node: crate::query::ast::QueryNode) -> anyhow::Result<crate::query::ast::QueryNode> {
+    pub fn expand(
+        &self,
+        node: crate::query::ast::QueryNode,
+    ) -> anyhow::Result<crate::query::ast::QueryNode> {
         self.expand_recursive(node)
     }
 
-    fn expand_recursive(&self, node: crate::query::ast::QueryNode) -> anyhow::Result<crate::query::ast::QueryNode> {
+    fn expand_recursive(
+        &self,
+        node: crate::query::ast::QueryNode,
+    ) -> anyhow::Result<crate::query::ast::QueryNode> {
         use crate::query::ast::QueryNode;
         match node {
             QueryNode::TypedTag(tt) => {
@@ -219,15 +487,16 @@ impl Lens {
             _ => None,
         };
 
-        resolve(&cmp.first).or_else(|| {
-            cmp.rest.iter().find_map(|(_, op)| resolve(op))
-        })
+        resolve(&cmp.first)
+            .or_else(|| cmp.rest.iter().find_map(|(_, op)| resolve(op)))
     }
 
     /// 展開済みノードを、物理的な所在（StorageMapping）を持つ ResolvedNode へ解決します。
-    pub fn resolve(&self, node: crate::query::ast::QueryNode) -> anyhow::Result<ResolvedNode> {
+    pub fn resolve(
+        &self,
+        node: crate::query::ast::QueryNode,
+    ) -> anyhow::Result<ResolvedNode> {
         use crate::query::ast::QueryNode;
-        use crate::query::ast::ComparisonOp;
         match node {
             QueryNode::TypedTag(tt) => {
                 let (storage, sql_type) = match self.look_up(&tt.tagtype) {
@@ -250,9 +519,9 @@ impl Lens {
             }
             QueryNode::ColumnMatch { tag, label } => {
                 let tag_type = TagType::Base(tag);
-                let desc = self
-                    .look_up(&tag_type)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown SType: {:?}", tag))?;
+                let desc = self.look_up(&tag_type).ok_or_else(|| {
+                    anyhow::anyhow!("Unknown SType: {:?}", tag)
+                })?;
                 Ok(ResolvedNode::Match {
                     tag_type,
                     storage: desc.storage.clone(),
@@ -261,9 +530,7 @@ impl Lens {
                     label,
                 })
             }
-            QueryNode::Comparison(cmp) => {
-                self.resolve_comparison(cmp)
-            }
+            QueryNode::Comparison(cmp) => self.resolve_comparison(cmp),
             QueryNode::And(nodes) => {
                 let mut resolved = Vec::new();
                 for n in nodes {
@@ -299,7 +566,10 @@ impl Lens {
         }
     }
 
-    fn resolve_comparison(&self, cmp: crate::query::ast::ComparisonNode) -> anyhow::Result<ResolvedNode> {
+    fn resolve_comparison(
+        &self,
+        cmp: crate::query::ast::ComparisonNode,
+    ) -> anyhow::Result<ResolvedNode> {
         let mut nodes = Vec::new();
         let mut current_left = cmp.first;
 
@@ -326,7 +596,6 @@ impl Lens {
         right: crate::query::ast::Operand,
     ) -> anyhow::Result<ResolvedNode> {
         use crate::query::ast::Operand;
-        use crate::query::ast::ComparisonOp;
 
         match (left, right) {
             (Operand::TypeRef(tt), Operand::Literal(lab)) => {
@@ -370,14 +639,27 @@ impl Lens {
     }
 }
 
-fn flip_op(op: crate::query::ast::ComparisonOp) -> crate::query::ast::ComparisonOp {
-    use crate::query::ast::ComparisonOp;
+pub fn flip_op(
+    op: crate::query::ast::ComparisonOp,
+) -> crate::query::ast::ComparisonOp {
     match op {
         ComparisonOp::Gt => ComparisonOp::Lt,
         ComparisonOp::Ge => ComparisonOp::Le,
         ComparisonOp::Lt => ComparisonOp::Gt,
         ComparisonOp::Le => ComparisonOp::Ge,
         other => other,
+    }
+}
+
+/// ComparisonOp を sea_query の BinOper に変換します。
+pub fn to_bin_op(op: ComparisonOp) -> BinOper {
+    match op {
+        ComparisonOp::Eq => BinOper::Equal,
+        ComparisonOp::Ne => BinOper::NotEqual,
+        ComparisonOp::Gt => BinOper::GreaterThan,
+        ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
+        ComparisonOp::Lt => BinOper::SmallerThan,
+        ComparisonOp::Le => BinOper::SmallerThanOrEqual,
     }
 }
 
@@ -584,5 +866,44 @@ mod tests {
                 stype
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    use sea_query::BinOper;
+
+    #[test]
+    fn test_cond_and_basic() {
+        let node = ResolvedNode::ColumnMatch {
+            tag: SType::LabelStr, 
+            label: Label::String("val".to_string()) 
+        };
+        
+        let nodes = vec![node];
+        let cond = cond_and(&nodes);
+        let debug_str = format!("{:?}", cond);
+        assert!(!debug_str.is_empty());
+    }
+
+    #[test]
+    fn test_build_int_condition() {
+        let cond = build_int_condition(Col::LabelInt, BinOper::Equal, 10, true);
+        let debug_str = format!("{:?}", cond);
+        assert!(!debug_str.is_empty());
+    }
+
+    #[test]
+    fn test_build_str_condition() {
+        let cond = build_str_condition(
+            Col::LabelStr, 
+            BinOper::Equal, 
+            "test_val", 
+            crate::db::SqlType::VARCHAR, 
+            true
+        );
+        let debug_str = format!("{:?}", cond);
+        assert!(!debug_str.is_empty());
     }
 }

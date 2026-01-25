@@ -66,7 +66,7 @@ impl FileManager {
         pick_plan.select_sql.create_table_as(&self.conn, Tbl::Sub)?;
 
         if candidate_ids.is_empty() {
-             return Ok(SearchResponse {
+            return Ok(SearchResponse {
                 results: vec![],
                 type_for_projection: projection.map(|p| p.into()),
                 cid: None,
@@ -345,7 +345,6 @@ impl FileManager {
             n,
             offset,
         );
-
 
         let labels = self
             .conn
@@ -871,4 +870,3 @@ mod tests {
         Ok(())
     }
 }
-

@@ -155,20 +155,36 @@ pub fn expand_comparison_node(
     node
 }
 
-pub fn expand_query_node(node: QueryNode, registry: &QueryFunctionRegistry) -> QueryNode {
+pub fn expand_query_node(
+    node: QueryNode,
+    registry: &QueryFunctionRegistry,
+) -> QueryNode {
     match node {
-        QueryNode::And(nodes) => {
-            QueryNode::And(nodes.into_iter().map(|n| expand_query_node(n, registry)).collect())
+        QueryNode::And(nodes) => QueryNode::And(
+            nodes
+                .into_iter()
+                .map(|n| expand_query_node(n, registry))
+                .collect(),
+        ),
+        QueryNode::Or(nodes) => QueryNode::Or(
+            nodes
+                .into_iter()
+                .map(|n| expand_query_node(n, registry))
+                .collect(),
+        ),
+        QueryNode::Difference(l, r) => QueryNode::Difference(
+            Box::new(expand_query_node(*l, registry)),
+            Box::new(expand_query_node(*r, registry)),
+        ),
+        QueryNode::Complement(c) => {
+            QueryNode::Complement(Box::new(expand_query_node(*c, registry)))
         }
-        QueryNode::Or(nodes) => {
-            QueryNode::Or(nodes.into_iter().map(|n| expand_query_node(n, registry)).collect())
+        QueryNode::Comparison(cmp) => {
+            QueryNode::Comparison(expand_comparison_node(cmp, registry))
         }
-        QueryNode::Difference(l, r) => {
-            QueryNode::Difference(Box::new(expand_query_node(*l, registry)), Box::new(expand_query_node(*r, registry)))
+        QueryNode::ColumnMatch { tag, label } => {
+            QueryNode::ColumnMatch { tag, label }
         }
-        QueryNode::Complement(c) => QueryNode::Complement(Box::new(expand_query_node(*c, registry))),
-        QueryNode::Comparison(cmp) => QueryNode::Comparison(expand_comparison_node(cmp, registry)),
-        QueryNode::ColumnMatch { tag, label } => QueryNode::ColumnMatch { tag, label },
         QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
         QueryNode::Projection(tt) => registry.expand_projection(tt),
     }
@@ -240,7 +256,11 @@ impl QueryFunction for ExtensionQuery {
         SType::Extension.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        let normalized = label.as_str().to_lowercase().trim_start_matches('.').to_string();
+        let normalized = label
+            .as_str()
+            .to_lowercase()
+            .trim_start_matches('.')
+            .to_string();
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(
                 <&str>::from(SType::Extension).to_string(),
@@ -281,7 +301,10 @@ impl QueryFunction for PathQuery {
             Label::Literal(_) => Label::Literal(normalized),
             _ => Label::String(normalized),
         };
-        QueryNode::TypedTag(TypedTag::new(<&str>::from(SType::Path).to_string(), new_label))
+        QueryNode::TypedTag(TypedTag::new(
+            <&str>::from(SType::Path).to_string(),
+            new_label,
+        ))
     }
 }
 
@@ -297,7 +320,10 @@ impl QueryFunction for ParentDirQuery {
             Label::Literal(_) => Label::Literal(normalized),
             _ => Label::String(normalized),
         };
-        QueryNode::TypedTag(TypedTag::new(<&str>::from(SType::Parentdir).to_string(), new_label))
+        QueryNode::TypedTag(TypedTag::new(
+            <&str>::from(SType::Parentdir).to_string(),
+            new_label,
+        ))
     }
 }
 
@@ -485,11 +511,11 @@ mod tests {
         // size > 1
         let node = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(1)))]
+            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(1)))],
         };
 
         let expanded = expand_comparison_node(node, &reg);
-        
+
         match &expanded.rest[0].1 {
             Operand::Literal(Label::Integer(val)) => assert_eq!(*val, 1024),
             _ => panic!("Expected Literal Integer"),
@@ -500,8 +526,12 @@ mod tests {
     fn test_expand_projection_mock() {
         struct MockProjQuery;
         impl QueryFunction for MockProjQuery {
-            fn name(&self) -> &str { "size" } // Must be a valid SType (Base) to trigger expansion
-            fn expand(&self, _: &Label) -> QueryNode { QueryNode::And(vec![]) }
+            fn name(&self) -> &str {
+                "size"
+            } // Must be a valid SType (Base) to trigger expansion
+            fn expand(&self, _: &Label) -> QueryNode {
+                QueryNode::And(vec![])
+            }
             // Mock: projection size -> projection rank
             fn expand_projection(&self, _: TagType) -> QueryNode {
                 QueryNode::Projection(TagType::from("rank"))
@@ -513,7 +543,7 @@ mod tests {
 
         let tag = TagType::from("size");
         let expanded = reg.expand_projection(tag);
-        
+
         if let QueryNode::Projection(t) = expanded {
             assert_eq!(t.as_str(), "rank");
         } else {
@@ -526,27 +556,35 @@ mod tests {
         let mut reg = QueryFunctionRegistry::new();
         struct MockTagQuery;
         impl QueryFunction for MockTagQuery {
-             fn name(&self) -> &str { "size" } // Use valid SType "size"
-             fn expand(&self, _label: &Label) -> QueryNode {
-                 QueryNode::Comparison(crate::query::ast::ComparisonNode {
-                     first: Operand::TypeRef(TagType::from("size")),
-                     rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(0)))]
-                 })
-             }
+            fn name(&self) -> &str {
+                "size"
+            } // Use valid SType "size"
+            fn expand(&self, _label: &Label) -> QueryNode {
+                QueryNode::Comparison(crate::query::ast::ComparisonNode {
+                    first: Operand::TypeRef(TagType::from("size")),
+                    rest: vec![(
+                        ComparisonOp::Gt,
+                        Operand::Literal(Label::Integer(0)),
+                    )],
+                })
+            }
         }
         reg.register(Box::new(MockTagQuery));
 
         // Registered ("size")
         let node = reg.process_tag(TagType::from("size"), Label::from("foo"));
         match node {
-            QueryNode::Comparison(_) => {},
+            QueryNode::Comparison(_) => {}
             _ => panic!("Expected Comparison from expansion, got {:?}", node),
         }
 
         // Unregistered
-        let node2 = reg.process_tag(TagType::from("unknown"), Label::from("foo"));
+        let node2 =
+            reg.process_tag(TagType::from("unknown"), Label::from("foo"));
         match node2 {
-            QueryNode::TypedTag(tt) => assert_eq!(tt.tagtype.as_str(), "unknown"),
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.tagtype.as_str(), "unknown")
+            }
             _ => panic!("Expected TypedTag for unknown, got {:?}", node2),
         }
     }
@@ -556,9 +594,13 @@ mod tests {
         let mut reg = QueryFunctionRegistry::new();
         struct MockRecursive;
         impl QueryFunction for MockRecursive {
-            fn name(&self) -> &str { "name" } // Use valid SType "name"
+            fn name(&self) -> &str {
+                "name"
+            } // Use valid SType "name"
             fn expand(&self, _: &Label) -> QueryNode {
-                 QueryNode::TypedTag(crate::types::TypedTag::new("expanded", "rec"))
+                QueryNode::TypedTag(crate::types::TypedTag::new(
+                    "expanded", "rec",
+                ))
             }
         }
         reg.register(Box::new(MockRecursive));
@@ -575,16 +617,24 @@ mod tests {
                 assert_eq!(nodes.len(), 2);
                 // First should be expanded
                 match &nodes[0] {
-                     QueryNode::TypedTag(tt) => {
-                         assert_eq!(tt.tagtype.as_str(), "expanded");
-                         assert_eq!(tt.label.as_str(), "rec");
-                     }
-                     _ => panic!("Expected expanded TypedTag in first node, got {:?}", nodes[0]),
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.tagtype.as_str(), "expanded");
+                        assert_eq!(tt.label.as_str(), "rec");
+                    }
+                    _ => panic!(
+                        "Expected expanded TypedTag in first node, got {:?}",
+                        nodes[0]
+                    ),
                 }
                 // Second should be same
                 match &nodes[1] {
-                     QueryNode::TypedTag(tt) => assert_eq!(tt.tagtype.as_str(), "other"),
-                     _ => panic!("Expected original TypedTag in second node, got {:?}", nodes[1]),
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.tagtype.as_str(), "other")
+                    }
+                    _ => panic!(
+                        "Expected original TypedTag in second node, got {:?}",
+                        nodes[1]
+                    ),
                 }
             }
             _ => panic!("Expected And node, got {:?}", expanded),
@@ -630,4 +680,3 @@ mod tests {
         }
     }
 }
-

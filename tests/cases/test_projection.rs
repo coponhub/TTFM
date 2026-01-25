@@ -163,33 +163,44 @@ fn test_projection_queries() {
     // ユーザーの指摘により、これをサポートすべきか確認するフェーズ。
     // 一旦アサーションは入れず、挙動を確認する。
     if results.type_for_projection == Some(ttfm::types::TagType::from("rank")) {
-         // サポートされている場合
-        assert!(!results.results.is_empty(), "rank: should return items if supported");
+        // サポートされている場合
+        assert!(
+            !results.results.is_empty(),
+            "rank: should return items if supported"
+        );
     }
 
     // 9. category: (投影 -> type='category')
     // label は SType::Label (仮想タグ) として予約されているため、
     // 任意のタグ名のテストには category を使用する。
     let note_id = fm.add_item("note", "Category Test Note").unwrap();
-    fm.tag_item(&note_id.to_string(), "category:important").unwrap();
-    
+    fm.tag_item(&note_id.to_string(), "category:important")
+        .unwrap();
+
     let results = fm.search("category:", Default::default()).unwrap();
-    assert!(results.results.len() >= 1, "category: should match items with category tag");
+    assert!(
+        results.results.len() >= 1,
+        "category: should match items with category tag"
+    );
     assert_eq!(
         results.type_for_projection,
         Some(ttfm::types::TagType::from("category"))
     );
-     // 値チェック
-    let has_val = results.results.iter().any(|r| {
-         r.get_tag_value("category").as_deref() == Some("important")
-    });
+    // 値チェック
+    let has_val = results
+        .results
+        .iter()
+        .any(|r| r.get_tag_value("category").as_deref() == Some("important"));
     assert!(has_val, "Should find 'important' category value");
 
     // 10. label: (Virtual Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する仮想プロジェクション。
     let results = fm.search("label:", Default::default()).unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
-    assert!(results.results.len() >= 3, "label: should match all tagged items");
+    assert!(
+        results.results.len() >= 3,
+        "label: should match all tagged items"
+    );
     assert_eq!(
         results.type_for_projection,
         Some(ttfm::types::TagType::from("label"))

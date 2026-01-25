@@ -154,12 +154,12 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
         .next()
         .ok_or_else(|| anyhow!(errors::MISSING_TAG_LABEL))?;
     let label = build_label(label_pair)?;
-    
+
     // Empty label implies projection (e.g. "extension:")
     if label.as_str().is_empty() {
         return Ok(QueryNode::Projection(tagtype));
     }
-    
+
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
 
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(unescape_unquoted(r"foo\]bar").unwrap(), "foo[]]bar");
         // ! is NOT escaped by simple logic mostly, but let's check input
         // Standard globs: [!] is one thing.
-        // implementation details in unescape_unquoted: 
+        // implementation details in unescape_unquoted:
         // "DuckDB GLOB pattern ... characters (*, ?, [, ], !) ... escape with [char]"
         assert_eq!(unescape_unquoted(r"foo\!bar").unwrap(), "foo[!]bar");
     }
@@ -461,7 +461,10 @@ mod tests {
                 // first should be 'size' (Operand::Literal) - conversion happens in expand phase
                 match cmp.first {
                     Operand::Literal(ref l) => assert_eq!(l.as_str(), "size"),
-                    _ => panic!("Expected Literal for first operand, got {:?}", cmp.first),
+                    _ => panic!(
+                        "Expected Literal for first operand, got {:?}",
+                        cmp.first
+                    ),
                 }
                 assert_eq!(cmp.rest.len(), 1);
                 assert_eq!(cmp.rest[0].0, ComparisonOp::Gt);

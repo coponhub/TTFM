@@ -1,8 +1,6 @@
 use crate::db::{Col, Tbl};
-use crate::query::ast::{
-    ComparisonNode, ComparisonOp, Operand, QueryNode,
-};
-use crate::query::lens::{ResolvedNode, StorageMapping};
+use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::lens::{to_bin_op, ResolvedNode, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use sea_query::{Alias, BinOper, Condition, Expr, Query, SelectStatement};
 
@@ -30,9 +28,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
     match node {
         ResolvedNode::And(nodes) => build_resolved_and_sql(nodes, view),
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
-        ResolvedNode::Difference(l, r) => {
-            build_resolved_diff_sql(l, r, view)
-        }
+        ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
         ResolvedNode::Projection(tt, storage) => {
             build_resolved_projection_sql(tt, storage, view)
@@ -89,8 +85,7 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
 
     for t in types {
         if t.contains('*') || t.contains('?') || t.contains('[') {
-            cond = cond
-                .add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
+            cond = cond.add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
         } else {
             fixed_types.push(t);
         }
@@ -162,15 +157,14 @@ fn build_resolved_diff_sql(
     q
 }
 
-fn build_resolved_comp_sql(
-    c: &ResolvedNode,
-    view: &str,
-) -> SelectStatement {
+fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
         .from(Alias::new(view))
-        .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "typedtag"]));
+        .and_where(
+            Expr::col(Col::ItemKind).is_not_in(vec!["type", "typedtag"]),
+        );
 
     let mut eq = Query::select();
     eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
@@ -189,24 +183,12 @@ fn build_resolved_projection_sql(
         .distinct()
         .from(Alias::new(view));
 
-    match storage {
-        StorageMapping::Column(col) => {
-            q.and_where(Expr::col(*col).is_not_null());
-        }
-        StorageMapping::RowTag { tag_key, .. } => {
-            let mut tag_op = BinOper::Equal;
-            if tag_key.contains('*') || tag_key.contains('?') || tag_key.contains('[') {
-                tag_op = BinOper::Custom("GLOB");
-            }
-            q.and_where(Expr::col(Col::Type).binary(tag_op, tag_key.as_str()));
-        }
-        StorageMapping::Virtual => {
-            // Virtual は解決済みなので基本来ないが、念のため
-            q.and_where(Expr::val(1).eq(0));
-        }
-    }
+    // ResolvedNode の Projection 用条件生成を利用
+    let cond = ResolvedNode::Projection(tagtype.clone(), storage.clone())
+        .to_condition();
+    q.cond_where(cond);
 
-    // 特別なタグの追加条件 (Phase 1 build_projection_sql を参考)
+    // 特別なタグの追加条件
     if let TagType::Base(SType::TypedTag) = tagtype {
         q.and_where(Expr::col(Col::TypedTag).is_not_null());
     } else if let TagType::Base(SType::Origin) = tagtype {
@@ -227,157 +209,8 @@ fn build_resolved_match_sql(
         .distinct()
         .from(Alias::new(view));
 
-    let bin_op = to_bin_op(op);
-    match storage {
-        StorageMapping::Column(col) => {
-            apply_physical_column_condition(
-                &mut q, *col, bin_op, label, sql_type,
-            );
-        }
-        StorageMapping::RowTag { column, tag_key } => {
-            let mut tag_op = BinOper::Equal;
-            if tag_key.contains('*')
-                || tag_key.contains('?')
-                || tag_key.contains('[')
-            {
-                tag_op = BinOper::Custom("GLOB");
-            }
-            q.and_where(Expr::col(Col::Type).binary(tag_op, tag_key.as_str()));
-            apply_physical_column_condition(
-                &mut q, *column, bin_op, label, sql_type,
-            );
-        }
-        StorageMapping::Virtual => {
-            q.and_where(Expr::val(1).eq(0));
-        }
-    }
+    q.cond_where(storage.to_condition(op, label, sql_type));
     q
-}
-
-fn apply_physical_column_condition(
-    q: &mut SelectStatement,
-    col: Col,
-    op: BinOper,
-    label: &Label,
-    sql_type: crate::db::SqlType,
-) {
-    let mut cond = Condition::any();
-
-    // 汎用カラムか？ (oneviewのRowTag用カラム)
-    // LabelStr, LabelInt, LabelDouble, LabelBool はすべて、
-    // 物理的に値がどこに入っているかが不定なため、
-    // 値の型に応じて適切なカラムを検索する必要がある。
-    let is_generic_row_col = col == Col::LabelStr
-        || col == Col::LabelInt
-        || col == Col::LabelDouble
-        || col == Col::LabelBool;
-
-    match label {
-        Label::Integer(i) => {
-            // LabelStr に対して数値比較を行うと型エラーになるためスキップし、
-            // 代わりに generic row column (LabelInt) への条件のみを使用する
-            if col != Col::LabelStr {
-                cond = cond.add(Expr::col(col).binary(op, Expr::val(*i)));
-            }
-            if is_generic_row_col {
-                // 数値の場合は Double カラムもチェック
-                cond = cond.add(
-                    Expr::col(Col::LabelDouble).binary(op, Expr::val(*i as f64)),
-                );
-                // LabelStr の場合、LabelInt もチェック対象にする
-                // (RowTagフォールバック時は LabelStr が渡ってくるため)
-                if col == Col::LabelStr {
-                    cond = cond
-                        .add(Expr::col(Col::LabelInt).binary(op, Expr::val(*i)));
-                }
-            }
-        }
-        Label::String(s) => {
-            let mut val_str = s.clone();
-            let mut effective_op = op;
-
-            // 数値型の場合は文字列比較を行わない
-            let is_numeric_field = sql_type == crate::db::SqlType::BIGINT
-                || sql_type == crate::db::SqlType::DOUBLE;
-
-            if !is_numeric_field {
-                if val_str.starts_with('^') {
-                    val_str = format!("{}*", &val_str[1..]);
-                    effective_op = BinOper::Custom("GLOB");
-                } else if val_str.contains('*')
-                    || val_str.contains('?')
-                    || val_str.contains('[')
-                {
-                    effective_op = BinOper::Custom("GLOB");
-                }
-                // LabelStr に対しては文字列比較を行う (汎用タグの場合ここに文字列が入るため)
-                // ただし数値フィールドだと分かっている場合はスキップする
-                if col == Col::LabelStr {
-                     cond = cond.add(
-                        Expr::col(col).binary(effective_op, Expr::val(val_str.as_str())),
-                    );
-                } else {
-                    // その他の文字列カラム（Name, Path等）
-                    cond = cond.add(
-                        Expr::col(col).binary(effective_op, Expr::val(val_str.as_str())),
-                    );
-                }
-            }
-
-            if is_generic_row_col {
-                if let Ok(i) = val_str.parse::<i64>() {
-                    cond = cond.add(
-                        Expr::col(Col::LabelInt).binary(effective_op, Expr::val(i)),
-                    );
-                    cond = cond.add(
-                        Expr::col(Col::LabelDouble)
-                            .binary(effective_op, Expr::val(i)),
-                    );
-                    if col == Col::LabelStr {
-                        cond = cond.add(
-                            Expr::col(Col::LabelInt).binary(effective_op, Expr::val(i)),
-                        );
-                    }
-                } else if let Ok(f) = val_str.parse::<f64>() {
-                    cond = cond.add(
-                        Expr::col(Col::LabelDouble)
-                            .binary(effective_op, Expr::val(f)),
-                    );
-                } else if val_str == "true" || val_str == "false" {
-                    cond = cond.add(
-                        Expr::col(Col::LabelBool)
-                            .binary(effective_op, Expr::val(val_str == "true")),
-                    );
-                }
-            }
-            // LiteralでないStringの場合、Genericでないカラム(FileId等)への数値適用の可否は
-            // パース結果次第だが、基本的には文字列比較を行う
-        }
-        Label::Literal(s) => {
-            // Literal は常に完全一致（または指定された演算子）。GLOB展開はしない。
-            // LabelStr の場合も文字列としての一致を確認する
-            cond = cond.add(Expr::col(col).binary(op, Expr::val(s.as_str())));
-            if is_generic_row_col {
-                // ... (数値パースロジックはStringと同じだが、GLOBはないのでopを使う)
-                if let Ok(i) = s.parse::<i64>() {
-                    cond = cond.add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)));
-                    cond = cond.add(
-                        Expr::col(Col::LabelDouble).binary(op, Expr::val(i as f64)),
-                    );
-                    if col == Col::LabelStr {
-                        cond = cond.add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)));
-                    }
-                } else if let Ok(f) = s.parse::<f64>() {
-                    cond = cond.add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)));
-                } else if s == "true" || s == "false" {
-                    cond = cond.add(
-                        Expr::col(Col::LabelBool).binary(op, Expr::val(s == "true")),
-                    );
-                }
-            }
-        }
-    }
-    q.and_where(cond.into());
 }
 
 // ========== SQL Generation Helper Functions ==========
@@ -479,10 +312,7 @@ fn build_comp_sql(c: &QueryNode, view: &str) -> SelectStatement {
     q
 }
 
-fn build_comparison_sql(
-    node: &ComparisonNode,
-    view: &str,
-) -> SelectStatement {
+fn build_comparison_sql(node: &ComparisonNode, view: &str) -> SelectStatement {
     let mut operands = vec![&node.first];
     for (_, opd) in &node.rest {
         operands.push(opd);
@@ -492,8 +322,7 @@ fn build_comparison_sql(
     for (i, (op, _)) in node.rest.iter().enumerate() {
         let left = operands[i];
         let right = operands[i + 1];
-        subqueries
-            .push(build_binary_comparison_sql(left, *op, right, view));
+        subqueries.push(build_binary_comparison_sql(left, *op, right, view));
     }
 
     if subqueries.len() == 1 {
@@ -532,17 +361,6 @@ fn build_binary_comparison_sql(
     apply_generic_comparison(q, tt, effective_op, lab)
 }
 
-/// ComparisonOp を sea_query の BinOper に変換します。
-fn to_bin_op(op: ComparisonOp) -> BinOper {
-    match op {
-        ComparisonOp::Eq => BinOper::Equal,
-        ComparisonOp::Ne => BinOper::NotEqual,
-        ComparisonOp::Gt => BinOper::GreaterThan,
-        ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
-        ComparisonOp::Lt => BinOper::SmallerThan,
-        ComparisonOp::Le => BinOper::SmallerThanOrEqual,
-    }
-}
 
 /// 比較演算子を反転します（オペランドの順序が逆転した時に使用）。
 /// 例: `a < b` を `b > a` に変換する際、`<` を `>` に反転
@@ -593,19 +411,14 @@ fn apply_generic_comparison(
             if let Ok(i) = s.parse::<i64>() {
                 condition = condition
                     .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
-                    .add(
-                        Expr::col(Col::LabelDouble)
-                            .binary(op, Expr::val(i)),
-                    );
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
             } else if let Ok(f) = s.parse::<f64>() {
-                condition = condition.add(
-                    Expr::col(Col::LabelDouble).binary(op, Expr::val(f)),
-                );
+                condition = condition
+                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)));
             } else if s == "true" || s == "false" {
                 let b = s == "true";
-                condition = condition.add(
-                    Expr::col(Col::LabelBool).binary(op, Expr::val(b)),
-                );
+                condition = condition
+                    .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)));
             }
         }
     };
@@ -618,10 +431,7 @@ fn apply_generic_comparison(
 /// プロジェクションクエリのSQLを生成します。
 ///
 /// 指定されたタグタイプの値を持つ全アイテムを返します。
-fn build_projection_sql(
-    tagtype: &TagType,
-    view: &str,
-) -> SelectStatement {
+fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
@@ -754,9 +564,8 @@ fn build_typed_tag_sql(
                 s.clone()
             };
 
-            cond = cond.add(
-                Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)),
-            );
+            cond = cond
+                .add(Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)));
             if let Ok(i) = s.parse::<i64>() {
                 cond = cond.add(Expr::col(Col::LabelInt).eq(i));
             }
@@ -793,34 +602,33 @@ pub fn build_label_aggregation_sql(
     // カラム選択ロジック
     // カラム選択ロジック
     // SType に応じて、どのカラムを LabelStr/Int 等にマッピングするかを決定
-    let (col_str, col_int, col_double, col_bool) =
-        match proj_type {
-            TagType::Base(SType::TypedTag) => (
-                Expr::col(Col::TypedTag),
-                Expr::val(Option::<i64>::None),
-                Expr::val(Option::<f64>::None),
-                Expr::val(Option::<bool>::None),
-            ),
-            TagType::Base(SType::Origin) => (
-                Expr::col(Col::Origin),
-                Expr::val(Option::<i64>::None),
-                Expr::val(Option::<f64>::None),
-                Expr::val(Option::<bool>::None),
-            ),
-            TagType::Base(SType::Rank) => (
-                Expr::val(Option::<String>::None),
-                Expr::col(Col::Rank),
-                Expr::val(Option::<f64>::None),
-                Expr::val(Option::<bool>::None),
-            ),
-            // その他のタグ（Label含む）は標準的なカラムを使用
-            _ => (
-                Expr::col(Col::LabelStr),
-                Expr::col(Col::LabelInt),
-                Expr::col(Col::LabelDouble),
-                Expr::col(Col::LabelBool),
-            ),
-        };
+    let (col_str, col_int, col_double, col_bool) = match proj_type {
+        TagType::Base(SType::TypedTag) => (
+            Expr::col(Col::TypedTag),
+            Expr::val(Option::<i64>::None),
+            Expr::val(Option::<f64>::None),
+            Expr::val(Option::<bool>::None),
+        ),
+        TagType::Base(SType::Origin) => (
+            Expr::col(Col::Origin),
+            Expr::val(Option::<i64>::None),
+            Expr::val(Option::<f64>::None),
+            Expr::val(Option::<bool>::None),
+        ),
+        TagType::Base(SType::Rank) => (
+            Expr::val(Option::<String>::None),
+            Expr::col(Col::Rank),
+            Expr::val(Option::<f64>::None),
+            Expr::val(Option::<bool>::None),
+        ),
+        // その他のタグ（Label含む）は標準的なカラムを使用
+        _ => (
+            Expr::col(Col::LabelStr),
+            Expr::col(Col::LabelInt),
+            Expr::col(Col::LabelDouble),
+            Expr::col(Col::LabelBool),
+        ),
+    };
 
     q.expr_as(col_str, Col::LabelStr)
         .expr_as(col_int, Col::LabelInt)
@@ -975,9 +783,9 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_query::{BinOper, SqliteQueryBuilder, Alias, Query};
     use crate::query::ast::QueryNode;
-    use crate::types::{TypedTag, Label, TagType};
+    use crate::types::{Label, TagType, TypedTag};
+    use sea_query::{Alias, BinOper, Query, SqliteQueryBuilder};
 
     #[test]
     fn test_to_bin_op_conversion() {
@@ -989,7 +797,10 @@ mod tests {
     #[test]
     fn test_flip_bin_op() {
         assert_eq!(flip_bin_op(BinOper::GreaterThan), BinOper::SmallerThan);
-        assert_eq!(flip_bin_op(BinOper::SmallerThanOrEqual), BinOper::GreaterThanOrEqual);
+        assert_eq!(
+            flip_bin_op(BinOper::SmallerThanOrEqual),
+            BinOper::GreaterThanOrEqual
+        );
         assert_eq!(flip_bin_op(BinOper::Equal), BinOper::Equal);
     }
 
@@ -997,14 +808,17 @@ mod tests {
     fn test_normalize_comparison_order() {
         let left = Operand::TypeRef(TagType::from("size"));
         let right = Operand::Literal(Label::Integer(100));
-        let (tt, lab, op) = normalize_comparison(&left, BinOper::Equal, &right).unwrap();
+        let (tt, lab, op) =
+            normalize_comparison(&left, BinOper::Equal, &right).unwrap();
         assert_eq!(tt.as_str(), "size");
         assert_eq!(lab, Label::Integer(100));
         assert_eq!(op, BinOper::Equal);
 
         let left_lit = Operand::Literal(Label::Integer(100));
         let right_tag = Operand::TypeRef(TagType::from("size"));
-        let (tt2, lab2, op2) = normalize_comparison(&left_lit, BinOper::GreaterThan, &right_tag).unwrap();
+        let (tt2, lab2, op2) =
+            normalize_comparison(&left_lit, BinOper::GreaterThan, &right_tag)
+                .unwrap();
         assert_eq!(tt2.as_str(), "size");
         assert_eq!(lab2, Label::Integer(100));
         assert_eq!(op2, BinOper::SmallerThan);
@@ -1012,13 +826,17 @@ mod tests {
 
     #[test]
     fn test_to_tag_condition_generation() {
-        let node = QueryNode::TypedTag(TypedTag::new("size", Label::Integer(100)));
+        let node =
+            QueryNode::TypedTag(TypedTag::new("size", Label::Integer(100)));
         let cond = to_tag_condition(&node);
-        
+
         let mut query = Query::select();
-        query.column(Alias::new("id")).from(Alias::new("tbl")).cond_where(cond);
+        query
+            .column(Alias::new("id"))
+            .from(Alias::new("tbl"))
+            .cond_where(cond);
         let sql = query.to_string(SqliteQueryBuilder);
-        
+
         // Verifying exact string content is fragile across sea-query versions/builders.
         // We ensure a query is generated (condition applied).
         assert!(!sql.is_empty());
@@ -1034,12 +852,15 @@ mod tests {
         assert!(result.contains("'foo.txt'"));
         assert!(result.contains("'name'"));
     }
-    
+
     #[test]
     fn test_build_comparison_sql_int() {
         let node = ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(100)))],
+            rest: vec![(
+                ComparisonOp::Gt,
+                Operand::Literal(Label::Integer(100)),
+            )],
         };
         let sql = build_comparison_sql(&node, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
@@ -1052,10 +873,9 @@ mod tests {
         let node1 = QueryNode::TypedTag(TypedTag::new("name", "foo"));
         let node2 = QueryNode::TypedTag(TypedTag::new("extension", "rs"));
         let nodes = vec![node1, node2];
-        
+
         let sql = build_and_sql(&nodes, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
         assert!(result.contains("INTERSECT"));
     }
 }
-

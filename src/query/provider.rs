@@ -34,7 +34,8 @@ impl<'a> Provider<'a> {
         let resolved = &self.lens.resolved_query;
 
         // 1. SQL 構築
-        let mut select_sql = crate::query::sql::build_pick_sql(resolved, "oneview");
+        let mut select_sql =
+            crate::query::sql::build_pick_sql(resolved, "oneview");
 
         // 検索仕様に基づき Rank と ItemId で降順ソート
         let rank_col = self.lens.resolve_col(SType::Rank)?;
@@ -91,9 +92,9 @@ mod tests {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
         let lens = Lens::with_standard("directory:docs").unwrap();
         let expanded = &lens.expanded_query;
-        
+
         let target_label = Label::String("docs".to_string());
-        
+
         // 少なくとも TypedTag(Directory) ではなくなっているはず
         if let QueryNode::TypedTag(tt) = &expanded {
             assert_ne!(tt.tagtype, TagType::Base(SType::Directory));
@@ -105,10 +106,15 @@ mod tests {
         // Focused Lens 生成
         let lens = Lens::with_standard("size:100").unwrap();
         let resolved = &lens.resolved_query;
-        
-        if let ResolvedNode::Match { storage, sql_type, .. } = resolved {
+
+        if let ResolvedNode::Match {
+            storage, sql_type, ..
+        } = resolved
+        {
             match storage {
-                StorageMapping::RowTag { tag_key, .. } => assert_eq!(tag_key, "size"),
+                StorageMapping::RowTag { tag_key, .. } => {
+                    assert_eq!(tag_key, "size")
+                }
                 _ => panic!("Expected RowTag mapping for size"),
             }
             // Size は LabelInt (BIGINT)
@@ -129,20 +135,36 @@ mod tests {
             item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
             label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
         )", []).unwrap();
-        conn.execute("INSERT INTO oneview VALUES 
-            (1, 10, 'file', 'user', 'extension', 'rs', NULL, NULL, NULL)", []).unwrap();
-        conn.execute("INSERT INTO oneview VALUES 
-            (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)", []).unwrap();
-        conn.execute("INSERT INTO oneview VALUES 
-            (2, 5, 'file', 'user', 'extension', 'txt', NULL, NULL, NULL)", []).unwrap();
-        conn.execute("INSERT INTO oneview VALUES 
-            (2, 5, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)", []).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'extension', 'rs', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (2, 5, 'file', 'user', 'extension', 'txt', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (2, 5, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        )
+        .unwrap();
 
         let lens = Lens::with_standard("extension:rs").unwrap();
         let provider = Provider::new(&lens, &conn);
 
         let plan = provider.pick(None, None).unwrap();
-        
+
         assert_eq!(plan.candidate_ids, vec![1]);
     }
 }

@@ -136,10 +136,7 @@ impl QueryNode {
         }
     }
 
-    fn collect_projections(
-        &self,
-        projections: &mut HashSet<String>,
-    ) {
+    fn collect_projections(&self, projections: &mut HashSet<String>) {
         match self {
             QueryNode::And(nodes) | QueryNode::Or(nodes) => {
                 for node in nodes {
@@ -272,14 +269,14 @@ mod tests {
             right: Operand::TypeRef(TagType::from("height")),
         };
         let op = Operand::Calculation(Box::new(calc));
-        
+
         // Wrap in a comparison to test via QueryNode or manually helper
         // Let's test helper directly via ComparisonNode
         let node = QueryNode::Comparison(ComparisonNode {
             first: op,
             rest: vec![(ComparisonOp::Gt, Operand::Literal("100".into()))],
         });
-        
+
         let types = node.get_all_types();
         assert!(types.contains(&"width".to_string()));
         assert!(types.contains(&"height".to_string()));
