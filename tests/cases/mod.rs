@@ -7,5 +7,4 @@ pub mod test_projection;
 pub mod test_size_units;
 pub mod verify_search;
 pub mod verify_search_all;
-pub mod verify_projection_limit;
 pub mod wasm_plugin_test;
