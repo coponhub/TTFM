@@ -120,7 +120,13 @@ impl QueryNode {
             QueryNode::Comparison(cmp) => {
                 cmp.collect_types(types);
             }
-            QueryNode::ColumnMatch { .. } => {}
+            QueryNode::ColumnMatch { tag, label } => {
+                if *tag == SType::Type {
+                    types.insert(label.as_str());
+                } else {
+                    types.insert(tag.to_string());
+                }
+            }
             QueryNode::TypedTag(tt) => {
                 types.insert(tt.tagtype.as_str().to_string());
             }

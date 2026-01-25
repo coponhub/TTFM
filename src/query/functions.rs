@@ -1,6 +1,8 @@
 use crate::query::ast::{Operand, QueryNode};
-use crate::types::{Label, TagType, TypedTag};
+use crate::types::{Label, SType, TagType, TypedTag};
+use path_slash::PathExt;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// 検索クエリの展開を行う抽象化単位。
 pub trait QueryFunction: Send + Sync {
@@ -41,7 +43,7 @@ impl QueryFunctionRegistry {
 
     /// 標準的なクエリ展開関数を登録済みのレジストリを返します。
     pub fn with_standard() -> Self {
-        use crate::query_functions::*;
+        use self::*;
         let mut reg = Self::new();
         reg.register(Box::new(DirectoryQuery));
         reg.register(Box::new(FilenameQuery));
@@ -155,29 +157,292 @@ pub fn expand_comparison_node(
 
 pub fn expand_query_node(node: QueryNode, registry: &QueryFunctionRegistry) -> QueryNode {
     match node {
-        QueryNode::And(nodes) => QueryNode::And(
-            nodes.into_iter().map(|n| expand_query_node(n, registry)).collect(),
-        ),
-        QueryNode::Or(nodes) => QueryNode::Or(
-            nodes.into_iter().map(|n| expand_query_node(n, registry)).collect(),
-        ),
-        QueryNode::Difference(l, r) => QueryNode::Difference(
-            Box::new(expand_query_node(*l, registry)),
-            Box::new(expand_query_node(*r, registry)),
-        ),
-        QueryNode::Complement(c) => {
-            QueryNode::Complement(Box::new(expand_query_node(*c, registry)))
+        QueryNode::And(nodes) => {
+            QueryNode::And(nodes.into_iter().map(|n| expand_query_node(n, registry)).collect())
         }
-        QueryNode::Comparison(cmp) => {
-            QueryNode::Comparison(expand_comparison_node(cmp, registry))
+        QueryNode::Or(nodes) => {
+            QueryNode::Or(nodes.into_iter().map(|n| expand_query_node(n, registry)).collect())
         }
-        QueryNode::ColumnMatch { tag, label } => {
-            QueryNode::ColumnMatch { tag, label }
+        QueryNode::Difference(l, r) => {
+            QueryNode::Difference(Box::new(expand_query_node(*l, registry)), Box::new(expand_query_node(*r, registry)))
         }
-        QueryNode::TypedTag(tt) => {
-            registry.process_tag(tt.tagtype, tt.label)
-        }
+        QueryNode::Complement(c) => QueryNode::Complement(Box::new(expand_query_node(*c, registry))),
+        QueryNode::Comparison(cmp) => QueryNode::Comparison(expand_comparison_node(cmp, registry)),
+        QueryNode::ColumnMatch { tag, label } => QueryNode::ColumnMatch { tag, label },
+        QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
         QueryNode::Projection(tt) => registry.expand_projection(tt),
+    }
+}
+
+/// "directory:name" -> "name:name & is_dir:true" への展開
+pub struct DirectoryQuery;
+impl QueryFunction for DirectoryQuery {
+    fn name(&self) -> &str {
+        SType::Directory.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::Filename).to_string(),
+                label.clone(),
+            )),
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("true".to_string()),
+            )),
+        ])
+    }
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("true".to_string()),
+            )),
+            QueryNode::Projection(SType::Filename.into()),
+        ])
+    }
+}
+
+/// "filename:name" -> "name:name & is_dir:false" への展開
+pub struct FilenameQuery;
+impl QueryFunction for FilenameQuery {
+    fn name(&self) -> &str {
+        SType::Filename.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::Filename).to_string(),
+                label.clone(),
+            )),
+            // ディレクトリを除外
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("false".to_string()),
+            )),
+        ])
+    }
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("false".to_string()),
+            )),
+            QueryNode::Projection(SType::Filename.into()),
+        ])
+    }
+}
+
+/// "extension:RS" -> "extension:rs" (小文字化とドットの削除)
+pub struct ExtensionQuery;
+impl QueryFunction for ExtensionQuery {
+    fn name(&self) -> &str {
+        SType::Extension.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        let normalized = label.as_str().to_lowercase().trim_start_matches('.').to_string();
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::Extension).to_string(),
+                Label::String(normalized),
+            )),
+            // ディレクトリを除外 (拡張子はファイルのみ)
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("false".to_string()),
+            )),
+        ])
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new(
+                <&str>::from(SType::IsDir).to_string(),
+                Label::String("false".to_string()),
+            )),
+            QueryNode::Projection(tagtype),
+        ])
+    }
+}
+
+/// パスの正規化を行う内部ヘルパー
+fn normalize_path(path_str: &str) -> String {
+    Path::new(path_str).to_slash_lossy().to_string()
+}
+
+/// "path:C:\foo" -> "path:C:/foo"
+pub struct PathQuery;
+impl QueryFunction for PathQuery {
+    fn name(&self) -> &str {
+        SType::Path.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        let normalized = normalize_path(&label.as_str());
+        let new_label = match label {
+            Label::Literal(_) => Label::Literal(normalized),
+            _ => Label::String(normalized),
+        };
+        QueryNode::TypedTag(TypedTag::new(<&str>::from(SType::Path).to_string(), new_label))
+    }
+}
+
+/// "parentdir:C:\foo" -> "parentdir:C:/foo"
+pub struct ParentDirQuery;
+impl QueryFunction for ParentDirQuery {
+    fn name(&self) -> &str {
+        SType::Parentdir.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        let normalized = normalize_path(&label.as_str());
+        let new_label = match label {
+            Label::Literal(_) => Label::Literal(normalized),
+            _ => Label::String(normalized),
+        };
+        QueryNode::TypedTag(TypedTag::new(<&str>::from(SType::Parentdir).to_string(), new_label))
+    }
+}
+
+/// "name:label" -> ColumnMatch(SType::Name, label)
+pub struct NameQuery;
+impl QueryFunction for NameQuery {
+    fn name(&self) -> &str {
+        SType::Name.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::TypedTag(TypedTag::new("name", label.clone()))
+    }
+}
+
+/// "item_kind:label" -> ColumnMatch(SType::ItemKind, label)
+pub struct ItemKindQuery;
+impl QueryFunction for ItemKindQuery {
+    fn name(&self) -> &str {
+        SType::ItemKind.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::ItemKind,
+            label: label.clone(),
+        }
+    }
+}
+
+/// "rank:label" -> ColumnMatch(SType::Rank, label)
+pub struct RankQuery;
+impl QueryFunction for RankQuery {
+    fn name(&self) -> &str {
+        SType::Rank.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::TypedTag(TypedTag::new("rank", label.clone()))
+    }
+}
+
+/// "size:label" -> ColumnMatch(SType::Size, label)
+pub struct SizeQuery;
+impl QueryFunction for SizeQuery {
+    fn name(&self) -> &str {
+        SType::Size.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        let label = self.normalize_label(label);
+        QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
+    }
+    fn normalize_label(&self, label: &Label) -> Label {
+        match label {
+            Label::String(s) | Label::Literal(s) => {
+                if let Some(bytes) = crate::util::parse_size(s) {
+                    Label::Integer(bytes)
+                } else {
+                    label.clone()
+                }
+            }
+            _ => label.clone(),
+        }
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
+}
+
+/// "mtime:label" -> ColumnMatch(SType::Mtime, label)
+pub struct MtimeQuery;
+impl QueryFunction for MtimeQuery {
+    fn name(&self) -> &str {
+        SType::Mtime.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::TypedTag(TypedTag::new("mtime", label.clone()))
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
+}
+
+/// "origin:system/user" -> ColumnMatch(SType::Origin, label)
+pub struct OriginQuery;
+impl QueryFunction for OriginQuery {
+    fn name(&self) -> &str {
+        SType::Origin.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::Origin,
+            label: label.clone(),
+        }
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
+}
+
+/// "type:label" -> ColumnMatch(SType::Type, label)
+pub struct TypeQuery;
+impl QueryFunction for TypeQuery {
+    fn name(&self) -> &str {
+        SType::Type.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::Type,
+            label: label.clone(),
+        }
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
+}
+
+/// "label:value" -> ColumnMatch(SType::Label, label)
+pub struct LabelQuery;
+impl QueryFunction for LabelQuery {
+    fn name(&self) -> &str {
+        SType::Label.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::Label,
+            label: label.clone(),
+        }
+    }
+    fn expand_projection(&self, tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(tagtype)
+    }
+}
+
+/// "typedtag:label" -> item_kind:typedtag & name:label (タグ自体の検索)
+pub struct TypedTagQuery;
+impl QueryFunction for TypedTagQuery {
+    fn name(&self) -> &str {
+        SType::TypedTag.into()
+    }
+    fn expand(&self, label: &Label) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::TypedTag,
+            label: label.clone(),
+        }
+    }
+    fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
+        QueryNode::Projection(SType::TypedTag.into())
     }
 }
 
@@ -323,6 +588,45 @@ mod tests {
                 }
             }
             _ => panic!("Expected And node, got {:?}", expanded),
+        }
+    }
+
+    #[test]
+    fn test_typedtag_query_expansion() {
+        let q = TypedTagQuery;
+
+        // 1. expand (通常の検索)
+        let label = Label::String("extension:rs".to_string());
+        let expanded = q.expand(&label);
+
+        if let QueryNode::ColumnMatch { tag, label: l } = expanded {
+            assert_eq!(tag, SType::TypedTag);
+            assert_eq!(l, label);
+        } else {
+            panic!("Expected ColumnMatch, got {:?}", expanded);
+        }
+
+        // 2. expand_projection (プロジェクション)
+        let expanded_proj = q.expand_projection(SType::TypedTag.into());
+
+        if let QueryNode::Projection(tt) = expanded_proj {
+            assert_eq!(tt, SType::TypedTag.into());
+        } else {
+            panic!("Expected Projection, got {:?}", expanded_proj);
+        }
+    }
+
+    #[test]
+    fn test_type_query_expansion() {
+        let q = TypeQuery;
+
+        // expand_projection
+        let expanded_proj = q.expand_projection(SType::Type.into());
+        // Projection(Type)
+        if let QueryNode::Projection(tt) = expanded_proj {
+            assert_eq!(tt, TagType::Base(SType::Type));
+        } else {
+            panic!("Expected Projection node, got {:?}", expanded_proj);
         }
     }
 }

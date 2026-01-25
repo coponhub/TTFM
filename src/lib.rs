@@ -18,7 +18,6 @@ pub mod macros;
 pub mod oneview;
 pub mod plugins;
 pub mod query;
-pub mod query_functions;
 pub mod rank;
 pub mod response;
 mod taggers;

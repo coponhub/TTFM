@@ -45,51 +45,25 @@ impl FileManager {
         let offset = options.offset.unwrap_or(0);
         let limit = if n > 0 { n + 1 } else { 0 };
 
-        let node = if query.trim().is_empty() {
-            QueryNode::And(vec![])
+        let lens = crate::query::lens::Lens::with_standard(query)?;
+        let provider = crate::query::provider::Provider::new(&lens, &self.conn);
+
+        // Lens 内部で展開されたクエリからプロジェクション（投影タグ）を取得
+        let projection = lens.expanded_query.get_projections().first().cloned();
+
+        // Provider による ID 抽出 (Pick)
+        let (pick_offset, pick_limit) = if projection.is_none() {
+            (Some(offset), Some(limit))
         } else {
-            crate::query::parse(query)?
+            (None, None)
         };
 
-        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-        let expanded = node.expand(&q_reg);
-        let projection = expanded.get_projections().first().cloned();
-        
-        // Item Selector による ID 抽出
-        let mut item_sql = expanded.to_sql("oneview");
-        item_sql
-            .order_by_expr(Expr::col(Col::Rank).into(), sea_query::Order::Desc);
-        item_sql.order_by_expr(
-            Expr::col(Col::ItemId).into(),
-            sea_query::Order::Desc,
-        );
+        let pick_plan = provider.pick(pick_offset, pick_limit)?;
+        let candidate_ids = pick_plan.candidate_ids;
 
-        // プロジェクション時は、ユニークラベルを取得する際に offset/limit をかけるため、
-        // ここでの絞り込みには適用しない。
-        if projection.is_none() {
-            if offset > 0 {
-                item_sql.offset(offset as u64);
-            }
-            if limit > 0 {
-                item_sql.limit(limit as u64);
-            }
-        }
-        // DuckDB の隔離された環境で ID を抽出
+        // 後続処理のために一時テーブル sub を作成 (search.rs の既存仕様を維持)
         Tbl::Sub.drop_table(&self.conn).ok();
-        item_sql.create_table_as(&self.conn, Tbl::Sub)?;
-        
-        // Count total matching (before limit) if needed.
-        // For accurate total_count with projection, we might need a separate query,
-        // but exact matches are in `Sub` now.
-        // The `cid` (Cache ID) logic would use `Sub` content.
-
-        // Get candidate IDs from Sub for simple non-projection results
-        let candidate_ids = self
-            .conn
-            .prepare("SELECT item_id FROM sub")?
-            .query_map([], |r| r.get::<_, i64>(0))?
-            .collect::<Result<Vec<i64>, _>>()?;
+        pick_plan.select_sql.create_table_as(&self.conn, Tbl::Sub)?;
 
         if candidate_ids.is_empty() {
              return Ok(SearchResponse {
@@ -165,7 +139,7 @@ impl FileManager {
         let fetch_ids: Vec<i64> =
             target_entries.iter().map(|(id, _)| *id).collect();
 
-        let tag_cond = expanded.to_tag_condition();
+        let tag_cond = lens.expanded_query.to_tag_condition();
         let mut fetch_sql = Query::select();
         fetch_sql
             .columns(Col::raw_tag_row_columns())
