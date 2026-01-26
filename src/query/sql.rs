@@ -46,6 +46,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
     }
 }
 
+
 /// クエリに使用されている、または投影されている型のリストを元に
 /// OneView から特定のタグ行のみを抽出するための Condition を生成します。
 pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {

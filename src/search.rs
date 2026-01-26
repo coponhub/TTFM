@@ -46,19 +46,19 @@ impl FileManager {
         let limit = if n > 0 { n + 1 } else { 0 };
 
         let lens = crate::query::lens::Lens::with_standard(query)?;
-        let provider = crate::query::provider::Provider::new(&lens, &self.conn);
+        let fetcher = crate::query::fetcher::Fetcher::new(&lens, &self.conn);
 
         // Lens 内部で展開されたクエリからプロジェクション（投影タグ）を取得
         let projection = lens.expanded_query.get_projections().first().cloned();
 
-        // Provider による ID 抽出 (Pick)
+        // Fetcher による ID 抽出 (Pick)
         let (pick_offset, pick_limit) = if projection.is_none() {
             (Some(offset), Some(limit))
         } else {
             (None, None)
         };
 
-        let pick_plan = provider.pick(pick_offset, pick_limit)?;
+        let pick_plan = fetcher.pick(pick_offset, pick_limit)?;
         let candidate_ids = pick_plan.candidate_ids;
 
         // 後続処理のために一時テーブル sub を作成 (search.rs の既存仕様を維持)

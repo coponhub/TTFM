@@ -12,13 +12,13 @@ pub struct PickPlan {
     pub candidate_ids: Vec<i64>,
 }
 
-/// クエリの初期抽出（Pick）を担当する。
-pub struct Provider<'a> {
+/// クエリに基づきデータベースからデータを取得（Fetch）を担当する。
+pub struct Fetcher<'a> {
     pub lens: &'a Lens,
     pub conn: &'a duckdb::Connection,
 }
 
-impl<'a> Provider<'a> {
+impl<'a> Fetcher<'a> {
     pub fn new(lens: &'a Lens, conn: &'a duckdb::Connection) -> Self {
         Self { lens, conn }
     }
@@ -93,7 +93,7 @@ mod tests {
         let lens = Lens::with_standard("directory:docs").unwrap();
         let expanded = &lens.expanded_query;
 
-        let target_label = Label::String("docs".to_string());
+        let _target_label = Label::String("docs".to_string());
 
         // 少なくとも TypedTag(Directory) ではなくなっているはず
         if let QueryNode::TypedTag(tt) = &expanded {
@@ -126,7 +126,6 @@ mod tests {
 
     #[test]
     fn test_pick_integration() {
-        use crate::db::SqlType;
         std::env::set_var("TTFM_DEBUG", "1");
 
         let conn = duckdb::Connection::open_in_memory().unwrap();
@@ -161,9 +160,9 @@ mod tests {
         .unwrap();
 
         let lens = Lens::with_standard("extension:rs").unwrap();
-        let provider = Provider::new(&lens, &conn);
+        let fetcher = Fetcher::new(&lens, &conn);
 
-        let plan = provider.pick(None, None).unwrap();
+        let plan = fetcher.pick(None, None).unwrap();
 
         assert_eq!(plan.candidate_ids, vec![1]);
     }

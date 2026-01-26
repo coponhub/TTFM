@@ -402,93 +402,7 @@ impl Lens {
         &self,
         node: crate::query::ast::QueryNode,
     ) -> anyhow::Result<crate::query::ast::QueryNode> {
-        self.expand_recursive(node)
-    }
-
-    fn expand_recursive(
-        &self,
-        node: crate::query::ast::QueryNode,
-    ) -> anyhow::Result<crate::query::ast::QueryNode> {
-        use crate::query::ast::QueryNode;
-        match node {
-            QueryNode::TypedTag(tt) => {
-                if let Some(desc) = self.look_up(&tt.tagtype) {
-                    if let Some(func) = &desc.logical_function {
-                        return Ok(func.expand(&tt.label));
-                    }
-                }
-                Ok(QueryNode::TypedTag(tt))
-            }
-            QueryNode::Projection(tagtype) => {
-                if let Some(desc) = self.look_up(&tagtype) {
-                    if let Some(func) = &desc.logical_function {
-                        return Ok(func.expand_projection(tagtype.clone()));
-                    }
-                }
-                Ok(QueryNode::Projection(tagtype))
-            }
-            QueryNode::And(nodes) => {
-                let mut expanded = Vec::new();
-                for n in nodes {
-                    expanded.push(self.expand_recursive(n)?);
-                }
-                Ok(QueryNode::And(expanded))
-            }
-            QueryNode::Or(nodes) => {
-                let mut expanded = Vec::new();
-                for n in nodes {
-                    expanded.push(self.expand_recursive(n)?);
-                }
-                Ok(QueryNode::Or(expanded))
-            }
-            QueryNode::Difference(l, r) => Ok(QueryNode::Difference(
-                Box::new(self.expand_recursive(*l)?),
-                Box::new(self.expand_recursive(*r)?),
-            )),
-            QueryNode::Complement(c) => {
-                Ok(QueryNode::Complement(Box::new(self.expand_recursive(*c)?)))
-            }
-            QueryNode::Comparison(cmp) => {
-                Ok(QueryNode::Comparison(self.expand_comparison_node(cmp)?))
-            }
-            other => Ok(other),
-        }
-    }
-
-    fn expand_comparison_node(
-        &self,
-        mut cmp: crate::query::ast::ComparisonNode,
-    ) -> anyhow::Result<crate::query::ast::ComparisonNode> {
-        use crate::query::ast::Operand;
-
-        if let Some(func) = self.find_logical_function(&cmp) {
-            if let Operand::Literal(lab) = &mut cmp.first {
-                *lab = func.normalize_label(lab);
-            }
-            for (_, op) in &mut cmp.rest {
-                if let Operand::Literal(lab) = op {
-                    *lab = func.normalize_label(lab);
-                }
-            }
-        }
-        Ok(cmp)
-    }
-
-    fn find_logical_function<'a>(
-        &'a self,
-        cmp: &crate::query::ast::ComparisonNode,
-    ) -> Option<&'a dyn crate::query::QueryFunction> {
-        use crate::query::ast::Operand;
-
-        let resolve = |op: &Operand| match op {
-            Operand::TypeRef(tt) => {
-                self.look_up(tt).and_then(|d| d.logical_function.as_deref())
-            }
-            _ => None,
-        };
-
-        resolve(&cmp.first)
-            .or_else(|| cmp.rest.iter().find_map(|(_, op)| resolve(op)))
+        expand_query_node(self, node)
     }
 
     /// 展開済みノードを、物理的な所在（StorageMapping）を持つ ResolvedNode へ解決します。
@@ -496,146 +410,240 @@ impl Lens {
         &self,
         node: crate::query::ast::QueryNode,
     ) -> anyhow::Result<ResolvedNode> {
-        use crate::query::ast::QueryNode;
-        match node {
-            QueryNode::TypedTag(tt) => {
-                let (storage, sql_type) = match self.look_up(&tt.tagtype) {
-                    Some(desc) => (desc.storage.clone(), desc.sql_type),
-                    None => (
-                        StorageMapping::RowTag {
-                            column: crate::db::Col::LabelStr,
-                            tag_key: tt.tagtype.as_str().to_string(),
-                        },
-                        crate::db::SqlType::VARCHAR,
-                    ),
-                };
-                Ok(ResolvedNode::Match {
-                    tag_type: tt.tagtype,
-                    storage,
-                    sql_type,
-                    op: ComparisonOp::Eq,
-                    label: tt.label,
-                })
-            }
-            QueryNode::ColumnMatch { tag, label } => {
-                let tag_type = TagType::Base(tag);
-                let desc = self.look_up(&tag_type).ok_or_else(|| {
-                    anyhow::anyhow!("Unknown SType: {:?}", tag)
-                })?;
-                Ok(ResolvedNode::Match {
-                    tag_type,
-                    storage: desc.storage.clone(),
-                    sql_type: desc.sql_type,
-                    op: ComparisonOp::Eq,
-                    label,
-                })
-            }
-            QueryNode::Comparison(cmp) => self.resolve_comparison(cmp),
-            QueryNode::And(nodes) => {
-                let mut resolved = Vec::new();
-                for n in nodes {
-                    resolved.push(self.resolve(n)?);
+        resolve_query_node(self, node)
+    }
+}
+
+fn expand_query_node(
+    lens: &Lens,
+    node: crate::query::ast::QueryNode,
+) -> anyhow::Result<crate::query::ast::QueryNode> {
+    use crate::query::ast::QueryNode;
+    match node {
+        QueryNode::TypedTag(tt) => {
+            if let Some(desc) = lens.look_up(&tt.tagtype) {
+                if let Some(func) = &desc.logical_function {
+                    return Ok(func.expand(&tt.label));
                 }
-                Ok(ResolvedNode::And(resolved))
             }
-            QueryNode::Or(nodes) => {
-                let mut resolved = Vec::new();
-                for n in nodes {
-                    resolved.push(self.resolve(n)?);
+            Ok(QueryNode::TypedTag(tt))
+        }
+        QueryNode::Projection(tagtype) => {
+            if let Some(desc) = lens.look_up(&tagtype) {
+                if let Some(func) = &desc.logical_function {
+                    return Ok(func.expand_projection(tagtype.clone()));
                 }
-                Ok(ResolvedNode::Or(resolved))
             }
-            QueryNode::Difference(l, r) => Ok(ResolvedNode::Difference(
-                Box::new(self.resolve(*l)?),
-                Box::new(self.resolve(*r)?),
-            )),
-            QueryNode::Complement(c) => {
-                Ok(ResolvedNode::Complement(Box::new(self.resolve(*c)?)))
+            Ok(QueryNode::Projection(tagtype))
+        }
+        QueryNode::And(nodes) => {
+            let mut expanded = Vec::new();
+            for n in nodes {
+                expanded.push(expand_query_node(lens, n)?);
             }
-            QueryNode::Projection(tt) => {
-                let storage = match self.look_up(&tt) {
-                    Some(desc) => desc.storage.clone(),
-                    None => StorageMapping::RowTag {
+            Ok(QueryNode::And(expanded))
+        }
+        QueryNode::Or(nodes) => {
+            let mut expanded = Vec::new();
+            for n in nodes {
+                expanded.push(expand_query_node(lens, n)?);
+            }
+            Ok(QueryNode::Or(expanded))
+        }
+        QueryNode::Difference(l, r) => Ok(QueryNode::Difference(
+            Box::new(expand_query_node(lens, *l)?),
+            Box::new(expand_query_node(lens, *r)?),
+        )),
+        QueryNode::Complement(c) => {
+            Ok(QueryNode::Complement(Box::new(expand_query_node(lens, *c)?)))
+        }
+        QueryNode::Comparison(cmp) => {
+            Ok(QueryNode::Comparison(expand_comparison_node(lens, cmp)?))
+        }
+        other => Ok(other),
+    }
+}
+
+fn expand_comparison_node(
+    lens: &Lens,
+    mut cmp: crate::query::ast::ComparisonNode,
+) -> anyhow::Result<crate::query::ast::ComparisonNode> {
+    use crate::query::ast::Operand;
+
+    if let Some(func) = find_logical_function(lens, &cmp) {
+        if let Operand::Literal(lab) = &mut cmp.first {
+            *lab = func.normalize_label(lab);
+        }
+        for (_, op) in &mut cmp.rest {
+            if let Operand::Literal(lab) = op {
+                *lab = func.normalize_label(lab);
+            }
+        }
+    }
+    Ok(cmp)
+}
+
+fn find_logical_function<'a>(
+    lens: &'a Lens,
+    cmp: &crate::query::ast::ComparisonNode,
+) -> Option<&'a dyn crate::query::QueryFunction> {
+    use crate::query::ast::Operand;
+
+    let resolve = |op: &Operand| match op {
+        Operand::TypeRef(tt) => {
+            lens.look_up(tt).and_then(|d| d.logical_function.as_deref())
+        }
+        _ => None,
+    };
+
+    resolve(&cmp.first)
+        .or_else(|| cmp.rest.iter().find_map(|(_, op)| resolve(op)))
+}
+
+fn resolve_query_node(
+    lens: &Lens,
+    node: crate::query::ast::QueryNode,
+) -> anyhow::Result<ResolvedNode> {
+    use crate::query::ast::QueryNode;
+    match node {
+        QueryNode::TypedTag(tt) => {
+            let (storage, sql_type) = match lens.look_up(&tt.tagtype) {
+                Some(desc) => (desc.storage.clone(), desc.sql_type),
+                None => (
+                    StorageMapping::RowTag {
                         column: crate::db::Col::LabelStr,
-                        tag_key: tt.as_str().to_string(),
+                        tag_key: tt.tagtype.as_str().to_string(),
                     },
-                };
-                Ok(ResolvedNode::Projection(tt, storage))
+                    crate::db::SqlType::VARCHAR,
+                ),
+            };
+            Ok(ResolvedNode::Match {
+                tag_type: tt.tagtype,
+                storage,
+                sql_type,
+                op: ComparisonOp::Eq,
+                label: tt.label,
+            })
+        }
+        QueryNode::ColumnMatch { tag, label } => {
+            let tag_type = TagType::Base(tag);
+            let desc = lens.look_up(&tag_type).ok_or_else(|| {
+                anyhow::anyhow!("Unknown SType: {:?}", tag)
+            })?;
+            Ok(ResolvedNode::Match {
+                tag_type,
+                storage: desc.storage.clone(),
+                sql_type: desc.sql_type,
+                op: ComparisonOp::Eq,
+                label,
+            })
+        }
+        QueryNode::Comparison(cmp) => resolve_comparison(lens, cmp),
+        QueryNode::And(nodes) => {
+            let mut resolved = Vec::new();
+            for n in nodes {
+                resolved.push(resolve_query_node(lens, n)?);
             }
-            _ => Err(anyhow::anyhow!("Unsupported query node for resolution")),
+            Ok(ResolvedNode::And(resolved))
         }
-    }
-
-    fn resolve_comparison(
-        &self,
-        cmp: crate::query::ast::ComparisonNode,
-    ) -> anyhow::Result<ResolvedNode> {
-        let mut nodes = Vec::new();
-        let mut current_left = cmp.first;
-
-        for (op, right) in cmp.rest {
-            nodes.push(self.resolve_single_match(
-                current_left,
-                op,
-                right.clone(),
-            )?);
-            current_left = right;
-        }
-
-        if nodes.len() == 1 {
-            Ok(nodes.pop().unwrap())
-        } else {
-            Ok(ResolvedNode::And(nodes))
-        }
-    }
-
-    fn resolve_single_match(
-        &self,
-        left: crate::query::ast::Operand,
-        op: crate::query::ast::ComparisonOp,
-        right: crate::query::ast::Operand,
-    ) -> anyhow::Result<ResolvedNode> {
-        use crate::query::ast::Operand;
-
-        match (left, right) {
-            (Operand::TypeRef(tt), Operand::Literal(lab)) => {
-                let (storage, sql_type) = self.get_storage_and_type(&tt);
-                Ok(ResolvedNode::Match {
-                    tag_type: tt,
-                    storage,
-                    sql_type,
-                    op,
-                    label: lab,
-                })
+        QueryNode::Or(nodes) => {
+            let mut resolved = Vec::new();
+            for n in nodes {
+                resolved.push(resolve_query_node(lens, n)?);
             }
-            (Operand::Literal(lab), Operand::TypeRef(tt)) => {
-                let (storage, sql_type) = self.get_storage_and_type(&tt);
-                Ok(ResolvedNode::Match {
-                    tag_type: tt,
-                    storage,
-                    sql_type,
-                    op: flip_op(op),
-                    label: lab,
-                })
-            }
-            _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
+            Ok(ResolvedNode::Or(resolved))
         }
-    }
-
-    fn get_storage_and_type(
-        &self,
-        tt: &crate::types::TagType,
-    ) -> (StorageMapping, crate::db::SqlType) {
-        match self.look_up(tt) {
-            Some(desc) => (desc.storage.clone(), desc.sql_type),
-            None => (
-                StorageMapping::RowTag {
+        QueryNode::Difference(l, r) => Ok(ResolvedNode::Difference(
+            Box::new(resolve_query_node(lens, *l)?),
+            Box::new(resolve_query_node(lens, *r)?),
+        )),
+        QueryNode::Complement(c) => {
+            Ok(ResolvedNode::Complement(Box::new(resolve_query_node(lens, *c)?)))
+        }
+        QueryNode::Projection(tt) => {
+            let storage = match lens.look_up(&tt) {
+                Some(desc) => desc.storage.clone(),
+                None => StorageMapping::RowTag {
                     column: crate::db::Col::LabelStr,
                     tag_key: tt.as_str().to_string(),
                 },
-                crate::db::SqlType::VARCHAR,
-            ),
+            };
+            Ok(ResolvedNode::Projection(tt, storage))
         }
+        _ => Err(anyhow::anyhow!("Unsupported query node for resolution")),
+    }
+}
+
+fn resolve_comparison(
+    lens: &Lens,
+    cmp: crate::query::ast::ComparisonNode,
+) -> anyhow::Result<ResolvedNode> {
+    let mut nodes = Vec::new();
+    let mut current_left = cmp.first;
+
+    for (op, right) in cmp.rest {
+        nodes.push(resolve_single_match(
+            lens,
+            current_left,
+            op,
+            right.clone(),
+        )?);
+        current_left = right;
+    }
+
+    if nodes.len() == 1 {
+        Ok(nodes.pop().unwrap())
+    } else {
+        Ok(ResolvedNode::And(nodes))
+    }
+}
+
+fn resolve_single_match(
+    lens: &Lens,
+    left: crate::query::ast::Operand,
+    op: crate::query::ast::ComparisonOp,
+    right: crate::query::ast::Operand,
+) -> anyhow::Result<ResolvedNode> {
+    use crate::query::ast::Operand;
+
+    match (left, right) {
+        (Operand::TypeRef(tt), Operand::Literal(lab)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            Ok(ResolvedNode::Match {
+                tag_type: tt,
+                storage,
+                sql_type,
+                op,
+                label: lab,
+            })
+        }
+        (Operand::Literal(lab), Operand::TypeRef(tt)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            Ok(ResolvedNode::Match {
+                tag_type: tt,
+                storage,
+                sql_type,
+                op: flip_op(op),
+                label: lab,
+            })
+        }
+        _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
+    }
+}
+
+fn get_storage_and_type(
+    lens: &Lens,
+    tt: &crate::types::TagType,
+) -> (StorageMapping, crate::db::SqlType) {
+    match lens.look_up(tt) {
+        Some(desc) => (desc.storage.clone(), desc.sql_type),
+        None => (
+            StorageMapping::RowTag {
+                column: crate::db::Col::LabelStr,
+                tag_key: tt.as_str().to_string(),
+            },
+            crate::db::SqlType::VARCHAR,
+        ),
     }
 }
 
