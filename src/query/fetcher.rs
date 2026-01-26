@@ -1,9 +1,8 @@
-
-use crate::query::lens::Lens;
-use crate::response::SearchResult;
+use crate::query::lens::{Lens, StorageMapping};
+use crate::response::{RawTagRow, SearchResult};
 use crate::types::{Origin, SType, TagType};
 use anyhow::Result;
-use sea_query::Iden;
+use duckdb::types::Value;
 
 /// 検索結果の抽出（Pick）計画。
 #[derive(Debug, Clone)]
@@ -68,15 +67,7 @@ impl<'a> Fetcher<'a> {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<SearchResult>> {
-        use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
-
-        // 識別子からクォートなしのカラム名を取得するヘルパー
-        let col = |c: SType| {
-            let mut s = String::new();
-            c.unquoted(&mut s);
-            s
-        };
 
         let select_sql = crate::query::sql::build_fetch_items_sql(
             &self.lens.resolved_query,
@@ -92,46 +83,9 @@ impl<'a> Fetcher<'a> {
 
         let mut stmt = self.conn.prepare(&sql_str)?;
         let item_iter = stmt.query_map([], |row| {
-            let id: i64 = row.get(col(SType::ItemId).as_str())?;
-            let mut res = SearchResult::new_empty(id);
-            res.rank = row.get::<_, Option<i64>>(col(SType::Rank).as_str())?.unwrap_or(0);
-            res.item_kind = row.get(col(SType::ItemKind).as_str())?;
-
-            let Value::List(tags) = row.get("tags")? else {
-                return Ok(res);
-            };
-
-            for v in tags {
-                let Value::Struct(ref map) = v else { continue };
-
-                // type カラムからタグの型を特定
-                let Some(tag_type) = map.get(&col(SType::Type)).and_then(|v| match v {
-                    Value::Text(s) => Some(TagType::from(s.as_str())),
-                    _ => None,
-                }) else {
-                    continue;
-                };
-
-
-
-                // Lens に物理デコードを委譲 (Label への復元)
-                let Some(label) = self.lens.decode_label(&tag_type, &v) else {
-
-                    continue;
-                };
-
-                // Origin の解決
-                let origin = map
-                    .get(&col(SType::Origin))
-                    .and_then(|v| match v {
-                        Value::Text(s) if s == "user" => Some(Origin::User),
-                        _ => None,
-                    })
-                    .unwrap_or(Origin::System);
-
-                res.apply_tag(label, origin);
-            }
-            Ok(res)
+            // 列名の重複回避のため、ID 直接指定ではなく「構造化データ全体」を受け取るのを理想とするが
+            // 現状の fetch_items_sql が生成する単一行から復元する。
+            self.decode_item_from_row(row)
         })?;
 
         let mut results = Vec::new();
@@ -143,6 +97,190 @@ impl<'a> Fetcher<'a> {
             }
         }
         Ok(results)
+    }
+
+    /// ラベル（型）ごとの集約結果を取得します。
+    pub fn fetch_label_groups(
+        &self,
+        proj_type: &TagType,
+        limit: usize,
+        offset: usize,
+    ) -> Result<crate::response::PagedResult<crate::response::LabelGroup>> {
+        use crate::response::{LabelGroup, PagedResult};
+        use duckdb::types::Value;
+        use sea_query::PostgresQueryBuilder;
+
+        let select_sql = crate::query::sql::build_fetch_label_groups_sql(
+            self.lens, proj_type, "oneview", limit, offset,
+        )?;
+
+        let sql_str = select_sql.to_string(PostgresQueryBuilder);
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            println!(
+                "--- FETCH LABEL GROUPS SQL ---\n{}\n----------------",
+                sql_str
+            );
+        }
+
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let mut rows = stmt.query([])?;
+        let mut groups = Vec::new();
+
+        let desc = self.lens.look_up_or_default(proj_type);
+        let main_col_name = match &desc.storage {
+            StorageMapping::Column(col) => col.name(),
+            StorageMapping::RowTag { column, .. } => column.name(),
+            _ => anyhow::bail!(
+                "Unsupported storage for projection: {:?}",
+                desc.storage
+            ),
+        };
+
+        while let Some(row) = rows.next()? {
+            let label_val: Value = row.get(main_col_name.as_str())?;
+            let total_count: i64 = row.get(SType::Label.name().as_str())?;
+            let Value::List(items_list_of_lists) =
+                row.get("aggregated_items")?
+            else {
+                continue;
+            };
+
+            let results = self.decode_grouped_items(items_list_of_lists);
+
+            groups.push(LabelGroup {
+                label: self.lens.resolve_label(proj_type, &label_val),
+                results,
+                total_count: total_count as usize,
+            });
+        }
+
+        Ok(PagedResult::new(groups, limit, offset))
+    }
+
+    /// プロジェクション（ラベル集計）で得られた、入れ子構造のアイテムリストをデコードします。
+    fn decode_grouped_items(
+        &self,
+        items_list: Vec<Value>,
+    ) -> Vec<SearchResult> {
+        items_list
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::List(l) => Some(l),
+                _ => None,
+            })
+            .filter_map(|item_tags| {
+                let mut it = item_tags.into_iter().filter_map(|v| match v {
+                    Value::Struct(m) => Some(m),
+                    _ => None,
+                });
+
+                let first_map = it.next()?;
+                let mut res = self.decode_item_from_map(&first_map).ok()?;
+                for tag_map in it {
+                    let _ = self.decode_item_tags_from_map(&mut res, &tag_map);
+                }
+                Some(res)
+            })
+            .collect()
+    }
+
+    /// DuckDB の Row から SearchResult を構築します。
+    fn decode_item_from_row(
+        &self,
+        row: &duckdb::Row,
+    ) -> duckdb::Result<SearchResult> {
+        use duckdb::types::Value;
+
+        let id: i64 = row.get(SType::ItemId.name().as_str())?;
+        let mut res = SearchResult::new_empty(id);
+        res.rank = row
+            .get::<_, Option<i64>>(SType::Rank.name().as_str())?
+            .unwrap_or(0);
+        res.item_kind = row.get(SType::ItemKind.name().as_str())?;
+
+        let Value::List(tags) = row.get("tags")? else {
+            return Ok(res);
+        };
+
+        for v in tags {
+            let Value::Struct(map) = v else {
+                continue;
+            };
+            if let Some(row) = RawTagRow::from_map(&map) {
+                res.apply_raw_tag(row);
+            }
+        }
+        Ok(res)
+    }
+
+    /// 物理カラムの Map (struct_pack 結果) から SearchResult を構築します。
+    fn decode_item_from_map(
+        &self,
+        map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
+    ) -> Result<SearchResult> {
+        use duckdb::types::Value;
+
+        let id = map
+            .get(&SType::ItemId.name())
+            .and_then(|v| match v {
+                Value::BigInt(i) => Some(*i),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("Missing item_id in packed data"))?;
+
+        let mut res = SearchResult::new_empty(id);
+        res.rank = map
+            .get(&SType::Rank.name())
+            .and_then(|v| match v {
+                Value::BigInt(i) => Some(*i),
+                _ => None,
+            })
+            .unwrap_or(0);
+        res.item_kind = map
+            .get(&SType::ItemKind.name())
+            .and_then(|v| match v {
+                Value::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        self.decode_item_tags_from_map(&mut res, map)?;
+
+        Ok(res)
+    }
+
+    /// Map 形式のタグデータ（1行分）を SearchResult に適用します。
+    fn decode_item_tags_from_map(
+        &self,
+        res: &mut SearchResult,
+        map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
+    ) -> Result<()> {
+        use duckdb::types::Value;
+
+        let type_key = SType::Type.name();
+        let origin_key = SType::Origin.name();
+
+        let Some(tag_type_str) = map.get(&type_key).and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+
+        let tag_type = TagType::from(tag_type_str);
+        if let Some(label) = self.lens.decode_label_from_map(&tag_type, map) {
+            let origin = map
+                .get(&origin_key)
+                .and_then(|v| match v {
+                    Value::Text(s) if s == "user" => Some(Origin::User),
+                    _ => None,
+                })
+                .unwrap_or(Origin::System);
+
+            res.apply_tag(label, origin);
+        }
+
+        Ok(())
     }
 }
 
@@ -171,8 +309,9 @@ pub fn fetch_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::lens::Lens;
-    use crate::types::SType;
+    use crate::query::ast::QueryNode;
+    use crate::query::lens::{Lens, ResolvedNode, StorageMapping};
+    use crate::types::{Label, SType, TagType};
 
     #[test]
     fn test_expand_query_recursive() {

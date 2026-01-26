@@ -56,6 +56,52 @@ impl RawTagRow {
             origin: r.get(col(Col::Origin).as_str())?,
         })
     }
+
+    pub fn from_map(
+        map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
+    ) -> Option<Self> {
+        use crate::db::Col;
+        use duckdb::types::Value;
+
+        let get_str = |c: Col| {
+            map.get(&c.name()).and_then(|v| match v {
+                Value::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+        };
+        let get_i64 = |c: Col| {
+            map.get(&c.name()).and_then(|v| match v {
+                Value::BigInt(i) => Some(*i),
+                _ => None,
+            })
+        };
+        let get_f64 = |c: Col| {
+            map.get(&c.name()).and_then(|v| match v {
+                Value::Double(d) => Some(*d),
+                Value::BigInt(i) => Some(*i as f64),
+                _ => None,
+            })
+        };
+        let get_bool = |c: Col| {
+            map.get(&c.name()).and_then(|v| match v {
+                Value::Boolean(b) => Some(*b),
+                _ => None,
+            })
+        };
+
+        Some(Self {
+            id: get_i64(Col::ItemId)?,
+            item_kind: get_str(Col::ItemKind)
+                .unwrap_or_else(|| "unknown".to_string()),
+            tag_type: get_str(Col::Type).unwrap_or_default(),
+            label_str: get_str(Col::LabelStr),
+            label_int: get_i64(Col::LabelInt),
+            label_double: get_f64(Col::LabelDouble),
+            label_bool: get_bool(Col::LabelBool),
+            origin: get_str(Col::Origin)
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+    }
 }
 
 /// 検索クエリの結果全体を表す構造体。
@@ -86,13 +132,38 @@ pub struct TypeGroup<'a> {
     pub results: Vec<&'a SearchResult>,
 }
 
-/// 投影された「一意な値（ラベル）」とそのアイテム集合（所有権あり）。
+/// 投影された「一意な値（ラベル）」とそのアイテム集合（所有権あり）/// ラベルごとのグループ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelGroup {
-    /// 投影されたラベルの値
+    /// ラベル（グループ名）
     pub label: crate::types::Label,
-    /// このラベルを持つアイテムの集合
+    /// そのラベルを持つアイテム（プレビュー）
     pub results: Vec<SearchResult>,
+    /// このラベルを持つ全アイテム数
+    pub total_count: usize,
+}
+
+/// ページングされた結果を保持する構造体。
+#[derive(Debug, Clone)]
+pub struct PagedResult<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    pub current_page: usize,
+}
+
+impl<T> PagedResult<T> {
+    pub fn new(mut items: Vec<T>, limit: usize, offset: usize) -> Self {
+        let has_more = limit > 0 && items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+        let current_page = if limit > 0 { (offset / limit) + 1 } else { 1 };
+        Self {
+            items,
+            has_more,
+            current_page,
+        }
+    }
 }
 
 impl SearchResponse {
@@ -166,11 +237,11 @@ impl SearchResponse {
             cid,
             has_more,
             total_count: Some(0),
+            type_for_projection,
             progress: crate::types::Progress {
                 current: 0,
                 total: Some(0),
             },
-            type_for_projection,
         }
     }
 
@@ -210,8 +281,12 @@ impl SearchResult {
         match &label {
             Label::Name(s) => self.name = s.clone(),
             Label::Rank(i) => self.rank = *i,
-            Label::Size(i) => self.intrinsic.size = Some(crate::types::FileSize(*i)),
-            Label::Mtime(i) => self.intrinsic.mtime = Some(crate::types::FileTimestamp(*i)),
+            Label::Size(i) => {
+                self.intrinsic.size = Some(crate::types::FileSize(*i))
+            }
+            Label::Mtime(i) => {
+                self.intrinsic.mtime = Some(crate::types::FileTimestamp(*i))
+            }
             Label::Hash(s) => self.intrinsic.hash = Some(s.clone()),
             Label::ItemKind(s) => self.item_kind = s.clone(),
             _ => {} // 通常タグは特化フィールド更新なし
@@ -337,7 +412,12 @@ impl SearchResult {
             }
             // 仮想ラベル: type: (タグの型一覧)
             TagType::Base(SType::Type) => {
-                let mut types: Vec<TagType> = self.tags.entries.iter().map(|e| e.label.tag_type()).collect();
+                let mut types: Vec<TagType> = self
+                    .tags
+                    .entries
+                    .iter()
+                    .map(|e| e.label.tag_type())
+                    .collect();
                 // 固定属性も型として含める（設計上の整合性）
                 if self.intrinsic.size.is_some() {
                     types.push(TagType::Base(SType::Size));
@@ -347,11 +427,15 @@ impl SearchResult {
                 }
                 types.sort();
                 types.dedup();
-                return types.into_iter().map(|t| Label::from(t.as_str())).collect();
+                return types
+                    .into_iter()
+                    .map(|t| Label::from(t.as_str()))
+                    .collect();
             }
             // 仮想ラベル: label: (アイテムが持つ全てのラベル値)
             TagType::Base(SType::Label) => {
-                let mut labels: Vec<Label> = self.tags.entries.iter().map(|e| e.label.clone()).collect();
+                let mut labels: Vec<Label> =
+                    self.tags.entries.iter().map(|e| e.label.clone()).collect();
                 labels.sort();
                 labels.dedup();
                 return labels;
@@ -481,6 +565,7 @@ mod tests {
         let label_group = LabelGroup {
             label: Label::from("rs"),
             results: vec![res1.clone(), res2.clone()],
+            total_count: 2,
         };
 
         let response = SearchResponse {
@@ -508,10 +593,12 @@ mod tests {
         let group1 = LabelGroup {
             label: Label::from(20),
             results: vec![res1.clone()],
+            total_count: 1,
         };
         let group2 = LabelGroup {
             label: Label::from(100),
             results: vec![res2.clone()],
+            total_count: 1,
         };
 
         let response = SearchResponse {

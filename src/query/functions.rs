@@ -71,8 +71,7 @@ impl QueryFunctionRegistry {
         // LiteralCustom の場合は魔法（展開関数）をスキップする
         if let TagType::LiteralCustom(_) = tagtype {
             return QueryNode::And(vec![QueryNode::TypedTag(TypedTag::new(
-                tagtype,
-                label,
+                tagtype, label,
             ))]);
         }
 
@@ -185,7 +184,9 @@ pub fn expand_query_node(
         QueryNode::ColumnMatch { tag, label } => {
             QueryNode::ColumnMatch { tag, label }
         }
-        QueryNode::TypedTag(tt) => registry.process_tag(tt.label.tag_type(), tt.label),
+        QueryNode::TypedTag(tt) => {
+            registry.process_tag(tt.label.tag_type(), tt.label)
+        }
         QueryNode::Projection(tt) => registry.expand_projection(tt),
     }
 }
@@ -271,7 +272,9 @@ impl QueryFunction for PathQuery {
     fn expand(&self, label: &Label) -> QueryNode {
         let normalized = normalize_path(&label.as_str());
         let label_val = match label.value() {
-            crate::types::LabelValue::Literal(_) => crate::types::LabelValue::Literal(normalized),
+            crate::types::LabelValue::Literal(_) => {
+                crate::types::LabelValue::Literal(normalized)
+            }
             _ => crate::types::LabelValue::String(normalized),
         };
         QueryNode::TypedTag(TypedTag::new(SType::Path, label_val))
@@ -287,7 +290,9 @@ impl QueryFunction for ParentDirQuery {
     fn expand(&self, label: &Label) -> QueryNode {
         let normalized = normalize_path(&label.as_str());
         let label_val = match label.value() {
-            crate::types::LabelValue::Literal(_) => crate::types::LabelValue::Literal(normalized),
+            crate::types::LabelValue::Literal(_) => {
+                crate::types::LabelValue::Literal(normalized)
+            }
             _ => crate::types::LabelValue::String(normalized),
         };
         QueryNode::TypedTag(TypedTag::new(SType::Parentdir, label_val))

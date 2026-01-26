@@ -50,42 +50,7 @@ impl FileManager {
         // プロジェクション（投影タグ）の有無を確認
         let projection = lens.get_projection();
 
-        let (final_results, has_more) = if let Some(ref proj_type) = projection {
-            // 1. プロジェクションケース: ラベル集約が必要なため、既存の多段フローを維持
-            // (将来的に 1 SQL へ統合可能だが、一旦は安全のために維持)
-            let labels =
-                self.get_unique_labels(true, None, proj_type, n, offset)?;
-            let has_more = n > 0 && labels.len() > n;
-            let final_labels =
-                if has_more { &labels[..n] } else { &labels[..] };
-
-            let target_entries = self.expand_labels_to_entries(
-                true,
-                None,
-                proj_type,
-                final_labels,
-            )?;
-
-            let fetch_ids: Vec<i64> =
-                target_entries.iter().map(|(id, _)| *id).collect();
-
-            // ID 集合からメタデータを一括取得 (ここは fetch_items の内部部品として切り出し可能だが、一旦既存流用)
-            let mut fetch_query = Query::select();
-            fetch_query
-                .columns(Col::raw_tag_row_columns())
-                .from(Tbl::OneView)
-                .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
-
-            let res = self.fetch_and_build(
-                target_entries,
-                fetch_query.to_string(PostgresQueryBuilder),
-                None, // cid は後で設定
-                has_more,
-                n,
-                Some(&proj_type.as_str().to_string()),
-            )?;
-            (res.results, has_more)
-        } else {
+        let (final_results, has_more) = {
             // 2. 通常検索ケース: Fetcher によるシングルパス取得
             let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
             let has_more = n > 0 && results.len() > n;
@@ -105,32 +70,28 @@ impl FileManager {
         };
 
         // 4. ラベルグループの構築
-        let label_results = if let Some(ref _proj_type) = projection {
-            let mut label_map: std::collections::BTreeMap<
-                crate::types::Label,
-                Vec<SearchResult>,
-            > = std::collections::BTreeMap::new();
+        if let Some(tag) = lens.get_projection() {
+            let n = options.n.unwrap_or(100);
+            let offset = options.offset.unwrap_or(0);
 
-            for res in &final_results {
-                if let Some(ref l) = res.projected_label {
-                    label_map.entry(l.clone()).or_default().push(res.clone());
-                }
+            let paged = fetcher.fetch_label_groups(&tag, n, offset)?;
+            let mut results = Vec::new();
+            for group in &paged.items {
+                results.extend(group.results.clone());
             }
 
-            label_map
-                .into_iter()
-                .map(|(label, results)| crate::response::LabelGroup {
-                    label,
-                    results,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            return Ok(SearchResponse {
+                results,
+                label_results: paged.items,
+                has_more: paged.has_more,
+                type_for_projection: Some(tag),
+                ..SearchResponse::new_empty(None, paged.has_more, None)
+            });
+        }
 
         Ok(SearchResponse {
             results: final_results,
-            label_results,
+            label_results: Vec::new(),
             cid,
             has_more,
             total_count: None,
@@ -334,7 +295,9 @@ impl FileManager {
         let labels = self
             .conn
             .prepare(&label_query.to_string(PostgresQueryBuilder))?
-            .query_map([], |r| Ok(crate::types::Label::from_raw_row(proj_type.clone(), r, 0)))?
+            .query_map([], |r| {
+                Ok(crate::types::Label::from_raw_row(proj_type.clone(), r, 0))
+            })?
             .collect::<Result<Vec<crate::types::Label>, _>>()?;
 
         Ok(labels)
@@ -417,6 +380,7 @@ impl FileManager {
             .map(|(label, results)| crate::response::LabelGroup {
                 label,
                 results,
+                total_count: 0,
             })
             .collect();
 

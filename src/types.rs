@@ -164,7 +164,7 @@ pub enum Label {
     ItemId(i64),
     FileId(Uuid),
     IsDir(bool),
-    
+
     // --- 汎用・未解決型 ---
     /// 標準外のタグ、または明示的にドメインを特定しない汎用値。
     /// タグの型（TagType）を自律的に保持します。
@@ -191,23 +191,32 @@ impl Label {
     /// 文字列としての表現を取得します。
     pub fn as_str(&self) -> String {
         match self {
-            Label::Name(s) | Label::Hash(s) | Label::ItemKind(s) | 
-            Label::Extension(s) | Label::Path(s) => s.clone(),
-            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => i.to_string(),
+            Label::Name(s)
+            | Label::Hash(s)
+            | Label::ItemKind(s)
+            | Label::Extension(s)
+            | Label::Path(s) => s.clone(),
+            Label::Rank(i)
+            | Label::Size(i)
+            | Label::Mtime(i)
+            | Label::ItemId(i) => i.to_string(),
             Label::FileId(u) => u.to_string(),
             Label::IsDir(b) => b.to_string(),
             Label::Other(_, val) => match val {
                 LabelValue::String(s) | LabelValue::Literal(s) => s.clone(),
                 LabelValue::Integer(i) => i.to_string(),
                 LabelValue::Boolean(b) => b.to_string(),
-            }
+            },
         }
     }
 
     /// 数値としての値を取得します（数値でない場合は 0）。
     pub fn as_i64(&self) -> i64 {
         match self {
-            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => *i,
+            Label::Rank(i)
+            | Label::Size(i)
+            | Label::Mtime(i)
+            | Label::ItemId(i) => *i,
             Label::Other(_, LabelValue::Integer(i)) => *i,
             _ => self.as_str().parse::<i64>().unwrap_or_default(),
         }
@@ -251,9 +260,15 @@ impl Label {
     /// Label が保持している物理的な値（LabelValue）を返します。
     pub fn value(&self) -> LabelValue {
         match self {
-            Label::Name(s) | Label::Hash(s) | Label::ItemKind(s) | 
-            Label::Extension(s) | Label::Path(s) => LabelValue::String(s.clone()),
-            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => LabelValue::Integer(*i),
+            Label::Name(s)
+            | Label::Hash(s)
+            | Label::ItemKind(s)
+            | Label::Extension(s)
+            | Label::Path(s) => LabelValue::String(s.clone()),
+            Label::Rank(i)
+            | Label::Size(i)
+            | Label::Mtime(i)
+            | Label::ItemId(i) => LabelValue::Integer(*i),
             Label::FileId(u) => LabelValue::String(u.to_string()),
             Label::IsDir(b) => LabelValue::Boolean(*b),
             Label::Other(_, val) => val.clone(),
@@ -262,22 +277,27 @@ impl Label {
 
     /// 物理的な型とタグの種類から、適切なドメイン指向 Label を構築（Promote）します。
     pub fn resolve(tag: TagType, value: LabelValue) -> Self {
-        if let TagType::Base(stype) = &tag {
-            match (stype, &value) {
-                (SType::Name, LabelValue::String(s)) => return Label::Name(s.clone()),
-                (SType::Rank, LabelValue::Integer(i)) => return Label::Rank(*i),
-                (SType::Size, LabelValue::Integer(i)) => return Label::Size(*i),
-                (SType::Mtime, LabelValue::Integer(i)) => return Label::Mtime(*i),
-                (SType::Hash, LabelValue::String(s)) => return Label::Hash(s.clone()),
-                (SType::ItemKind, LabelValue::String(s)) => return Label::ItemKind(s.clone()),
-                (SType::Extension, LabelValue::String(s)) => return Label::Extension(s.clone()),
-                (SType::Path, LabelValue::String(s)) => return Label::Path(s.clone()),
-                (SType::ItemId, LabelValue::Integer(i)) => return Label::ItemId(*i),
-                (SType::IsDir, LabelValue::Boolean(b)) => return Label::IsDir(*b),
-                _ => {}
+        let TagType::Base(stype) = &tag else {
+            return Label::Other(tag, value);
+        };
+
+        match (stype, &value) {
+            (SType::Name, LabelValue::String(s)) => Label::Name(s.clone()),
+            (SType::Rank, LabelValue::Integer(i)) => Label::Rank(*i),
+            (SType::Size, LabelValue::Integer(i)) => Label::Size(*i),
+            (SType::Mtime, LabelValue::Integer(i)) => Label::Mtime(*i),
+            (SType::Hash, LabelValue::String(s)) => Label::Hash(s.clone()),
+            (SType::ItemKind, LabelValue::String(s)) => {
+                Label::ItemKind(s.clone())
             }
+            (SType::Extension, LabelValue::String(s)) => {
+                Label::Extension(s.clone())
+            }
+            (SType::Path, LabelValue::String(s)) => Label::Path(s.clone()),
+            (SType::ItemId, LabelValue::Integer(i)) => Label::ItemId(*i),
+            (SType::IsDir, LabelValue::Boolean(b)) => Label::IsDir(*b),
+            _ => Label::Other(tag, value),
         }
-        Label::Other(tag, value)
     }
 }
 
@@ -289,7 +309,10 @@ impl From<String> for Label {
 
 impl From<&str> for Label {
     fn from(s: &str) -> Self {
-        Label::Other(TagType::Custom(String::new()), LabelValue::String(s.to_string()))
+        Label::Other(
+            TagType::Custom(String::new()),
+            LabelValue::String(s.to_string()),
+        )
     }
 }
 
@@ -308,13 +331,21 @@ pub struct TypedTag {
 
 impl std::fmt::Display for TypedTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.label.tag_type().as_str(), self.label.as_str())
+        write!(
+            f,
+            "{}:{}",
+            self.label.tag_type().as_str(),
+            self.label.as_str()
+        )
     }
 }
 
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
-    pub fn new(tagtype: impl Into<TagType>, label_val: impl Into<LabelValue>) -> Self {
+    pub fn new(
+        tagtype: impl Into<TagType>,
+        label_val: impl Into<LabelValue>,
+    ) -> Self {
         Self {
             label: Label::resolve(tagtype.into(), label_val.into()),
         }
@@ -555,6 +586,12 @@ pub enum SType {
     DataType,
 }
 
+impl SType {
+    pub fn name(&self) -> String {
+        self.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests_types {
     use super::*;
@@ -571,9 +608,18 @@ mod tests_types {
     #[test]
     fn test_tags_iter_typed_tags() {
         let mut tags = Tags::new();
-        tags.push(Label::resolve(TagType::from("project"), "A".into()), Origin::User);
-        tags.push(Label::resolve(TagType::from("project"), "B".into()), Origin::User);
-        tags.push(Label::resolve(TagType::from("extension"), "rs".into()), Origin::User);
+        tags.push(
+            Label::resolve(TagType::from("project"), "A".into()),
+            Origin::User,
+        );
+        tags.push(
+            Label::resolve(TagType::from("project"), "B".into()),
+            Origin::User,
+        );
+        tags.push(
+            Label::resolve(TagType::from("extension"), "rs".into()),
+            Origin::User,
+        );
 
         let mut results: Vec<String> =
             tags.iter_typed_tags().map(|tt| tt.to_string()).collect();

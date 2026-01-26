@@ -95,6 +95,115 @@ pub fn build_fetch_items_sql(
     q
 }
 
+/// 指定された条件に合致するアイテムをラベル（型）ごとに集約し、
+/// 代表アイテムのリストと総数を 1 クエリで取得するための SQL を生成します。
+pub fn build_fetch_label_groups_sql(
+    lens: &crate::query::lens::Lens,
+    proj_type: &TagType,
+    view: &str,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<SelectStatement> {
+    use crate::db::CustomFunc;
+    use sea_query::Order;
+
+    let pick_sql = build_pick_sql(&lens.resolved_query, view);
+
+    // 1. プロジェクション対象の物理カラムを特定
+    let desc = lens.look_up_or_default(proj_type);
+    let main_col_name = match &desc.storage {
+        StorageMapping::Column(col) => col.name(),
+        StorageMapping::RowTag { column, .. } => column.name(),
+        _ => anyhow::bail!(
+            "Unsupported storage for projection: {:?}",
+            desc.storage
+        ),
+    };
+
+    // 2. アイテムごとの全タグを集計するサブクエリ
+    let mut item_packed_q = Query::select();
+    item_packed_q
+        .column(Col::ItemId)
+        .expr_as(
+            CustomFunc::list_with_order(
+                CustomFunc::struct_pack(&Col::raw_tag_row_columns()),
+                vec![(Col::Rank, Order::Desc), (Col::ItemId, Order::Desc)],
+            ),
+            Alias::new("aggregated_items"), // list(struct) のカラム
+        )
+        .from(Alias::new(view))
+        .and_where(
+            Expr::col(Col::ItemId)
+                .in_subquery(wrap_to_ids(pick_sql.to_owned())),
+        )
+        .group_by_col(Col::ItemId);
+
+    // 3. ラベルごとのグループを集計する最終クエリ
+    let mut q = Query::select();
+    let col_alias = Alias::new(&main_col_name);
+
+    // プレビュー用にリスト化: LIST(LIST(struct))
+    let items_list = CustomFunc::list_slice(
+        sea_query::Func::cust(crate::db::DuckDbFunc::List).arg(Expr::col((
+            Alias::new("tags"),
+            Alias::new("aggregated_items"),
+        ))),
+        1,
+        100,
+    );
+
+    q.expr_as(
+        Expr::col((Alias::new("labels"), col_alias.clone())),
+        col_alias.clone(),
+    )
+    .expr_as(
+        sea_query::Func::count(Expr::col((Alias::new("labels"), Col::ItemId))),
+        Col::Label,
+    )
+    .expr_as(items_list, Alias::new("aggregated_items"))
+    .from_subquery(
+        {
+            let mut lq = Query::select();
+            lq.column(Col::ItemId)
+                .column(col_alias.clone())
+                .from(Alias::new(view))
+                .and_where(
+                    Expr::col(Col::ItemId)
+                        .in_subquery(wrap_to_ids(pick_sql.to_owned())),
+                );
+            if let StorageMapping::RowTag { tag_key, .. } = &desc.storage {
+                lq.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+            }
+            lq.to_owned()
+        },
+        Alias::new("labels"),
+    )
+    .join_subquery(
+        sea_query::JoinType::Join,
+        item_packed_q,
+        Alias::new("tags"),
+        Expr::col((Alias::new("labels"), Col::ItemId))
+            .eq(Expr::col((Alias::new("tags"), Col::ItemId))),
+    )
+    .group_by_col((Alias::new("labels"), col_alias.clone()))
+    .order_by((Alias::new("labels"), col_alias), Order::Asc);
+
+    if limit > 0 {
+        q.limit((limit + 1) as u64);
+    }
+    if offset > 0 {
+        q.offset(offset as u64);
+    }
+
+    Ok(q)
+}
+
+fn wrap_to_ids(sql: SelectStatement) -> SelectStatement {
+    Query::select()
+        .column(Col::ItemId)
+        .from_subquery(sql, Alias::new("sub"))
+        .to_owned()
+}
 
 /// クエリに使用されている、または投影されている型のリストを元に
 /// OneView から特定のタグ行のみを抽出するための Condition を生成します。
@@ -411,7 +520,6 @@ fn build_binary_comparison_sql(
     apply_generic_comparison(q, tt, effective_op, lab)
 }
 
-
 /// 比較演算子を反転します（オペランドの順序が逆転した時に使用）。
 /// 例: `a < b` を `b > a` に変換する際、`<` を `>` に反転
 fn flip_bin_op(op: BinOper) -> BinOper {
@@ -452,7 +560,10 @@ fn apply_generic_comparison(
     // 物理カラム（LabelInt / LabelStr 等）のどれに合致し得るかを判定
     // FIXME: Label 自身に物理型情報（LabelValue）を問い合わせるのが美しい
     match label {
-        Label::Rank(_) | Label::Size(_) | Label::Mtime(_) | Label::ItemId(_) => {
+        Label::Rank(_)
+        | Label::Size(_)
+        | Label::Mtime(_)
+        | Label::ItemId(_) => {
             let i = label.as_i64();
             condition = condition
                 .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
@@ -578,7 +689,7 @@ fn build_column_match_sql(
             q.and_where(Expr::col(t).eq(s.as_str()));
         }
         crate::types::LabelValue::Boolean(b) => {
-             q.and_where(Expr::col(Col::LabelBool).eq(b));
+            q.and_where(Expr::col(Col::LabelBool).eq(b));
         }
     }
     q
@@ -639,7 +750,7 @@ fn build_typed_tag_sql(
             }
         }
         crate::types::LabelValue::Boolean(b) => {
-             cond = cond.add(Expr::col(Col::LabelBool).eq(b));
+            cond = cond.add(Expr::col(Col::LabelBool).eq(b));
         }
     }
     q.and_where(cond.into());
@@ -814,14 +925,15 @@ pub fn build_label_expansion_sql(
         TagType::Base(SType::Label) => {
             // Label (仮想タグ) の場合は Type フィルタなしで Label 値のみで検索
             match label.value() {
-                crate::types::LabelValue::String(s) | crate::types::LabelValue::Literal(s) => {
+                crate::types::LabelValue::String(s)
+                | crate::types::LabelValue::Literal(s) => {
                     q.and_where(Expr::col(Col::LabelStr).eq(s));
                 }
                 crate::types::LabelValue::Integer(i) => {
                     q.and_where(Expr::col(Col::LabelInt).eq(i));
                 }
                 crate::types::LabelValue::Boolean(b) => {
-                     q.and_where(Expr::col(Col::LabelBool).eq(b));
+                    q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
             }
         }
@@ -829,14 +941,15 @@ pub fn build_label_expansion_sql(
             // 一般的なタグ
             q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
             match label.value() {
-                crate::types::LabelValue::String(s) | crate::types::LabelValue::Literal(s) => {
+                crate::types::LabelValue::String(s)
+                | crate::types::LabelValue::Literal(s) => {
                     q.and_where(Expr::col(Col::LabelStr).eq(s));
                 }
                 crate::types::LabelValue::Integer(i) => {
                     q.and_where(Expr::col(Col::LabelInt).eq(i));
                 }
                 crate::types::LabelValue::Boolean(b) => {
-                     q.and_where(Expr::col(Col::LabelBool).eq(b));
+                    q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
             }
         }
@@ -910,7 +1023,8 @@ mod tests {
     #[test]
     fn test_build_typed_tag_sql_gen() {
         let tt = TypedTag::new("name", Label::from("foo.txt"));
-        let sql = build_typed_tag_sql(&tt.label.tag_type(), &tt.label, "oneview");
+        let sql =
+            build_typed_tag_sql(&tt.label.tag_type(), &tt.label, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
         // Expect exact logic: "label_str" = 'foo.txt' AND "type" = 'name'
         // Quotes might vary slightly by builder, but Sqlite default uses double quotes for identifiers and single for strings.
@@ -922,10 +1036,7 @@ mod tests {
     fn test_build_comparison_sql_int() {
         let node = ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(
-                ComparisonOp::Gt,
-                Operand::Literal(Label::from(100)),
-            )],
+            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::from(100)))],
         };
         let sql = build_comparison_sql(&node, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);

@@ -1,8 +1,8 @@
 pub mod ast;
+pub mod fetcher;
 pub mod functions;
 pub mod lens;
 pub mod parser;
-pub mod fetcher;
 pub mod sql;
 
 pub use ast::*;

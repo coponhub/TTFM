@@ -241,6 +241,10 @@ pub enum DuckDbFunc {
     Concat,
     #[iden = "parquet_kv_metadata"]
     ParquetKvMetadata,
+    #[iden = "struct_pack"]
+    StructPack,
+    #[iden = "list_slice"]
+    ListSlice,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -269,6 +273,73 @@ impl CustomFunc {
     ) -> sea_query::SimpleExpr {
         sea_query::Func::cust(DuckDbFunc::List)
             .arg(expr.into())
+            .into()
+    }
+
+    /// list(expr ORDER BY ...) を生成します。
+    pub fn list_with_order<E, O>(
+        expr: E,
+        order_bys: Vec<(O, sea_query::Order)>,
+    ) -> sea_query::SimpleExpr
+    where
+        E: Into<sea_query::SimpleExpr>,
+        O: sea_query::IntoIden,
+    {
+        let mut sql = "list($1".to_string();
+        if !order_bys.is_empty() {
+            sql.push_str(" ORDER BY ");
+            let orders = order_bys
+                .into_iter()
+                .map(|(col, ord)| {
+                    let mut s = String::new();
+                    col.into_iden().unquoted(&mut s);
+                    format!(
+                        "\"{}\" {}",
+                        s,
+                        if matches!(ord, sea_query::Order::Asc) {
+                            "ASC"
+                        } else {
+                            "DESC"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&orders);
+        }
+        sql.push(')');
+        sea_query::Expr::cust_with_exprs(sql, [expr.into()])
+    }
+
+    /// struct_pack(col1 := col1, ...) を生成します。
+    pub fn struct_pack<I>(columns: &[I]) -> sea_query::SimpleExpr
+    where
+        I: sea_query::IntoIden + Clone,
+    {
+        let fields = columns
+            .iter()
+            .map(|c| {
+                let mut s = String::new();
+                c.clone().into_iden().unquoted(&mut s);
+                format!("\"{}\" := \"{}\"", s, s)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        sea_query::Expr::cust(format!("struct_pack({})", fields))
+    }
+
+    /// list_slice(list, start, end) を生成します。
+    pub fn list_slice<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+        start: usize,
+        end: usize,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::ListSlice)
+            .args([
+                expr.into(),
+                sea_query::Expr::val(start as i64).into(),
+                sea_query::Expr::val(end as i64).into(),
+            ])
             .into()
     }
 

@@ -313,7 +313,10 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             // Remove outer quotes before unescaping
             let content = &inner.as_str()[1..inner.as_str().len() - 1];
             let s = unescape_string(content)?;
-            Ok(Label::Other(TagType::Custom(String::new()), crate::types::LabelValue::Literal(s)))
+            Ok(Label::Other(
+                TagType::Custom(String::new()),
+                crate::types::LabelValue::Literal(s),
+            ))
         }
         Rule::number => {
             let i = inner.as_str().parse::<i64>()?;
