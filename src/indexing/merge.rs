@@ -408,7 +408,4 @@ fn merge_and_save(
 // ========================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sea_query::PostgresQueryBuilder;
-}
+mod tests {}

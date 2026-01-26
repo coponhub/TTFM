@@ -1,6 +1,5 @@
 use crate::db::TargetTable;
 use crate::db::{Col, Tbl};
-use crate::query::QueryNode;
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{Progress, TagType};
 use crate::{FileManager, FunctionRegistry};
@@ -412,40 +411,9 @@ impl FileManager {
             let res = (|| -> Result<()> {
                 let conn = Connection::open_in_memory()?;
 
-                let node = if query_owned.trim().is_empty() {
-                    QueryNode::And(vec![])
-                } else {
-                    crate::query::parse(&query_owned)?
-                };
-                let registry =
-                    crate::query::QueryFunctionRegistry::with_standard();
-                let expanded = node.expand(&registry);
-
-                let mut item_ids_query = expanded.to_sql("oneview");
-                item_ids_query.order_by_expr(
-                    Expr::col(Col::Rank).into(),
-                    sea_query::Order::Desc,
-                );
-                item_ids_query.order_by_expr(
-                    Expr::col(Col::ItemId).into(),
-                    sea_query::Order::Desc,
-                );
-
-                let mut sub_select = Query::select();
-                sub_select
-                    .column(Col::ItemId)
-                    .from_subquery(item_ids_query, Tbl::InnerSub);
-
-                let tag_cond = expanded.to_tag_condition();
-                let mut cache_select = Query::select();
-                cache_select
-                    .columns(Col::raw_tag_row_columns())
-                    .columns([Col::Rank])
-                    .from(Tbl::OneView)
-                    .and_where(Expr::col(Col::ItemId).in_subquery(sub_select))
-                    .and_where(tag_cond.into());
-
-                let sql_stmt = cache_select.to_owned();
+                let lens =
+                    crate::query::lens::Lens::with_standard(&query_owned)?;
+                let fetcher = crate::query::fetcher::Fetcher::new(&lens, &conn);
 
                 let registry_full = FunctionRegistry::with_standard();
                 let all_columns = registry_full.get_all_columns();
@@ -470,12 +438,7 @@ impl FileManager {
                     "1".to_string(),
                 );
 
-                crate::util::save_parquet(
-                    &conn,
-                    &sql_stmt,
-                    &cache_path,
-                    Some(&metadata),
-                )?;
+                fetcher.fetch_save_flat_table(&cache_path, Some(&metadata))?;
 
                 Ok(())
             })();

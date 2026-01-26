@@ -184,7 +184,7 @@ impl Operand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{SType, TagType};
+    use crate::types::TagType;
 
     #[test]
     fn test_get_all_types_simple() {

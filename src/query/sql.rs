@@ -95,6 +95,42 @@ pub fn build_fetch_items_sql(
     q
 }
 
+/// アイテムを絞り込みつつ、集約せずに平坦な行として全タグを取得する SQL を生成します。
+pub fn build_flat_table_sql(
+    resolved: &ResolvedNode,
+    query_node: &QueryNode,
+    view: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> SelectStatement {
+    let pick_sql = build_pick_sql(resolved, view);
+    let tag_cond = to_tag_condition(query_node);
+
+    let mut q = Query::select();
+    q.columns(Col::raw_tag_row_columns())
+        .column(Col::Rank)
+        .from(Alias::new(view))
+        .and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from_subquery(pick_sql.to_owned(), Alias::new("pk"))
+                    .to_owned(),
+            ),
+        )
+        .and_where(tag_cond.into())
+        .order_by(Col::Rank, sea_query::Order::Desc)
+        .order_by(Col::ItemId, sea_query::Order::Desc);
+
+    if let Some(l) = limit {
+        q.limit(l as u64);
+    }
+    if let Some(o) = offset {
+        q.offset(o as u64);
+    }
+    q
+}
+
 /// 指定された条件に合致するアイテムをラベル（型）ごとに集約し、
 /// 代表アイテムのリストと総数を 1 クエリで取得するための SQL を生成します。
 pub fn build_fetch_label_groups_sql(
@@ -1053,5 +1089,53 @@ mod tests {
         let sql = build_and_sql(&nodes, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
         assert!(result.contains("INTERSECT"));
+    }
+
+    #[test]
+    fn test_build_flat_table_sql_structure() {
+        use crate::query::lens::StorageMapping;
+        use sea_query::PostgresQueryBuilder;
+
+        let node = ResolvedNode::Match {
+            tag_type: TagType::Base(SType::Name),
+            storage: StorageMapping::Column(Col::Name),
+            sql_type: crate::db::SqlType::VARCHAR,
+            op: ComparisonOp::Eq,
+            label: Label::from("test"),
+        };
+        let query_node = QueryNode::And(vec![]);
+        let sql =
+            build_flat_table_sql(&node, &query_node, "oneview", Some(10), None);
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // 基本構造の検証
+        assert!(sql_str.contains("SELECT"), "SQL should contain SELECT");
+        assert!(
+            sql_str.contains("\"item_id\""),
+            "SQL should contain item_id column"
+        );
+        assert!(
+            sql_str.contains("\"rank\""),
+            "SQL should contain rank column"
+        );
+        assert!(
+            sql_str.contains("FROM \"oneview\""),
+            "SQL should select from oneview"
+        );
+        // サブクエリによる絞り込みの検証
+        assert!(
+            sql_str.contains("IN (SELECT"),
+            "SQL should use IN (SELECT...) for filtering"
+        );
+        assert!(
+            sql_str.contains("AS \"pk\""),
+            "SQL should use pk alias for subquery"
+        );
+        // ソートとリミットの検証
+        assert!(
+            sql_str.contains("ORDER BY"),
+            "SQL should have ORDER BY clause"
+        );
+        assert!(sql_str.contains("LIMIT 10"), "SQL should have LIMIT 10");
     }
 }

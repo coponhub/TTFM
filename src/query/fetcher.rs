@@ -3,6 +3,8 @@ use crate::response::{RawTagRow, SearchResult};
 use crate::types::{Origin, SType, TagType};
 use anyhow::Result;
 use duckdb::types::Value;
+use std::collections::HashMap;
+use std::path::Path;
 
 /// 検索結果の抽出（Pick）計画。
 #[derive(Debug, Clone)]
@@ -155,6 +157,48 @@ impl<'a> Fetcher<'a> {
         }
 
         Ok(PagedResult::new(groups, limit, offset))
+    }
+
+    /// 平坦なタグデータのリストを取得（メモリ上での利用・デバッグ用）
+    pub fn fetch_flat_table(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<RawTagRow>> {
+        use sea_query::PostgresQueryBuilder;
+        let select_sql = crate::query::sql::build_flat_table_sql(
+            &self.lens.resolved_query,
+            &self.lens.expanded_query,
+            "oneview",
+            limit,
+            offset,
+        );
+        let sql_str = select_sql.to_string(PostgresQueryBuilder);
+
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let rows = stmt.query_map([], |row| RawTagRow::from_row(row))?;
+
+        let mut results = Vec::new();
+        for res in rows {
+            results.push(res?);
+        }
+        Ok(results)
+    }
+
+    /// 高速に Parquet 保存（キャッシュ生成用）
+    pub fn fetch_save_flat_table(
+        &self,
+        path: &Path,
+        metadata: Option<&HashMap<String, String>>,
+    ) -> Result<()> {
+        let select_sql = crate::query::sql::build_flat_table_sql(
+            &self.lens.resolved_query,
+            &self.lens.expanded_query,
+            "oneview",
+            None,
+            None,
+        );
+        crate::util::save_parquet(self.conn, &select_sql, path, metadata)
     }
 
     /// プロジェクション（ラベル集計）で得られた、入れ子構造のアイテムリストをデコードします。
@@ -391,5 +435,72 @@ mod tests {
         let plan = fetcher.pick(None, None).unwrap();
 
         assert_eq!(plan.candidate_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_fetch_flat_table() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'extension', 'rs', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        )
+        .unwrap();
+
+        let lens = Lens::with_standard("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&lens, &conn);
+
+        let results = fetcher.fetch_flat_table(None, None).unwrap();
+        assert_eq!(results.len(), 2); // extension + is_dir
+        assert!(results.iter().any(|r| r.tag_type == "extension"));
+        assert!(results.iter().any(|r| r.tag_type == "is_dir"));
+    }
+
+    #[test]
+    fn test_fetch_save_flat_table() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'extension', 'rs', NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        )
+        .unwrap();
+
+        let lens = Lens::with_standard("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&lens, &conn);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("test.parquet");
+
+        fetcher.fetch_save_flat_table(&path, None).unwrap();
+        assert!(path.exists());
     }
 }
