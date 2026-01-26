@@ -465,7 +465,7 @@ fn print_compact_projections(
         safe_println!(
             "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
             label,
-            items.len()
+            group.total_count
         );
 
         // 2行目: アイテムリスト (  #ID:name, ...)

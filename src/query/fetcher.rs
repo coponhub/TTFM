@@ -139,10 +139,13 @@ impl<'a> Fetcher<'a> {
         };
 
         while let Some(row) = rows.next()? {
+            use sea_query::Iden;
             let label_val: Value = row.get(main_col_name.as_str())?;
-            let total_count: i64 = row.get(SType::Label.name().as_str())?;
-            let Value::List(items_list_of_lists) =
-                row.get("aggregated_items")?
+            let total_count: i64 =
+                row.get(Iden::to_string(&SType::Label).as_str())?;
+            let Value::List(items_list_of_lists) = row.get(
+                Iden::to_string(&crate::db::Tbl::AggregatedItems).as_str(),
+            )?
             else {
                 continue;
             };

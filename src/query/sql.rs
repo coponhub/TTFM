@@ -141,88 +141,99 @@ pub fn build_fetch_label_groups_sql(
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
-    use sea_query::Order;
 
     let pick_sql = build_pick_sql(&lens.resolved_query, view);
 
     // 1. プロジェクション対象の物理カラムを特定
     let desc = lens.look_up_or_default(proj_type);
-    let main_col_name = match &desc.storage {
-        StorageMapping::Column(col) => col.name(),
-        StorageMapping::RowTag { column, .. } => column.name(),
+    let col_iden = match &desc.storage {
+        StorageMapping::Column(col) => *col,
+        StorageMapping::RowTag { column, .. } => *column,
         _ => anyhow::bail!(
             "Unsupported storage for projection: {:?}",
             desc.storage
         ),
     };
 
-    // 2. アイテムごとの全タグを集計するサブクエリ
+    // 2. クエリに合致するアイテムと、それに対応するプロジェクション・ラベルを取得
+    //    ウィンドウ関数を使ってラベル内での順位(rn)と総件数(total)を算出
+    let mut hits_q = Query::select();
+    hits_q
+        .column(Col::ItemId)
+        .column(col_iden)
+        .column(Col::Rank)
+        .expr_as(
+            CustomFunc::row_number_over(
+                col_iden,
+                vec![
+                    (Col::Rank, sea_query::Order::Desc),
+                    (Col::ItemId, sea_query::Order::Desc),
+                ],
+            ),
+            Tbl::Rn,
+        )
+        .expr_as(CustomFunc::count_over(col_iden), Tbl::GroupTotal)
+        .distinct()
+        .from(Alias::new(view))
+        .and_where(
+            Expr::col(Col::ItemId)
+                .in_subquery(wrap_to_ids(pick_sql.to_owned())),
+        );
+
+    if let StorageMapping::RowTag { tag_key, .. } = &desc.storage {
+        hits_q.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+    }
+
+    // 3. 表示対象アイテムの ID のみを取得する軽量なサブクエリ
+    let mut top_items_q = Query::select();
+    top_items_q
+        .column(col_iden)
+        .column(Col::ItemId)
+        .column(Tbl::GroupTotal)
+        .from_subquery(hits_q, Tbl::AllHits)
+        .and_where(Expr::col(Tbl::Rn).lte(100)); // プレビュー制限
+
+    // 4. 表示対象アイテムについてのみ、全タグをパッキングする
     let mut item_packed_q = Query::select();
     item_packed_q
         .column(Col::ItemId)
         .expr_as(
             CustomFunc::list_with_order(
                 CustomFunc::struct_pack(&Col::raw_tag_row_columns()),
-                vec![(Col::Rank, Order::Desc), (Col::ItemId, Order::Desc)],
+                vec![
+                    (Col::Rank, sea_query::Order::Desc),
+                    (Col::ItemId, sea_query::Order::Desc),
+                ],
             ),
-            Alias::new("aggregated_items"), // list(struct) のカラム
+            Tbl::AggregatedItems,
         )
         .from(Alias::new(view))
         .and_where(
             Expr::col(Col::ItemId)
-                .in_subquery(wrap_to_ids(pick_sql.to_owned())),
+                .in_subquery(wrap_to_ids(top_items_q.to_owned())),
         )
         .group_by_col(Col::ItemId);
 
-    // 3. ラベルごとのグループを集計する最終クエリ
+    // 5. 最終集計
     let mut q = Query::select();
-    let col_alias = Alias::new(&main_col_name);
-
-    // プレビュー用にリスト化: LIST(LIST(struct))
-    let items_list = CustomFunc::list_slice(
-        sea_query::Func::cust(crate::db::DuckDbFunc::List).arg(Expr::col((
-            Alias::new("tags"),
-            Alias::new("aggregated_items"),
-        ))),
-        1,
-        100,
-    );
-
-    q.expr_as(
-        Expr::col((Alias::new("labels"), col_alias.clone())),
-        col_alias.clone(),
-    )
-    .expr_as(
-        sea_query::Func::count(Expr::col((Alias::new("labels"), Col::ItemId))),
-        Col::Label,
-    )
-    .expr_as(items_list, Alias::new("aggregated_items"))
-    .from_subquery(
-        {
-            let mut lq = Query::select();
-            lq.column(Col::ItemId)
-                .column(col_alias.clone())
-                .from(Alias::new(view))
-                .and_where(
-                    Expr::col(Col::ItemId)
-                        .in_subquery(wrap_to_ids(pick_sql.to_owned())),
-                );
-            if let StorageMapping::RowTag { tag_key, .. } = &desc.storage {
-                lq.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
-            }
-            lq.to_owned()
-        },
-        Alias::new("labels"),
-    )
-    .join_subquery(
-        sea_query::JoinType::Join,
-        item_packed_q,
-        Alias::new("tags"),
-        Expr::col((Alias::new("labels"), Col::ItemId))
-            .eq(Expr::col((Alias::new("tags"), Col::ItemId))),
-    )
-    .group_by_col((Alias::new("labels"), col_alias.clone()))
-    .order_by((Alias::new("labels"), col_alias), Order::Asc);
+    q.column(col_iden)
+        .expr_as(Expr::col(Tbl::GroupTotal), Col::Label)
+        .expr_as(
+            sea_query::Func::cust(crate::db::DuckDbFunc::List)
+                .arg(Expr::col(Tbl::AggregatedItems)),
+            Tbl::AggregatedItems,
+        )
+        .from_subquery(top_items_q, Tbl::Top)
+        .join_subquery(
+            sea_query::JoinType::Join,
+            item_packed_q,
+            Tbl::TagsGroup,
+            Expr::col((Tbl::Top, Col::ItemId))
+                .eq(Expr::col((Tbl::TagsGroup, Col::ItemId))),
+        )
+        .group_by_col(col_iden)
+        .group_by_col(Tbl::GroupTotal)
+        .order_by(col_iden, sea_query::Order::Asc);
 
     if limit > 0 {
         q.limit((limit + 1) as u64);

@@ -76,6 +76,14 @@ pub enum Tbl {
     Master,
     Sub,
     InnerSub,
+    AllHits,
+    TopItems,
+    PackedTags,
+    Top,
+    TagsGroup,
+    Rn,
+    GroupTotal,
+    AggregatedItems,
 
     // --- Set Operation Aliases ---
     LeftSide,
@@ -245,6 +253,10 @@ pub enum DuckDbFunc {
     StructPack,
     #[iden = "list_slice"]
     ListSlice,
+    #[iden = "row_number"]
+    RowNumber,
+    #[iden = "count"]
+    Count,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -361,6 +373,58 @@ impl CustomFunc {
             "$1 - (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
             [sea_query::Expr::val(start_id).into()],
         )
+    }
+
+    /// row_number() OVER (PARTITION BY ... ORDER BY ...) を生成します。
+    pub fn row_number_over<P, O>(
+        partition_by: P,
+        order_bys: Vec<(O, sea_query::Order)>,
+    ) -> sea_query::SimpleExpr
+    where
+        P: sea_query::IntoIden,
+        O: sea_query::IntoIden,
+    {
+        let mut sql = "row_number() OVER (PARTITION BY ".to_string();
+        let mut p_name = String::new();
+        partition_by.into_iden().unquoted(&mut p_name);
+        sql.push_str(&format!("\"{}\"", p_name));
+
+        if !order_bys.is_empty() {
+            sql.push_str(" ORDER BY ");
+            let orders = order_bys
+                .into_iter()
+                .map(|(col, ord)| {
+                    let mut s = String::new();
+                    col.into_iden().unquoted(&mut s);
+                    format!(
+                        "\"{}\" {}",
+                        s,
+                        if matches!(ord, sea_query::Order::Asc) {
+                            "ASC"
+                        } else {
+                            "DESC"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&orders);
+        }
+        sql.push(')');
+        sea_query::Expr::cust(sql)
+    }
+
+    /// count(*) OVER (PARTITION BY ...) を生成します。
+    pub fn count_over<P>(partition_by: P) -> sea_query::SimpleExpr
+    where
+        P: sea_query::IntoIden,
+    {
+        let mut p_name = String::new();
+        partition_by.into_iden().unquoted(&mut p_name);
+        sea_query::Expr::cust(format!(
+            "count(*) OVER (PARTITION BY \"{}\")",
+            p_name
+        ))
     }
 }
 
