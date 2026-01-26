@@ -3,7 +3,6 @@ use crate::db::{Col, Tbl};
 use crate::query::QueryNode;
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{Progress, TagType};
-use crate::util::{IdenExt, SelectExt};
 use crate::{FileManager, FunctionRegistry};
 use anyhow::Result;
 use duckdb::Connection;
@@ -48,77 +47,55 @@ impl FileManager {
         let lens = crate::query::lens::Lens::with_standard(query)?;
         let fetcher = crate::query::fetcher::Fetcher::new(&lens, &self.conn);
 
-        // Lens 内部で展開されたクエリからプロジェクション（投影タグ）を取得
-        let projection = lens.expanded_query.get_projections().first().cloned();
+        // プロジェクション（投影タグ）の有無を確認
+        let projection = lens.get_projection();
 
-        // Fetcher による ID 抽出 (Pick)
-        let (pick_offset, pick_limit) = if projection.is_none() {
-            (Some(offset), Some(limit))
-        } else {
-            (None, None)
-        };
-
-        let pick_plan = fetcher.pick(pick_offset, pick_limit)?;
-        let candidate_ids = pick_plan.candidate_ids;
-
-        // 後続処理のために一時テーブル sub を作成 (search.rs の既存仕様を維持)
-        Tbl::Sub.drop_table(&self.conn).ok();
-        pick_plan.select_sql.create_table_as(&self.conn, Tbl::Sub)?;
-
-        if candidate_ids.is_empty() {
-            return Ok(SearchResponse {
-                results: vec![],
-                type_for_projection: projection.map(|p| p.into()),
-                cid: None,
-                total_count: Some(0),
-                has_more: false,
-                progress: Progress::default(),
-                label_results: Vec::new(),
-            });
-        }
-
-        let (target_entries, has_more) = if let Some(ref proj_name) = projection
-        {
-            let proj_type = TagType::from(proj_name.as_str());
+        let (final_results, has_more) = if let Some(ref proj_type) = projection {
+            // 1. プロジェクションケース: ラベル集約が必要なため、既存の多段フローを維持
+            // (将来的に 1 SQL へ統合可能だが、一旦は安全のために維持)
             let labels =
-                self.get_unique_labels(true, None, &proj_type, n, offset)?;
+                self.get_unique_labels(true, None, proj_type, n, offset)?;
             let has_more = n > 0 && labels.len() > n;
             let final_labels =
                 if has_more { &labels[..n] } else { &labels[..] };
 
-            let entries = self.expand_labels_to_entries(
+            let target_entries = self.expand_labels_to_entries(
                 true,
                 None,
-                &proj_type,
+                proj_type,
                 final_labels,
             )?;
-            (entries, has_more)
-        } else {
-            let id_select = Query::select()
-                .column(Col::ItemId)
-                .from(Tbl::Sub)
-                .to_owned();
 
-            let id_rows = self
-                .conn
-                .prepare(&id_select.to_string(PostgresQueryBuilder))?
-                .query_map([], |r| r.get::<_, i64>(0))?
-                .collect::<Result<Vec<i64>, _>>()?;
+            let fetch_ids: Vec<i64> =
+                target_entries.iter().map(|(id, _)| *id).collect();
 
-            let has_more = n > 0 && id_rows.len() > n;
-            let mut target_ids = id_rows;
-            if has_more {
-                target_ids.truncate(n);
-            }
-            (
-                target_ids
-                    .into_iter()
-                    .map(|id| (id, None))
-                    .collect::<Vec<_>>(),
+            // ID 集合からメタデータを一括取得 (ここは fetch_items の内部部品として切り出し可能だが、一旦既存流用)
+            let mut fetch_query = Query::select();
+            fetch_query
+                .columns(Col::raw_tag_row_columns())
+                .from(Tbl::OneView)
+                .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
+
+            let res = self.fetch_and_build(
+                target_entries,
+                fetch_query.to_string(PostgresQueryBuilder),
+                None, // cid は後で設定
                 has_more,
-            )
+                n,
+                Some(&proj_type.as_str().to_string()),
+            )?;
+            (res.results, has_more)
+        } else {
+            // 2. 通常検索ケース: Fetcher によるシングルパス取得
+            let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
+            let has_more = n > 0 && results.len() > n;
+            if has_more {
+                results.truncate(n);
+            }
+            (results, has_more)
         };
 
+        // 3. キャッシュ生成の開始（続きがある場合）
         let cid = if has_more {
             let new_cid = uuid::Uuid::new_v4().to_string();
             self.spawn_cache_worker(&new_cid, query)?;
@@ -127,34 +104,42 @@ impl FileManager {
             None
         };
 
-        // 3. Tag Selector による属性取得 (Bulk Fetch)
-        if target_entries.is_empty() {
-            return Ok(SearchResponse::new_empty(
-                cid,
-                has_more,
-                projection.map(|p| p.into()),
-            ));
-        }
+        // 4. ラベルグループの構築
+        let label_results = if let Some(ref _proj_type) = projection {
+            let mut label_map: std::collections::BTreeMap<
+                crate::types::Label,
+                Vec<SearchResult>,
+            > = std::collections::BTreeMap::new();
 
-        let fetch_ids: Vec<i64> =
-            target_entries.iter().map(|(id, _)| *id).collect();
+            for res in &final_results {
+                if let Some(ref l) = res.projected_label {
+                    label_map.entry(l.clone()).or_default().push(res.clone());
+                }
+            }
 
-        let tag_cond = lens.expanded_query.to_tag_condition();
-        let mut fetch_sql = Query::select();
-        fetch_sql
-            .columns(Col::raw_tag_row_columns())
-            .from(Tbl::OneView)
-            .and_where(Expr::col(Col::ItemId).is_in(fetch_ids))
-            .and_where(tag_cond.into());
+            label_map
+                .into_iter()
+                .map(|(label, results)| crate::response::LabelGroup {
+                    label,
+                    results,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-        self.fetch_and_build(
-            target_entries,
-            fetch_sql.to_string(PostgresQueryBuilder),
+        Ok(SearchResponse {
+            results: final_results,
+            label_results,
             cid,
             has_more,
-            n,
-            projection.as_ref(),
-        )
+            total_count: None,
+            progress: Progress {
+                current: n,
+                total: None,
+            },
+            type_for_projection: projection,
+        })
     }
 
     fn try_resolve_cache(
@@ -349,7 +334,7 @@ impl FileManager {
         let labels = self
             .conn
             .prepare(&label_query.to_string(PostgresQueryBuilder))?
-            .query_map([], |r| Ok(crate::types::Label::from_row_at(r, 0)))?
+            .query_map([], |r| Ok(crate::types::Label::from_raw_row(proj_type.clone(), r, 0)))?
             .collect::<Result<Vec<crate::types::Label>, _>>()?;
 
         Ok(labels)

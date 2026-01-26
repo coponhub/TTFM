@@ -16,7 +16,7 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
             build_column_match_sql(*tag, label, view_name)
         }
         QueryNode::TypedTag(tt) => {
-            build_typed_tag_sql(&tt.tagtype, &tt.label, view_name)
+            build_typed_tag_sql(&tt.label.tag_type(), &tt.label, view_name)
         }
         QueryNode::Projection(tt) => build_projection_sql(tt, view_name),
     };
@@ -44,6 +44,55 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             ..
         } => build_resolved_match_sql(storage, *sql_type, *op, label, view),
     }
+}
+
+/// 指定された条件に合致するアイテムと、その全タグを一括取得するための SQL を生成します。
+pub fn build_fetch_items_sql(
+    node: &ResolvedNode,
+    view: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> SelectStatement {
+    let pick_sql = build_pick_sql(node, view);
+    let columns = Col::raw_tag_row_columns();
+
+    // 物理カラムをパックして集約。
+    // DuckDB の struct_pack("col1" := "col1", ...) 構文を使用。
+    let fields = columns
+        .iter()
+        .map(|c| format!("\"{}\" := \"{}\"", c.to_string(), c.to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tags_expr = format!("LIST(struct_pack({}))", fields);
+
+    let mut q = Query::select();
+    q.column(Col::ItemId)
+        .expr_as(Expr::col(Col::Rank).max(), Col::Rank)
+        .expr_as(
+            Expr::cust(format!("ANY_VALUE(\"{}\")", Col::ItemKind.to_string())),
+            Col::ItemKind,
+        )
+        .expr_as(Expr::cust(tags_expr), Alias::new("tags"))
+        .from(Alias::new(view))
+        .and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from_subquery(pick_sql, Alias::new("pk"))
+                    .to_owned(),
+            ),
+        )
+        .group_by_col(Col::ItemId)
+        .order_by(Col::Rank, sea_query::Order::Desc)
+        .order_by(Col::ItemId, sea_query::Order::Desc);
+
+    if let Some(l) = limit {
+        q.limit(l as u64);
+    }
+    if let Some(o) = offset {
+        q.offset(o as u64);
+    }
+    q
 }
 
 
@@ -398,31 +447,38 @@ fn apply_generic_comparison(
     label: Label,
 ) -> SelectStatement {
     let mut condition = Condition::any();
+    let s_val = label.as_str();
+
+    // 物理カラム（LabelInt / LabelStr 等）のどれに合致し得るかを判定
+    // FIXME: Label 自身に物理型情報（LabelValue）を問い合わせるのが美しい
     match label {
-        Label::Integer(i) => {
+        Label::Rank(_) | Label::Size(_) | Label::Mtime(_) | Label::ItemId(_) => {
+            let i = label.as_i64();
             condition = condition
                 .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
                 .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
         }
-        Label::String(s) | Label::Literal(s) => {
+        _ => {
+            // 文字列ベースのマッチング
             condition = condition.add(
-                Expr::col(Col::LabelStr).binary(op, Expr::val(s.as_str())),
+                Expr::col(Col::LabelStr).binary(op, Expr::val(s_val.clone())),
             );
 
-            if let Ok(i) = s.parse::<i64>() {
+            // 数値や真偽値として解釈可能な場合はそれらとも比較
+            if let Ok(i) = s_val.parse::<i64>() {
                 condition = condition
                     .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
                     .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(i)));
-            } else if let Ok(f) = s.parse::<f64>() {
+            } else if let Ok(f) = s_val.parse::<f64>() {
                 condition = condition
                     .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)));
-            } else if s == "true" || s == "false" {
-                let b = s == "true";
+            } else if s_val == "true" || s_val == "false" {
+                let b = s_val == "true";
                 condition = condition
                     .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)));
             }
         }
-    };
+    }
 
     q.and_where(Expr::col(Col::Type).eq(tagtype.as_str()))
         .and_where(condition.into());
@@ -486,16 +542,16 @@ fn build_column_match_sql(
         .distinct()
         .from(Alias::new(view));
 
-    match label {
-        Label::Integer(i) => {
+    match label.value() {
+        crate::types::LabelValue::Integer(i) => {
             let t = if matches!(tag, SType::Label) {
                 Col::LabelInt.into()
             } else {
                 tag
             };
-            q.and_where(Expr::col(t).eq(*i));
+            q.and_where(Expr::col(t).eq(i));
         }
-        Label::String(s) => {
+        crate::types::LabelValue::String(s) => {
             let t = if matches!(tag, SType::Label) {
                 Col::LabelStr.into()
             } else {
@@ -513,13 +569,16 @@ fn build_column_match_sql(
                     .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
             );
         }
-        Label::Literal(s) => {
+        crate::types::LabelValue::Literal(s) => {
             let t = if matches!(tag, SType::Label) {
                 Col::LabelStr.into()
             } else {
                 tag
             };
             q.and_where(Expr::col(t).eq(s.as_str()));
+        }
+        crate::types::LabelValue::Boolean(b) => {
+             q.and_where(Expr::col(Col::LabelBool).eq(b));
         }
     }
     q
@@ -552,29 +611,25 @@ fn build_typed_tag_sql(
     }
 
     let mut cond = Condition::any();
-    match label {
-        Label::Integer(i) => {
+    match label.value() {
+        crate::types::LabelValue::Integer(i) => {
             cond = cond
-                .add(Expr::col(Col::LabelInt).eq(*i))
-                .add(Expr::col(Col::LabelDouble).eq(*i as f64));
+                .add(Expr::col(Col::LabelInt).eq(i))
+                .add(Expr::col(Col::LabelDouble).eq(i as f64));
         }
-        Label::String(s) => {
+        crate::types::LabelValue::String(s) => {
             let val_str = if s.starts_with('^') {
                 format!("{}*", &s[1..])
             } else {
                 s.clone()
             };
 
-            cond = cond
-                .add(Expr::col(Col::LabelStr).binary(glob, Expr::val(val_str)));
-            if let Ok(i) = s.parse::<i64>() {
-                cond = cond.add(Expr::col(Col::LabelInt).eq(i));
-            }
-            if s == "true" || s == "false" {
-                cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
-            }
+            cond = cond.add(
+                Expr::col(Col::LabelStr)
+                    .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
+            );
         }
-        Label::Literal(s) => {
+        crate::types::LabelValue::Literal(s) => {
             cond = cond.add(Expr::col(Col::LabelStr).eq(s.as_str()));
             if let Ok(i) = s.parse::<i64>() {
                 cond = cond.add(Expr::col(Col::LabelInt).eq(i));
@@ -582,6 +637,9 @@ fn build_typed_tag_sql(
             if s == "true" || s == "false" {
                 cond = cond.add(Expr::col(Col::LabelBool).eq(s == "true"));
             }
+        }
+        crate::types::LabelValue::Boolean(b) => {
+             cond = cond.add(Expr::col(Col::LabelBool).eq(b));
         }
     }
     q.and_where(cond.into());
@@ -743,9 +801,9 @@ pub fn build_label_expansion_sql(
             q.and_where(Expr::col(Col::Origin).eq(label.as_str()));
         }
         TagType::Base(SType::Rank) => {
-            match label {
-                Label::Integer(i) => {
-                    q.and_where(Expr::col(Col::Rank).eq(*i));
+            match label.value() {
+                crate::types::LabelValue::Integer(i) => {
+                    q.and_where(Expr::col(Col::Rank).eq(i));
                 }
                 _ => {
                     // RankなのにInteger以外が来た場合はヒットしない
@@ -755,24 +813,30 @@ pub fn build_label_expansion_sql(
         }
         TagType::Base(SType::Label) => {
             // Label (仮想タグ) の場合は Type フィルタなしで Label 値のみで検索
-            match label {
-                Label::String(s) | Label::Literal(s) => {
-                    q.and_where(Expr::col(Col::LabelStr).eq(s.as_str()));
+            match label.value() {
+                crate::types::LabelValue::String(s) | crate::types::LabelValue::Literal(s) => {
+                    q.and_where(Expr::col(Col::LabelStr).eq(s));
                 }
-                Label::Integer(i) => {
-                    q.and_where(Expr::col(Col::LabelInt).eq(*i));
+                crate::types::LabelValue::Integer(i) => {
+                    q.and_where(Expr::col(Col::LabelInt).eq(i));
+                }
+                crate::types::LabelValue::Boolean(b) => {
+                     q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
             }
         }
         _ => {
             // 一般的なタグ
             q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
-            match label {
-                Label::String(s) | Label::Literal(s) => {
-                    q.and_where(Expr::col(Col::LabelStr).eq(s.as_str()));
+            match label.value() {
+                crate::types::LabelValue::String(s) | crate::types::LabelValue::Literal(s) => {
+                    q.and_where(Expr::col(Col::LabelStr).eq(s));
                 }
-                Label::Integer(i) => {
-                    q.and_where(Expr::col(Col::LabelInt).eq(*i));
+                crate::types::LabelValue::Integer(i) => {
+                    q.and_where(Expr::col(Col::LabelInt).eq(i));
+                }
+                crate::types::LabelValue::Boolean(b) => {
+                     q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
             }
         }
@@ -808,27 +872,27 @@ mod tests {
     #[test]
     fn test_normalize_comparison_order() {
         let left = Operand::TypeRef(TagType::from("size"));
-        let right = Operand::Literal(Label::Integer(100));
+        let right = Operand::Literal(Label::from(100));
         let (tt, lab, op) =
             normalize_comparison(&left, BinOper::Equal, &right).unwrap();
         assert_eq!(tt.as_str(), "size");
-        assert_eq!(lab, Label::Integer(100));
+        assert_eq!(lab.value(), crate::types::LabelValue::Integer(100));
         assert_eq!(op, BinOper::Equal);
 
-        let left_lit = Operand::Literal(Label::Integer(100));
+        let left_lit = Operand::Literal(Label::from(100));
         let right_tag = Operand::TypeRef(TagType::from("size"));
         let (tt2, lab2, op2) =
             normalize_comparison(&left_lit, BinOper::GreaterThan, &right_tag)
                 .unwrap();
         assert_eq!(tt2.as_str(), "size");
-        assert_eq!(lab2, Label::Integer(100));
+        assert_eq!(lab2.value(), crate::types::LabelValue::Integer(100));
         assert_eq!(op2, BinOper::SmallerThan);
     }
 
     #[test]
     fn test_to_tag_condition_generation() {
         let node =
-            QueryNode::TypedTag(TypedTag::new("size", Label::Integer(100)));
+            QueryNode::TypedTag(TypedTag::new(SType::Size, Label::from(100)));
         let cond = to_tag_condition(&node);
 
         let mut query = Query::select();
@@ -845,8 +909,8 @@ mod tests {
 
     #[test]
     fn test_build_typed_tag_sql_gen() {
-        let tt = TypedTag::new("name", "foo.txt");
-        let sql = build_typed_tag_sql(&tt.tagtype, &tt.label, "oneview");
+        let tt = TypedTag::new("name", Label::from("foo.txt"));
+        let sql = build_typed_tag_sql(&tt.label.tag_type(), &tt.label, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
         // Expect exact logic: "label_str" = 'foo.txt' AND "type" = 'name'
         // Quotes might vary slightly by builder, but Sqlite default uses double quotes for identifiers and single for strings.
@@ -860,7 +924,7 @@ mod tests {
             first: Operand::TypeRef(TagType::from("size")),
             rest: vec![(
                 ComparisonOp::Gt,
-                Operand::Literal(Label::Integer(100)),
+                Operand::Literal(Label::from(100)),
             )],
         };
         let sql = build_comparison_sql(&node, "oneview");

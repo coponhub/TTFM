@@ -33,7 +33,7 @@ mod tests {
     fn test_query_types() {
         let node = parse("extension:rs").expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.as_str(), "extension");
+            assert_eq!(tt.label.tag_type().as_str(), "extension");
             assert_eq!(tt.label.as_str(), "rs");
         } else {
             panic!("Should be a TypedTag");
@@ -45,7 +45,7 @@ mod tests {
         let q = "extension:rs";
         let node = parse(q).expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.tagtype.as_str(), "extension");
+            assert_eq!(tt.label.tag_type().as_str(), "extension");
             assert_eq!(tt.label.as_str(), "rs");
         } else {
             panic!("Expected TypedTag");

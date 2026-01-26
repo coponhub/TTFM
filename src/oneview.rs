@@ -596,7 +596,9 @@ fn create_view_union_by_name(
     // DuckDB 独自の UNION ALL BY NAME を使用するため、ここでは文字列結合を行います。
     // select_sqls の各要素は sea-query で安全に構築されていることが前提です。
     let combined_sql = select_sqls.join("\nUNION ALL BY NAME\n");
-    // eprintln!("DEBUG ONEVIEW SQL:\n{}", combined_sql);
+    if std::env::var("TTFM_DEBUG").is_ok() {
+        println!("DEBUG ONEVIEW SQL:\n{}", combined_sql);
+    }
     conn.execute(
         &format!("CREATE OR REPLACE VIEW {} AS {}", view_name, combined_sql),
         [],

@@ -120,8 +120,8 @@ impl SearchResponse {
             }
 
             // 動的タグ
-            for t in &res.tags.types {
-                keys.insert(TagType::from(t.as_str()));
+            for entry in &res.tags.entries {
+                keys.insert(entry.label.tag_type());
             }
 
             let group_key = (res.item_kind.clone(), keys);
@@ -202,14 +202,29 @@ impl SearchResult {
         }
     }
 
-    /// 生のタグ行データをアイテムに適用します。
-    pub fn apply_raw_tag(&mut self, row: RawTagRow) {
-        use crate::types::{Label, Origin, SType, TagType};
+    /// 解決済みのタグ情報をアイテムに適用します。
+    pub fn apply_tag(&mut self, label: crate::types::Label, origin: Origin) {
+        use crate::types::Label;
 
-        // 検索結果に必要な基本属性を RawRow から補完
-        if self.item_kind.is_empty() {
-            self.item_kind = row.item_kind.clone();
+        // 検索結果に必要な基本属性を補完 (パターンマッチングによる直感的な代入)
+        match &label {
+            Label::Name(s) => self.name = s.clone(),
+            Label::Rank(i) => self.rank = *i,
+            Label::Size(i) => self.intrinsic.size = Some(crate::types::FileSize(*i)),
+            Label::Mtime(i) => self.intrinsic.mtime = Some(crate::types::FileTimestamp(*i)),
+            Label::Hash(s) => self.intrinsic.hash = Some(s.clone()),
+            Label::ItemKind(s) => self.item_kind = s.clone(),
+            _ => {} // 通常タグは特化フィールド更新なし
         }
+
+        // 全てのタグ（特殊属性含む）を Tags にプッシュ
+        self.tags.push(label, origin);
+    }
+
+    /// 生のタグ行データをアイテムに適用します (DEPRECATED: 互換性のために維持)。
+    #[deprecated(note = "Use apply_tag instead with resolved Label and Origin")]
+    pub fn apply_raw_tag(&mut self, row: RawTagRow) {
+        use crate::types::{Label, LabelValue, Origin, TagType};
 
         let origin = if row.origin == "system" {
             Origin::System
@@ -217,52 +232,20 @@ impl SearchResult {
             Origin::User
         };
 
-        let label = if let Some(i) = row.label_int {
-            Label::Integer(i)
+        let label_val = if let Some(i) = row.label_int {
+            LabelValue::Integer(i)
         } else if let Some(s) = row.label_str {
-            Label::String(s)
+            LabelValue::String(s)
         } else if let Some(b) = row.label_bool {
-            Label::String(b.to_string())
+            LabelValue::Boolean(b)
         } else if let Some(d) = row.label_double {
-            Label::String(d.to_string())
+            LabelValue::String(d.to_string())
         } else {
             return;
         };
 
-        let tag_type = TagType::from(row.tag_type.clone());
-
-        // 特殊属性の解決
-        match &tag_type {
-            TagType::Base(SType::Name) => {
-                self.name = label.as_str();
-                self.tags.push(tag_type, label, origin);
-            }
-            TagType::Base(SType::Rank) => {
-                self.rank = label.as_i64();
-                self.tags.push(tag_type, label, origin);
-            }
-            TagType::Base(SType::Size) => {
-                self.intrinsic.size =
-                    Some(crate::types::FileSize(label.as_i64()));
-                self.tags.push(tag_type, label, origin);
-            }
-            TagType::Base(SType::Mtime) => {
-                self.intrinsic.mtime =
-                    Some(crate::types::FileTimestamp(label.as_i64()));
-                self.tags.push(tag_type, label, origin);
-            }
-            TagType::Base(SType::Hash) => {
-                self.intrinsic.hash = Some(label.as_str());
-                self.tags.push(tag_type, label, origin);
-            }
-            TagType::Base(SType::ItemKind) => {
-                self.item_kind = label.as_str();
-                self.tags.push(tag_type, label, origin);
-            }
-            _ => {
-                self.tags.push(tag_type, label, origin);
-            }
-        }
+        let label = Label::resolve(TagType::from(row.tag_type), label_val);
+        self.apply_tag(label, origin);
     }
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
@@ -272,7 +255,10 @@ impl SearchResult {
             return Some(self.name.clone());
         }
         // フォールバックとしてタグの中を探す
-        self.get_tag_value("path")
+        use crate::types::SType;
+        self.get_all_labels(&SType::Path.into())
+            .first()
+            .map(|l| l.as_str().to_string())
             .or_else(|| self.get_tag_value("content"))
             .or_else(|| self.get_tag_value("value"))
             .or_else(|| self.get_tag_value("filename"))
@@ -282,10 +268,10 @@ impl SearchResult {
     /// 一つでもユーザー付与のタグがあれば Origin::User を返します。
     pub fn origin(&self) -> Origin {
         self.tags
-            .origins
+            .entries
             .iter()
-            .any(|&o| o == Origin::User)
-            .then_some(Origin::User)
+            .any(|e| matches!(e.origin, Origin::User))
+            .then(|| Origin::User)
             .unwrap_or(Origin::System)
     }
 
@@ -351,21 +337,21 @@ impl SearchResult {
             }
             // 仮想ラベル: type: (タグの型一覧)
             TagType::Base(SType::Type) => {
-                let mut types: Vec<String> = self.tags.types.clone();
+                let mut types: Vec<TagType> = self.tags.entries.iter().map(|e| e.label.tag_type()).collect();
                 // 固定属性も型として含める（設計上の整合性）
                 if self.intrinsic.size.is_some() {
-                    types.push(SType::Size.to_string());
+                    types.push(TagType::Base(SType::Size));
                 }
                 if self.intrinsic.mtime.is_some() {
-                    types.push(SType::Mtime.to_string());
+                    types.push(TagType::Base(SType::Mtime));
                 }
                 types.sort();
                 types.dedup();
-                return types.into_iter().map(Label::from).collect();
+                return types.into_iter().map(|t| Label::from(t.as_str())).collect();
             }
             // 仮想ラベル: label: (アイテムが持つ全てのラベル値)
             TagType::Base(SType::Label) => {
-                let mut labels: Vec<Label> = self.tags.labels.clone();
+                let mut labels: Vec<Label> = self.tags.entries.iter().map(|e| e.label.clone()).collect();
                 labels.sort();
                 labels.dedup();
                 return labels;
@@ -405,18 +391,15 @@ mod tests {
     fn create_test_result() -> SearchResult {
         let mut tags = Tags::new();
         tags.push(
-            TagType::from("extension"),
-            Label::String("rs".to_string()),
+            Label::resolve(TagType::from("extension"), "rs".into()),
             Origin::System,
         );
         tags.push(
-            TagType::from("project"),
-            Label::String("A".to_string()),
+            Label::resolve(TagType::from("project"), "A".into()),
             Origin::User,
         );
         tags.push(
-            TagType::from("project"),
-            Label::String("B".to_string()),
+            Label::resolve(TagType::from("project"), "B".into()),
             Origin::User,
         );
 

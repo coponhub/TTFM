@@ -1,7 +1,9 @@
-use crate::query::ast::{ComparisonNode, ComparisonOp, QueryNode};
-use crate::query::lens::{Lens, ResolvedNode, StorageMapping};
-use crate::types::{Label, SType, TagType, TypedTag};
-use anyhow::{anyhow, Result};
+
+use crate::query::lens::Lens;
+use crate::response::SearchResult;
+use crate::types::{Origin, SType, TagType};
+use anyhow::Result;
+use sea_query::Iden;
 
 /// 検索結果の抽出（Pick）計画。
 #[derive(Debug, Clone)]
@@ -59,6 +61,89 @@ impl<'a> Fetcher<'a> {
             candidate_ids,
         })
     }
+
+    /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
+    pub fn fetch_items(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<SearchResult>> {
+        use duckdb::types::Value;
+        use sea_query::PostgresQueryBuilder;
+
+        // 識別子からクォートなしのカラム名を取得するヘルパー
+        let col = |c: SType| {
+            let mut s = String::new();
+            c.unquoted(&mut s);
+            s
+        };
+
+        let select_sql = crate::query::sql::build_fetch_items_sql(
+            &self.lens.resolved_query,
+            "oneview",
+            limit,
+            offset,
+        );
+
+        let sql_str = select_sql.to_string(PostgresQueryBuilder);
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            println!("--- FETCH ITEMS SQL ---\n{}\n----------------", sql_str);
+        }
+
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let item_iter = stmt.query_map([], |row| {
+            let id: i64 = row.get(col(SType::ItemId).as_str())?;
+            let mut res = SearchResult::new_empty(id);
+            res.rank = row.get::<_, Option<i64>>(col(SType::Rank).as_str())?.unwrap_or(0);
+            res.item_kind = row.get(col(SType::ItemKind).as_str())?;
+
+            let Value::List(tags) = row.get("tags")? else {
+                return Ok(res);
+            };
+
+            for v in tags {
+                let Value::Struct(ref map) = v else { continue };
+
+                // type カラムからタグの型を特定
+                let Some(tag_type) = map.get(&col(SType::Type)).and_then(|v| match v {
+                    Value::Text(s) => Some(TagType::from(s.as_str())),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+
+
+
+                // Lens に物理デコードを委譲 (Label への復元)
+                let Some(label) = self.lens.decode_label(&tag_type, &v) else {
+
+                    continue;
+                };
+
+                // Origin の解決
+                let origin = map
+                    .get(&col(SType::Origin))
+                    .and_then(|v| match v {
+                        Value::Text(s) if s == "user" => Some(Origin::User),
+                        _ => None,
+                    })
+                    .unwrap_or(Origin::System);
+
+                res.apply_tag(label, origin);
+            }
+            Ok(res)
+        })?;
+
+        let mut results = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        for item in item_iter {
+            let item = item?;
+            if seen_ids.insert(item.id) {
+                results.push(item);
+            }
+        }
+        Ok(results)
+    }
 }
 
 /// DB から ID リストを抽出する汎用ヘルパー。
@@ -78,6 +163,8 @@ pub fn fetch_ids(
     for id in id_iter {
         candidate_ids.push(id?);
     }
+    candidate_ids.sort_unstable();
+    candidate_ids.dedup();
     Ok(candidate_ids)
 }
 
@@ -93,11 +180,11 @@ mod tests {
         let lens = Lens::with_standard("directory:docs").unwrap();
         let expanded = &lens.expanded_query;
 
-        let _target_label = Label::String("docs".to_string());
+        let _target_label = Label::from("docs");
 
         // 少なくとも TypedTag(Directory) ではなくなっているはず
         if let QueryNode::TypedTag(tt) = &expanded {
-            assert_ne!(tt.tagtype, TagType::Base(SType::Directory));
+            assert_ne!(tt.label.tag_type(), TagType::Base(SType::Directory));
         }
     }
 

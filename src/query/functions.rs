@@ -70,10 +70,10 @@ impl QueryFunctionRegistry {
     pub fn process_tag(&self, tagtype: TagType, label: Label) -> QueryNode {
         // LiteralCustom の場合は魔法（展開関数）をスキップする
         if let TagType::LiteralCustom(_) = tagtype {
-            return QueryNode::And(vec![QueryNode::TypedTag(TypedTag {
+            return QueryNode::And(vec![QueryNode::TypedTag(TypedTag::new(
                 tagtype,
                 label,
-            })]);
+            ))]);
         }
 
         // Baseタグ（SType）であれば、レジストリから展開関数を探す
@@ -85,7 +85,7 @@ impl QueryFunctionRegistry {
         }
 
         // それ以外（カスタムタグまたは未登録の標準タグ）はそのまま TypedTag として保持
-        QueryNode::TypedTag(TypedTag { tagtype, label })
+        QueryNode::TypedTag(TypedTag::new(tagtype, label))
     }
 
     /// 指定された TagType に対応する QueryFunction を返します。
@@ -185,7 +185,7 @@ pub fn expand_query_node(
         QueryNode::ColumnMatch { tag, label } => {
             QueryNode::ColumnMatch { tag, label }
         }
-        QueryNode::TypedTag(tt) => registry.process_tag(tt.tagtype, tt.label),
+        QueryNode::TypedTag(tt) => registry.process_tag(tt.label.tag_type(), tt.label),
         QueryNode::Projection(tt) => registry.expand_projection(tt),
     }
 }
@@ -198,22 +198,13 @@ impl QueryFunction for DirectoryQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::Filename).to_string(),
-                label.clone(),
-            )),
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("true".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, true)),
         ])
     }
     fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("true".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, true)),
             QueryNode::Projection(SType::Filename.into()),
         ])
     }
@@ -227,23 +218,14 @@ impl QueryFunction for FilenameQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::Filename).to_string(),
-                label.clone(),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
             // ディレクトリを除外
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("false".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
         ])
     }
     fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("false".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
             QueryNode::Projection(SType::Filename.into()),
         ])
     }
@@ -262,23 +244,14 @@ impl QueryFunction for ExtensionQuery {
             .trim_start_matches('.')
             .to_string();
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::Extension).to_string(),
-                Label::String(normalized),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::Extension, normalized)),
             // ディレクトリを除外 (拡張子はファイルのみ)
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("false".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
         ])
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(
-                <&str>::from(SType::IsDir).to_string(),
-                Label::String("false".to_string()),
-            )),
+            QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
             QueryNode::Projection(tagtype),
         ])
     }
@@ -297,14 +270,11 @@ impl QueryFunction for PathQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         let normalized = normalize_path(&label.as_str());
-        let new_label = match label {
-            Label::Literal(_) => Label::Literal(normalized),
-            _ => Label::String(normalized),
+        let label_val = match label.value() {
+            crate::types::LabelValue::Literal(_) => crate::types::LabelValue::Literal(normalized),
+            _ => crate::types::LabelValue::String(normalized),
         };
-        QueryNode::TypedTag(TypedTag::new(
-            <&str>::from(SType::Path).to_string(),
-            new_label,
-        ))
+        QueryNode::TypedTag(TypedTag::new(SType::Path, label_val))
     }
 }
 
@@ -316,14 +286,11 @@ impl QueryFunction for ParentDirQuery {
     }
     fn expand(&self, label: &Label) -> QueryNode {
         let normalized = normalize_path(&label.as_str());
-        let new_label = match label {
-            Label::Literal(_) => Label::Literal(normalized),
-            _ => Label::String(normalized),
+        let label_val = match label.value() {
+            crate::types::LabelValue::Literal(_) => crate::types::LabelValue::Literal(normalized),
+            _ => crate::types::LabelValue::String(normalized),
         };
-        QueryNode::TypedTag(TypedTag::new(
-            <&str>::from(SType::Parentdir).to_string(),
-            new_label,
-        ))
+        QueryNode::TypedTag(TypedTag::new(SType::Parentdir, label_val))
     }
 }
 
@@ -334,7 +301,7 @@ impl QueryFunction for NameQuery {
         SType::Name.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new("name", label.clone()))
+        QueryNode::TypedTag(TypedTag::new(SType::Name, label.clone()))
     }
 }
 
@@ -359,7 +326,7 @@ impl QueryFunction for RankQuery {
         SType::Rank.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new("rank", label.clone()))
+        QueryNode::TypedTag(TypedTag::new(SType::Rank, label.clone()))
     }
 }
 
@@ -374,15 +341,10 @@ impl QueryFunction for SizeQuery {
         QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
     }
     fn normalize_label(&self, label: &Label) -> Label {
-        match label {
-            Label::String(s) | Label::Literal(s) => {
-                if let Some(bytes) = crate::util::parse_size(s) {
-                    Label::Integer(bytes)
-                } else {
-                    label.clone()
-                }
-            }
-            _ => label.clone(),
+        if let Some(bytes) = crate::util::parse_size(&label.as_str()) {
+            Label::Size(bytes)
+        } else {
+            label.clone()
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
@@ -397,7 +359,7 @@ impl QueryFunction for MtimeQuery {
         SType::Mtime.into()
     }
     fn expand(&self, label: &Label) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new("mtime", label.clone()))
+        QueryNode::TypedTag(TypedTag::new(SType::Mtime, label.clone()))
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
         QueryNode::Projection(tagtype)
@@ -488,10 +450,7 @@ mod tests {
         }
         fn normalize_label(&self, label: &Label) -> Label {
             // Mock: multiply by 1024
-            match label {
-                Label::Integer(i) => Label::Integer(i * 1024),
-                _ => label.clone(),
-            }
+            Label::Size(label.as_i64() * 1024)
         }
     }
 
@@ -511,14 +470,14 @@ mod tests {
         // size > 1
         let node = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::Integer(1)))],
+            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::from(1)))],
         };
 
         let expanded = expand_comparison_node(node, &reg);
 
         match &expanded.rest[0].1 {
-            Operand::Literal(Label::Integer(val)) => assert_eq!(*val, 1024),
-            _ => panic!("Expected Literal Integer"),
+            Operand::Literal(l) => assert_eq!(l.as_i64(), 1024),
+            _ => panic!("Expected Literal with value 1024"),
         }
     }
 
@@ -564,7 +523,7 @@ mod tests {
                     first: Operand::TypeRef(TagType::from("size")),
                     rest: vec![(
                         ComparisonOp::Gt,
-                        Operand::Literal(Label::Integer(0)),
+                        Operand::Literal(Label::from(0)),
                     )],
                 })
             }
@@ -583,7 +542,7 @@ mod tests {
             reg.process_tag(TagType::from("unknown"), Label::from("foo"));
         match node2 {
             QueryNode::TypedTag(tt) => {
-                assert_eq!(tt.tagtype.as_str(), "unknown")
+                assert_eq!(tt.label.tag_type().as_str(), "unknown")
             }
             _ => panic!("Expected TypedTag for unknown, got {:?}", node2),
         }
@@ -618,7 +577,7 @@ mod tests {
                 // First should be expanded
                 match &nodes[0] {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.tagtype.as_str(), "expanded");
+                        assert_eq!(tt.label.tag_type().as_str(), "expanded");
                         assert_eq!(tt.label.as_str(), "rec");
                     }
                     _ => panic!(
@@ -629,7 +588,7 @@ mod tests {
                 // Second should be same
                 match &nodes[1] {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.tagtype.as_str(), "other")
+                        assert_eq!(tt.label.tag_type().as_str(), "other")
                     }
                     _ => panic!(
                         "Expected original TypedTag in second node, got {:?}",
@@ -646,7 +605,7 @@ mod tests {
         let q = TypedTagQuery;
 
         // 1. expand (通常の検索)
-        let label = Label::String("extension:rs".to_string());
+        let label = Label::from("extension:rs");
         let expanded = q.expand(&label);
 
         if let QueryNode::ColumnMatch { tag, label: l } = expanded {

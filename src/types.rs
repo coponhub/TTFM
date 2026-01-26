@@ -149,12 +149,35 @@ impl From<&str> for TagType {
 }
 
 /// タグの「値」部分（例: "rs", "1024"）。
-/// 文字列と数値のどちらかを取り得ます。
+/// 物理的な型だけでなく、ドメイン上の意味（SType）を宿しています。
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum Label {
+    // --- ドメイン特化型 (Standard Types) ---
+    Name(String),
+    Rank(i64),
+    Size(i64),
+    Mtime(i64),
+    Hash(String),
+    ItemKind(String),
+    Extension(String),
+    Path(String),
+    ItemId(i64),
+    FileId(Uuid),
+    IsDir(bool),
+    
+    // --- 汎用・未解決型 ---
+    /// 標準外のタグ、または明示的にドメインを特定しない汎用値。
+    /// タグの型（TagType）を自律的に保持します。
+    Other(TagType, LabelValue),
+}
+
+/// Label が保持する生の値の種類。
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+pub enum LabelValue {
     String(String),
     Integer(i64),
-    /// 引用符で囲まれたリテラル文字列。Globを無効化する。
+    Boolean(bool),
+    /// 引用符で囲まれたリテラル文字列。
     Literal(String),
 }
 
@@ -165,81 +188,169 @@ impl std::fmt::Display for Label {
 }
 
 impl Label {
-    /// データベースの行から指定されたオフセットのカラムを Label として読み取ります。
-    /// LabelStr, LabelInt, LabelDouble, LabelBool の順に並んでいることを想定します。
-    pub fn from_row_at(r: &duckdb::Row, offset: usize) -> Self {
-        if let Ok(i) = r.get::<_, i64>(offset + 1) {
-            Self::Integer(i)
-        } else if let Ok(s) = r.get::<_, String>(offset) {
-            Self::String(s)
-        } else if let Ok(b) = r.get::<_, bool>(offset + 3) {
-            Self::String(b.to_string())
-        } else if let Ok(d) = r.get::<_, f64>(offset + 2) {
-            Self::String(d.to_string())
-        } else {
-            Self::String(String::new())
-        }
-    }
-
+    /// 文字列としての表現を取得します。
     pub fn as_str(&self) -> String {
         match self {
-            Label::String(s) => s.clone(),
-            Label::Integer(i) => i.to_string(),
-            Label::Literal(s) => s.clone(),
+            Label::Name(s) | Label::Hash(s) | Label::ItemKind(s) | 
+            Label::Extension(s) | Label::Path(s) => s.clone(),
+            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => i.to_string(),
+            Label::FileId(u) => u.to_string(),
+            Label::IsDir(b) => b.to_string(),
+            Label::Other(_, val) => match val {
+                LabelValue::String(s) | LabelValue::Literal(s) => s.clone(),
+                LabelValue::Integer(i) => i.to_string(),
+                LabelValue::Boolean(b) => b.to_string(),
+            }
         }
     }
 
     /// 数値としての値を取得します（数値でない場合は 0）。
     pub fn as_i64(&self) -> i64 {
         match self {
-            Label::Integer(i) => *i,
-            Label::String(s) | Label::Literal(s) => {
-                s.parse::<i64>().unwrap_or_default()
+            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => *i,
+            Label::Other(_, LabelValue::Integer(i)) => *i,
+            _ => self.as_str().parse::<i64>().unwrap_or_default(),
+        }
+    }
+
+    /// この Label が代表するタグの型（TagType）を返します。
+    pub fn tag_type(&self) -> TagType {
+        match self {
+            Label::Name(_) => TagType::Base(SType::Name),
+            Label::Rank(_) => TagType::Base(SType::Rank),
+            Label::Size(_) => TagType::Base(SType::Size),
+            Label::Mtime(_) => TagType::Base(SType::Mtime),
+            Label::Hash(_) => TagType::Base(SType::Hash),
+            Label::ItemKind(_) => TagType::Base(SType::ItemKind),
+            Label::Extension(_) => TagType::Base(SType::Extension),
+            Label::Path(_) => TagType::Base(SType::Path),
+            Label::ItemId(_) => TagType::Base(SType::ItemId),
+            Label::FileId(_) => TagType::Base(SType::FileId),
+            Label::IsDir(_) => TagType::Base(SType::IsDir),
+            Label::Other(tt, _) => tt.clone(),
+        }
+    }
+
+    /// データベースの行から指定されたオフセットのカラム（LabelStr, LabelInt 等）を Label として物理デコードし、
+    /// その後ドメインへの格上げ（Promotion）を試みます。
+    pub fn from_raw_row(tag: TagType, r: &duckdb::Row, offset: usize) -> Self {
+        let label_val = if let Ok(i) = r.get::<_, i64>(offset + 1) {
+            LabelValue::Integer(i)
+        } else if let Ok(s) = r.get::<_, String>(offset) {
+            LabelValue::String(s)
+        } else if let Ok(b) = r.get::<_, bool>(offset + 3) {
+            LabelValue::Boolean(b)
+        } else if let Ok(d) = r.get::<_, f64>(offset + 2) {
+            LabelValue::String(d.to_string())
+        } else {
+            LabelValue::String(String::new())
+        };
+        Self::resolve(tag, label_val)
+    }
+
+    /// Label が保持している物理的な値（LabelValue）を返します。
+    pub fn value(&self) -> LabelValue {
+        match self {
+            Label::Name(s) | Label::Hash(s) | Label::ItemKind(s) | 
+            Label::Extension(s) | Label::Path(s) => LabelValue::String(s.clone()),
+            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) | Label::ItemId(i) => LabelValue::Integer(*i),
+            Label::FileId(u) => LabelValue::String(u.to_string()),
+            Label::IsDir(b) => LabelValue::Boolean(*b),
+            Label::Other(_, val) => val.clone(),
+        }
+    }
+
+    /// 物理的な型とタグの種類から、適切なドメイン指向 Label を構築（Promote）します。
+    pub fn resolve(tag: TagType, value: LabelValue) -> Self {
+        if let TagType::Base(stype) = &tag {
+            match (stype, &value) {
+                (SType::Name, LabelValue::String(s)) => return Label::Name(s.clone()),
+                (SType::Rank, LabelValue::Integer(i)) => return Label::Rank(*i),
+                (SType::Size, LabelValue::Integer(i)) => return Label::Size(*i),
+                (SType::Mtime, LabelValue::Integer(i)) => return Label::Mtime(*i),
+                (SType::Hash, LabelValue::String(s)) => return Label::Hash(s.clone()),
+                (SType::ItemKind, LabelValue::String(s)) => return Label::ItemKind(s.clone()),
+                (SType::Extension, LabelValue::String(s)) => return Label::Extension(s.clone()),
+                (SType::Path, LabelValue::String(s)) => return Label::Path(s.clone()),
+                (SType::ItemId, LabelValue::Integer(i)) => return Label::ItemId(*i),
+                (SType::IsDir, LabelValue::Boolean(b)) => return Label::IsDir(*b),
+                _ => {}
             }
         }
+        Label::Other(tag, value)
     }
 }
 
 impl From<String> for Label {
     fn from(s: String) -> Self {
-        Label::String(s)
+        Label::Other(TagType::Custom(String::new()), LabelValue::String(s))
     }
 }
 
 impl From<&str> for Label {
     fn from(s: &str) -> Self {
-        Label::String(s.to_string())
+        Label::Other(TagType::Custom(String::new()), LabelValue::String(s.to_string()))
     }
 }
 
 impl From<i64> for Label {
     fn from(i: i64) -> Self {
-        Label::Integer(i)
+        Label::Other(TagType::Custom(String::new()), LabelValue::Integer(i))
     }
 }
 
 /// 「キー:値」のペアを表す構造体。
 #[derive(Debug, PartialEq, Clone)]
 pub struct TypedTag {
-    /// タグの型（キー）。例: "extension"
-    pub tagtype: TagType,
-    /// タグの値。例: "rs"
+    /// タグの値（型情報を内包）
     pub label: Label,
 }
 
 impl std::fmt::Display for TypedTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.tagtype.as_str(), self.label.as_str())
+        write!(f, "{}:{}", self.label.tag_type().as_str(), self.label.as_str())
     }
 }
 
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
-    pub fn new(tagtype: impl Into<TagType>, label: impl Into<Label>) -> Self {
+    pub fn new(tagtype: impl Into<TagType>, label_val: impl Into<LabelValue>) -> Self {
         Self {
-            tagtype: tagtype.into(),
-            label: label.into(),
+            label: Label::resolve(tagtype.into(), label_val.into()),
         }
+    }
+}
+
+impl From<String> for LabelValue {
+    fn from(s: String) -> Self {
+        Self::String(s)
+    }
+}
+impl From<&str> for LabelValue {
+    fn from(s: &str) -> Self {
+        Self::String(s.to_string())
+    }
+}
+impl From<i64> for LabelValue {
+    fn from(i: i64) -> Self {
+        Self::Integer(i)
+    }
+}
+impl From<bool> for LabelValue {
+    fn from(b: bool) -> Self {
+        Self::Boolean(b)
+    }
+}
+
+impl From<Label> for LabelValue {
+    fn from(l: Label) -> Self {
+        l.value()
+    }
+}
+
+impl From<&Label> for LabelValue {
+    fn from(l: &Label) -> Self {
+        l.value()
     }
 }
 
@@ -253,61 +364,54 @@ pub struct TagValue {
 }
 
 /// タグの集合。
-/// 並列リスト（Stream）ベースの Lazy な構造で、情報の解決をアクセス時まで遅延させます。
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct Tags {
-    pub types: Vec<String>,
-    pub labels: Vec<Label>,
-    pub origins: Vec<Origin>,
+    pub entries: Vec<TagEntry>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct TagEntry {
+    pub label: Label,
+    pub origin: Origin,
 }
 
 impl Tags {
     pub fn new() -> Self {
         Self {
-            types: Vec::new(),
-            labels: Vec::new(),
-            origins: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
     /// 新しいタグを追加します。
-    pub fn push(&mut self, tagtype: TagType, label: Label, origin: Origin) {
-        self.types.push(tagtype.as_str().to_string());
-        self.labels.push(label);
-        self.origins.push(origin);
+    pub fn push(&mut self, label: Label, origin: Origin) {
+        self.entries.push(TagEntry { label, origin });
     }
 
     /// 「型:値」のペアを生成するイテレータを返します。
     pub fn iter_typed_tags(&self) -> impl Iterator<Item = TypedTag> + '_ {
-        self.types
-            .iter()
-            .zip(self.labels.iter())
-            .map(|(t, l)| TypedTag {
-                tagtype: TagType::from(t.as_str()),
-                label: l.clone(),
-            })
+        self.entries.iter().map(|e| TypedTag {
+            label: e.label.clone(),
+        })
     }
 
     /// 指定された型のタグ値をリストとして取得します（リニアスキャン）。
     pub fn get_values(&self, key: &TagType) -> Vec<TagValue> {
-        let key_str = key.as_str();
-        self.types
+        self.entries
             .iter()
-            .enumerate()
-            .filter(|(_, t)| *t == key_str)
-            .map(|(i, _)| TagValue {
-                label: self.labels[i].clone(),
-                origin: self.origins[i],
+            .filter(|e| e.label.tag_type() == *key)
+            .map(|e| TagValue {
+                label: e.label.clone(),
+                origin: e.origin,
             })
             .collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.types.is_empty()
+        self.entries.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.types.len()
+        self.entries.len()
     }
 }
 
@@ -321,12 +425,12 @@ impl IntoIterator for Tags {
         // 必要に応じて HashMap に詰め直して返す（Lazy 化の恩恵は受けられないが、互換性は保つ）
         let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
             std::collections::HashMap::new();
-        for i in 0..self.types.len() {
-            map.entry(TagType::from(self.types[i].as_str()))
+        for entry in self.entries {
+            map.entry(entry.label.tag_type())
                 .or_default()
                 .push(TagValue {
-                    label: self.labels[i].clone(),
-                    origin: self.origins[i],
+                    label: entry.label,
+                    origin: entry.origin,
                 });
         }
         map.into_iter()
@@ -341,12 +445,12 @@ impl<'a> IntoIterator for &'a Tags {
     fn into_iter(self) -> Self::IntoIter {
         let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
             std::collections::HashMap::new();
-        for i in 0..self.types.len() {
-            map.entry(TagType::from(self.types[i].as_str()))
+        for entry in &self.entries {
+            map.entry(entry.label.tag_type())
                 .or_default()
                 .push(TagValue {
-                    label: self.labels[i].clone(),
-                    origin: self.origins[i],
+                    label: entry.label.clone(),
+                    origin: entry.origin,
                 });
         }
         map.into_iter().collect::<Vec<_>>().into_iter()
@@ -467,9 +571,9 @@ mod tests_types {
     #[test]
     fn test_tags_iter_typed_tags() {
         let mut tags = Tags::new();
-        tags.push(TagType::from("project"), Label::from("A"), Origin::User);
-        tags.push(TagType::from("project"), Label::from("B"), Origin::User);
-        tags.push(TagType::from("extension"), Label::from("rs"), Origin::User);
+        tags.push(Label::resolve(TagType::from("project"), "A".into()), Origin::User);
+        tags.push(Label::resolve(TagType::from("project"), "B".into()), Origin::User);
+        tags.push(Label::resolve(TagType::from("extension"), "rs".into()), Origin::User);
 
         let mut results: Vec<String> =
             tags.iter_typed_tags().map(|tt| tt.to_string()).collect();

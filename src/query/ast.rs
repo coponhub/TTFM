@@ -128,7 +128,7 @@ impl QueryNode {
                 }
             }
             QueryNode::TypedTag(tt) => {
-                types.insert(tt.tagtype.as_str().to_string());
+                types.insert(tt.label.tag_type().as_str().to_string());
             }
             QueryNode::Projection(tt) => {
                 types.insert(tt.as_str().to_string());
