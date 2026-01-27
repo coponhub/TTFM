@@ -114,13 +114,13 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
 
     // 1. 基本的なサイズ比較
-    println!("Testing 'size: > 300'...");
-    let res = fm.search("size: > 300", Default::default())?;
+    println!("Testing 'size: :> 300'...");
+    let res = fm.search("size: :> 300", Default::default())?;
     assert_eq!(res.results.len(), 2); // medium, large
 
     // 2. 連鎖比較 (Between)
-    println!("Testing '200 < size: < 800'...");
-    let res = fm.search("200 < size: < 800", Default::default())?;
+    println!("Testing '200 :< size: :< 800'...");
+    let res = fm.search("200 :< size: :< 800", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert!(res.results[0].name.contains("medium.txt"));
 
@@ -129,13 +129,13 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let item_id = res.results[0].id.to_string();
     fm.tag_item(&item_id, "width:640")?;
 
-    let res = fm.search("width: > 500", Default::default())?;
+    let res = fm.search("width: :> 500", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].id.to_string(), item_id);
 
     // 4. 複数条件の組み合わせ
     println!("Testing multiple conditions...");
-    let res = fm.search("size: > 300 & width: > 500", Default::default())?;
+    let res = fm.search("size: :> 300 & width: :> 500", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].name, "medium.txt");
 
@@ -149,32 +149,32 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     println!("Testing other operators...");
 
     // >= (Inclusive)
-    println!("Testing 'size: >= 500'...");
-    let res = fm.search("size: >= 500", Default::default())?;
-    assert_eq!(res.results.len(), 2, "size: >= 500 failed"); // medium(500), large(1000)
+    println!("Testing 'size: :>= 500'...");
+    let res = fm.search("size: :>= 500", Default::default())?;
+    assert_eq!(res.results.len(), 2, "size: :>= 500 failed"); // medium(500), large(1000)
 
     // <= (Inclusive)
-    println!("Testing 'size: <= 500'...");
+    println!("Testing 'size: :<= 500'...");
     // 0-byte directory might match <= 500, so exclude directory explicitly
-    let res = fm.search("size: <= 500 & is_dir:false", Default::default())?;
-    assert_eq!(res.results.len(), 2, "size: <= 500 failed"); // small(100), medium(500)
+    let res = fm.search("size: :<= 500 & is_dir:false", Default::default())?;
+    assert_eq!(res.results.len(), 2, "size: :<= 500 failed"); // small(100), medium(500)
 
     // == (Equal)
-    println!("Testing 'size: == 500'...");
-    let res = fm.search("size: == 500", Default::default())?;
-    assert_eq!(res.results.len(), 1, "size: == 500 failed"); // medium(500)
+    println!("Testing 'size: :== 500'...");
+    let res = fm.search("size: :== 500", Default::default())?;
+    assert_eq!(res.results.len(), 1, "size: :== 500 failed"); // medium(500)
 
     // ^= (Not Equal)
-    println!("Testing 'size: ^= 500'...");
-    let res = fm.search("size: ^= 500 & is_dir:false", Default::default())?;
+    println!("Testing 'size: :^= 500'...");
+    let res = fm.search("size: :^= 500 & is_dir:false", Default::default())?;
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // ^ (Not Equal shorthand)
-    let res = fm.search("size: ^ 500 & is_dir:false", Default::default())?;
+    let res = fm.search("size: :^ 500 & is_dir:false", Default::default())?;
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // Custom tag exact match (Cast check)
-    let res = fm.search("width: == 640", Default::default())?;
+    let res = fm.search("width: :== 640", Default::default())?;
     assert_eq!(res.results.len(), 1);
 
     // width:640 is set on one item. Others don't have width.
@@ -492,9 +492,9 @@ fn test_complex_search_combinations() {
     assert!(results.results.len() >= 1);
     assert!(results.results.iter().all(|r| r.name == "main.rs"));
 
-    // 6. Value Glob + Value Prefix AND (name:*.rs & name:^mai)
+    // 6. Value Glob + Value Prefix AND (name:*.rs & name:mai*)
     let results = fm
-        .search("name:*.rs & name:^mai", Default::default())
+        .search("name:*.rs & name:mai*", Default::default())
         .unwrap();
     assert!(results.results.len() >= 1);
     assert!(results.results.iter().all(|r| r.name == "main.rs"));

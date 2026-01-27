@@ -1012,15 +1012,15 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::ast::QueryNode;
+    use crate::query::ast::{QueryNode, BasicOp};
     use crate::types::{Label, TagType, TypedTag};
     use sea_query::{Alias, BinOper, Query, SqliteQueryBuilder};
 
     #[test]
     fn test_to_bin_op_conversion() {
-        assert_eq!(to_bin_op(ComparisonOp::Eq), BinOper::Equal);
-        assert_eq!(to_bin_op(ComparisonOp::Gt), BinOper::GreaterThan);
-        assert_eq!(to_bin_op(ComparisonOp::Lt), BinOper::SmallerThan);
+        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Eq)), BinOper::Equal);
+        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Gt)), BinOper::GreaterThan);
+        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Lt)), BinOper::SmallerThan);
     }
 
     #[test]
@@ -1087,7 +1087,7 @@ mod tests {
     fn test_build_comparison_sql_int() {
         let node = ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::from(100)))],
+            rest: vec![(ComparisonOp::Scalar(BasicOp::Gt), Operand::Literal(Label::from(100)))],
         };
         let sql = build_comparison_sql(&node, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);
@@ -1115,7 +1115,7 @@ mod tests {
             tag_type: TagType::Base(SType::Name),
             storage: StorageMapping::Column(Col::Name),
             sql_type: crate::db::SqlType::VARCHAR,
-            op: ComparisonOp::Eq,
+            op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
         let query_node = QueryNode::And(vec![]);

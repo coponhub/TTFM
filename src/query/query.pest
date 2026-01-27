@@ -15,26 +15,48 @@ infix = _{ ampersand | pipe | minus }
 // --- Primary elements ---
 primary = { complement | factor }
 
-// Complement (e.g., ^(extension:pdf))
-// DESIGN.md: MUST be followed by parens and no space between ^ and (.
 comp_prefix = @{ "^" ~ "(" }
 complement = { comp_prefix ~ expr ~ ")" }
 
 // --- Factors ---
 // PEG priority: Try specific rules first.
 factor = { 
-    "(" ~ expr ~ ")" 
+    comparison
   | typed_tag
-  | comparison
   | projection
+  | "(" ~ expr ~ ")"
 }
 
 projection = { type_ref }
 
-// --- Label Comparison ---
-// Format: operand cmp_op operand [cmp_op operand ...]
-comparison = { operand ~ (cmp_op ~ operand)+ }
-cmp_op = { "==" | "^=" | "^" | ">=" | ">" | "<=" | "<" }
+// --- Label/Scalar Comparison ---
+// DESIGN.md:
+// - Label Comparison: Stuck operator (size:>100) or Colon operator (size: :> 100)
+// - Scalar Comparison: Space between operand and operator (sum(size:) > 1GB)
+// - TypedTag/TypeRef + ScalarOp (size: > 100) is a Syntax Error.
+
+comparison = { 
+    label_comparison 
+  | scalar_comparison 
+}
+
+// Label comparison: operand (including projection) followed by label-style operator
+label_comparison = ${ 
+    ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step)+ )
+  | ( (number | quoted_string) ~ (WHITESPACE* ~ label_op)+ )
+  | ( (unquoted_string | unquoted_tag_string) ~ label_op+ )
+}
+label_op = ${ colon ~ basic_op ~ WHITESPACE* ~ operand }
+stuck_op_step = ${ basic_op ~ WHITESPACE* ~ operand }
+colon = { ":" }
+
+// Scalar comparison: scalar-only operand followed by scalar-style operator
+// Note: projection (type_ref) is NOT allowed in scalar_operand.
+scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ basic_op ~ WHITESPACE* ~ operand)+ }
+
+scalar_operand = { calculation | label } // aggregation will be added in future
+
+basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)
@@ -66,7 +88,7 @@ unquoted_tag_string = @{
 // DESIGN.md: Arithmetic can ONLY be used inside parentheses of a comparison operand.
 calculation = { "(" ~ calculation_inner ~ ")" }
 calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
-arith_op = { "+" | "-" | "*" | "/" | "%" }
+arith_op = @{ WHITESPACE* ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE* }
 
 // Calc operands (to avoid ambiguity)
 operand_calc = { type_ref | label | calculation }
@@ -83,7 +105,7 @@ label = { quoted_string | number | unquoted_string }
 identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
-number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC) }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC | "/") }
 
 // Quoted strings
 quoted_string = ${ 

@@ -123,29 +123,36 @@ pub fn expand_comparison_node(
     node: crate::query::ast::ComparisonNode,
     registry: &QueryFunctionRegistry,
 ) -> QueryNode {
-    use crate::query::ast::Operand;
+    use crate::query::ast::{ComparisonOp, Operand};
 
-    let rep_func = find_representative_function(&node, registry);
+    // 最初の演算子でモードを判定。Label モードの場合のみ拡張ロジックを適用
+    match node.rest.first().map(|(op, _)| op) {
+        Some(ComparisonOp::Label(_)) => {
+            let rep_func = find_representative_function(&node, registry);
+            let Some(f) = rep_func else {
+                return QueryNode::Comparison(node);
+            };
 
-    let Some(f) = rep_func else {
-        return QueryNode::Comparison(node);
-    };
+            if f.name() == SType::Mtime.name() {
+                return expand_mtime_comparison(node);
+            }
 
-    if f.name() == SType::Mtime.name() {
-        return expand_mtime_comparison(node);
-    }
-
-    // 標準的な正規化（SizeQuery 等）
-    let mut node = node;
-    if let Operand::Literal(label) = &mut node.first {
-        *label = f.normalize_label(label);
-    }
-    for (_, op) in &mut node.rest {
-        if let Operand::Literal(label) = op {
-            *label = f.normalize_label(label);
+            // 標準的な正規化（SizeQuery 等）
+            let mut node = node;
+            if let Operand::Literal(label) = &mut node.first {
+                *label = f.normalize_label(label);
+            }
+            for (op, rhs) in &mut node.rest {
+                if let ComparisonOp::Label(_) = op {
+                    if let Operand::Literal(label) = rhs {
+                        *label = f.normalize_label(label);
+                    }
+                }
+            }
+            QueryNode::Comparison(node)
         }
+        _ => QueryNode::Comparison(node),
     }
-    QueryNode::Comparison(node)
 }
 
 fn find_representative_function<'a>(
@@ -213,67 +220,76 @@ fn expand_mtime_range_op(
     range: crate::util::DatetimeRange,
     _original_rhs: crate::query::ast::Operand,
 ) -> Vec<QueryNode> {
-    use crate::query::ast::{ComparisonNode, ComparisonOp, Operand};
-    match op {
-        ComparisonOp::Eq => vec![
+    use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+    
+    // expand_mtime_comparison から呼ばれる際、op は必ず ComparisonOp::Label(BasicOp) であることを想定
+    let ComparisonOp::Label(basic_op) = op else {
+        return vec![QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(op, _original_rhs)],
+        })];
+    };
+
+    match basic_op {
+        BasicOp::Eq => vec![
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
                 rest: vec![(
-                    ComparisonOp::Ge,
+                    ComparisonOp::Label(BasicOp::Ge),
                     Operand::Literal(Label::Mtime(range.start)),
                 )],
             }),
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
                 rest: vec![(
-                    ComparisonOp::Le,
+                    ComparisonOp::Label(BasicOp::Le),
                     Operand::Literal(Label::Mtime(range.end)),
                 )],
             }),
         ],
-        ComparisonOp::Ne => vec![QueryNode::Complement(Box::new(QueryNode::And(
+        BasicOp::Ne => vec![QueryNode::Complement(Box::new(QueryNode::And(
             vec![
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        ComparisonOp::Ge,
+                        ComparisonOp::Label(BasicOp::Ge),
                         Operand::Literal(Label::Mtime(range.start)),
                     )],
                 }),
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        ComparisonOp::Le,
+                        ComparisonOp::Label(BasicOp::Le),
                         Operand::Literal(Label::Mtime(range.end)),
                     )],
                 }),
             ],
         )))],
-        ComparisonOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
+        BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Gt,
+                ComparisonOp::Label(BasicOp::Gt),
                 Operand::Literal(Label::Mtime(range.end)),
             )],
         })],
-        ComparisonOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
+        BasicOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Ge,
+                ComparisonOp::Label(BasicOp::Ge),
                 Operand::Literal(Label::Mtime(range.start)),
             )],
         })],
-        ComparisonOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
+        BasicOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Lt,
+                ComparisonOp::Label(BasicOp::Lt),
                 Operand::Literal(Label::Mtime(range.start)),
             )],
         })],
-        ComparisonOp::Le => vec![QueryNode::Comparison(ComparisonNode {
+        BasicOp::Le => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Le,
+                ComparisonOp::Label(BasicOp::Le),
                 Operand::Literal(Label::Mtime(range.end)),
             )],
         })],
@@ -500,7 +516,7 @@ impl QueryFunction for MtimeQuery {
                             SType::Mtime.into(),
                         ),
                         rest: vec![(
-                            crate::query::ast::ComparisonOp::Ge,
+                            crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Ge),
                             crate::query::ast::Operand::Literal(Label::Mtime(
                                 range.start,
                             )),
@@ -511,7 +527,7 @@ impl QueryFunction for MtimeQuery {
                             SType::Mtime.into(),
                         ),
                         rest: vec![(
-                            crate::query::ast::ComparisonOp::Le,
+                            crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Le),
                             crate::query::ast::Operand::Literal(Label::Mtime(
                                 range.end,
                             )),
@@ -632,7 +648,7 @@ mod tests {
         // size > 1
         let node = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal(Label::from(1)))],
+            rest: vec![(ComparisonOp::Label(crate::query::ast::BasicOp::Gt), Operand::Literal(Label::from(1)))],
         };
 
         let expanded = expand_comparison_node(node, &reg);
@@ -688,7 +704,7 @@ mod tests {
                 QueryNode::Comparison(crate::query::ast::ComparisonNode {
                     first: Operand::TypeRef(TagType::from("size")),
                     rest: vec![(
-                        ComparisonOp::Gt,
+                        ComparisonOp::Label(crate::query::ast::BasicOp::Gt),
                         Operand::Literal(Label::from(0)),
                     )],
                 })
@@ -813,7 +829,7 @@ mod tests {
         let node = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("mtime")),
             rest: vec![(
-                ComparisonOp::Eq,
+                ComparisonOp::Label(crate::query::ast::BasicOp::Eq),
                 Operand::Literal(Label::from("2024/01/01")),
             )],
         };
@@ -830,7 +846,7 @@ mod tests {
         let node_gt = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("mtime")),
             rest: vec![(
-                ComparisonOp::Gt,
+                ComparisonOp::Label(crate::query::ast::BasicOp::Gt),
                 Operand::Literal(Label::from("2024/01/01")),
             )],
         };

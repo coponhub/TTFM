@@ -59,15 +59,14 @@ mod tests {
             "type:file",
             "extension:rs & ^(path:*/target/*)",
             "^(extension:pdf)",
-            "size: > 1024",
-            "size: >= 1024",
-            "size: < 2048",
-            "size: <= 2048",
-            "rank: == 5",
-            "rank: ^= 1", // Not Equal
-            "50 < width: < 100",
-            "10 <= height: <= 20",
-            "(size: + 1024) > 2048",
+            "size:>1024",
+            "size:>=1024",
+            "size:<2048",
+            "size:<=2048",
+            "rank:==5",
+            "rank:^=1", // Not Equal
+            "50:< width: :< 100",
+            "10:<= height: :<= 20",
             "name:\"My File\" | name:'Other File'",
             "extension:pdf - filename:test.pdf",
         ];
@@ -86,6 +85,7 @@ mod tests {
             "^ (extension:pdf)", // Space after ^
             "extension : rs",    // Space around :
             "size :> 100",       // Space before :>
+            "size : > 100",      // Invalid projection with scalar op
         ];
         for q in fail_queries {
             assert!(

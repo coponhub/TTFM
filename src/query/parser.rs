@@ -1,5 +1,5 @@
 use crate::query::ast::{
-    ArithmeticOp, CalculationNode, ComparisonNode, ComparisonOp, Operand,
+    ArithmeticOp, BasicOp, CalculationNode, ComparisonNode, ComparisonOp, Operand,
     QueryNode,
 };
 use crate::types::{Label, TagType, TypedTag};
@@ -201,49 +201,93 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
 }
 
 fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
-    // comparison = { operand ~ (cmp_op ~ operand)+ }
-    // AST Node: ComparisonNode { first: Operand, rest: Vec<(ComparisonOp, Operand)> }
-    let mut inner = pair.into_inner();
-    let first_op = build_operand(inner.next().unwrap())?;
+    // comparison = { label_comparison | scalar_comparison }
+    let inner = pair.into_inner().next().unwrap();
+    let rule = inner.as_rule();
+    let mut inner_pairs = inner.into_inner();
+    
+    let first_op = build_operand(inner_pairs.next().unwrap())?;
     let mut rest = Vec::new();
 
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_str() {
-            "==" => ComparisonOp::Eq,
-            "^=" | "^" => ComparisonOp::Ne, // ^ and ^= are NotEqual
-            ">" => ComparisonOp::Gt,
-            ">=" => ComparisonOp::Ge,
-            "<" => ComparisonOp::Lt,
-            "<=" => ComparisonOp::Le,
-            s => {
-                return Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s))
-            }
+    while let Some(step_pair) = inner_pairs.next() {
+        // Scalar comparison consumes WHITESPACE+ tokens here (they are pairs in ${})
+        // If it's whitespace, get the next real token
+        let actual_step = if step_pair.as_rule() == Rule::WHITESPACE {
+            inner_pairs.next().unwrap()
+        } else {
+            step_pair
         };
-        let right_pair = inner
-            .next()
-            .ok_or_else(|| anyhow!(errors::MISSING_COMPARISON_OPERAND))?;
-        let right_op = build_operand(right_pair)?;
+
+        let (op, right_op) = match rule {
+            Rule::label_comparison => {
+                let step_rule = actual_step.as_rule();
+                let mut step_inner = actual_step.into_inner();
+                let op_str = if step_rule == Rule::label_op {
+                    let _colon = step_inner.next(); // consume the colon pair if present
+                    step_inner.next().unwrap().as_str() // basic_op
+                } else {
+                    step_inner.next().unwrap().as_str() // basic_op directly from stuck_op_step
+                };
+                let basic_op = parse_basic_op(op_str)?;
+                let right_op = build_operand(step_inner.next().unwrap())?;
+                (ComparisonOp::Label(basic_op), right_op)
+            }
+            Rule::scalar_comparison => {
+                let basic_op_str = actual_step.as_str();
+                let basic_op = parse_basic_op(basic_op_str)?;
+                let right_op = build_operand(inner_pairs.next().unwrap())?;
+                (ComparisonOp::Scalar(basic_op), right_op)
+            }
+            _ => unreachable!(),
+        };
         rest.push((op, right_op));
     }
+    
     Ok(QueryNode::Comparison(ComparisonNode {
         first: first_op,
         rest,
     }))
 }
 
+fn parse_basic_op(s: &str) -> Result<BasicOp> {
+    match s {
+        "==" => Ok(BasicOp::Eq),
+        "^=" | "^" => Ok(BasicOp::Ne),
+        ">" => Ok(BasicOp::Gt),
+        ">=" => Ok(BasicOp::Ge),
+        "<" => Ok(BasicOp::Lt),
+        "<=" => Ok(BasicOp::Le),
+        s => Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s)),
+    }
+}
+
 fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
-    // operand = { calculation | type_ref | label }
-    let inner = pair.into_inner().next().unwrap();
+    let rule = pair.as_rule();
+    let inner = if rule == Rule::operand || rule == Rule::scalar_operand {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
+
     match inner.as_rule() {
-        Rule::calculation => {
+        Rule::typed_tag => {
+            let tn = build_typed_tag(inner)?;
+            if let QueryNode::TypedTag(tt) = tn {
+                Ok(Operand::Literal(tt.label))
+            } else {
+                unreachable!()
+            }
+        }
+        Rule::calculation | Rule::calculation_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
         Rule::type_ref => {
-            // type_ref = ${ tag_type ~ ":" }
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
-        Rule::label => Ok(Operand::Literal(build_label(inner)?)),
+        Rule::label | Rule::number | Rule::quoted_string | Rule::unquoted_string | Rule::unquoted_tag_string => {
+            Ok(Operand::Literal(build_label(inner)?))
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             errors::UNKNOWN_OPERAND_RULE,
@@ -253,7 +297,12 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
 }
 
 fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
-    let inner_pair = pair.into_inner().next().unwrap();
+    let rule = pair.as_rule();
+    let inner_pair = if rule == Rule::calculation {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
     let mut pairs = inner_pair.into_inner();
 
     let first_pair = pairs.next().unwrap();
@@ -276,10 +325,11 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
 }
 
 fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
-    match s {
+    match s.trim() {
         "+" => Ok(ArithmeticOp::Add),
         "-" => Ok(ArithmeticOp::Sub),
         "*" => Ok(ArithmeticOp::Mul),
+        "x" => Ok(ArithmeticOp::Mul), // 'x' is also allowed for multiplication
         "/" => Ok(ArithmeticOp::Div),
         "%" => Ok(ArithmeticOp::Mod),
         _ => Err(anyhow!(errors::UNKNOWN_ARITHMETIC_OP)),
@@ -287,27 +337,84 @@ fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
 }
 
 fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
-    // operand_calc = { type_ref | label | calculation }
-    let inner = pair.into_inner().next().unwrap();
+    let rule = pair.as_rule();
+    let inner = if rule == Rule::operand_calc || rule == Rule::scalar_operand {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
+
     match inner.as_rule() {
         Rule::type_ref => {
-            let s = inner.as_str();
-            let key = s.trim_end_matches(':');
-            Ok(Operand::TypeRef(TagType::from(key)))
+            let inner_tag = inner.into_inner().next().unwrap();
+            Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
-        Rule::label => Ok(Operand::Literal(build_label(inner)?)),
-        Rule::calculation => {
+        Rule::label | Rule::number | Rule::quoted_string | Rule::unquoted_string | Rule::unquoted_tag_string => {
+            Ok(Operand::Literal(build_label(inner)?))
+        }
+        Rule::calculation | Rule::calculation_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
-        _ => Err(anyhow!(errors::UNKNOWN_OPERAND_CALC_RULE)),
+        _ => Err(anyhow!(
+            "{}: {:?}",
+            errors::UNKNOWN_OPERAND_CALC_RULE,
+            inner.as_rule()
+        )),
     }
+}
+
+fn build_quoted_string(pair: Pair<Rule>) -> Result<Label> {
+    // Remove outer quotes before unescaping
+    let content = &pair.as_str()[1..pair.as_str().len() - 1];
+    let s = unescape_string(content)?;
+    Ok(Label::Other(
+        TagType::Custom(String::new()),
+        crate::types::LabelValue::Literal(s),
+    ))
+}
+
+fn build_number(pair: Pair<Rule>) -> Result<Label> {
+    let i = pair.as_str().parse::<i64>()?;
+    Ok(Label::from(i))
+}
+
+fn unescape_glob_string(s: &str) -> Result<String> {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next_char) = chars.peek() {
+                // Keep backslash if it escapes a glob special char
+                if matches!(next_char, '*' | '?' | '[' | ']') {
+                    result.push('\\');
+                    result.push(chars.next().unwrap());
+                } else {
+                    // Otherwise consumes backslash (unescape)
+                    result.push(chars.next().unwrap());
+                }
+            } else {
+                // Trailing backslash
+                result.push('\\');
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    Ok(result)
 }
 
 fn build_label(pair: Pair<Rule>) -> Result<Label> {
     // label = { quoted_string | number | unquoted_string }
     // tag_label = { quoted_string | number | unquoted_tag_string }
     // Both are handled by this single function.
-    let inner = pair.into_inner().next().unwrap();
+    let rule = pair.as_rule();
+    let inner = if rule == Rule::label || rule == Rule::tag_label {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
+
     match inner.as_rule() {
         Rule::quoted_string => {
             // Remove outer quotes before unescaping
@@ -323,7 +430,7 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             Ok(Label::from(i))
         }
         Rule::unquoted_string | Rule::unquoted_tag_string => {
-            let s = unescape_unquoted(inner.as_str())?;
+            let s = unescape_glob_string(inner.as_str())?;
             Ok(Label::from(s))
         }
         _ => Err(anyhow!(
@@ -455,22 +562,19 @@ mod tests {
 
     #[test]
     fn test_parse_comparison_simple() {
-        let node = parse("size > 100").expect("Failed to parse comparison");
+        // Using colon-operator format for explicit Label comparison
+        let node = parse("size:>100").expect("Failed to parse comparison");
         match node {
             QueryNode::Comparison(cmp) => {
-                // first should be 'size' (Operand::TypeRef)
-                // op should be Gt
-                // operand should be '100' (Operand::Literal)
-                // first should be 'size' (Operand::Literal) - conversion happens in expand phase
-                match cmp.first {
-                    Operand::Literal(ref l) => assert_eq!(l.as_str(), "size"),
-                    _ => panic!(
-                        "Expected Literal for first operand, got {:?}",
-                        cmp.first
-                    ),
+                // first should be 'size' (Operand::TypeRef) because 'size:' is parsed as TypeRef
+                // and followed by stuck operator '>100'
+                if let Operand::TypeRef(ref t) = cmp.first {
+                    assert_eq!(t.as_str(), "size");
+                } else {
+                    panic!("Expected TypeRef for first operand, got {:?}", cmp.first);
                 }
                 assert_eq!(cmp.rest.len(), 1);
-                assert_eq!(cmp.rest[0].0, ComparisonOp::Gt);
+                assert_eq!(cmp.rest[0].0, ComparisonOp::Label(crate::query::ast::BasicOp::Gt));
                 match &cmp.rest[0].1 {
                     Operand::Literal(l) => assert_eq!(l.as_str(), "100"),
                     _ => panic!("Expected Literal for second operand"),

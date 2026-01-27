@@ -606,7 +606,7 @@ fn resolve_query_node(
                 tag_type,
                 storage,
                 sql_type,
-                op: ComparisonOp::Eq,
+                op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label: tt.label,
             })
         }
@@ -619,7 +619,7 @@ fn resolve_query_node(
                 tag_type,
                 storage: desc.storage.clone(),
                 sql_type: desc.sql_type,
-                op: ComparisonOp::Eq,
+                op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
             })
         }
@@ -734,24 +734,38 @@ fn get_storage_and_type(
 pub fn flip_op(
     op: crate::query::ast::ComparisonOp,
 ) -> crate::query::ast::ComparisonOp {
+    use crate::query::ast::BasicOp;
     match op {
-        ComparisonOp::Gt => ComparisonOp::Lt,
-        ComparisonOp::Ge => ComparisonOp::Le,
-        ComparisonOp::Lt => ComparisonOp::Gt,
-        ComparisonOp::Le => ComparisonOp::Ge,
+        ComparisonOp::Scalar(b) => ComparisonOp::Scalar(flip_basic_op(b)),
+        ComparisonOp::Label(b) => ComparisonOp::Label(flip_basic_op(b)),
+    }
+}
+
+pub fn flip_basic_op(op: crate::query::ast::BasicOp) -> crate::query::ast::BasicOp {
+    use crate::query::ast::BasicOp;
+    match op {
+        BasicOp::Gt => BasicOp::Lt,
+        BasicOp::Ge => BasicOp::Le,
+        BasicOp::Lt => BasicOp::Gt,
+        BasicOp::Le => BasicOp::Ge,
         other => other,
     }
 }
 
 /// ComparisonOp を sea_query の BinOper に変換します。
 pub fn to_bin_op(op: ComparisonOp) -> BinOper {
-    match op {
-        ComparisonOp::Eq => BinOper::Equal,
-        ComparisonOp::Ne => BinOper::NotEqual,
-        ComparisonOp::Gt => BinOper::GreaterThan,
-        ComparisonOp::Ge => BinOper::GreaterThanOrEqual,
-        ComparisonOp::Lt => BinOper::SmallerThan,
-        ComparisonOp::Le => BinOper::SmallerThanOrEqual,
+    use crate::query::ast::BasicOp;
+    let basic = match op {
+        ComparisonOp::Scalar(b) => b,
+        ComparisonOp::Label(b) => b,
+    };
+    match basic {
+        BasicOp::Eq => BinOper::Equal,
+        BasicOp::Ne => BinOper::NotEqual,
+        BasicOp::Gt => BinOper::GreaterThan,
+        BasicOp::Ge => BinOper::GreaterThanOrEqual,
+        BasicOp::Lt => BinOper::SmallerThan,
+        BasicOp::Le => BinOper::SmallerThanOrEqual,
     }
 }
 

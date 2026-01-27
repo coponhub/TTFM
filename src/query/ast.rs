@@ -10,6 +10,13 @@ pub type ComparisonChain = Vec<(ComparisonOp, Operand)>;
 /// 比較演算子の種類。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ComparisonOp {
+    Scalar(BasicOp), // スカラー比較 (>)
+    Label(BasicOp),  // ラベル比較 (:>)
+}
+
+/// 基本的な比較演算子。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum BasicOp {
     Eq,
     Ne,
     Gt,
@@ -224,7 +231,7 @@ mod tests {
         // size > 100
         let node = QueryNode::Comparison(ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Gt, Operand::Literal("100".into()))],
+            rest: vec![(ComparisonOp::Label(BasicOp::Gt), Operand::Literal("100".into()))],
         });
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
@@ -274,7 +281,7 @@ mod tests {
         // Let's test helper directly via ComparisonNode
         let node = QueryNode::Comparison(ComparisonNode {
             first: op,
-            rest: vec![(ComparisonOp::Gt, Operand::Literal("100".into()))],
+            rest: vec![(ComparisonOp::Label(BasicOp::Gt), Operand::Literal("100".into()))],
         });
 
         let types = node.get_all_types();
