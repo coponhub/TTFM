@@ -56,7 +56,22 @@ pub fn build_fetch_items_sql(
     let pick_sql = build_pick_sql(node, view);
     let columns = Col::raw_tag_row_columns();
 
-    // 物理カラムをパックして集約。
+    // 1. まず ID を絞り込むためのサブクエリを構築
+    let mut id_query = Query::select();
+    id_query
+        .column(Col::ItemId)
+        .from_subquery(pick_sql, Alias::new("pk"))
+        .order_by(Col::Rank, sea_query::Order::Desc)
+        .order_by(Col::ItemId, sea_query::Order::Desc);
+
+    if let Some(l) = limit {
+        id_query.limit(l as u64);
+    }
+    if let Some(o) = offset {
+        id_query.offset(o as u64);
+    }
+
+    // 2. 物理カラムをパックして集約。
     // DuckDB の struct_pack("col1" := "col1", ...) 構文を使用。
     let fields = columns
         .iter()
@@ -74,24 +89,11 @@ pub fn build_fetch_items_sql(
         )
         .expr_as(Expr::cust(tags_expr), Alias::new("tags"))
         .from(Alias::new(view))
-        .and_where(
-            Expr::col(Col::ItemId).in_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .from_subquery(pick_sql, Alias::new("pk"))
-                    .to_owned(),
-            ),
-        )
+        .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .group_by_col(Col::ItemId)
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
-    if let Some(l) = limit {
-        q.limit(l as u64);
-    }
-    if let Some(o) = offset {
-        q.offset(o as u64);
-    }
     q
 }
 
@@ -106,28 +108,30 @@ pub fn build_flat_table_sql(
     let pick_sql = build_pick_sql(resolved, view);
     let tag_cond = to_tag_condition(query_node);
 
-    let mut q = Query::select();
-    q.columns(Col::raw_tag_row_columns())
-        .column(Col::Rank)
-        .from(Alias::new(view))
-        .and_where(
-            Expr::col(Col::ItemId).in_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .from_subquery(pick_sql.to_owned(), Alias::new("pk"))
-                    .to_owned(),
-            ),
-        )
-        .and_where(tag_cond.into())
+    // 1. まず ID を絞り込むためのサブクエリを構築
+    let mut id_query = Query::select();
+    id_query
+        .column(Col::ItemId)
+        .from_subquery(pick_sql.to_owned(), Alias::new("pk"))
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
     if let Some(l) = limit {
-        q.limit(l as u64);
+        id_query.limit(l as u64);
     }
     if let Some(o) = offset {
-        q.offset(o as u64);
+        id_query.offset(o as u64);
     }
+
+    let mut q = Query::select();
+    q.columns(Col::raw_tag_row_columns())
+        .column(Col::Rank)
+        .from(Alias::new(view))
+        .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
+        .and_where(tag_cond.into())
+        .order_by(Col::Rank, sea_query::Order::Desc)
+        .order_by(Col::ItemId, sea_query::Order::Desc);
+
     q
 }
 
