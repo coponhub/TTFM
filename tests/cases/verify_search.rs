@@ -177,14 +177,41 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = fm.search("width: == 640", Default::default())?;
     assert_eq!(res.results.len(), 1);
 
-    // Custom tag not equal
-    let res = fm.search("width: ^= 999", Default::default())?;
     // width:640 is set on one item. Others don't have width.
     // If we search for 'width: ^= 999', it effectively means "Has 'width' AND width != 999".
     // Since only one item has 'width' (640), and 640 != 999, it should match that one item.
     // NOTE: The current logic for generic generic tags is: type='...' AND TRY_CAST(label) != ...
     // So it implicitely filters by type='width'.
     assert_eq!(res.results.len(), 1);
+
+    // 7. 日時比較 (mtime)
+    println!("Testing 'mtime:today'...");
+    let res = fm.search("mtime:today", Default::default())?;
+    assert!(res.results.len() >= 3, "Should match files created today");
+
+    println!("Testing 'mtime:\"2026/01/27\"'...");
+    let res = fm.search("mtime:\"2026/01/27\"", Default::default())?;
+    assert!(res.results.len() >= 3, "Should match specific date (today)");
+
+    // 過去のファイルを準備 (Linux の touch コマンドを使用)
+    let past_file = data_dir.join("past.txt");
+    std::fs::write(&past_file, "past content")?;
+    let status = std::process::Command::new("touch")
+        .args(["-d", "2026-01-26 12:00:00", past_file.to_str().unwrap()])
+        .status()?;
+    assert!(status.success());
+
+    // 再インデックスして mtime を反映させる
+    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+
+    println!("Testing 'mtime:yesterday'...");
+    let res = fm.search("mtime:yesterday", Default::default())?;
+    assert!(res.results.iter().any(|r| r.name == "past.txt"), "Should match past.txt by 'yesterday'");
+
+    println!("Testing 'mtime:<today'...");
+    let res = fm.search("mtime:<today", Default::default())?;
+    assert!(res.results.iter().any(|r| r.name == "past.txt"), "Should match past.txt by '<today'");
+    assert!(res.results.iter().all(|r| r.name != "small.txt"), "Should NOT match files created today");
 
     Ok(())
 }

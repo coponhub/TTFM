@@ -575,47 +575,14 @@ fn expand_query_node(
             expand_query_node(lens, *c)?,
         ))),
         QueryNode::Comparison(cmp) => {
-            Ok(QueryNode::Comparison(expand_comparison_node(lens, cmp)?))
+            let reg = QueryFunctionRegistry::with_standard();
+            let expanded_node: crate::query::ast::QueryNode = crate::query::functions::expand_comparison_node(cmp, &reg);
+            Ok(expanded_node)
         }
         other => Ok(other),
     }
 }
 
-fn expand_comparison_node(
-    lens: &Lens,
-    mut cmp: crate::query::ast::ComparisonNode,
-) -> anyhow::Result<crate::query::ast::ComparisonNode> {
-    use crate::query::ast::Operand;
-
-    if let Some(func) = find_logical_function(lens, &cmp) {
-        if let Operand::Literal(lab) = &mut cmp.first {
-            *lab = func.normalize_label(lab);
-        }
-        for (_, op) in &mut cmp.rest {
-            if let Operand::Literal(lab) = op {
-                *lab = func.normalize_label(lab);
-            }
-        }
-    }
-    Ok(cmp)
-}
-
-fn find_logical_function<'a>(
-    lens: &'a Lens,
-    cmp: &crate::query::ast::ComparisonNode,
-) -> Option<&'a dyn crate::query::QueryFunction> {
-    use crate::query::ast::Operand;
-
-    let resolve = |op: &Operand| match op {
-        Operand::TypeRef(tt) => {
-            lens.look_up(tt).and_then(|d| d.logical_function.as_deref())
-        }
-        _ => None,
-    };
-
-    resolve(&cmp.first)
-        .or_else(|| cmp.rest.iter().find_map(|(_, op)| resolve(op)))
-}
 
 fn resolve_query_node(
     lens: &Lens,

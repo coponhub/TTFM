@@ -128,8 +128,8 @@ fn test_incremental_indexing_full_flow() {
     let uuid_str = uuid::Uuid::from_u64_pair(upper, lower).to_string();
     let query = format!("file_id:\"{}\"", uuid_str);
 
-    let res_inode = fm.search(&query, Default::default()).unwrap();
-    let files_inode: Vec<_> = res_inode
+    let _res_inode = fm.search(&query, Default::default()).unwrap();
+    let _files_inode: Vec<_> = _res_inode
         .results
         .iter()
         .filter(|r| r.item_kind == "file")
