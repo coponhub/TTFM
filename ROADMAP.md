@@ -74,9 +74,9 @@ Transition to a robust schema that separates system-generated metadata from user
 
 - **Upcoming Features**:
     - [ ] **Advanced Query Features**:
-        - [ ] **集約 (Aggregation)**: `sum(size:)`, `count(ext:jpg)` 等の統計値計算。
-        - [ ] **グループ比較 (Grouping Comparison)**: `parentdir:(sum(size:) > 1GB)` 等のグルーピング検索。
-        - [x] **射影 (Projection)**: `type:` による値の抽出。
+        - [ ] **Aggregation**: Statistical calculations such as `sum(size:)`, `count(ext:jpg)`.
+        - [ ] **Grouping Comparison**: Grouped searches such as `parentdir:(sum(size:) > 1GB)`.
+        - [x] **Projection**: Value extraction via `type:`.
     - [x] Implement `name` tag support in query parser and search results.
     - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
 
@@ -89,7 +89,7 @@ Directly interact with files from the CLI.
     - If the argument does not contain a colon (`:`), it is treated as a relative path to a local file rather than a query.
     - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
 
-### 9. Interactive Mode
+### 8. Interactive Mode
 - [ ] **Feature**: Support `ttfm -i`.
     - fdisk-like REPL interface for managing files and tags interactively.
 
@@ -149,3 +149,8 @@ Directly interact with files from the CLI.
   - [ ] **Split `src/query.rs`**: Decouple AST, Parser, and SQL generation into a `query/` module.
   - [ ] **Decompose `FileManager`**: Extract indexing logic and plugin management from `lib.rs` into dedicated modules.
   - [ ] **Common SQL Logic**: Finalize the consolidation of redundant SQL generation patterns (empty sets, common CTEs).
+
+  - [ ] **Directory Optimization Trade-offs (Optional)**:
+    - **Benefits**: Dramatic reduction in system calls for large file counts (up to 100M+).
+    - **Constraints**: Potential to miss updates when content changes without filename modification (mtime sync issue).
+

@@ -1,12 +1,12 @@
-## TTFM Plugin Design Specification
+# TTFM Plugin Design Specification
 
 バイナリを再コンパイルすることなく機能を拡張するため、`wasmtime` を用いた WebAssembly (Wasm) プラグシステムを導入する。
 
-### 6.1 アーキテクチャ概要
+## 1. アーキテクチャ概要
 Wasmモジュールはホスト（Rust）から見て1つの `IndexingFunction` として振る舞う。
 ホスト側で `WasmPluginAdapter`（仮称）を作成し、これが `IndexingFunction` トレイトを実装することで、既存の `FunctionRegistry` にそのまま登録可能とする。
 
-### 6.2 インターフェース定義 (WIT: Wasm Interface Type)
+## 2. インターフェース定義 (WIT: Wasm Interface Type)
 Wasmコンポーネントモデルを採用し、`wit` ファイルでインターフェースを定義する。将来的な拡張性を考慮し、プラグイン種別を特定する `core` インターフェースを設ける。
 
 ```wit
@@ -57,13 +57,13 @@ world plugin {
 }
 ```
 
-### 6.3 ホスト側の責務 (Rust)
+## 3. ホスト側の責務 (Rust)
 1.  **プラグイン探索**: 所定のディレクトリ（例: `~/.config/ttfm/plugins/`）から `.wasm` ファイルをロードする。
 2.  **アダプタ生成**: ロードしたWasmモジュールごとに `WasmPluginAdapter` を生成し、`FunctionRegistry` に登録する。
 3.  **WASI構成**: プラグインが対象ファイルを読み込めるよう、実行時にWASIのファイルシステムアクセス権限（Read-Only）を動的に付与する。
 4.  **SQL生成**: Wasm側にはSQL生成ロジックを持たせず（複雑化回避）、ホスト側が標準的なSQL（単純なカラム一致検索など）を自動生成するフォールバックロジックを使用する。
 5.  **実行最適化**: `rayon` による並列実行、および `thread_local` による Wasm インスタンス・プールを用いて高速化を図る。
 
-### 6.4 ゲスト側の責務 (Wasm/Rust, C, etc.)
+## 4. ゲスト側の責務 (Wasm/Rust, C, etc.)
 1.  **ファイル解析**: 渡されたファイルパス（WASIパス）を開き、内容を解析する（例: 先頭バイトを読んでMIME判定）。
 2.  **値の返却**: 解析結果を `tag-value` のリストとして返す。
