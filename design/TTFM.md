@@ -18,10 +18,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - **File Reference**: ファイルシステム上の実ファイルに基づく実体。InodeおよびDevice IDによって同一性が追跡される。
 - **Item Reference**: ファイル以外の対象に基づく実体。
     - **ItemKinds**:
-        - `type`: タグの型（例: `location`）。
-        - `typedtag`: 型と値のペア（例: `location:tokyo`）。
-        - `label`: タグの値（例: `tokyo`）。
-        - `note`: ユーザーが作成する仮想的なテキストメモ。
+        `typedtag`,　`type`, `label`,　`note` (noteはユーザーがDBに格納可能なメモ)
 
 これらの実体はすべてデータベース上のItemとして、等しくタグ付けの対象となる。これにより、ファイルだけでなくタグ定義自体にメタデータを付与したり、メモ情報を記録・管理したりすることが可能となる。
 
@@ -58,68 +55,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 ファイルの実体とパス、およびスキャンにより自動抽出されたタグを管理する。
 これらのテーブルは `ttfm index` 実行時に更新・洗い替えされる。
 
-**A. `file_references` テーブル (実体) (.ttfm/db/file_references.parquet)**
-- `item_id`: 内部管理用ユニークID (PRIMARY KEY)
-- `rank`: 優先度 (DEFAULT 0)
-- `file_id`: OSレベルの識別子 (Inode number / File Index)
-- `device_id`: デバイス識別子
-- `size`: ファイルサイズ
-- `mtime`: 最終更新日時
-- `hash`: コンテンツハッシュ (オプション)
-
-**B. `locations` テーブル (場所) (.ttfm/db/locations.parquet)**
-- `item_id`: `file_references.item_id` への外部キー
-- `path`: フルパス (UNIQUE)
-- `filename`: ファイル名
-- `parentdir`: 親ディレクトリパス（検索最適化用）
-- `extension`: 拡張子
-
-**C. `base_tags` テーブル (自動抽出タグ) (.ttfm/db/base_tags.parquet)**
-- `item_id`: `file_references.item_id` への外部キー
-- `type`: タグの種類（例: `size_str`, `type_from_ext`）
-- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（型ごとに物理カラムを持ち、適切な型で格納される）
-- ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
-
-#### 2. Item Store (Definition Registry)
-タグの型(Type)や値(Label)の定義自体を管理するID台帳。
-システム定義とユーザー定義の両方が混在するが、IDによって管理される。
-
-**D. `item_references` テーブル (.ttfm/db/item_references.parquet)**
-- `item_id`: ユニークID (PRIMARY KEY)
-- `rank`: 優先度 (DEFAULT 0)
-- `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
-- `content`: 識別名（Type名等）または Note の本文
-
-#### 3. Tag Store (Relations)
-Item（FileおよびDefinition）に対するタグ付けを管理する。
-データの由来（Origin）によってテーブルを分離することで、ユーザーデータを保護しつつ効率的な更新を実現する。
-
-**E. `system_tags` テーブル (System Tags) (.ttfm/db/system_tags.parquet)**
-- `item_id`: `item_references.item_id` への外部キー
-- `type`: タグの種類
-- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
-- ※ システム定義Item（`filename` Type等）に対してシステムが付与するタグ（例: `origin:system`）。
-
-**F. `user_tags` テーブル (User Tags) (.ttfm/db/user_tags.parquet)**
-- `item_id`: 対象のID (`file_references` または `item_references` のいずれか)
-- `type`: タグの種類
-- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
-- ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
-
-#### 4. Unified View (`oneview`)
-全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
-- `item_id`: 対象のID
-- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `typedtag` 等)
-- `rank`: 対象の優先度（ソート用）
-- `origin`: タグの出典 (`system` または `user`)
-- `type`: タグの種類
-- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（それぞれの物理カラムから合流）
-- `typedtag`: タグ全体（`type:label`）を表す文字列
-- `name`: アイテムの名称
-
-**Origin & Name Resolution**:
-- **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
-- **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
+テーブル定義・スキーマについては `STORE.md` を参照
 
 ### 4.3 検索・集約エンジン (Lens & Fetcher)
 
@@ -200,93 +136,11 @@ OneView という抽象化されたデータ構造の「歩き方」をクエリ
 
 ### 5.2 検索処理 (`ttfm search`)
 
-1.  **クエリ解析**: 検索クエリをパーサによって AST（抽象構文木）へ変換。クエリは以下の要素で構成される。
+1. **クエリ解析**:
+    TTQLで書かれたQueryを用いて検索を行う。クエリはパーサによって AST（抽象構文木）へ変換する。
 
-    - **TypedTag（タグ）**:
-        - `type:label` 形式の基本単位。
-        - **ルール**: `type` と `label` の間にスペースを含めることはできない。
-    - **集合演算**:
-        - 演算子
-            - `&`: 積集合 (Intersection)
-            - `|`: 和集合 (Union)
-            - `-`: 差集合 (Difference) ※二項演算子
-            - `^()`: 補集合 (Complement) ※単項演算子。
-                - **対象を必ず括弧 `()` で囲む必要があり、かつ `^(` と密着させる（スペース不可）。**
-            - 例: `type:file & project:ttfm`
-            - 例: `^(type:file)`
-        - **演算対象 (Operand)**:
-	        - グループ
-	        - TypedTag
-	        - ラベル比較
-        - **演算子の優先順位**: 
-            - `^()` > `&` > `|` = `-`
-    - **集約 (Aggregation)**:
-        - 形式: `[aggregator]([query])`
-        - aggregator: `count`, `sum`, `avg`, `max`, `min`
-        - query: 任意の検索クエリ。ただし、数値集計（sum, avg等）を行う場合は、数値のProjectionを返すクエリとする
-        - 戻り値: クエリ結果を集約した数値（スカラー）。
-        - 例: `sum(size:)`
-            - `sum(project:A & size:>1GB & size:)`
-            - `count(filename:)` ファイル名の種類をカウント
-        - count()でプロジェクションを数える場合projection(ラベルの種類)をカウントする
-    - **分割比較 (Nested Comparison)**:
-        - 形式: `[type]:( [Scalar Comparison])`
-        - type: グルーピングのキーとなるtype。
-        - Scalar Comparison: スカラー同士の計算。集約はスカラーを返すため集約が来ても良い。type毎に分割した値を用いて比較する
-        - 演算子: `==` (一致), `^` または `^=` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
-        - 挙動: 指定されたキーでグルーピングし、条件を満たすグループ（に対応するItem）を返す。キーと括弧を省略した場合は全体に対して適用する
-        - **例**
-            - `sum(project:A & size:) > 1GB` (キー省略時は全体の合計)
-            - `parentdir:( sum(size:) > 1GB )` (フォルダ毎の合計サイズが1GB超)
-            - `parentdir:( count(extension:jpg) > 10 )` (JPGファイルを10個以上含むフォルダを検索)
-    - **ラベル取得 (Label Retrieval / Projection)**:
-        - `Type:`形式。「Typeに含まれるラベル」と、「そのType:Labelが付与されたItemのItemID」のペアを取得する。
-        - **仮想的なラベル**:
-            - `type:`: Typeを抽出
-            - `origin:`: データの出典 (`system` または `user`)を抽出。
-            - `typedtag:`: TypedTagを抽出
-        - **例**:
-            - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
-            - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
-            - `path:` (各アイテムのパスを取得)
-    - **ラベル比較 (Label Comparison)**:
-        - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。取得した各ラベルを比較する。
-        - **演算対象 (Operand)**:
-            - **Labelリテラル**: 文字列または数値。
-            - **Label取得**: 上記「ラベル取得」
-            - **ラベル計算式**: 下記「ラベル計算」
-        - **演算子**:
-            - **ラベル比較演算子**: `=` (一致), `^` または `^=` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
-        - **ルール**:
-            - 比較演算子は必ず:の後に記載する必要がある。
-            - 比較演算子の前にスペースを挿入する場合、演算子の前に:を追記する（例: `size: :> 100`）。
-            - スペースを挿入しない場合はそのまま記載可能（例: `size:>100`）。
-            - 演算子の後にスペースを挿入可能（例: `size:> 100`）。
-            - 数式のような柔軟な記述が可能（例: `100 :< size:`, `width: :> height:`）。
-            - 連鎖比較が可能（例: `50 :< height: :< 100`）。
-    - **ラベル計算 (Label Calculation)**:
-        - ラベル比較式の一部として使用可能 `(Operand [ArithmeticOp] Operand)` の形式。
-        - **演算子**:
-            - **ラベル算術演算子**: `+`, `-`, `*`, `/`, `%`。
-        - **演算対象 (Operand)**:
-            - ラベル比較と同じ
-        - **ルール**:
-            - 算術演算はラベル比較の演算対象（Operand）括弧内でのみ使用可能。
-        - **例**: `(size: + 1024)`, `(width: * height:)`
-    - **エスケープと引用符 (Escaping & Quoting)**:
-        - **基本**: スペース、演算子記号、あるいはクオート自体を含める場合は、`""` (ダブルクオート) または `''` (シングルクオート) で囲む。
-        - **適用範囲**: Type（左側）と Label（右側）の両方で使用可能。ただし、単語の途中を引用符で囲むことはできず、全体を囲む必要がある。
-        - **リテラル化**: 引用符で囲まれた文字列内では、Globパターン（`*`, `?` 等）は無効化され、完全一致検索が行われる。
-        - **バックスラッシュ**: クォート内での `\"`, `\'`, `\\` 等のエスケープ、および未クォート時の一文字エスケープに使用する。
-        - 例: `"extension":rs`, `filename:"project_*"` (Glob無効、完全一致), `filename:\[WIP\]_*` (ブラケットを文字として扱い、末尾はワイルドカード)
-    - **グルーピング**:
-        - `()`: ラベル計算、集合演算の評価の優先順位を制御するために使用する。
-    - **Globパターンのサポート**: 未クォートの文字列では `*`, `?`, `[]`, `[!...]` を Label および Type の両方で使用できる。
-
-2.  **評価の優先順位**:
-    - 以下の順序で評価される。
-    - `(ラベル計算)` > `ラベル比較` > `TypedTag / ラベル取得` > `集約` > `グループ比較` > `集合演算 `
-    - **注**: `集約` や `グループ比較`、`ラベル計算` 等で使用される括弧 `()` 内の式は、再帰的に評価され、常に外側の演算よりも優先される。
+2. **TTQL(Typed Tag Query Language)**: 
+    `QUERY.md` を参照
 
 3.  **論理演算の解決**: 各比較式およびタグに対し、以下の 2 つの側面を持つ **Universal Selector** を生成。`oneview` またはキャッシュに対してクエリを発行する。
     - **Item Selector**: アイテムを絞り込むための SQL 条件（`WHERE` 句）。
@@ -344,75 +198,9 @@ OneView という抽象化されたデータ構造の「歩き方」をクエリ
 - 1: その他システムタグ
 - 0: 初期値（ユーザータグ等）
 
-## 6. プラグインシステム設計 (WebAssembly)
+### プラグイン設計
 
-バイナリを再コンパイルすることなく機能を拡張するため、`wasmtime` を用いた WebAssembly (Wasm) プラグシステムを導入する。
-
-### 6.1 アーキテクチャ概要
-Wasmモジュールはホスト（Rust）から見て1つの `IndexingFunction` として振る舞う。
-ホスト側で `WasmPluginAdapter`（仮称）を作成し、これが `IndexingFunction` トレイトを実装することで、既存の `FunctionRegistry` にそのまま登録可能とする。
-
-### 6.2 インターフェース定義 (WIT: Wasm Interface Type)
-Wasmコンポーネントモデルを採用し、`wit` ファイルでインターフェースを定義する。将来的な拡張性を考慮し、プラグイン種別を特定する `core` インターフェースを設ける。
-
-```wit
-package ttfm:plugin
-
-// プラグインの基本情報を定義する共通インターフェース
-interface core {
-    enum plugin-kind {
-        indexing-function,
-    }
-
-    record plugin-info {
-        name: string,
-        version: string,
-        kind: plugin-kind,
-    }
-
-    // プラグインの種別やバージョンを返す
-    get-info: func() -> plugin-info
-}
-
-// IndexingFunction (メタデータ抽出) 固有のインターフェース
-interface indexing-function {
-    // カラム定義の型
-    record column-def {
-        name: string,
-        sql-type: string,
-    }
-    
-    // 提供するカラムのリスト
-    get-columns: func() -> list<column-def>
-    
-    // 値のバリアント
-    variant tag-value {
-        text(string),
-        big-int(s64),
-        boolean(bool),
-        empty,
-    }
-    
-    // 指定されたファイルのパスを受け取り、タグ値を返す
-    tag-file: func(path: string) -> list<tag-value>
-}
-
-world plugin {
-    export core
-    export indexing-function
-}
-```
-
-### 6.3 ホスト側の責務 (Rust)
-1.  **プラグイン探索**: 所定のディレクトリ（例: `~/.config/ttfm/plugins/`）から `.wasm` ファイルをロードする。
-2.  **アダプタ生成**: ロードしたWasmモジュールごとに `WasmPluginAdapter` を生成し、`FunctionRegistry` に登録する。
-3.  **WASI構成**: プラグインが対象ファイルを読み込めるよう、実行時にWASIのファイルシステムアクセス権限（Read-Only）を動的に付与する。
-4.  **SQL生成**: Wasm側にはSQL生成ロジックを持たせず（複雑化回避）、ホスト側が標準的なSQL（単純なカラム一致検索など）を自動生成するフォールバックロジックを使用する。
-5.  **実行最適化**: `rayon` による並列実行、および `thread_local` による Wasm インスタンス・プールを用いて高速化を図る。
-
-### 6.4 ゲスト側の責務 (Wasm/Rust, C, etc.)
-1.  **ファイル解析**: 渡されたファイルパス（WASIパス）を開き、内容を解析する（例: 先頭バイトを読んでMIME判定）。
-2.  **値の返却**: 解析結果を `tag-value` のリストとして返す。
+`PLUGIN.md`を参照
 
 ### 4.5 永続化とアトミック性 (IndexStore)
 インデックス（Parquetファイル）の更新において、データの整合性と堅牢性を確保するため、`IndexStore` は以下の設計指針に基づくアトミックな書き込みを提供する。
