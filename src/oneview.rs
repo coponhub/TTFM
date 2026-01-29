@@ -365,7 +365,7 @@ impl OneView {
                     }
                 }
 
-                // typedtag column
+                // tag column
                 q.expr_as(
                     Func::cust(crate::db::DuckDbFunc::Concat).args([
                         Expr::val(&cd.name[..])

@@ -275,7 +275,7 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
         "item_kind",
         "content",
         "value",
-        "typedtag",
+        "tag",
         "filename",
         "is_dir",
     ];
@@ -285,7 +285,7 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
         }
     }
 
-    if types.iter().any(|t| t == "*" || t == "typedtag") {
+    if types.iter().any(|t| t == "*" || t == "tag") {
         return sea_query::Condition::all();
     }
 
@@ -373,7 +373,7 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
         .distinct()
         .from(Alias::new(view))
         .and_where(
-            Expr::col(Col::ItemKind).is_not_in(vec!["type", "typedtag"]),
+            Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]),
         );
 
     let mut eq = Query::select();
@@ -673,7 +673,7 @@ fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
     } else {
         let tag_name = tagtype.as_str();
         if tag_name != "*"
-            && tag_name != "typedtag"
+            && tag_name != "tag"
             && tag_name != "type"
             && tag_name != "origin"
         {

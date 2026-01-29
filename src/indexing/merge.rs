@@ -62,7 +62,7 @@ pub(crate) fn run_merge(
     tag.cleanup()?;
 
     // システムアイテム（基本Type定義のみ）の更新
-    // 以前はここで type/label/typedtag の全バリエーションを登録していたが、
+    // 以前はここで type/label/tag の全バリエーションを登録していたが、
     // oneview のプロジェクションにより不要になったため廃止した。
     update_sys_fn(None)?;
 

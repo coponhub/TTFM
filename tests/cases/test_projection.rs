@@ -120,25 +120,25 @@ fn test_projection_queries() {
     }
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
-    let results = fm.search("typedtag:", Default::default()).unwrap();
-    println!("Matches for 'typedtag:': {} items", results.results.len());
+    let results = fm.search("tag:", Default::default()).unwrap();
+    println!("Matches for 'tag:': {} items", results.results.len());
     assert!(
         results.results.len() >= 3,
-        "typedtag: should match all items"
+        "tag: should match all items"
     );
     assert_eq!(
         results.type_for_projection,
-        Some(ttfm::types::TagType::from("typedtag"))
+        Some(ttfm::types::TagType::from("tag"))
     );
 
-    // 検証: アイテムが typedtag タグを持っているか
-    let has_typedtag = results
+    // 検証: アイテムが tag タグを持っているか
+    let has_tag = results
         .results
         .iter()
-        .any(|r| r.get_tag_value("typedtag").is_some());
+        .any(|r| r.get_tag_value("tag").is_some());
     assert!(
-        has_typedtag,
-        "Items should have 'typedtag' tag values in SearchResult"
+        has_tag,
+        "Items should have 'tag' tag values in SearchResult"
     );
 
     // 追加検証: extension: 結果の中身

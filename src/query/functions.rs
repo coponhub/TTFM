@@ -595,7 +595,7 @@ impl QueryFunction for LabelQuery {
     }
 }
 
-/// "typedtag:label" -> item_kind:typedtag & name:label (タグ自体の検索)
+/// "tag:label" -> item_kind:tag & name:label (タグ自体の検索)
 pub struct TypedTagQuery;
 impl QueryFunction for TypedTagQuery {
     fn name(&self) -> &str {
@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_typedtag_query_expansion() {
+    fn test_tag_query_expansion() {
         let q = TypedTagQuery;
 
         // 1. expand (通常の検索)

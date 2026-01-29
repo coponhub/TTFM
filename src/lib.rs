@@ -381,7 +381,7 @@ impl FileManager {
         // 1. タグ自体の Item Entity が存在することを確認（なければ作成）
         self.get_or_create_item("type", key)?;
         self.get_or_create_item("label", value)?;
-        self.get_or_create_item("typedtag", tag_str)?;
+        self.get_or_create_item("tag", tag_str)?;
 
         // 2. ターゲットの ID を特定
         let item_id = if let Ok(id) = item.parse::<i64>() {

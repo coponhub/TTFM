@@ -37,7 +37,7 @@ TTFMのデータベースは以下の様式で定義される。
 - **ファイルパス**: `.ttfm/db/item_references.parquet`
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
-- `item_kind`: アイテムの種類 (`type`, `typedtag`, `label`, `note` のいずれか)
+- `item_kind`: アイテムの種類 (`type`, `tag`, `label`, `note` のいずれか)
 - `content`: 識別名（Type名等）または Note の本文
 
 ## 3. Tag Store (Relations)
@@ -61,12 +61,12 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 ## 4. Unified View (`oneview`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
-- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `typedtag` 等)
+- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `tag` 等)
 - `rank`: 対象の優先度（ソート用）
 - `origin`: タグの出典 (`system` または `user`)
 - `type`: タグの種類
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（それぞれの物理カラムから合流）
-- `typedtag`: タグ全体（`type:label`）を表す文字列
+- `tag`: タグ全体（`type:label`）を表す文字列
 - `name`: アイテムの名称
 
 ### 4.1 Origin & Name Resolution

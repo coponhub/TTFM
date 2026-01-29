@@ -185,19 +185,25 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 1);
 
     // 7. 日時比較 (mtime)
+    let now = chrono::Local::now();
+    let today_str = now.format("%Y/%m/%d").to_string();
+    let yesterday = now - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d %H:%M:%S").to_string();
+
     println!("Testing 'mtime:today'...");
     let res = fm.search("mtime:today", Default::default())?;
     assert!(res.results.len() >= 3, "Should match files created today");
 
-    println!("Testing 'mtime:\"2026/01/27\"'...");
-    let res = fm.search("mtime:\"2026/01/27\"", Default::default())?;
+    println!("Testing 'mtime:\"{}\"'...", today_str);
+    let query = format!("mtime:\"{}\"", today_str);
+    let res = fm.search(&query, Default::default())?;
     assert!(res.results.len() >= 3, "Should match specific date (today)");
 
     // 過去のファイルを準備 (Linux の touch コマンドを使用)
     let past_file = data_dir.join("past.txt");
     std::fs::write(&past_file, "past content")?;
     let status = std::process::Command::new("touch")
-        .args(["-d", "2026-01-26 12:00:00", past_file.to_str().unwrap()])
+        .args(["-d", &yesterday_str, past_file.to_str().unwrap()])
         .status()?;
     assert!(status.success());
 

@@ -162,38 +162,38 @@ fn test_system_items_registration() {
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
     let results_physical = fm
         .search(
-            "item_kind:typedtag & name:extension:txt",
+            "item_kind:tag & name:extension:txt",
             Default::default(),
         )
         .unwrap();
     assert!(
         results_physical.results.is_empty(),
-        "Physical typedtag item should NOT be created automatically"
+        "Physical tag item should NOT be created automatically"
     );
 
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
     let results_projection =
-        fm.search("typedtag:", Default::default()).unwrap();
+        fm.search("tag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert_eq!(
         results_projection.type_for_projection,
-        Some(ttfm::types::TagType::from("typedtag")),
-        "Query should project 'typedtag' field"
+        Some(ttfm::types::TagType::from("tag")),
+        "Query should project 'tag' field"
     );
     assert!(!results_projection.results.is_empty(), "Should find items");
 
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.get_all_values("typedtag")
+        r.get_all_values("tag")
             .iter()
             .any(|val| val == "extension:txt")
     });
     assert!(
         has_target_val,
-        "Should contain 'extension:txt' in projected typedtag values"
+        "Should contain 'extension:txt' in projected tag values"
     );
 
     // 3. origin のプロジェクションも確認
@@ -234,12 +234,12 @@ fn test_typedtag_listing_via_type_query() {
     let tt_items: Vec<_> = results
         .results
         .iter()
-        .filter(|r| r.item_kind == "typedtag" && r.name == "extension:txt")
+        .filter(|r| r.item_kind == "tag" && r.name == "extension:txt")
         .collect();
     assert_eq!(
         tt_items.len(),
         0,
-        "Should NOT find the typedtag item because it doesn't have the tag (metadata definition only)"
+        "Should NOT find the tag item because it doesn't have the tag (metadata definition only)"
     );
 
     // 2. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
@@ -253,14 +253,14 @@ fn test_typedtag_listing_via_type_query() {
     let tags: Vec<_> = results
         .results
         .iter()
-        .filter(|r| r.item_kind == "typedtag")
+        .filter(|r| r.item_kind == "tag")
         .collect();
 
     assert_eq!(files.len(), 1, "Should find the file");
     assert_eq!(
         tags.len(),
         0,
-        "Should NOT find the typedtag item itself as noise"
+        "Should NOT find the tag item itself as noise"
     );
 }
 
@@ -277,7 +277,7 @@ fn test_no_empty_extension_system_item() {
 
     let results = fm
         .search(
-            "item_kind:typedtag & name:\"extension:\"",
+            "item_kind:tag & name:\"extension:\"",
             Default::default(),
         )
         .unwrap();

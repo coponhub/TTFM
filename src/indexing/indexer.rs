@@ -332,7 +332,7 @@ impl<'a> Indexer<'a> {
             .expr_as(Expr::val("type"), Col::Type)
             .expr_as(
                 Expr::case(
-                    Expr::col(Col::ItemKind).eq("typedtag"),
+                    Expr::col(Col::ItemKind).eq("tag"),
                     Expr::col(Col::Type),
                 )
                 .finally(Expr::col(Col::ItemKind))
@@ -351,7 +351,7 @@ impl<'a> Indexer<'a> {
                 Col::LabelStr,
             )
             .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"))
+            .and_where(Expr::col(Col::ItemKind).eq("tag"))
             .to_owned();
 
         let union_sql = format!(

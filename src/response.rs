@@ -440,7 +440,7 @@ impl SearchResult {
                 labels.dedup();
                 return labels;
             }
-            // 仮想ラベル: typedtag: (type:label 形式の全タグ)
+            // 仮想ラベル: tag: (type:label 形式の全タグ)
             TagType::Base(SType::TypedTag) => {
                 let mut tts: Vec<String> = self
                     .tags
@@ -521,8 +521,8 @@ mod tests {
         assert!(types.contains(&"project".to_string()));
         assert!(types.contains(&"size".to_string()));
 
-        // 仮想ラベル typedtag:
-        let tts = res.get_all_values("typedtag");
+        // 仮想ラベル tag:
+        let tts = res.get_all_values("tag");
         assert!(tts.contains(&"extension:rs".to_string()));
         assert!(tts.contains(&"project:A".to_string()));
         assert!(tts.contains(&"project:B".to_string()));

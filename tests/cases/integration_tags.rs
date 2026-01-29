@@ -45,13 +45,13 @@ fn test_integration_tag_tagging() {
     fm.tag_item(&item, "project:mars").unwrap();
 
     // 2. タグ (project:mars) 自体にタグ (priority:high) を付ける
-    let tag_id = fm.get_or_create_item("typedtag", "project:mars").unwrap();
+    let tag_id = fm.get_or_create_item("tag", "project:mars").unwrap();
     fm.tag_item(&tag_id.to_string(), "priority:high").unwrap();
 
     // 3. 確認
     // 対象のタグ定義(typedtag)のみを検証するため、item_kindで絞り込む
     let results = fm
-        .search("priority:high & item_kind:typedtag", Default::default())
+        .search("priority:high & item_kind:tag", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, tag_id);
@@ -109,11 +109,11 @@ fn test_system_item_metadata_integration() {
 
     // 3. 'extension:rs' という typedtag Item（物理）は自動生成されないことを確認
     let results_physical = fm
-        .search("item_kind:typedtag & label:rs", Default::default())
+        .search("item_kind:tag & label:rs", Default::default())
         .unwrap();
     assert!(
         results_physical.results.is_empty(),
-        "Physical typedtag item should NOT be created automatically"
+        "Physical tag item should NOT be created automatically"
     );
 
     // 4. 代わりにプロジェクションで確認

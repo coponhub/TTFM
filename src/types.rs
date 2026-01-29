@@ -573,7 +573,7 @@ pub enum SType {
     Types,
     Labels,
     ScanHash,
-    #[strum(serialize = "typedtag")]
+    #[strum(serialize = "tag")]
     TypedTag,
     // 検索専用仮想タグ
     Directory,
