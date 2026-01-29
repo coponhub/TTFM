@@ -1,30 +1,30 @@
 # TTFM Query Design Specification
 
-- **名称** Typed Tag Query Languge 略してTTQLと呼ぶ
+- **名称** Typed Tag Query Language 略してTTQLと呼ぶ
 
 ## 1. クエリは以下の要素で構成される
 
 - **TypedTag**:
     - `type:label` 形式の基本単位。
+    - **意味**: 記載されたTypedTagが付与されたアイテムを取得する
     - **ルール**: 
         - `type` と `label` の間にスペースを含めることはできない。
-        - 右辺はScalar値であり、集約値を用いる事も出来る
+        - 右辺はScalar値であり、集約値(Aggregateの結果)を用いる事も出来る
         - 密着ラベル比較のEqual(一致比較)と見なす事も可能
-- **集合演算 (set opeartion)**:
+- **集合演算 (set operation)**:
     - 演算子 ※全て2項演算子
         - `&`: 積集合 (Intersection)
         - `|`: 和集合 (Union)
         - `-`: 差集合 (Difference)
         - 例: `type:file & project:ttfm`
-        - 例: `^(type:file)`
     - **演算対象 (Operand)**:
-        - Group
         - TypedTag
         - Projection:
     - **演算子の優先順位**: 
         - `&` > `|` = `-`
     - **ルール**
     - 演算子とオペランドの間にはスペースを入れなければならない。　`type:file&project:ttfm` のような記載は集合演算と見なされない
+    - `Projection:` 同士の差集合については `-:` と記載する(算術演算と区別するため)
 - **集約 (Aggregation)**:
     - 形式: `[aggregator]([query])`
     - aggregator: `count`, `sum`, `avg`, `max`, `min`
@@ -40,21 +40,23 @@
     - 演算子: `==` (一致), `^` または `^=` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
     - 返り値: 真偽値を返す
      - **ルール**
-        - 演算子とオペランドの間にはスペースを入れなければならない。　`1 >1` のような記載はスカラー比較と見做されない
-- **分割比較(Nest comparsion)**:
-    - 形式: `[gkey]:&([nested scalar comparsion])`
+        - 演算子とオペランドの間にはスペースを入れなければならない。　`1>1` のような記載はスペースが無いためスカラー比較と見做されない
+- **分割比較(Nested comparison)**:
+    - 形式: `[gkey]:&([nested scalar comparison])`
     - gkey: グルーピングのキーとなるtype。
-    - nested scalar comparsion:
+    - nested scalar comparison:
         - gkeyによってグルーピングされた各要素に対するスカラー比較。
         - trueの場合のみ結果リストに含まれる
     - **例**
         - `parentdir:&( sum(size:) > 1GB )` (フォルダ毎の合計サイズが1GB超のアイテムを検索)
         - `parentdir:&( count(extension:jpg) > 10 )` (JPGファイルを10個以上含むフォルダを検索)
-        - `parentdir:&( sum(mtime:>"7d ago" & size: ) > 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムを検索)
+        - `parentdir:&( sum(mtime:>"7d ago" & size: ) < 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムを検索)
     - **ルール**
         - 演算子とオペランドの間にはスペースを入れなければならない。　`sum(size:)>1GB` のような記載は分割比較と見做されない
 - **ラベル取得 / Projection: (Label Retrieval / Projection)**:
-    - `Type:`形式。「Typeに含まれるラベル」と、「そのType:Labelが付与されたItemのItemID」のペアを取得する。
+    - `Type:`形式。
+    - **意味**: `Type:`が含まれるTypedTagのLabelを取り出す
+        - 「Typeに含まれるラベル」と、「そのType:Labelが付与されたItemのItemID」のペアを取得する。
     - Type: TypedTagの:の左辺にくるもの。型を示す
     - **例**:
         - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
@@ -84,24 +86,31 @@
         - **比較演算子**: `^` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
     - **ルール**:
         - 演算子とオペランドの間にスペースを含める事は出来ない `size: >1GB` `size: > 1GB` のような記載はエラーとなる
-        - 必ず右辺にProjection:、左辺にScalarが来る。
+        - 必ず左辺にProjection:、右辺にScalarが来る。
         - 省略したラベル比較のように記載できる (例: `extension:^rs`, `size:>=1GB`)
-        - イコール演算子(=)はTypedTagと同じ意味になるため存在しない
+        - イコール演算子(=)は存在しない。TypedTagをそのまま書いた場合と同じ結果となるため
 - **算術演算 (Calculation)**:
-    -  `Operand [ArithmeticOp] Operand` の形式。
+    -  `(Operand [ArithmeticOp] Operand)` の形式。
     - **演算子**:
         - **算術演算子**: `+`, `-`, `*`, `/`, `%`。
     - **演算対象 (Operand)**:
         - Projection
         - Scalar値
     - **ルール**:
-        - 両辺をProjectionにする事は出来ない
-        - `Proj + Scalar` -> OK
-        - `Scalar + Proj` -> OK
-        - `Scalar + Scalar` -> OK
-        - `Proj + Proj` -> ERROR
-            - ただし、マイナス(`Proj - Proj`) については集合演算が優先され、差集合となる
-        - 演算子とオペランドの間にはスペースを開ける必要がある。 `1*2` `1 /2` `proj:*2`のような記載は算術演算とみなされない
+        - 算術演算は括弧で囲まなければならない。
+            - ただし、同じレベルの`()`内に算術演算子以外の演算子が無い場合は括弧を省略できる
+            - 例: 
+                - `(1 - 2) :> size:` OK
+                - `1 - 2 :> size:` NG
+                - `size: - 2 & project:A` NG
+                - `sum(size: - 2B)` OK
+                - `sum(size: - 10TB :> 10TB)` NG
+                - `sum((size: - 10TB) :> 10TB)` OK
+                - `sum(size: - 2TB) > 10TB` OK 
+                - `sum(size:) == avg(size:) * count()` NG
+                - `sum(size:) == (avg(size:) * count())` OK
+        - 演算子とオペランドの間にはスペースを開ける必要がある。 `1*2` `1 /2` `proj:*2`のような記載は算術演算とはみなされない。
+        - TypedTagに対する算術演算はエラーとなる
 - **エスケープと引用符 (Escaping & Quoting)**:
     - **基本**: スペース、演算子記号、あるいはクオート自体を含める場合は、`""` (ダブルクオート) または `''` (シングルクオート) で囲む。
     - **適用範囲**: Type（左側）と Label（右側）の両方で使用可能。ただし、単語の途中を引用符で囲むことはできず、全体を囲む必要がある。
@@ -109,10 +118,10 @@
     - **バックスラッシュ**: クォート内での `\"`, `\'`, `\\` 等のエスケープ、および未クォート時の一文字エスケープに使用する。
     - 例: `"extension":rs`, `filename:"project_*"` (Glob無効、完全一致), `filename:\[WIP\]_*` (ブラケットを文字として扱い、末尾はワイルドカード)
 - **グルーピング**:
-    - `()`: ラベル計算、集合演算の評価の優先順位を制御するために使用する。
+    - `()`: 算術演算、集合演算の評価の優先順位を制御するために使用する。
 - **Globパターンのサポート**: 未クォートの文字列では `*`, `?`, `[]`, `[!...]` を Label および Type の両方で使用できる。
 
 ## 2.  **評価の優先順位**:
 - 以下の順序で評価される。
 - `(算術演算)` > `密着ラベル比較 / TypedTag` > `汎用ラベル比較` > `ラベル取得` > `集約` > `分割比較` > `集合演算 `
-- **注**: `集約` や `グループ比較`、`ラベル計算` 等で使用される括弧 `()` 内の式は、再帰的に評価され、常に括弧の外側の演算よりも優先される。
+- **注**: `集約` や `分割比較`、`算術演算` 等で使用される括弧 `()` 内の式は、再帰的に評価され、常に括弧の外側の演算よりも優先される。

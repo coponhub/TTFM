@@ -18,7 +18,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - **File Reference**: ファイルシステム上の実ファイルを示す参照。InodeおよびDevice IDによって同一性が追跡される。
 - **Item Reference**: ファイル以外の対象を示す参照。
     - **ItemKinds**:
-        `typedtag`: `Type:Label` 形式のTypedTagそのもの　
+        `tag`: `Type:Label` 形式のTypedTagそのもの　
         `type` : TypedTagのType
         `label`：TypedTagのLabel
         `note`: (noteはユーザーがDBに格納可能なメモ)
@@ -73,7 +73,7 @@ OneView という抽象化されたデータ構造の「歩き方」をクエリ
 - **主要な概念**:
     - **データ型カラム**: 型によって別々のカラム（`label_str`, `label_int`, `label_bool`）に分類されている実値を格納する器。
     - **一般タグ**: `type` カラムに Type 名を持ち、データ型カラムに実値を持つ通常の TypedTag。OneView に行として登録されている。
-    - **特殊なラベル値**: `item_kind`, `rank`, `item_id`, `typedtag`, `type`, `label` など、機能上の理由で OneView の直接的なカラムとして保持されている属性。
+    - **特殊なラベル値**: `item_kind`, `rank`, `item_id`, `tag`, `type`, `label` など、機能上の理由で OneView の直接的なカラムとして保持されている属性。
 
 #### 2. Fetcher (実行・復元エンジン)
 `Lens` が持つ解決知識を、具体的な SQL アクションとドメインオブジェクト（SearchResult 等）に変換する実働部。
