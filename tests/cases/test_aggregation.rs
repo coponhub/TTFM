@@ -275,3 +275,60 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// max(mtime:) と日付文字列の比較
+#[test]
+fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 古いファイルと新しいファイルを作成
+    std::fs::write(root.join("old.txt"), "old")?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    std::fs::write(root.join("new.txt"), "new")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // max(mtime:) を取得
+    let res1 = fm.search("max(mtime:)", Default::default())?;
+    println!("max(mtime:) = {:?}", res1.scalar);
+
+    // max(mtime:) < 2026-02-01 を比較
+    let res2 = fm.search("max(mtime:) < 2026-02-01", Default::default())?;
+    println!("max(mtime:) < 2026-02-01 = {:?}", res2);
+
+    // 今日の日付より前なので TRUE になるはず
+    assert_eq!(res2.results.len(), 1);
+    assert_eq!(res2.results[0].name, "TRUE");
+
+    Ok(())
+}
+
+/// max(filter & mtime:) と日付文字列の比較（AND条件内のProjection）
+#[test]
+fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("test.txt"), "content")?;
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    std::fs::write(root.join("test.rs"), "code")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // max(extension:txt & mtime:) < 2027-02-01
+    let res = fm.search(
+        "max(extension:txt & mtime:) < 2027-02-01",
+        Default::default(),
+    )?;
+
+    // 今日の日付より前なので TRUE になるはず
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].name, "TRUE");
+
+    Ok(())
+}

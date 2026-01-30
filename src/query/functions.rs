@@ -123,55 +123,93 @@ pub fn expand_comparison_node(
     node: crate::query::ast::ComparisonNode,
     registry: &QueryFunctionRegistry,
 ) -> QueryNode {
-    use crate::query::ast::{ComparisonOp, Operand};
+    use crate::query::ast::Operand;
 
-    // 最初の演算子でモードを判定。Label モードの場合のみ拡張ロジックを適用
-    match node.rest.first().map(|(op, _)| op) {
-        Some(ComparisonOp::Label(_)) => {
-            let rep_func = find_representative_function(&node, registry);
-            let Some(f) = rep_func else {
-                return QueryNode::Comparison(node);
-            };
+    // 代表関数を探す（型情報から正規化関数を取得するため）
+    let rep_func = find_representative_function(&node, registry);
+    let Some(f) = rep_func else {
+        return QueryNode::Comparison(node);
+    };
 
-            if f.name() == SType::Mtime.name() {
-                return expand_mtime_comparison(node);
-            }
-
-            // 標準的な正規化（SizeQuery 等）
-            let mut node = node;
-            if let Operand::Literal(label) = &mut node.first {
-                *label = f.normalize_label(label);
-            }
-            for (op, rhs) in &mut node.rest {
-                if let ComparisonOp::Label(_) = op {
-                    if let Operand::Literal(label) = rhs {
-                        *label = f.normalize_label(label);
-                    }
-                }
-            }
-            QueryNode::Comparison(node)
-        }
-        _ => QueryNode::Comparison(node),
+    // mtime の場合は特殊な展開処理
+    if f.name() == SType::Mtime.name() {
+        return expand_mtime_comparison(node);
     }
+
+    // 標準的な正規化（SizeQuery, 日付文字列 等）
+    // Label比較、スカラー比較の両方に適用
+    let mut node = node;
+    if let Operand::Literal(label) = &mut node.first {
+        *label = f.normalize_label(label);
+    }
+    for (_op, rhs) in &mut node.rest {
+        if let Operand::Literal(label) = rhs {
+            *label = f.normalize_label(label);
+        }
+    }
+    QueryNode::Comparison(node)
 }
 
 fn find_representative_function<'a>(
     node: &crate::query::ast::ComparisonNode,
     registry: &'a QueryFunctionRegistry,
 ) -> Option<&'a dyn QueryFunction> {
-    use crate::query::ast::Operand;
-    if let Operand::TypeRef(tt) = &node.first {
+    use crate::query::ast::{AggregationNode, Operand, QueryNode};
+
+    // QueryNodeからProjectionを再帰的に探索
+    fn find_projection(qnode: &QueryNode) -> Option<&TagType> {
+        match qnode {
+            QueryNode::Projection(tt) => Some(tt),
+            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                nodes.iter().find_map(find_projection)
+            }
+            QueryNode::Difference(l, _) | QueryNode::Complement(l) => {
+                find_projection(l)
+            }
+            _ => None,
+        }
+    }
+
+    // 最初のオペランドから探す
+    let tt = match &node.first {
+        Operand::TypeRef(tt) => Some(tt),
+        Operand::Aggregation(agg) => {
+            // Aggregationの中身を探索
+            let inner = match agg.as_ref() {
+                AggregationNode::Count(q) => q,
+                AggregationNode::Arithmetic { inner, .. } => inner,
+            };
+            // innerから再帰的にProjectionを探す
+            find_projection(inner.as_ref())
+        }
+        _ => None,
+    };
+    if let Some(tt) = tt {
         if let Some(f) = registry.get_function(tt) {
             return Some(f);
         }
     }
+
+    // 残りのオペランドから探す
     for (_, op) in &node.rest {
-        if let Operand::TypeRef(tt) = op {
+        let tt = match op {
+            Operand::TypeRef(tt) => Some(tt),
+            Operand::Aggregation(agg) => {
+                let inner = match agg.as_ref() {
+                    AggregationNode::Count(q) => q,
+                    AggregationNode::Arithmetic { inner, .. } => inner,
+                };
+                find_projection(inner.as_ref())
+            }
+            _ => None,
+        };
+        if let Some(tt) = tt {
             if let Some(f) = registry.get_function(tt) {
                 return Some(f);
             }
         }
     }
+
     None
 }
 
@@ -226,12 +264,15 @@ fn expand_mtime_range_op(
 ) -> Vec<QueryNode> {
     use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
 
-    // expand_mtime_comparison から呼ばれる際、op は必ず ComparisonOp::Label(BasicOp) であることを想定
-    let ComparisonOp::Label(basic_op) = op else {
-        return vec![QueryNode::Comparison(ComparisonNode {
-            first: first.clone(),
-            rest: vec![(op, _original_rhs)],
-        })];
+    // Label比較とスカラー比較の両方に対応
+    let basic_op = match op {
+        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+    };
+
+    // 元の比較種別を保持（Label or Scalar）
+    let make_op = |b: BasicOp| match op {
+        ComparisonOp::Label(_) => ComparisonOp::Label(b),
+        ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
     };
 
     match basic_op {
@@ -239,14 +280,14 @@ fn expand_mtime_range_op(
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
                 rest: vec![(
-                    ComparisonOp::Label(BasicOp::Ge),
+                    make_op(BasicOp::Ge),
                     Operand::Literal(Label::Mtime(range.start)),
                 )],
             }),
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
                 rest: vec![(
-                    ComparisonOp::Label(BasicOp::Le),
+                    make_op(BasicOp::Le),
                     Operand::Literal(Label::Mtime(range.end)),
                 )],
             }),
@@ -256,14 +297,14 @@ fn expand_mtime_range_op(
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        ComparisonOp::Label(BasicOp::Ge),
+                        make_op(BasicOp::Ge),
                         Operand::Literal(Label::Mtime(range.start)),
                     )],
                 }),
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        ComparisonOp::Label(BasicOp::Le),
+                        make_op(BasicOp::Le),
                         Operand::Literal(Label::Mtime(range.end)),
                     )],
                 }),
@@ -272,28 +313,28 @@ fn expand_mtime_range_op(
         BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Label(BasicOp::Gt),
+                make_op(BasicOp::Gt),
                 Operand::Literal(Label::Mtime(range.end)),
             )],
         })],
         BasicOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Label(BasicOp::Ge),
+                make_op(BasicOp::Ge),
                 Operand::Literal(Label::Mtime(range.start)),
             )],
         })],
         BasicOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Label(BasicOp::Lt),
+                make_op(BasicOp::Lt),
                 Operand::Literal(Label::Mtime(range.start)),
             )],
         })],
         BasicOp::Le => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
-                ComparisonOp::Label(BasicOp::Le),
+                make_op(BasicOp::Le),
                 Operand::Literal(Label::Mtime(range.end)),
             )],
         })],
