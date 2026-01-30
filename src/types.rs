@@ -8,7 +8,68 @@ pub const METADATA_ERROR: i64 = -1;
 pub type Rank = i64;
 
 /// アイテムの一意なID。
-pub type ItemId = i64;
+/// 実際のDBアイテム (Real) または仮想アイテム (Virtual) を表現。
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+pub enum ItemId {
+    /// データベースに存在する実アイテム
+    Real(i64),
+    /// 集約結果など、DBに存在しない仮想アイテム
+    Virtual(VirtualItem),
+}
+
+/// 仮想アイテムの種類
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+pub enum VirtualItem {
+    /// 真偽値 (1=True, 0=False)
+    Boolean(u8),
+}
+
+impl ItemId {
+    /// i64 値を取得（Virtual の場合は負の値: True=-1, False=-2）
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            ItemId::Real(i) => *i,
+            ItemId::Virtual(VirtualItem::Boolean(v)) => *v as i64,
+        }
+    }
+
+    /// Real かどうか
+    pub fn is_real(&self) -> bool {
+        matches!(self, ItemId::Real(_))
+    }
+}
+
+impl From<i64> for ItemId {
+    fn from(i: i64) -> Self {
+        ItemId::Real(i)
+    }
+}
+
+impl std::fmt::Display for ItemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ItemId::Real(i) => write!(f, "{}", i),
+            ItemId::Virtual(VirtualItem::Boolean(1)) => write!(f, "1"),
+            ItemId::Virtual(VirtualItem::Boolean(0)) => write!(f, "0"),
+            ItemId::Virtual(VirtualItem::Boolean(v)) => write!(f, "{}", v),
+        }
+    }
+}
+
+impl FromSql for ItemId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let i = i64::column_result(value)?;
+        Ok(ItemId::from(i))
+    }
+}
+
+impl ToSql for ItemId {
+    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Owned(duckdb::types::Value::BigInt(
+            self.as_i64(),
+        )))
+    }
+}
 
 /// ファイルの実体（Inode/FileID）を一意に表す 128ビット識別子。
 pub type FileRef = Uuid;

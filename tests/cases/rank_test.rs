@@ -1,5 +1,6 @@
 use std::fs;
 use tempfile::tempdir;
+use ttfm::types::ItemId;
 use ttfm::FileManager;
 
 #[test]
@@ -87,6 +88,6 @@ fn test_rank_set_by_id_low_level() {
     fm.set_rank_by_id(id, false, 500).unwrap();
 
     let results = fm.search("item_kind:note", Default::default()).unwrap();
-    assert_eq!(results.results[0].id, id);
+    assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }

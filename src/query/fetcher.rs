@@ -1,5 +1,6 @@
 use crate::query::lens::{Lens, StorageMapping};
 use crate::response::{RawTagRow, SearchResult};
+use crate::types::ItemId;
 use crate::types::{Origin, SType, TagType};
 use anyhow::Result;
 use duckdb::types::Value;
@@ -61,6 +62,45 @@ impl<'a> Fetcher<'a> {
             select_sql,
             candidate_ids,
         })
+    }
+
+    /// クエリをトップレベルの集約として実行し、単一のスカラ値を返します。
+    pub fn fetch_scalar(&self) -> Result<f64> {
+        let agg = self.lens.get_aggregation().ok_or_else(|| {
+            anyhow::anyhow!("Query is not a top-level aggregation")
+        })?;
+
+        let sql =
+            crate::query::sql::build_resolved_aggregation_sql(&agg, "oneview");
+
+        let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
+        self.conn
+            .prepare(&sql_str)?
+            .query_row([], |r| {
+                let val: duckdb::types::Value = r.get(0)?;
+                match val {
+                    duckdb::types::Value::Null => Ok(0.0),
+                    duckdb::types::Value::Float(f) => Ok(f as f64),
+                    duckdb::types::Value::Double(d) => Ok(d),
+                    duckdb::types::Value::Int(i) => Ok(i as f64),
+                    duckdb::types::Value::BigInt(i) => Ok(i as f64),
+                    duckdb::types::Value::HugeInt(i) => Ok(i as f64),
+                    other => {
+                        // 文字列等の場合はパースを試みる
+                        if let Ok(s) = format!("{:?}", other).parse::<f64>() {
+                            Ok(s)
+                        } else {
+                            // 最終手段としてエラー
+                            Err(duckdb::Error::InvalidColumnType(
+                                0,
+                                format!("{:?}", other),
+                                duckdb::types::Type::Double,
+                            ))
+                        }
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to fetch scalar: {}", e))
     }
 
     /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
@@ -238,14 +278,27 @@ impl<'a> Fetcher<'a> {
     ) -> duckdb::Result<SearchResult> {
         use duckdb::types::Value;
 
-        let id: i64 = row.get(SType::ItemId.name().as_str())?;
+        let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
+        let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
+
+        let id = if item_kind == "virtual" {
+            // "virtual" の場合、id_val は 1 (True) or 0 (False)
+            // もし値が想定外なら 0 (False) 扱いにする等の安全策
+            let val = if id_val != 0 { 1 } else { 0 };
+            ItemId::Virtual(crate::types::VirtualItem::Boolean(val))
+        } else {
+            ItemId::Real(id_val)
+        };
+
         let mut res = SearchResult::new_empty(id);
         res.rank = row
             .get::<_, Option<i64>>(SType::Rank.name().as_str())?
             .unwrap_or(0);
-        res.item_kind = row.get(SType::ItemKind.name().as_str())?;
+        res.item_kind = item_kind;
 
-        let Value::List(tags) = row.get("tags")? else {
+        let Value::List(tags) =
+            row.get(crate::db::QueryResultCol::Tags.to_string().as_str())?
+        else {
             return Ok(res);
         };
 
@@ -254,6 +307,7 @@ impl<'a> Fetcher<'a> {
                 continue;
             };
             if let Some(row) = RawTagRow::from_map(&map) {
+                #[allow(deprecated)]
                 res.apply_raw_tag(row);
             }
         }
@@ -275,7 +329,7 @@ impl<'a> Fetcher<'a> {
             })
             .ok_or_else(|| anyhow::anyhow!("Missing item_id in packed data"))?;
 
-        let mut res = SearchResult::new_empty(id);
+        let mut res = SearchResult::new_empty(id.into());
         res.rank = map
             .get(&SType::Rank.name())
             .and_then(|v| match v {

@@ -43,7 +43,7 @@ impl StorageMapping {
 }
 
 /// 物理マッピングが解決された後のクエリノード。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedNode {
     And(Vec<ResolvedNode>),
     Or(Vec<ResolvedNode>),
@@ -64,10 +64,25 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         label: Label,
     },
+    Aggregation(ResolvedAggregationNode),
+    /// 集約結果との比較。
+    AggregationMatch {
+        agg: ResolvedAggregationNode,
+        op: ComparisonOp,
+        label: Label,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ResolvedAggregationNode {
+    Count(Box<ResolvedNode>),
+    Arithmetic {
+        op: crate::query::ast::ArithmeticAggOp,
+        inner: Box<ResolvedNode>,
+    },
 }
 
 impl ResolvedNode {
-    /// このノードを sea_query::Condition に変換します。
     /// このノードを sea_query::Condition に変換します。
     pub fn to_condition(&self) -> Condition {
         match self {
@@ -93,6 +108,11 @@ impl ResolvedNode {
                 label,
                 ..
             } => storage.to_condition(*op, label, *sql_type),
+            ResolvedNode::Aggregation(_)
+            | ResolvedNode::AggregationMatch { .. } => {
+                // 集約は基本的に SELECT 句または HAVING 句で扱われる
+                Condition::any()
+            }
         }
     }
 
@@ -107,6 +127,30 @@ impl ResolvedNode {
                 l.get_projection()
             }
             _ => None,
+        }
+    }
+
+    /// 集約のために、このノードから投影（集計対象）とフィルタ条件を分離して返します。
+    pub fn extract_agg_parts(&self) -> (Option<&StorageMapping>, Condition) {
+        match self {
+            ResolvedNode::Projection(_tt, storage) => {
+                (Some(storage), Condition::all())
+            }
+            ResolvedNode::And(nodes) => {
+                let mut storage = None;
+                let mut cond = Condition::all();
+                for n in nodes {
+                    if let ResolvedNode::Projection(_tt, s) = n {
+                        if storage.is_none() {
+                            storage = Some(s);
+                            continue;
+                        }
+                    }
+                    cond = cond.add(n.to_condition());
+                }
+                (storage, cond)
+            }
+            other => (None, other.to_condition()),
         }
     }
 }
@@ -461,6 +505,14 @@ impl Lens {
         self.resolved_query.get_projection()
     }
 
+    /// クエリがトップレベルでの集約（Aggregation）を目的としている場合、その情報を返します。
+    pub fn get_aggregation(&self) -> Option<ResolvedAggregationNode> {
+        match &self.resolved_query {
+            ResolvedNode::Aggregation(agg) => Some(agg.clone()),
+            _ => None,
+        }
+    }
+
     pub fn decode_label_from_map(
         &self,
         tag_type: &TagType,
@@ -655,6 +707,28 @@ fn resolve_query_node(
             };
             Ok(ResolvedNode::Projection(tt, storage))
         }
+        QueryNode::Aggregation(agg) => {
+            let res = resolve_aggregation(lens, agg)?;
+            Ok(ResolvedNode::Aggregation(res))
+        }
+    }
+}
+
+fn resolve_aggregation(
+    lens: &Lens,
+    agg: crate::query::ast::AggregationNode,
+) -> anyhow::Result<ResolvedAggregationNode> {
+    use crate::query::ast::AggregationNode;
+    match agg {
+        AggregationNode::Count(node) => Ok(ResolvedAggregationNode::Count(
+            Box::new(resolve_query_node(lens, *node)?),
+        )),
+        AggregationNode::Arithmetic { op, inner } => {
+            Ok(ResolvedAggregationNode::Arithmetic {
+                op,
+                inner: Box::new(resolve_query_node(lens, *inner)?),
+            })
+        }
     }
 }
 
@@ -711,6 +785,22 @@ fn resolve_single_match(
                 label: lab,
             })
         }
+        (Operand::Aggregation(agg), Operand::Literal(lab)) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationMatch {
+                agg: res_agg,
+                op,
+                label: lab,
+            })
+        }
+        (Operand::Literal(lab), Operand::Aggregation(agg)) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationMatch {
+                agg: res_agg,
+                op: flip_op(op),
+                label: lab,
+            })
+        }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
     }
 }
@@ -734,7 +824,6 @@ fn get_storage_and_type(
 pub fn flip_op(
     op: crate::query::ast::ComparisonOp,
 ) -> crate::query::ast::ComparisonOp {
-    use crate::query::ast::BasicOp;
     match op {
         ComparisonOp::Scalar(b) => ComparisonOp::Scalar(flip_basic_op(b)),
         ComparisonOp::Label(b) => ComparisonOp::Label(flip_basic_op(b)),

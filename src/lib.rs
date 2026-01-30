@@ -442,12 +442,12 @@ impl FileManager {
         let file_ids: Vec<i64> = results
             .iter()
             .filter(|r| r.item_kind == "file")
-            .map(|r| r.id)
+            .map(|r| r.id.as_i64())
             .collect();
         let item_ids: Vec<i64> = results
             .iter()
             .filter(|r| r.item_kind != "file")
-            .map(|r| r.id)
+            .map(|r| r.id.as_i64())
             .collect();
 
         if !file_ids.is_empty() {

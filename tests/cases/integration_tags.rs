@@ -1,5 +1,6 @@
 use std::fs::File;
 use tempfile::tempdir;
+use ttfm::types::ItemId;
 use ttfm::FileManager;
 
 #[test]
@@ -54,7 +55,7 @@ fn test_integration_tag_tagging() {
         .search("priority:high & item_kind:tag", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].id, tag_id);
+    assert_eq!(results.results[0].id, ItemId::from(tag_id));
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
     // さらに、ファイル検索に影響しないことも確認
@@ -81,7 +82,7 @@ fn test_integration_note_tagging() {
         .search("category:meeting & item_kind:note", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].id, note_id);
+    assert_eq!(results.results[0].id, ItemId::from(note_id));
     assert_eq!(results.results[0].item_kind, "note");
     assert_eq!(results.results[0].primary_value().unwrap(), "Meeting Memo");
 }

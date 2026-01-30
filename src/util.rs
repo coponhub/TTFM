@@ -364,7 +364,19 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
                     year -= 1;
                     month += 12;
                 }
-                let past = now.with_year(year)?.with_month(month as u32)?;
+                // 日付が存在しない場合（例：3/31の2ヶ月前=1/31は存在）月初に調整
+                let past = now
+                    .with_year(year)
+                    .and_then(|d| d.with_month(month as u32))
+                    .or_else(|| {
+                        now.with_year(year)
+                            .and_then(|d| d.with_month(month as u32))
+                            .or_else(|| {
+                                now.with_day(1)?
+                                    .with_year(year)?
+                                    .with_month(month as u32)
+                            })
+                    })?;
                 return Some(DatetimeRange {
                     start: past.timestamp(),
                     end: past.timestamp(),

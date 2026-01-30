@@ -332,6 +332,23 @@ pub fn expand_query_node(
             registry.process_tag(tt.label.tag_type(), tt.label)
         }
         QueryNode::Projection(tt) => registry.expand_projection(tt),
+        QueryNode::Aggregation(agg) => match agg {
+            crate::query::ast::AggregationNode::Count(node) => {
+                QueryNode::Aggregation(
+                    crate::query::ast::AggregationNode::Count(Box::new(
+                        expand_query_node(*node, registry),
+                    )),
+                )
+            }
+            crate::query::ast::AggregationNode::Arithmetic { op, inner } => {
+                QueryNode::Aggregation(
+                    crate::query::ast::AggregationNode::Arithmetic {
+                        op,
+                        inner: Box::new(expand_query_node(*inner, registry)),
+                    },
+                )
+            }
+        },
     }
 }
 

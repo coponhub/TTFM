@@ -159,6 +159,24 @@ impl sea_query::Iden for Val {
     }
 }
 
+/// クエリ結果の動的カラム名を表す識別子。
+/// データベーステーブルのカラムではなく、
+/// SQL結果を整形するために使用される一時的な名前。
+#[derive(
+    Clone, Copy, Debug, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum QueryResultCol {
+    Tags,
+}
+
+impl sea_query::Iden for QueryResultCol {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        let val: &'static str = (*self).into();
+        write!(s, "{}", val).unwrap();
+    }
+}
+
 /// 共通で使用されるカラム名を表す識別子。
 pub use crate::types::SType as Col;
 

@@ -90,7 +90,7 @@ impl RawTagRow {
         };
 
         Some(Self {
-            id: get_i64(Col::ItemId)?,
+            id: get_i64(Col::ItemId)?.into(),
             item_kind: get_str(Col::ItemKind)
                 .unwrap_or_else(|| "unknown".to_string()),
             tag_type: get_str(Col::Type).unwrap_or_default(),
@@ -113,6 +113,8 @@ pub struct SearchResponse {
     pub label_results: Vec<LabelGroup>,
     /// クエリで明示的に投影（Projection）されたタグ型（互換性のため維持）。
     pub type_for_projection: Option<TagType>,
+    /// 集計結果（トップレベルが集約の場合のみ）
+    pub scalar: Option<f64>,
     /// キャッシュ ID（続きがある場合のみ有効）
     pub cid: Option<String>,
     /// 検索結果の総件数（確定している場合）
@@ -189,6 +191,15 @@ impl SearchResponse {
             if res.intrinsic.hash.is_some() {
                 keys.insert(TagType::from(SType::Hash));
             }
+            if !res.item_kind.is_empty() {
+                keys.insert(TagType::from(SType::ItemKind));
+                if res.item_kind == "virtual" {
+                    keys.insert(TagType::from(SType::Type));
+                }
+            }
+            if !res.name.is_empty() {
+                keys.insert(TagType::from(SType::Name));
+            }
 
             // 動的タグ
             for entry in &res.tags.entries {
@@ -234,6 +245,7 @@ impl SearchResponse {
         Self {
             results: Vec::new(),
             label_results: Vec::new(),
+            scalar: None,
             cid,
             has_more,
             total_count: Some(0),
@@ -250,6 +262,7 @@ impl SearchResponse {
         Self {
             results: Vec::new(),
             label_results: Vec::new(),
+            scalar: None,
             cid: Some(cid.to_string()),
             has_more: true,
             total_count: None,
@@ -262,10 +275,23 @@ impl SearchResponse {
 impl SearchResult {
     /// 指定された ID で空の検索結果を作成します。
     pub fn new_empty(id: ItemId) -> Self {
+        let name = match id {
+            ItemId::Virtual(crate::types::VirtualItem::Boolean(1)) => {
+                "TRUE".to_string()
+            }
+            ItemId::Virtual(crate::types::VirtualItem::Boolean(0)) => {
+                "FALSE".to_string()
+            }
+            _ => String::new(),
+        };
         Self {
             id,
-            item_kind: String::new(),
-            name: String::new(),
+            item_kind: if id.is_real() {
+                String::new()
+            } else {
+                "virtual".to_string()
+            },
+            name,
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
@@ -422,6 +448,9 @@ impl SearchResult {
                 if self.intrinsic.size.is_some() {
                     types.push(TagType::Base(SType::Size));
                 }
+                if self.item_kind == "virtual" {
+                    types.push(TagType::from("boolean"));
+                }
                 if self.intrinsic.mtime.is_some() {
                     types.push(TagType::Base(SType::Mtime));
                 }
@@ -488,7 +517,7 @@ mod tests {
         );
 
         SearchResult {
-            id: 1,
+            id: 1.into(),
             item_kind: "file".to_string(),
             name: "test.rs".to_string(),
             rank: 1,
@@ -539,6 +568,7 @@ mod tests {
             results: vec![res1, res2],
             label_results: Vec::new(),
             type_for_projection: None,
+            scalar: None,
             cid: None,
             total_count: None,
             has_more: false,
@@ -620,6 +650,7 @@ mod tests {
             results: vec![create_test_result()],
             label_results: Vec::new(),
             type_for_projection: None,
+            scalar: None,
             cid: None,
             total_count: None,
             has_more: false,

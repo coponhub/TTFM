@@ -1,6 +1,7 @@
 use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::taggers::TagValue;
+use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use crate::FunctionRegistry;
 use anyhow::Result;
@@ -20,7 +21,7 @@ pub(crate) fn run_merge(
     store: &Store,
     results: Vec<TaggingResult>,
     moved: Vec<DynamicRow>,
-    deleted_ids: Vec<i64>,
+    deleted_ids: Vec<ItemId>,
     temp_scan_path: &Path,
     temp_live_path: &Path,
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
@@ -109,15 +110,17 @@ impl<'a> FileEntityMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
+    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        let ids_i64: Vec<i64> =
+            deleted_ids.iter().map(|id| id.as_i64()).collect();
         // file_entities は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::FileReferences),
             Tbl::FileReferencesDiff,
-            (!deleted_ids.is_empty()).then(|| {
+            (!ids_i64.is_empty()).then(|| {
                 Condition::all()
-                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
         )?;
@@ -242,15 +245,17 @@ impl<'a> BaseTagMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
+    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        let ids_i64: Vec<i64> =
+            deleted_ids.iter().map(|id| id.as_i64()).collect();
         // base_tags は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::BaseTags),
             Tbl::BaseTagsDiff,
-            (!deleted_ids.is_empty()).then(|| {
+            (!ids_i64.is_empty()).then(|| {
                 Condition::all()
-                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
         )?;

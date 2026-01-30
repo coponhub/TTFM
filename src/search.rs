@@ -46,11 +46,21 @@ impl FileManager {
         let lens = crate::query::lens::Lens::with_standard(query)?;
         let fetcher = crate::query::fetcher::Fetcher::new(&lens, &self.conn);
 
+        // 2-A. トップレベル集約ケース
+        if let Some(_) = lens.get_aggregation() {
+            let val = fetcher.fetch_scalar()?;
+            return Ok(SearchResponse {
+                scalar: Some(val),
+                total_count: Some(1),
+                ..SearchResponse::new_empty(None, false, None)
+            });
+        }
+
         // プロジェクション（投影タグ）の有無を確認
         let projection = lens.get_projection();
 
         let (final_results, has_more) = {
-            // 2. 通常検索ケース: Fetcher によるシングルパス取得
+            // 2-B. 通常検索ケース: Fetcher によるシングルパス取得
             let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
             let has_more = n > 0 && results.len() > n;
             if has_more {
@@ -91,6 +101,7 @@ impl FileManager {
         Ok(SearchResponse {
             results: final_results,
             label_results: Vec::new(),
+            scalar: None,
             cid,
             has_more,
             total_count: None,
@@ -349,7 +360,7 @@ impl FileManager {
 
         let mut tag_cache: HashMap<i64, Vec<RawTagRow>> = HashMap::new();
         for row in raw_results {
-            tag_cache.entry(row.id).or_default().push(row);
+            tag_cache.entry(row.id.as_i64()).or_default().push(row);
         }
 
         let mut label_map: std::collections::BTreeMap<
@@ -360,10 +371,11 @@ impl FileManager {
         let final_results: Vec<SearchResult> = target_entries
             .into_iter()
             .map(|(id, label)| {
-                let mut res = SearchResult::new_empty(id);
+                let mut res = SearchResult::new_empty(id.into());
                 res.projected_label = label.clone();
                 if let Some(tags) = tag_cache.get(&id) {
                     for tag in tags {
+                        #[allow(deprecated)]
                         res.apply_raw_tag(tag.clone());
                     }
                 }
@@ -386,6 +398,7 @@ impl FileManager {
         Ok(SearchResponse {
             results: final_results,
             label_results,
+            scalar: None,
             cid,
             has_more,
             total_count: None,

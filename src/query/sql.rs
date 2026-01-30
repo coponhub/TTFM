@@ -1,8 +1,12 @@
 use crate::db::{Col, Tbl};
 use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
-use crate::query::lens::{to_bin_op, ResolvedNode, StorageMapping};
+use crate::query::lens::{
+    to_bin_op, ResolvedAggregationNode, ResolvedNode, StorageMapping,
+};
 use crate::types::{Label, SType, TagType};
-use sea_query::{Alias, BinOper, Condition, Expr, Query, SelectStatement};
+use sea_query::{
+    Alias, BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
+};
 
 /// クエリ構造を SQL (SelectStatement) へ変換します。
 pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
@@ -19,6 +23,7 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
             build_typed_tag_sql(&tt.label.tag_type(), &tt.label, view_name)
         }
         QueryNode::Projection(tt) => build_projection_sql(tt, view_name),
+        QueryNode::Aggregation(agg) => build_aggregation_sql(agg, view_name),
     };
     stmt
 }
@@ -43,6 +48,203 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             label,
             ..
         } => build_resolved_match_sql(storage, *sql_type, *op, label, view),
+        ResolvedNode::Aggregation(agg) => {
+            build_resolved_aggregation_sql(agg, view)
+        }
+        ResolvedNode::AggregationMatch { agg, op, label } => {
+            build_resolved_aggregation_match_sql(agg, *op, label, view)
+        }
+    }
+}
+
+pub fn build_aggregation_sql(
+    _agg: &crate::query::ast::AggregationNode,
+    _view: &str,
+) -> SelectStatement {
+    // Phase 1 では未実装（resolve 経由を推奨）
+    Query::select().to_owned()
+}
+
+pub(crate) fn build_resolved_aggregation_sql(
+    agg: &ResolvedAggregationNode,
+    view: &str,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.from(Alias::new(view));
+
+    let (expr, cond, tag_key) = build_aggregation_parts(agg);
+
+    // 集計対象（Projection）がある場合、その型(type)自体で行を絞り込む必要がある
+    // ただし、物理カラム自体（item_id, path等）や、特別な仮想タグの場合は絞り込まない
+    let target_type = match agg {
+        ResolvedAggregationNode::Count(inner) => inner.get_projection(),
+        ResolvedAggregationNode::Arithmetic { inner, .. } => {
+            inner.get_projection()
+        }
+    };
+
+    let mut final_cond = Condition::all();
+    if let Some(key) = tag_key {
+        // RowTag の場合は実際の tag_key でフィルタする
+        final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
+    } else if target_type.is_some() {
+        // 念のため: tag_key がなく target_type がある場合は何もしない
+        // （物理カラムの場合は type フィルタ不要）
+    }
+
+    // 検索条件 (cond) がある場合は、それを ItemId の絞り込みとして IN サブクエリに送る
+    if !cond.is_empty() {
+        let mut sub = Query::select();
+        sub.column(Col::ItemId)
+            .from(Alias::new(view))
+            .cond_where(cond);
+        final_cond = final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
+    }
+
+    stmt.expr(expr);
+    stmt.cond_where(final_cond);
+
+    let sql = stmt.to_owned();
+    if std::env::var("TTFM_DEBUG").is_ok() {
+        println!(
+            "DEBUG AGG SQL: {}",
+            sql.to_string(sea_query::PostgresQueryBuilder)
+        );
+    }
+    sql
+}
+
+pub(crate) fn build_resolved_aggregation_match_sql(
+    agg: &ResolvedAggregationNode,
+    op: ComparisonOp,
+    label: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.from(Alias::new(view));
+
+    let (agg_expr, cond, tag_key) = build_aggregation_parts(agg);
+    let op_bin = to_bin_op(op);
+    let rhs = Expr::val(label.as_i64()); // TODO: 型に応じた変換
+
+    let condition = Expr::expr(agg_expr).binary(op_bin, rhs);
+
+    // 集計対象（Projection）がある場合、その型(type)自体で行を絞り込む必要がある
+    let target_type = match agg {
+        ResolvedAggregationNode::Count(inner) => inner.get_projection(),
+        ResolvedAggregationNode::Arithmetic { inner, .. } => {
+            inner.get_projection()
+        }
+    };
+
+    let mut final_cond = Condition::all();
+    if let Some(key) = tag_key {
+        // RowTag の場合は実際の tag_key でフィルタする
+        final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
+    } else if target_type.is_some() {
+        // 念のため: tag_key がなく target_type がある場合は何もしない
+        // （物理カラムの場合は type フィルタ不要）
+    }
+
+    // 検索条件 (cond) がある場合は、それを ItemId の絞り込みとして IN サブクエリに送る
+    if !cond.is_empty() {
+        let mut sub = Query::select();
+        sub.column(Col::ItemId)
+            .from(Alias::new(view))
+            .cond_where(cond);
+        final_cond = final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
+    }
+    stmt.cond_where(final_cond);
+
+    // 真なら TRUE (1), 偽なら FALSE (0) の ItemId を返す
+    // 仮想アイテムかどうかは item_kind = 'virtual' で判定する
+    let case_expr =
+        Expr::case(condition, Expr::val(1i64)).finally(Expr::val(0i64));
+
+    stmt.expr_as(case_expr, Col::ItemId);
+    stmt.expr_as(Expr::val("virtual"), Col::ItemKind);
+    stmt.expr_as(Expr::val("boolean"), Col::Type);
+    stmt.expr_as(Expr::val(0i64), Col::Rank);
+    // tags カラムが必要（fetch_items で decode_item_from_row が呼ばれるため）
+    // 空のリフト（リスト）をダミーとして設定
+    stmt.expr_as(Expr::cust("[]"), crate::db::QueryResultCol::Tags);
+
+    stmt.limit(1);
+
+    stmt.to_owned()
+}
+
+fn build_aggregation_parts(
+    agg: &ResolvedAggregationNode,
+) -> (SimpleExpr, Condition, Option<String>) {
+    match agg {
+        ResolvedAggregationNode::Count(node) => {
+            let (storage, cond) = node.extract_agg_parts();
+            let tag_key;
+            let expr = if let Some(s) = storage {
+                // count(projection:) -> COUNT(DISTINCT col)
+                let col = match s {
+                    StorageMapping::Column(c) => {
+                        tag_key = None;
+                        *c
+                    }
+                    StorageMapping::RowTag {
+                        column,
+                        tag_key: key,
+                    } => {
+                        tag_key = Some(key.clone());
+                        *column
+                    }
+                    _ => {
+                        tag_key = None;
+                        Col::LabelInt
+                    } // Fallback
+                };
+                Expr::col(col).count_distinct().into()
+            } else {
+                // count(query) -> COUNT(DISTINCT item_id)
+                tag_key = None;
+                Expr::col(Col::ItemId).count_distinct().into()
+            };
+            (expr, cond, tag_key)
+        }
+        ResolvedAggregationNode::Arithmetic { op, inner } => {
+            let (storage, cond) = inner.extract_agg_parts();
+            let tag_key;
+            let col = match storage {
+                Some(StorageMapping::Column(c)) => {
+                    tag_key = None;
+                    *c
+                }
+                Some(StorageMapping::RowTag {
+                    column,
+                    tag_key: key,
+                }) => {
+                    tag_key = Some(key.clone());
+                    *column
+                }
+                _ => {
+                    tag_key = None;
+                    Col::LabelInt
+                } // Fallback
+            };
+
+            let expr: SimpleExpr = match op {
+                crate::query::ast::ArithmeticAggOp::Sum => {
+                    Func::sum(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Avg => {
+                    Func::avg(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Max => {
+                    Func::max(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Min => {
+                    Func::min(Expr::col(col)).into()
+                }
+            };
+            (expr, cond, tag_key)
+        }
     }
 }
 
@@ -53,6 +255,16 @@ pub fn build_fetch_items_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> SelectStatement {
+    // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
+    // oneview との結合を行わず、集約計算結果だけをそのまま返す。
+    match node {
+        ResolvedNode::Aggregation(_)
+        | ResolvedNode::AggregationMatch { .. } => {
+            return build_pick_sql(node, view);
+        }
+        _ => {}
+    }
+
     let pick_sql = build_pick_sql(node, view);
     let columns = Col::raw_tag_row_columns();
 
@@ -87,7 +299,7 @@ pub fn build_fetch_items_sql(
             Expr::cust(format!("ANY_VALUE(\"{}\")", Col::ItemKind.to_string())),
             Col::ItemKind,
         )
-        .expr_as(Expr::cust(tags_expr), Alias::new("tags"))
+        .expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags)
         .from(Alias::new(view))
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .group_by_col(Col::ItemId)
@@ -1011,8 +1223,8 @@ pub fn build_label_expansion_sql(
 mod tests {
     use super::*;
     use crate::query::ast::{BasicOp, QueryNode};
-    use crate::types::{Label, TagType, TypedTag};
-    use sea_query::{Alias, BinOper, Query, SqliteQueryBuilder};
+    use crate::types::{Label, SType, TagType, TypedTag};
+    use sea_query::{PostgresQueryBuilder, Query, SqliteQueryBuilder};
 
     #[test]
     fn test_to_bin_op_conversion() {
@@ -1162,5 +1374,53 @@ mod tests {
             "SQL should have ORDER BY clause"
         );
         assert!(sql_str.contains("LIMIT 10"), "SQL should have LIMIT 10");
+    }
+
+    #[test]
+    fn test_build_resolved_aggregation_sql_count_items() {
+        let agg =
+            ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![
+                ResolvedNode::Match {
+                    tag_type: TagType::Base(SType::Extension),
+                    storage: StorageMapping::RowTag {
+                        column: Col::LabelStr,
+                        tag_key: "extension".to_string(),
+                    },
+                    sql_type: crate::db::SqlType::VARCHAR,
+                    op: ComparisonOp::Scalar(BasicOp::Eq),
+                    label: Label::from("txt"),
+                },
+            ])));
+
+        let sql = build_resolved_aggregation_sql(&agg, "oneview");
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // 基本的な COUNT
+        assert!(sql_str.contains("COUNT(DISTINCT \"item_id\")"));
+        // フィルタ条件 (IN サブクエリ形式)
+        assert!(sql_str.contains("IN (SELECT \"item_id\" FROM \"oneview\" WHERE \"type\" = 'extension' AND \"label_str\" = 'txt')"));
+    }
+
+    #[test]
+    fn test_build_resolved_aggregation_sql_sum_projection() {
+        use crate::query::ast::ArithmeticAggOp;
+        let agg = ResolvedAggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Sum,
+            inner: Box::new(ResolvedNode::Projection(
+                TagType::Base(SType::Size),
+                StorageMapping::RowTag {
+                    column: Col::LabelInt,
+                    tag_key: "size".to_string(),
+                },
+            )),
+        };
+
+        let sql = build_resolved_aggregation_sql(&agg, "oneview");
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // SUM(label_int) であること。
+        assert!(sql_str.contains("SUM(\"label_int\")"));
+        // 重複集計防止の type = 'size' フィルタがメインの WHERE に含まれていること。
+        assert!(sql_str.contains("WHERE \"type\" = 'size'"));
     }
 }

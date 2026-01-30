@@ -1,6 +1,6 @@
 use crate::query::ast::{
-    ArithmeticOp, BasicOp, CalculationNode, ComparisonNode, ComparisonOp,
-    Operand, QueryNode,
+    AggregationNode, ArithmeticAggOp, ArithmeticOp, BasicOp, CalculationNode,
+    ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
 use crate::types::{Label, TagType, TypedTag};
 use crate::util::DotOk;
@@ -26,7 +26,6 @@ mod errors {
     pub const UNKNOWN_INFIX_RULE: &str = "Unknown infix rule";
     pub const UNKNOWN_FACTOR_INNER: &str = "Unknown factor inner";
     pub const COMPLEMENT_MISSING_EXPR: &str = "Complement missing expr";
-    pub const UNEXPECTED_RULE: &str = "Unexpected rule in build_ast";
     pub const MISSING_TAG_KEY: &str = "Missing tag key";
     pub const MISSING_TAG_LABEL: &str = "Missing tag label";
     pub const MISSING_PROJECTION_INNER: &str = "Missing projection inner";
@@ -34,7 +33,6 @@ mod errors {
         "Missing tag key in projection";
     pub const UNEXPECTED_TAG_TYPE_RULE: &str = "Unexpected tag_type rule";
     pub const UNKNOWN_COMPARISON_OP: &str = "Unknown comparison op";
-    pub const MISSING_COMPARISON_OPERAND: &str = "Missing comparison operand";
     pub const UNKNOWN_OPERAND_RULE: &str = "Unknown operand rule";
     pub const UNKNOWN_ARITHMETIC_OP: &str = "Unknown arithmetic op";
     pub const CALC_REQUIRES_OP: &str =
@@ -68,11 +66,47 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
     match pair.as_rule() {
+        Rule::comparison => build_comparison(pair),
+        Rule::typed_tag => build_typed_tag(pair),
+        Rule::projection => build_projection(pair),
+        Rule::aggregation => {
+            build_aggregation(pair).map(QueryNode::Aggregation)
+        }
         Rule::expr => build_expr(pair),
-        Rule::primary => build_primary(pair),
-        Rule::factor => build_factor(pair),
-        Rule::complement => build_complement(pair),
-        _ => Err(anyhow!("{}: {:?}", errors::UNEXPECTED_RULE, pair.as_rule())),
+        Rule::primary => build_primary(pair), // Keep primary for now, it delegates to build_ast
+        Rule::factor => build_factor(pair), // Keep factor for now, it delegates to build_ast
+        Rule::complement => build_complement(pair), // Keep complement for now
+        _ => Err(anyhow!(errors::UNKNOWN_FACTOR_INNER)),
+    }
+}
+
+fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
+    let mut inner = pair.into_inner();
+    let op_pair = inner.next().ok_or_else(|| anyhow!("Missing aggregator"))?;
+    let expr_pair =
+        inner.next().ok_or_else(|| anyhow!("Missing expression"))?;
+
+    let node = build_expr(expr_pair)?;
+
+    match op_pair.as_str() {
+        "count" => Ok(AggregationNode::Count(Box::new(node))),
+        "sum" => Ok(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Sum,
+            inner: Box::new(node),
+        }),
+        "avg" => Ok(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Avg,
+            inner: Box::new(node),
+        }),
+        "max" => Ok(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Max,
+            inner: Box::new(node),
+        }),
+        "min" => Ok(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Min,
+            inner: Box::new(node),
+        }),
+        _ => Err(anyhow!("Unknown aggregator: {}", op_pair.as_str())),
     }
 }
 
@@ -126,6 +160,9 @@ fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::typed_tag => build_typed_tag(inner),
         Rule::comparison => build_comparison(inner),
         Rule::projection => build_projection(inner),
+        Rule::aggregation => {
+            build_aggregation(inner).map(QueryNode::Aggregation)
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             errors::UNKNOWN_FACTOR_INNER,
@@ -267,7 +304,7 @@ fn parse_label_basic_op(s: &str) -> Result<BasicOp> {
 fn parse_scalar_basic_op(s: &str) -> Result<BasicOp> {
     match s {
         "==" => Ok(BasicOp::Eq),
-        "^=" | "^" => Ok(BasicOp::Ne),
+        "^=" | "^" | "!=" => Ok(BasicOp::Ne),
         ">" => Ok(BasicOp::Gt),
         ">=" => Ok(BasicOp::Ge),
         "<" => Ok(BasicOp::Lt),
@@ -309,6 +346,9 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::unquoted_string
         | Rule::unquoted_tag_string => {
             Ok(Operand::Literal(build_label(inner)?))
+        }
+        Rule::aggregation => {
+            Ok(Operand::Aggregation(Box::new(build_aggregation(inner)?)))
         }
         _ => Err(anyhow!(
             "{}: {:?}",
@@ -387,21 +427,6 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
             inner.as_rule()
         )),
     }
-}
-
-fn build_quoted_string(pair: Pair<Rule>) -> Result<Label> {
-    // Remove outer quotes before unescaping
-    let content = &pair.as_str()[1..pair.as_str().len() - 1];
-    let s = unescape_string(content)?;
-    Ok(Label::Other(
-        TagType::Custom(String::new()),
-        crate::types::LabelValue::Literal(s),
-    ))
-}
-
-fn build_number(pair: Pair<Rule>) -> Result<Label> {
-    let i = pair.as_str().parse::<i64>()?;
-    Ok(Label::from(i))
 }
 
 fn unescape_glob_string(s: &str) -> Result<String> {
@@ -641,6 +666,92 @@ mod tests {
         match node {
             QueryNode::Projection(tt) => assert_eq!(tt.as_str(), "origin"),
             _ => panic!("Expected Projection(origin), got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_count_items() {
+        let node = parse("count(name:*.rs)")
+            .expect("Failed to parse count(name:*.rs)");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Count(inner) => match &*inner {
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.label.tag_type().as_str(), "name");
+                        assert_eq!(tt.label.as_str(), "*.rs");
+                    }
+                    _ => panic!(
+                        "Expected TypedTag inside count, got {:?}",
+                        inner
+                    ),
+                },
+                _ => panic!("Expected Count aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_count_projection() {
+        let node = parse("count(extension:)")
+            .expect("Failed to parse count(extension:)");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Count(inner) => match &*inner {
+                    QueryNode::Projection(tt) => {
+                        assert_eq!(tt.as_str(), "extension");
+                    }
+                    _ => panic!(
+                        "Expected Projection inside count, got {:?}",
+                        inner
+                    ),
+                },
+                _ => panic!("Expected Count aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_sum_projection() {
+        let node = parse("sum(size:)").expect("Failed to parse sum(size:)");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Arithmetic { op, ref inner } => {
+                    assert_eq!(op, ArithmeticAggOp::Sum);
+                    match &**inner {
+                        QueryNode::Projection(tt) => {
+                            assert_eq!(tt.as_str(), "size");
+                        }
+                        _ => panic!(
+                            "Expected Projection inside sum, got {:?}",
+                            inner
+                        ),
+                    }
+                }
+                _ => panic!("Expected Arithmetic aggregation, got {:?}", agg),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_aggregation_comparison() {
+        let node =
+            parse("sum(size:) > 100").expect("Failed to parse comparison");
+        match node {
+            QueryNode::Comparison(cmp) => match &cmp.first {
+                Operand::Aggregation(agg) => match &**agg {
+                    AggregationNode::Arithmetic { op, .. } => {
+                        assert_eq!(*op, ArithmeticAggOp::Sum);
+                    }
+                    _ => panic!("Expected Arithmetic agg"),
+                },
+                _ => {
+                    panic!("Expected Aggregation operand, got {:?}", cmp.first)
+                }
+            },
+            _ => panic!("Expected Comparison, got {:?}", node),
         }
     }
 }

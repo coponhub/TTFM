@@ -13,7 +13,6 @@ use std::path::Path;
 struct TagSource {
     table: Tbl,
     target: TargetTable,
-    origin: Val,
 }
 
 /// タグテーブルのソース一覧
@@ -21,17 +20,14 @@ const TAG_SOURCES: &[TagSource] = &[
     TagSource {
         table: Tbl::BaseTags,
         target: TargetTable::BaseTags,
-        origin: Val::System,
     },
     TagSource {
         table: Tbl::SystemTags,
         target: TargetTable::SystemTags,
-        origin: Val::System,
     },
     TagSource {
         table: Tbl::UserTags,
         target: TargetTable::UserTags,
-        origin: Val::User,
     },
 ];
 
@@ -161,12 +157,14 @@ fn spec_rank(source: &OneViewSource) -> sea_query::SimpleExpr {
         }
 
         // LocationAlias も Locations 同様
-        OneViewSource::LocationAlias(_) => Func::cust(crate::db::DuckDbFunc::Coalesce)
-            .args([
-                Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                Expr::val(0).into(),
-            ])
-            .into(),
+        OneViewSource::LocationAlias(_) => {
+            Func::cust(crate::db::DuckDbFunc::Coalesce)
+                .args([
+                    Expr::col((Tbl::FileReferences, Col::Rank)).into(),
+                    Expr::val(0).into(),
+                ])
+                .into()
+        }
 
         // ItemRef は自身のテーブルの Rank カラムを直接使う
         OneViewSource::ItemRef(_) => Expr::col(Col::Rank).into(),
@@ -176,7 +174,9 @@ fn spec_rank(source: &OneViewSource) -> sea_query::SimpleExpr {
 fn spec_item_kind(source: &OneViewSource) -> sea_query::SimpleExpr {
     match source {
         // Tag系は両方の JOIN があるため共通ロジックが使える
-        OneViewSource::Tag(_) => build_item_kind_expr().cast_as(SqlType::VARCHAR).into(),
+        OneViewSource::Tag(_) => {
+            build_item_kind_expr().cast_as(SqlType::VARCHAR).into()
+        }
 
         // Physical系およびエイリアスは常に File 確定
         OneViewSource::Physical { .. } | OneViewSource::LocationAlias(_) => {
@@ -186,7 +186,9 @@ fn spec_item_kind(source: &OneViewSource) -> sea_query::SimpleExpr {
         }
 
         // ItemRef は自身のカラムを直接使う
-        OneViewSource::ItemRef(_) => Expr::col(Col::ItemKind).cast_as(SqlType::VARCHAR).into(),
+        OneViewSource::ItemRef(_) => {
+            Expr::col(Col::ItemKind).cast_as(SqlType::VARCHAR).into()
+        }
     }
 }
 
@@ -194,20 +196,12 @@ fn spec_type(source: &OneViewSource) -> sea_query::SimpleExpr {
     let expr = match source {
         OneViewSource::Tag(s) => Expr::col((s.table, Col::Type)),
         OneViewSource::Physical { cd, .. } => Expr::val(&cd.name[..]),
-        OneViewSource::LocationAlias(v) => Expr::val(Into::<&'static str>::into(*v)),
-        OneViewSource::ItemRef(col) => Expr::val(Into::<&'static str>::into(*col)),
-    };
-    expr.cast_as(SqlType::VARCHAR).into()
-}
-
-fn spec_label_str(source: &OneViewSource) -> sea_query::SimpleExpr {
-    let expr: sea_query::SimpleExpr = match source {
-        OneViewSource::Tag(s) => build_label_str_expr(s.table),
-        OneViewSource::Physical { cd, tbl } => {
-            Expr::col((*tbl, crate::util::col_to_iden(&cd.name))).into()
+        OneViewSource::LocationAlias(v) => {
+            Expr::val(Into::<&'static str>::into(*v))
         }
-        OneViewSource::LocationAlias(_) => Expr::col((Tbl::Locations, Col::Filename)).into(),
-        OneViewSource::ItemRef(col) => Expr::col(*col).into(),
+        OneViewSource::ItemRef(col) => {
+            Expr::val(Into::<&'static str>::into(*col))
+        }
     };
     expr.cast_as(SqlType::VARCHAR).into()
 }
@@ -220,7 +214,9 @@ fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
         OneViewSource::Physical { cd, tbl } => {
             Expr::col((*tbl, crate::util::col_to_iden(&cd.name))).into()
         }
-        OneViewSource::LocationAlias(_) => Expr::col((Tbl::Locations, Col::Filename)).into(),
+        OneViewSource::LocationAlias(_) => {
+            Expr::col((Tbl::Locations, Col::Filename)).into()
+        }
         OneViewSource::ItemRef(col) => Expr::col(*col).into(),
     };
 
@@ -235,7 +231,10 @@ fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
 }
 
 /// Oneview の共通カラム群を一括設定する「真の集約エンジン」
-fn apply_oneview_schema(q: &mut sea_query::SelectStatement, source: OneViewSource) {
+fn apply_oneview_schema(
+    q: &mut sea_query::SelectStatement,
+    source: OneViewSource,
+) {
     let s = &source;
     add_col(Col::Origin, spec_origin, q, s);
     add_col(Col::Rank, spec_rank, q, s);
@@ -333,7 +332,10 @@ fn build_physical_column_query(
     apply_label_columns(&mut q, tbl_alias, &iden, cd.sql_type);
 
     // 【仕様の完全集約】全共通カラムをエンジンに委託
-    apply_oneview_schema(&mut q, OneViewSource::Physical { cd, tbl: tbl_alias });
+    apply_oneview_schema(
+        &mut q,
+        OneViewSource::Physical { cd, tbl: tbl_alias },
+    );
 
     q.from_subquery(crate::util::parquet_query(parquet_path), tbl_alias);
 
@@ -430,20 +432,36 @@ impl OneView {
         let file_ref_path = path(TargetTable::FileReferences);
         for source in PHYSICAL_SOURCES {
             let parquet_path = path(source.target);
-            let join_path = source.needs_file_ref_join.then_some(file_ref_path.as_str());
+            let join_path =
+                source.needs_file_ref_join.then_some(file_ref_path.as_str());
 
             // カラムごとのクエリを追加
             query_parts.extend(
                 all_columns
                     .iter()
                     .filter(|c| c.target_table == source.target)
-                    .map(|cd| build_physical_column_query(cd, source.table, &parquet_path, join_path)),
+                    .map(|cd| {
+                        build_physical_column_query(
+                            cd,
+                            source.table,
+                            &parquet_path,
+                            join_path,
+                        )
+                    }),
             );
 
             // Locations用のname/filenameエイリアス
             if source.add_location_aliases {
-                query_parts.push(build_location_alias_query(Val::Name, &parquet_path, &file_ref_path));
-                query_parts.push(build_location_alias_query(Val::Filename, &parquet_path, &file_ref_path));
+                query_parts.push(build_location_alias_query(
+                    Val::Name,
+                    &parquet_path,
+                    &file_ref_path,
+                ));
+                query_parts.push(build_location_alias_query(
+                    Val::Filename,
+                    &parquet_path,
+                    &file_ref_path,
+                ));
             }
         }
 

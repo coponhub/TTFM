@@ -112,7 +112,7 @@ impl<'a> ItemTriager<'a> {
             .map(|(existing_id, values, hash)| {
                 let id = existing_id.unwrap_or_else(|| {
                     current_max_id += 1;
-                    current_max_id
+                    ItemId::from(current_max_id)
                 });
                 self.triage_item(id, values, hash, &columns)
             })
@@ -122,16 +122,17 @@ impl<'a> ItemTriager<'a> {
 
     fn triage_item(
         &self,
-        id: i64,
+        id: ItemId,
         values: Vec<TagValue>,
         hash: ScanHash,
         cols: &[ColumnDef],
     ) -> TaggingResult {
+        let id_i64 = id.as_i64();
         let mut res = values
             .into_iter()
             .zip(cols)
-            .map(|(v, c)| self.classify(id, v, c))
-            .fold(TriageAccumulator::new(id), |acc, p| acc.collect(p))
+            .map(|(v, c)| self.classify(id_i64, v, c))
+            .fold(TriageAccumulator::new(id_i64), |acc, p| acc.collect(p))
             .finish();
 
         res.scan_hash = hash;
@@ -312,7 +313,8 @@ mod tests {
             TagValue::Text("rs".into()),
         ];
 
-        let res = triager.triage_item(7, vals, ScanHash(123), &cols);
+        let res =
+            triager.triage_item(ItemId::from(7), vals, ScanHash(123), &cols);
 
         assert_eq!(res.entity_row.id, 7);
         assert_eq!(res.scan_hash, ScanHash(123));
@@ -371,7 +373,7 @@ mod tests {
         let registry = FunctionRegistry::new();
         let triager = ItemTriager::new(&registry);
         let input = vec![
-            (Some(100), vec![], ScanHash(1)),
+            (Some(ItemId::from(100)), vec![], ScanHash(1)),
             (None, vec![], ScanHash(2)),
         ];
 

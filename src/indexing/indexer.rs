@@ -591,12 +591,12 @@ mod tests {
 
         // 2. ダミーデータを直接 locations に書き込む (scan_hash 込み)
         let hash_val = ScanHash(123456789);
-        let item_id: ItemId = 1;
+        let item_id: ItemId = ItemId::from(1);
         let locs_path = indexer.store.path_for_target(TargetTable::Locations);
 
         conn.execute(
             "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
-            [item_id, hash_val.0],
+            [item_id.as_i64(), hash_val.0],
         )
         .unwrap();
         conn.execute(

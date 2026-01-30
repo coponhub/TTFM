@@ -35,6 +35,27 @@ pub enum ArithmeticOp {
     Mod,
 }
 
+/// 算術集約演算子（Projection 必須）
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ArithmeticAggOp {
+    Sum,
+    Avg,
+    Max,
+    Min,
+}
+
+/// 集約ノード
+#[derive(Debug, PartialEq, Clone)]
+pub enum AggregationNode {
+    /// 件数カウント: `count(query)` または `count(tag:)`
+    Count(Box<QueryNode>),
+    /// 算術集約: `sum(tag:)`, `avg(tag:)` など
+    Arithmetic {
+        op: ArithmeticAggOp,
+        inner: Box<QueryNode>,
+    },
+}
+
 /// 比較演算または算術演算のオペランド。
 ///
 /// タグへの参照（TypeRef）またはリテラル値（Literal）のいずれか。
@@ -43,6 +64,8 @@ pub enum Operand {
     Literal(Label),
     TypeRef(TagType),
     Calculation(Box<CalculationNode>),
+    /// 集約演算結果 (sum(size:), count(*) など)
+    Aggregation(Box<AggregationNode>),
 }
 
 /// 算術演算ノード（加算、減算、乗算、除算）。
@@ -88,6 +111,8 @@ pub enum QueryNode {
     ColumnMatch { tag: SType, label: Label },
     /// ラベル取得 (Projection)
     Projection(TagType),
+    /// 集約演算 (count(query), sum(size:) など)
+    Aggregation(AggregationNode),
 }
 
 impl QueryNode {
@@ -140,6 +165,9 @@ impl QueryNode {
             QueryNode::Projection(tt) => {
                 types.insert(tt.as_str().to_string());
             }
+            QueryNode::Aggregation(agg) => {
+                agg.collect_types(types);
+            }
         }
     }
 
@@ -159,6 +187,14 @@ impl QueryNode {
             QueryNode::Projection(tt) => {
                 projections.insert(tt.as_str().to_string());
             }
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Count(node) => {
+                    node.collect_projections(projections)
+                }
+                AggregationNode::Arithmetic { inner, .. } => {
+                    inner.collect_projections(projections)
+                }
+            },
             _ => {}
         }
     }
@@ -173,6 +209,19 @@ impl ComparisonNode {
     }
 }
 
+impl AggregationNode {
+    fn collect_types(&self, types: &mut HashSet<String>) {
+        match self {
+            AggregationNode::Count(node) => {
+                node.collect_types(types);
+            }
+            AggregationNode::Arithmetic { inner, .. } => {
+                inner.collect_types(types);
+            }
+        }
+    }
+}
+
 impl Operand {
     fn collect_types(&self, types: &mut HashSet<String>) {
         match self {
@@ -183,6 +232,9 @@ impl Operand {
             Operand::Calculation(calc) => {
                 calc.left.collect_types(types);
                 calc.right.collect_types(types);
+            }
+            Operand::Aggregation(agg) => {
+                agg.collect_types(types);
             }
         }
     }

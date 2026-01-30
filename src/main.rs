@@ -306,6 +306,11 @@ fn print_results(
         );
     }
 
+    if let Some(scalar) = response.scalar {
+        safe_println!("{}", scalar);
+        return;
+    }
+
     if response.results.is_empty() {
         if response.progress.is_finished() {
             safe_println!("No items found.");
@@ -503,6 +508,17 @@ fn print_compact_projections(
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
 fn print_simple_results(response: &ttfm::SearchResponse) {
+    if let Some(scalar) = response.scalar {
+        safe_println!("{}", scalar);
+        return;
+    }
+
+    // 仮想アイテム（True/False）のみの場合は、単にその文字列を出す
+    if response.results.len() == 1 && !response.results[0].id.is_real() {
+        safe_println!("{}", response.results[0].id);
+        return;
+    }
+
     if response.type_for_projection.is_none() {
         // プロジェクションなし: アイテムごとに解決済みの名前を出力
         for res in &response.results {
