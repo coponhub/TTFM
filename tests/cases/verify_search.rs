@@ -15,6 +15,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         "image_vacation_2024.jpg",
         "image_work_2024.png",
         "backup_2023.zip",
+        "foo&bar.txt", // File with & in name (DESIGN.md:26 test)
     ];
 
     println!("Creating test files and folders in {:?}...", root);
@@ -56,6 +57,9 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
 
         // --- Deeply nested parentheses ---
         ("((extension:pdf | extension:txt) & filename:project_alpha_report.pdf) | directory:work_docs", 2),
+
+        // --- DESIGN.md:26: & without spaces is part of label, not set operator ---
+        ("name:foo&bar.txt", 1), // & is part of the label, matches "foo&bar.txt"
 
         // Folder specific searches (directories are also entries with filenames)
         ("filename:work_docs", 0),            // filename no longer matches directories
@@ -160,9 +164,9 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 2, "size: :<= 500 failed"); // small(100), medium(500)
 
     // == (Equal)
-    println!("Testing 'size: :== 500'...");
-    let res = fm.search("size: :== 500", Default::default())?;
-    assert_eq!(res.results.len(), 1, "size: :== 500 failed"); // medium(500)
+    println!("Testing 'size: := 500'...");
+    let res = fm.search("size: := 500", Default::default())?;
+    assert_eq!(res.results.len(), 1, "size: := 500 failed"); // medium(500)
 
     // ^= (Not Equal)
     println!("Testing 'size: :^= 500'...");
@@ -174,7 +178,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // Custom tag exact match (Cast check)
-    let res = fm.search("width: :== 640", Default::default())?;
+    let res = fm.search("width: := 640", Default::default())?;
     assert_eq!(res.results.len(), 1);
 
     // width:640 is set on one item. Others don't have width.
@@ -212,12 +216,21 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     println!("Testing 'mtime:yesterday'...");
     let res = fm.search("mtime:yesterday", Default::default())?;
-    assert!(res.results.iter().any(|r| r.name == "past.txt"), "Should match past.txt by 'yesterday'");
+    assert!(
+        res.results.iter().any(|r| r.name == "past.txt"),
+        "Should match past.txt by 'yesterday'"
+    );
 
     println!("Testing 'mtime:<today'...");
     let res = fm.search("mtime:<today", Default::default())?;
-    assert!(res.results.iter().any(|r| r.name == "past.txt"), "Should match past.txt by '<today'");
-    assert!(res.results.iter().all(|r| r.name != "small.txt"), "Should NOT match files created today");
+    assert!(
+        res.results.iter().any(|r| r.name == "past.txt"),
+        "Should match past.txt by '<today'"
+    );
+    assert!(
+        res.results.iter().all(|r| r.name != "small.txt"),
+        "Should NOT match files created today"
+    );
 
     Ok(())
 }

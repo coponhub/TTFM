@@ -343,7 +343,8 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
     // Nd ago
     if s_lower.ends_with(" ago") {
         let part = s_lower.trim_end_matches(" ago").trim();
-        let (num_str, unit) = part.split_at(part.find(|c: char| !c.is_numeric())?);
+        let (num_str, unit) =
+            part.split_at(part.find(|c: char| !c.is_numeric())?);
         let num: i64 = num_str.parse().ok()?;
 
         match unit.trim() {
@@ -416,7 +417,10 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let start = now.date_naive().and_hms_opt(h, m, 0)?;
             let end = now.date_naive().and_hms_opt(h, m, 59)?;
             Some(DatetimeRange {
-                start: Local.from_local_datetime(&start).earliest()?.timestamp(),
+                start: Local
+                    .from_local_datetime(&start)
+                    .earliest()?
+                    .timestamp(),
                 end: Local.from_local_datetime(&end).earliest()?.timestamp(),
             })
         }
@@ -427,21 +431,21 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let sec: u32 = parts[2].parse().ok()?;
             let dt = now.date_naive().and_hms_opt(h, m, sec)?;
             let ts = Local.from_local_datetime(&dt).earliest()?.timestamp();
-            Some(DatetimeRange {
-                start: ts,
-                end: ts,
-            })
+            Some(DatetimeRange { start: ts, end: ts })
         }
         // M/D (今年の M/D)
         2 => {
             let m: u32 = parts[0].parse().ok()?;
             let d: u32 = parts[1].parse().ok()?;
-            let start =
-                NaiveDate::from_ymd_opt(now.year(), m, d)?.and_hms_opt(0, 0, 0)?;
-            let end =
-                NaiveDate::from_ymd_opt(now.year(), m, d)?.and_hms_opt(23, 59, 59)?;
+            let start = NaiveDate::from_ymd_opt(now.year(), m, d)?
+                .and_hms_opt(0, 0, 0)?;
+            let end = NaiveDate::from_ymd_opt(now.year(), m, d)?
+                .and_hms_opt(23, 59, 59)?;
             Some(DatetimeRange {
-                start: Local.from_local_datetime(&start).earliest()?.timestamp(),
+                start: Local
+                    .from_local_datetime(&start)
+                    .earliest()?
+                    .timestamp(),
                 end: Local.from_local_datetime(&end).earliest()?.timestamp(),
             })
         }
@@ -450,10 +454,15 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let y: i32 = parts[0].parse().ok()?;
             let m: u32 = parts[1].parse().ok()?;
             let d: u32 = parts[2].parse().ok()?;
-            let start = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
-            let end = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
+            let start =
+                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
+            let end =
+                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
             Some(DatetimeRange {
-                start: Local.from_local_datetime(&start).earliest()?.timestamp(),
+                start: Local
+                    .from_local_datetime(&start)
+                    .earliest()?
+                    .timestamp(),
                 end: Local.from_local_datetime(&end).earliest()?.timestamp(),
             })
         }
@@ -469,7 +478,10 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let end =
                 NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(h, min, 59)?;
             Some(DatetimeRange {
-                start: Local.from_local_datetime(&start).earliest()?.timestamp(),
+                start: Local
+                    .from_local_datetime(&start)
+                    .earliest()?
+                    .timestamp(),
                 end: Local.from_local_datetime(&end).earliest()?.timestamp(),
             })
         }
@@ -484,10 +496,7 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let dt =
                 NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(h, min, sec)?;
             let ts = Local.from_local_datetime(&dt).earliest()?.timestamp();
-            Some(DatetimeRange {
-                start: ts,
-                end: ts,
-            })
+            Some(DatetimeRange { start: ts, end: ts })
         }
         _ => None,
     }

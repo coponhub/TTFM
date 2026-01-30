@@ -576,13 +576,13 @@ fn expand_query_node(
         ))),
         QueryNode::Comparison(cmp) => {
             let reg = QueryFunctionRegistry::with_standard();
-            let expanded_node: crate::query::ast::QueryNode = crate::query::functions::expand_comparison_node(cmp, &reg);
+            let expanded_node: crate::query::ast::QueryNode =
+                crate::query::functions::expand_comparison_node(cmp, &reg);
             Ok(expanded_node)
         }
         other => Ok(other),
     }
 }
-
 
 fn resolve_query_node(
     lens: &Lens,
@@ -741,7 +741,9 @@ pub fn flip_op(
     }
 }
 
-pub fn flip_basic_op(op: crate::query::ast::BasicOp) -> crate::query::ast::BasicOp {
+pub fn flip_basic_op(
+    op: crate::query::ast::BasicOp,
+) -> crate::query::ast::BasicOp {
     use crate::query::ast::BasicOp;
     match op {
         BasicOp::Gt => BasicOp::Lt,

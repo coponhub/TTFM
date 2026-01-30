@@ -5,12 +5,16 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 query = { SOI ~ expr ~ EOI }
 
 // --- Set operations (Pratt Parser) ---
-expr = { primary ~ (infix ~ primary)* }
+// DESIGN.md: Spaces are REQUIRED around set operators
+// "a:1&b:2" -> Not a set operation, parsed as TypedTag "a:1&b:2"
+// "a:1 & b:2" -> Set AND operation
+expr = ${ WHITESPACE* ~ primary ~ (WHITESPACE+ ~ infix ~ WHITESPACE+ ~ primary)* ~ WHITESPACE* }
 
-infix = _{ ampersand | pipe | minus }
-    ampersand = { "&" }
-    pipe      = { "|" }
-    minus     = { "-" }
+infix = _{ ampersand | pipe | minus_colon | minus }
+    ampersand   = { "&" }
+    pipe        = { "|" }
+    minus_colon = { "-:" }
+    minus       = { "-" }
 
 // --- Primary elements ---
 primary = { complement | factor }
@@ -20,7 +24,7 @@ complement = { comp_prefix ~ expr ~ ")" }
 
 // --- Factors ---
 // PEG priority: Try specific rules first.
-factor = { 
+factor = {
     comparison
   | typed_tag
   | projection
@@ -31,32 +35,48 @@ projection = { type_ref }
 
 // --- Label/Scalar Comparison ---
 // DESIGN.md:
-// - Label Comparison: Stuck operator (size:>100) or Colon operator (size: :> 100)
+// - Label Comparison: Stuck operator (size:>100) or Colon operator (size: := 100)
 // - Scalar Comparison: Space between operand and operator (sum(size:) > 1GB)
 // - TypedTag/TypeRef + ScalarOp (size: > 100) is a Syntax Error.
 
-comparison = { 
-    label_comparison 
-  | scalar_comparison 
+comparison = {
+    label_comparison
+  | scalar_comparison
 }
 
 // Label comparison: operand (including projection) followed by label-style operator
-label_comparison = ${ 
+label_comparison = ${
     ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step)+ )
   | ( (number | quoted_string) ~ (WHITESPACE* ~ label_op)+ )
   | ( (unquoted_string | unquoted_tag_string) ~ label_op+ )
 }
-label_op = ${ colon ~ basic_op ~ WHITESPACE* ~ operand }
-stuck_op_step = ${ basic_op ~ WHITESPACE* ~ operand }
+
+// Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
+// DESIGN.md:71 - Label equality uses single "=" not "=="
+label_op = ${ colon ~ label_basic_op ~ WHITESPACE* ~ operand }
+
+// Stuck operator: ^, ^=, >, >=, <, <= (NO equality operator)
+// DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
+// DESIGN.md:88 - NO whitespace allowed between operator and operand
+stuck_op_step = ${ stuck_basic_op ~ stuck_operand }
+stuck_operand = { quoted_string | number | unquoted_tag_string }
+
 colon = { ":" }
+
+// Label comparison operators: = for equality (not ==)
+label_basic_op = @{ "=" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
+
+// Stuck comparison operators: NO equality (= or ==) since TypedTag handles that
+stuck_basic_op = @{ "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // Scalar comparison: scalar-only operand followed by scalar-style operator
 // Note: projection (type_ref) is NOT allowed in scalar_operand.
-scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ basic_op ~ WHITESPACE* ~ operand)+ }
+scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ operand)+ }
 
 scalar_operand = { calculation | label } // aggregation will be added in future
 
-basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
+// Scalar comparison operators: == for equality
+scalar_basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)
@@ -65,10 +85,10 @@ basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
 typed_tag = ${ tag_type ~ ":" ~ tag_label }
 
 // --- Operands ---
-operand = { 
-    calculation 
-  | type_ref 
-  | label 
+operand = {
+    calculation
+  | type_ref
+  | label
 }
 
 // ... existing rules ...
@@ -76,9 +96,10 @@ operand = {
 // Tag Label (permissive, allows ^)
 tag_label = { quoted_string | number | unquoted_tag_string }
 
-// Unquoted tag string: allows ^ unlike standard unquoted_string
-unquoted_tag_string = @{ 
-    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+ 
+// Unquoted tag string: allows ^ and set operators (&, |) without spaces
+// DESIGN.md:26 - "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
+unquoted_tag_string = @{
+    (escape | (!(WHITESPACE | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+
 }
 
 // ... existing unquoted_string ...
@@ -86,9 +107,12 @@ unquoted_tag_string = @{
 
 // --- Label Calculation ---
 // DESIGN.md: Arithmetic can ONLY be used inside parentheses of a comparison operand.
+// DESIGN.md:112 - Arithmetic operators REQUIRE whitespace around them
+// "1*2" -> Not arithmetic, literal string
+// "1 * 2" -> Arithmetic operation
 calculation = { "(" ~ calculation_inner ~ ")" }
 calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
-arith_op = @{ WHITESPACE* ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE* }
+arith_op = @{ WHITESPACE+ ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)
 operand_calc = { type_ref | label | calculation }
@@ -108,26 +132,26 @@ identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC | "/") }
 
 // Quoted strings
-quoted_string = ${ 
-    ("\"" ~ inner_str_double ~ "\"") 
-  | ("'" ~ inner_str_single ~ "'") 
+quoted_string = ${
+    ("\"" ~ inner_str_double ~ "\"")
+  | ("'" ~ inner_str_single ~ "'")
 }
 inner_str_double = @{ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* }
 inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 
 // Unquoted strings: Allow colons in labels.
-unquoted_string = @{ 
-    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+ 
+unquoted_string = @{
+    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
 }
 
 escape = @{ "\\" ~ ANY }
 
 // Reserved characters are only those that trigger higher-level rules or separators.
 // Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
-reserved_chars = _{ 
-    WHITESPACE 
+reserved_chars = _{
+    WHITESPACE
   | "&" | "|" | "(" | ")" | "\"" | "'"
   | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
-  | "," | ";" | "{" | "}" 
+  | "," | ";" | "{" | "}"
   | ":"
 }

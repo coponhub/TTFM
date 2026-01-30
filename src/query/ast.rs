@@ -231,7 +231,10 @@ mod tests {
         // size > 100
         let node = QueryNode::Comparison(ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Label(BasicOp::Gt), Operand::Literal("100".into()))],
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal("100".into()),
+            )],
         });
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
@@ -281,7 +284,10 @@ mod tests {
         // Let's test helper directly via ComparisonNode
         let node = QueryNode::Comparison(ComparisonNode {
             first: op,
-            rest: vec![(ComparisonOp::Label(BasicOp::Gt), Operand::Literal("100".into()))],
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal("100".into()),
+            )],
         });
 
         let types = node.get_all_types();

@@ -33,7 +33,7 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         // 基本的な比較
         ("size: :>= 512KB & is_dir:false", 3), // half, one_half, ten
         ("size: :< 1MB & is_dir:false", 2),    // empty, half
-        ("size: :== 512KiB", 1),               // half_mb.bin
+        ("size: := 512KiB", 1),                // half_mb.bin
         // 小数点
         ("size: :<= 1.5MB & is_dir:false", 3), // empty, half, one_half
         ("size: :> 1.5MiB & is_dir:false", 1), // ten_mb.bin
@@ -43,8 +43,8 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         // 不一致
         ("size: :^= 0B & is_dir:false", 3), // half, one_half, ten
         // 単位のバリエーション (大文字小文字・ショートハンド)
-        ("size: :== 10m & is_dir:false", 1),
-        ("size: :== 512k & is_dir:false", 1),
+        ("size: := 10m & is_dir:false", 1),
+        ("size: := 512k & is_dir:false", 1),
     ];
 
     for (query, expected) in cases {
@@ -75,7 +75,7 @@ fn test_large_size_normalization() -> anyhow::Result<()> {
     assert!(res.is_ok()); // 結果は0件で良いが、パースエラーにならないことが重要
 
     // 1TB = 1099511627776
-    let res = fm.search("size: :== 1TB", Default::default());
+    let res = fm.search("size: := 1TB", Default::default());
     assert!(res.is_ok());
 
     Ok(())

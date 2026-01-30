@@ -122,10 +122,7 @@ fn test_projection_queries() {
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
     let results = fm.search("tag:", Default::default()).unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
-    assert!(
-        results.results.len() >= 3,
-        "tag: should match all items"
-    );
+    assert!(results.results.len() >= 3, "tag: should match all items");
     assert_eq!(
         results.type_for_projection,
         Some(ttfm::types::TagType::from("tag"))

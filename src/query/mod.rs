@@ -63,7 +63,7 @@ mod tests {
             "size:>=1024",
             "size:<2048",
             "size:<=2048",
-            "rank:==5",
+            "rank: := 5",
             "rank:^=1", // Not Equal
             "50:< width: :< 100",
             "10:<= height: :<= 20",
@@ -86,6 +86,8 @@ mod tests {
             "extension : rs",    // Space around :
             "size :> 100",       // Space before :>
             "size : > 100",      // Invalid projection with scalar op
+            "size: :== 100",     // Old syntax :== should fail (now :=)
+            "size:> 100",        // Stuck comparison with space after operator
         ];
         for q in fail_queries {
             assert!(
@@ -98,6 +100,46 @@ mod tests {
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
         assert!(parse(q_unary).is_ok(), "Unary minus should be valid now");
+    }
+
+    #[test]
+    fn test_set_operator_space_requirement() {
+        // DESIGN.md:26 - Set operators require spaces around them
+        // "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
+
+        // Without spaces: parsed as TypedTag (label contains &)
+        let q1 = parse("type:file&project:ttfm").unwrap();
+        if let QueryNode::TypedTag(tt) = q1 {
+            assert_eq!(tt.label.tag_type().as_str(), "type");
+            assert_eq!(tt.label.as_str(), "file&project:ttfm");
+        } else {
+            panic!("Expected TypedTag, got {:?}", q1);
+        }
+
+        // Without spaces: parsed as TypedTag (label contains |)
+        let q2 = parse("extension:rs|txt").unwrap();
+        if let QueryNode::TypedTag(tt) = q2 {
+            assert_eq!(tt.label.tag_type().as_str(), "extension");
+            assert_eq!(tt.label.as_str(), "rs|txt");
+        } else {
+            panic!("Expected TypedTag, got {:?}", q2);
+        }
+
+        // With spaces: parsed as set AND operation
+        let q3 = parse("type:file & project:ttfm").unwrap();
+        if let QueryNode::And(_) = q3 {
+            // OK
+        } else {
+            panic!("Expected And, got {:?}", q3);
+        }
+
+        // With spaces: parsed as set OR operation
+        let q4 = parse("extension:rs | extension:txt").unwrap();
+        if let QueryNode::Or(_) = q4 {
+            // OK
+        } else {
+            panic!("Expected Or, got {:?}", q4);
+        }
     }
 
     #[test]

@@ -161,10 +161,7 @@ fn test_system_items_registration() {
     // 1. item_entities に extension:txt 関連のItemがあるか確認
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
     let results_physical = fm
-        .search(
-            "item_kind:tag & name:extension:txt",
-            Default::default(),
-        )
+        .search("item_kind:tag & name:extension:txt", Default::default())
         .unwrap();
     assert!(
         results_physical.results.is_empty(),
@@ -173,8 +170,7 @@ fn test_system_items_registration() {
 
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
-    let results_projection =
-        fm.search("tag:", Default::default()).unwrap();
+    let results_projection = fm.search("tag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert_eq!(
@@ -276,10 +272,7 @@ fn test_no_empty_extension_system_item() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     let results = fm
-        .search(
-            "item_kind:tag & name:\"extension:\"",
-            Default::default(),
-        )
+        .search("item_kind:tag & name:\"extension:\"", Default::default())
         .unwrap();
     assert!(
         results.results.is_empty(),

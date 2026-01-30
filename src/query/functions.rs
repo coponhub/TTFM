@@ -175,7 +175,9 @@ fn find_representative_function<'a>(
     None
 }
 
-fn expand_mtime_comparison(node: crate::query::ast::ComparisonNode) -> QueryNode {
+fn expand_mtime_comparison(
+    node: crate::query::ast::ComparisonNode,
+) -> QueryNode {
     use crate::query::ast::Operand;
 
     let mut first = node.first.clone();
@@ -201,10 +203,12 @@ fn expand_mtime_comparison(node: crate::query::ast::ComparisonNode) -> QueryNode
                 continue;
             }
         }
-        conditions.push(QueryNode::Comparison(crate::query::ast::ComparisonNode {
-            first: first.clone(),
-            rest: vec![(op, rhs)],
-        }));
+        conditions.push(QueryNode::Comparison(
+            crate::query::ast::ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, rhs)],
+            },
+        ));
     }
 
     if conditions.len() == 1 {
@@ -221,7 +225,7 @@ fn expand_mtime_range_op(
     _original_rhs: crate::query::ast::Operand,
 ) -> Vec<QueryNode> {
     use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
-    
+
     // expand_mtime_comparison から呼ばれる際、op は必ず ComparisonOp::Label(BasicOp) であることを想定
     let ComparisonOp::Label(basic_op) = op else {
         return vec![QueryNode::Comparison(ComparisonNode {
@@ -247,8 +251,8 @@ fn expand_mtime_range_op(
                 )],
             }),
         ],
-        BasicOp::Ne => vec![QueryNode::Complement(Box::new(QueryNode::And(
-            vec![
+        BasicOp::Ne => {
+            vec![QueryNode::Complement(Box::new(QueryNode::And(vec![
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
@@ -263,8 +267,8 @@ fn expand_mtime_range_op(
                         Operand::Literal(Label::Mtime(range.end)),
                     )],
                 }),
-            ],
-        )))],
+            ])))]
+        }
         BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(
@@ -516,7 +520,9 @@ impl QueryFunction for MtimeQuery {
                             SType::Mtime.into(),
                         ),
                         rest: vec![(
-                            crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Ge),
+                            crate::query::ast::ComparisonOp::Label(
+                                crate::query::ast::BasicOp::Ge,
+                            ),
                             crate::query::ast::Operand::Literal(Label::Mtime(
                                 range.start,
                             )),
@@ -527,7 +533,9 @@ impl QueryFunction for MtimeQuery {
                             SType::Mtime.into(),
                         ),
                         rest: vec![(
-                            crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Le),
+                            crate::query::ast::ComparisonOp::Label(
+                                crate::query::ast::BasicOp::Le,
+                            ),
                             crate::query::ast::Operand::Literal(Label::Mtime(
                                 range.end,
                             )),
@@ -648,7 +656,10 @@ mod tests {
         // size > 1
         let node = crate::query::ast::ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Label(crate::query::ast::BasicOp::Gt), Operand::Literal(Label::from(1)))],
+            rest: vec![(
+                ComparisonOp::Label(crate::query::ast::BasicOp::Gt),
+                Operand::Literal(Label::from(1)),
+            )],
         };
 
         let expanded = expand_comparison_node(node, &reg);
@@ -839,7 +850,10 @@ mod tests {
                 assert_eq!(nodes.len(), 2);
                 // 順序は実装依存だが、Ge と Le が含まれているはず
             }
-            _ => panic!("Expected And node for mtime date equality, got {:?}", expanded),
+            _ => panic!(
+                "Expected And node for mtime date equality, got {:?}",
+                expanded
+            ),
         }
 
         // 2. 大小比較 (Gt) -> 境界値の調整 (その日の終わり)
@@ -854,7 +868,7 @@ mod tests {
         if let QueryNode::Comparison(comp) = expanded_gt {
             if let Operand::Literal(Label::Mtime(ts)) = &comp.rest[0].1 {
                 // 2024/01/01 23:59:59 のタイムスタンプ（Local）
-                assert!(*ts > 0); 
+                assert!(*ts > 0);
             } else {
                 panic!("Expected Mtime literal, got {:?}", comp.rest[0].1);
             }

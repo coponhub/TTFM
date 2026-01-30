@@ -372,9 +372,7 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
         .from(Alias::new(view))
-        .and_where(
-            Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]),
-        );
+        .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]));
 
     let mut eq = Query::select();
     eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
@@ -1012,15 +1010,24 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::ast::{QueryNode, BasicOp};
+    use crate::query::ast::{BasicOp, QueryNode};
     use crate::types::{Label, TagType, TypedTag};
     use sea_query::{Alias, BinOper, Query, SqliteQueryBuilder};
 
     #[test]
     fn test_to_bin_op_conversion() {
-        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Eq)), BinOper::Equal);
-        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Gt)), BinOper::GreaterThan);
-        assert_eq!(to_bin_op(ComparisonOp::Scalar(BasicOp::Lt)), BinOper::SmallerThan);
+        assert_eq!(
+            to_bin_op(ComparisonOp::Scalar(BasicOp::Eq)),
+            BinOper::Equal
+        );
+        assert_eq!(
+            to_bin_op(ComparisonOp::Scalar(BasicOp::Gt)),
+            BinOper::GreaterThan
+        );
+        assert_eq!(
+            to_bin_op(ComparisonOp::Scalar(BasicOp::Lt)),
+            BinOper::SmallerThan
+        );
     }
 
     #[test]
@@ -1087,7 +1094,10 @@ mod tests {
     fn test_build_comparison_sql_int() {
         let node = ComparisonNode {
             first: Operand::TypeRef(TagType::from("size")),
-            rest: vec![(ComparisonOp::Scalar(BasicOp::Gt), Operand::Literal(Label::from(100)))],
+            rest: vec![(
+                ComparisonOp::Scalar(BasicOp::Gt),
+                Operand::Literal(Label::from(100)),
+            )],
         };
         let sql = build_comparison_sql(&node, "oneview");
         let result = sql.to_string(SqliteQueryBuilder);

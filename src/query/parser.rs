@@ -1,6 +1,6 @@
 use crate::query::ast::{
-    ArithmeticOp, BasicOp, CalculationNode, ComparisonNode, ComparisonOp, Operand,
-    QueryNode,
+    ArithmeticOp, BasicOp, CalculationNode, ComparisonNode, ComparisonOp,
+    Operand, QueryNode,
 };
 use crate::types::{Label, TagType, TypedTag};
 use crate::util::DotOk;
@@ -47,6 +47,7 @@ fn get_parser() -> &'static PrattParser<Rule> {
     PRATT_PARSER.get_or_init(|| {
         PrattParser::new()
             .op(Op::infix(Rule::pipe, Assoc::Left)
+                | Op::infix(Rule::minus_colon, Assoc::Left)
                 | Op::infix(Rule::minus, Assoc::Left))
             .op(Op::infix(Rule::ampersand, Assoc::Left))
     })
@@ -100,7 +101,7 @@ fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
                     }
                     _ => Ok(QueryNode::Or(vec![lhs, rhs])),
                 },
-                Rule::minus => {
+                Rule::minus | Rule::minus_colon => {
                     Ok(QueryNode::Difference(Box::new(lhs), Box::new(rhs)))
                 }
                 _ => Err(anyhow!(
@@ -205,7 +206,7 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
     let rule = inner.as_rule();
     let mut inner_pairs = inner.into_inner();
-    
+
     let first_op = build_operand(inner_pairs.next().unwrap())?;
     let mut rest = Vec::new();
 
@@ -223,18 +224,18 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
                 let step_rule = actual_step.as_rule();
                 let mut step_inner = actual_step.into_inner();
                 let op_str = if step_rule == Rule::label_op {
-                    let _colon = step_inner.next(); // consume the colon pair if present
-                    step_inner.next().unwrap().as_str() // basic_op
+                    let _colon = step_inner.next(); // consume the colon pair
+                    step_inner.next().unwrap().as_str() // label_basic_op
                 } else {
-                    step_inner.next().unwrap().as_str() // basic_op directly from stuck_op_step
+                    step_inner.next().unwrap().as_str() // stuck_basic_op
                 };
-                let basic_op = parse_basic_op(op_str)?;
+                let basic_op = parse_label_basic_op(op_str)?;
                 let right_op = build_operand(step_inner.next().unwrap())?;
                 (ComparisonOp::Label(basic_op), right_op)
             }
             Rule::scalar_comparison => {
                 let basic_op_str = actual_step.as_str();
-                let basic_op = parse_basic_op(basic_op_str)?;
+                let basic_op = parse_scalar_basic_op(basic_op_str)?;
                 let right_op = build_operand(inner_pairs.next().unwrap())?;
                 (ComparisonOp::Scalar(basic_op), right_op)
             }
@@ -242,14 +243,28 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
         };
         rest.push((op, right_op));
     }
-    
+
     Ok(QueryNode::Comparison(ComparisonNode {
         first: first_op,
         rest,
     }))
 }
 
-fn parse_basic_op(s: &str) -> Result<BasicOp> {
+/// Label comparison uses "=" for equality (DESIGN.md:71)
+fn parse_label_basic_op(s: &str) -> Result<BasicOp> {
+    match s {
+        "=" => Ok(BasicOp::Eq),
+        "^=" | "^" => Ok(BasicOp::Ne),
+        ">" => Ok(BasicOp::Gt),
+        ">=" => Ok(BasicOp::Ge),
+        "<" => Ok(BasicOp::Lt),
+        "<=" => Ok(BasicOp::Le),
+        s => Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s)),
+    }
+}
+
+/// Scalar comparison uses "==" for equality
+fn parse_scalar_basic_op(s: &str) -> Result<BasicOp> {
     match s {
         "==" => Ok(BasicOp::Eq),
         "^=" | "^" => Ok(BasicOp::Ne),
@@ -263,7 +278,10 @@ fn parse_basic_op(s: &str) -> Result<BasicOp> {
 
 fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
     let rule = pair.as_rule();
-    let inner = if rule == Rule::operand || rule == Rule::scalar_operand {
+    let inner = if rule == Rule::operand
+        || rule == Rule::scalar_operand
+        || rule == Rule::stuck_operand
+    {
         pair.into_inner().next().unwrap()
     } else {
         pair
@@ -285,7 +303,11 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
-        Rule::label | Rule::number | Rule::quoted_string | Rule::unquoted_string | Rule::unquoted_tag_string => {
+        Rule::label
+        | Rule::number
+        | Rule::quoted_string
+        | Rule::unquoted_string
+        | Rule::unquoted_tag_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
         _ => Err(anyhow!(
@@ -349,7 +371,11 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
         }
-        Rule::label | Rule::number | Rule::quoted_string | Rule::unquoted_string | Rule::unquoted_tag_string => {
+        Rule::label
+        | Rule::number
+        | Rule::quoted_string
+        | Rule::unquoted_string
+        | Rule::unquoted_tag_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
         Rule::calculation | Rule::calculation_inner => {
@@ -571,10 +597,16 @@ mod tests {
                 if let Operand::TypeRef(ref t) = cmp.first {
                     assert_eq!(t.as_str(), "size");
                 } else {
-                    panic!("Expected TypeRef for first operand, got {:?}", cmp.first);
+                    panic!(
+                        "Expected TypeRef for first operand, got {:?}",
+                        cmp.first
+                    );
                 }
                 assert_eq!(cmp.rest.len(), 1);
-                assert_eq!(cmp.rest[0].0, ComparisonOp::Label(crate::query::ast::BasicOp::Gt));
+                assert_eq!(
+                    cmp.rest[0].0,
+                    ComparisonOp::Label(crate::query::ast::BasicOp::Gt)
+                );
                 match &cmp.rest[0].1 {
                     Operand::Literal(l) => assert_eq!(l.as_str(), "100"),
                     _ => panic!("Expected Literal for second operand"),
