@@ -4,6 +4,189 @@ use duckdb::{Connection, Result};
 use sea_query::{CaseStatement, Expr, Func, PostgresQueryBuilder, Query};
 use std::path::Path;
 
+// ============================================================================
+// データ駆動設計のための型定義
+// ============================================================================
+
+/// タグテーブルのソース定義
+#[derive(Clone, Copy)]
+struct TagSource {
+    table: Tbl,
+    target: TargetTable,
+    origin: Val,
+}
+
+/// タグテーブルのソース一覧
+const TAG_SOURCES: &[TagSource] = &[
+    TagSource {
+        table: Tbl::BaseTags,
+        target: TargetTable::BaseTags,
+        origin: Val::System,
+    },
+    TagSource {
+        table: Tbl::SystemTags,
+        target: TargetTable::SystemTags,
+        origin: Val::System,
+    },
+    TagSource {
+        table: Tbl::UserTags,
+        target: TargetTable::UserTags,
+        origin: Val::User,
+    },
+];
+
+// ============================================================================
+// ヘルパー関数（ロジック1箇所化）
+// ============================================================================
+
+/// label_str の COALESCE 式を生成
+fn build_label_str_expr(tbl: Tbl) -> sea_query::SimpleExpr {
+    Func::cust(crate::db::DuckDbFunc::Coalesce)
+        .args([
+            Expr::col((tbl, Col::LabelStr)).into(),
+            Expr::col((tbl, Col::LabelInt))
+                .cast_as(SqlType::VARCHAR)
+                .into(),
+            Expr::col((tbl, Col::LabelDouble))
+                .cast_as(SqlType::VARCHAR)
+                .into(),
+            CaseStatement::new()
+                .case(Expr::col((tbl, Col::LabelBool)).eq(true), "true")
+                .finally("false")
+                .into(),
+        ])
+        .into()
+}
+
+/// rank の COALESCE 式を生成
+fn build_rank_expr() -> sea_query::SimpleExpr {
+    Func::cust(crate::db::DuckDbFunc::Coalesce)
+        .args([
+            Expr::col((Tbl::FileReferences, Col::Rank)).into(),
+            Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
+            Expr::val(0).into(),
+        ])
+        .into()
+}
+
+/// item_kind の CASE 式を生成
+fn build_item_kind_expr() -> sea_query::SimpleExpr {
+    CaseStatement::new()
+        .case(
+            Expr::col((Tbl::FileReferences, Col::ItemId)).is_not_null(),
+            Expr::val(Into::<&'static str>::into(Val::File)),
+        )
+        .case(
+            Expr::col((Tbl::ItemReferences, Col::ItemId)).is_not_null(),
+            Expr::col((Tbl::ItemReferences, Col::ItemKind)),
+        )
+        .finally(Expr::val(Into::<&'static str>::into(Val::Unknown)))
+        .into()
+}
+
+/// tag (typed_tag) の CONCAT 式を生成
+fn build_tag_expr(tbl: Tbl, label_str_expr: sea_query::SimpleExpr) -> sea_query::SimpleExpr {
+    Func::cust(crate::db::DuckDbFunc::Concat)
+        .args([
+            Expr::col((tbl, Col::Type))
+                .cast_as(SqlType::VARCHAR)
+                .into(),
+            Expr::val(":").into(),
+            label_str_expr.into(),
+        ])
+        .into()
+}
+
+/// Locations テーブルの name/filename エイリアス用クエリを生成
+fn build_location_alias_query(
+    type_val: Val,
+    parquet_path: &str,
+    file_ref_path: &str,
+) -> String {
+    let mut q = Query::select();
+    q.column((Tbl::Locations, Col::ItemId))
+        .expr_as(
+            Expr::val(Into::<&'static str>::into(Val::System)).cast_as(SqlType::VARCHAR),
+            Col::Origin,
+        )
+        .expr_as(
+            Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                Expr::col((Tbl::FileReferences, Col::Rank)).into(),
+                Expr::val(0).into(),
+            ]),
+            Col::Rank,
+        )
+        .expr_as(
+            Expr::val(Into::<&'static str>::into(Val::File)).cast_as(SqlType::VARCHAR),
+            Col::ItemKind,
+        )
+        .expr_as(
+            Expr::val(Into::<&'static str>::into(type_val)).cast_as(SqlType::VARCHAR),
+            Col::Type,
+        )
+        .expr_as(Expr::col((Tbl::Locations, Col::Filename)), Col::LabelStr)
+        .expr_as(crate::util::null_as(SqlType::BIGINT), Col::LabelInt)
+        .expr_as(crate::util::null_as(SqlType::DOUBLE), Col::LabelDouble)
+        .expr_as(crate::util::null_as(SqlType::BOOLEAN), Col::LabelBool)
+        .expr_as(
+            Func::cust(crate::db::DuckDbFunc::Concat).args([
+                Expr::val(Into::<&'static str>::into(type_val))
+                    .cast_as(SqlType::VARCHAR)
+                    .into(),
+                Expr::val(":").into(),
+                Expr::col((Tbl::Locations, Col::Filename))
+                    .cast_as(SqlType::VARCHAR)
+                    .into(),
+            ]),
+            Col::TypedTag,
+        )
+        .from_subquery(crate::util::parquet_query(parquet_path), Tbl::Locations)
+        .join_subquery(
+            sea_query::JoinType::LeftJoin,
+            crate::util::parquet_query(file_ref_path),
+            Tbl::FileReferences,
+            Expr::col((Tbl::Locations, Col::ItemId))
+                .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
+        );
+    q.to_string(PostgresQueryBuilder)
+}
+
+/// タグソースからSELECT文を生成
+fn build_tag_query(source: &TagSource, path_fn: impl Fn(TargetTable) -> String) -> String {
+    let tbl = source.table;
+    let label_str = build_label_str_expr(tbl);
+
+    let mut q = Query::select();
+    q.column((tbl, Col::ItemId))
+        .expr_as(
+            Expr::val(Into::<&'static str>::into(source.origin)).cast_as(SqlType::VARCHAR),
+            Col::Origin,
+        )
+        .expr_as(build_rank_expr(), Col::Rank)
+        .expr_as(build_item_kind_expr(), Col::ItemKind)
+        .column((tbl, Col::Type))
+        .expr_as(build_tag_expr(tbl, label_str.clone()), Col::TypedTag)
+        .expr_as(label_str, Col::LabelStr)
+        .column((tbl, Col::LabelInt))
+        .column((tbl, Col::LabelDouble))
+        .column((tbl, Col::LabelBool))
+        .from_subquery(crate::util::parquet_query(&path_fn(source.target)), tbl)
+        .join_subquery(
+            sea_query::JoinType::LeftJoin,
+            crate::util::parquet_query(&path_fn(TargetTable::FileReferences)),
+            Tbl::FileReferences,
+            Expr::col((tbl, Col::ItemId)).eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
+        )
+        .join_subquery(
+            sea_query::JoinType::LeftJoin,
+            crate::util::parquet_query(&path_fn(TargetTable::ItemReferences)),
+            Tbl::ItemReferences,
+            Expr::col((tbl, Col::ItemId)).eq(Expr::col((Tbl::ItemReferences, Col::ItemId))),
+        );
+
+    q.to_string(PostgresQueryBuilder)
+}
+
 pub struct OneView;
 
 impl OneView {
@@ -22,263 +205,10 @@ impl OneView {
 
         let mut query_parts = Vec::new();
 
-        let _basic_cols: Vec<Col> = std::iter::once(Col::Type)
-            .chain(Col::typed_label_columns())
-            .collect();
-
-        // 1. BaseTags
-        let mut q1 = Query::select();
-        let label_str_expr =
-            Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                Expr::col((Tbl::BaseTags, Col::LabelStr)).into(),
-                Expr::col((Tbl::BaseTags, Col::LabelInt))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                Expr::col((Tbl::BaseTags, Col::LabelDouble))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::BaseTags, Col::LabelBool)).eq(true),
-                        "true",
-                    )
-                    .finally("false")
-                    .into(),
-            ]);
-
-        q1.column((Tbl::BaseTags, Col::ItemId))
-            .expr_as(
-                Expr::val(Into::<&'static str>::into(Val::System))
-                    .cast_as(SqlType::VARCHAR),
-                Col::Origin,
-            )
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                    Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                    Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
-                    Expr::val(0).into(),
-                ]),
-                Col::Rank,
-            )
-            .expr_as(
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::FileReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::val(Into::<&'static str>::into(Val::File)),
-                    )
-                    .case(
-                        Expr::col((Tbl::ItemReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::col((Tbl::ItemReferences, Col::ItemKind)),
-                    )
-                    .finally(Expr::val(Into::<&'static str>::into(
-                        Val::Unknown,
-                    ))),
-                Col::ItemKind,
-            )
-            .column((Tbl::BaseTags, Col::Type))
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Concat).args([
-                    Expr::col((Tbl::BaseTags, Col::Type))
-                        .cast_as(SqlType::VARCHAR)
-                        .into(),
-                    Expr::val(":").into(),
-                    label_str_expr.clone().into(),
-                ]),
-                Col::TypedTag,
-            )
-            .expr_as(label_str_expr, Col::LabelStr)
-            .column((Tbl::BaseTags, Col::LabelInt))
-            .column((Tbl::BaseTags, Col::LabelDouble))
-            .column((Tbl::BaseTags, Col::LabelBool))
-            .from_subquery(
-                crate::util::parquet_query(&path(TargetTable::BaseTags)),
-                Tbl::BaseTags,
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::FileReferences)),
-                Tbl::FileReferences,
-                Expr::col((Tbl::BaseTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::ItemReferences)),
-                Tbl::ItemReferences,
-                Expr::col((Tbl::BaseTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::ItemReferences, Col::ItemId))),
-            );
-        query_parts.push(q1.to_string(PostgresQueryBuilder));
-
-        // 2. SystemTags
-        let mut q2 = Query::select();
-        let label_str_expr_q2 = Func::cust(crate::db::DuckDbFunc::Coalesce)
-            .args([
-                Expr::col((Tbl::SystemTags, Col::LabelStr)).into(),
-                Expr::col((Tbl::SystemTags, Col::LabelInt))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                Expr::col((Tbl::SystemTags, Col::LabelDouble))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::SystemTags, Col::LabelBool)).eq(true),
-                        "true",
-                    )
-                    .finally("false")
-                    .into(),
-            ]);
-
-        q2.column((Tbl::SystemTags, Col::ItemId))
-            .expr_as(
-                Expr::val(Into::<&'static str>::into(Val::System))
-                    .cast_as(SqlType::VARCHAR),
-                Col::Origin,
-            )
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                    Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                    Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
-                    Expr::val(0).into(),
-                ]),
-                Col::Rank,
-            )
-            .expr_as(
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::FileReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::val(Into::<&'static str>::into(Val::File)),
-                    )
-                    .case(
-                        Expr::col((Tbl::ItemReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::col((Tbl::ItemReferences, Col::ItemKind)),
-                    )
-                    .finally(Expr::val(Into::<&'static str>::into(
-                        Val::Unknown,
-                    ))),
-                Col::ItemKind,
-            )
-            .column((Tbl::SystemTags, Col::Type))
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Concat).args([
-                    Expr::col((Tbl::SystemTags, Col::Type)).into(),
-                    Expr::val(":").into(),
-                    label_str_expr_q2.clone().into(),
-                ]),
-                Col::TypedTag,
-            )
-            .expr_as(label_str_expr_q2, Col::LabelStr)
-            .column((Tbl::SystemTags, Col::LabelInt))
-            .column((Tbl::SystemTags, Col::LabelDouble))
-            .column((Tbl::SystemTags, Col::LabelBool))
-            .from_subquery(
-                crate::util::parquet_query(&path(TargetTable::SystemTags)),
-                Tbl::SystemTags,
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::FileReferences)),
-                Tbl::FileReferences,
-                Expr::col((Tbl::SystemTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::ItemReferences)),
-                Tbl::ItemReferences,
-                Expr::col((Tbl::SystemTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::ItemReferences, Col::ItemId))),
-            );
-        query_parts.push(q2.to_string(PostgresQueryBuilder));
-
-        // 3. UserTags
-        let mut q3 = Query::select();
-        let label_str_expr_q3 = Func::cust(crate::db::DuckDbFunc::Coalesce)
-            .args([
-                Expr::col((Tbl::UserTags, Col::LabelStr)).into(),
-                Expr::col((Tbl::UserTags, Col::LabelInt))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                Expr::col((Tbl::UserTags, Col::LabelDouble))
-                    .cast_as(SqlType::VARCHAR)
-                    .into(),
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::UserTags, Col::LabelBool)).eq(true),
-                        "true",
-                    )
-                    .finally("false")
-                    .into(),
-            ]);
-
-        q3.column((Tbl::UserTags, Col::ItemId))
-            .expr_as(
-                Expr::val(Into::<&'static str>::into(Val::User))
-                    .cast_as(SqlType::VARCHAR),
-                Col::Origin,
-            )
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                    Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                    Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
-                    Expr::val(0).into(),
-                ]),
-                Col::Rank,
-            )
-            .expr_as(
-                CaseStatement::new()
-                    .case(
-                        Expr::col((Tbl::FileReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::val(Into::<&'static str>::into(Val::File)),
-                    )
-                    .case(
-                        Expr::col((Tbl::ItemReferences, Col::ItemId))
-                            .is_not_null(),
-                        Expr::col((Tbl::ItemReferences, Col::ItemKind)),
-                    )
-                    .finally(Expr::val(Into::<&'static str>::into(
-                        Val::Unknown,
-                    ))),
-                Col::ItemKind,
-            )
-            .column((Tbl::UserTags, Col::Type))
-            .expr_as(
-                Func::cust(crate::db::DuckDbFunc::Concat).args([
-                    Expr::col((Tbl::UserTags, Col::Type)).into(),
-                    Expr::val(":").into(),
-                    label_str_expr_q3.clone().into(),
-                ]),
-                Col::TypedTag,
-            )
-            .expr_as(label_str_expr_q3, Col::LabelStr)
-            .column((Tbl::UserTags, Col::LabelInt))
-            .column((Tbl::UserTags, Col::LabelDouble))
-            .column((Tbl::UserTags, Col::LabelBool))
-            .from_subquery(
-                crate::util::parquet_query(&path(TargetTable::UserTags)),
-                Tbl::UserTags,
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::FileReferences)),
-                Tbl::FileReferences,
-                Expr::col((Tbl::UserTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-            )
-            .join_subquery(
-                sea_query::JoinType::LeftJoin,
-                crate::util::parquet_query(&path(TargetTable::ItemReferences)),
-                Tbl::ItemReferences,
-                Expr::col((Tbl::UserTags, Col::ItemId))
-                    .eq(Expr::col((Tbl::ItemReferences, Col::ItemId))),
-            );
-        query_parts.push(q3.to_string(PostgresQueryBuilder));
+        // Tag系テーブル（BaseTags, SystemTags, UserTags）
+        for source in TAG_SOURCES {
+            query_parts.push(build_tag_query(source, &path));
+        }
 
         // 4. Physical Tables (FileReferences, Locations)
         for target in [TargetTable::FileReferences, TargetTable::Locations] {
@@ -400,145 +330,9 @@ impl OneView {
             }
 
             if target == TargetTable::Locations {
-                // name type
-                let mut q_name = Query::select();
-                q_name
-                    .column((Tbl::Locations, Col::ItemId))
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::System))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::Origin,
-                    )
-                    .expr_as(
-                        Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                            Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                            Expr::val(0).into(),
-                        ]),
-                        Col::Rank,
-                    )
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::File))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::ItemKind,
-                    )
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::Name))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::Type,
-                    )
-                    .expr_as(
-                        Expr::col((Tbl::Locations, Col::Filename)),
-                        Col::LabelStr,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::BIGINT),
-                        Col::LabelInt,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::DOUBLE),
-                        Col::LabelDouble,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::BOOLEAN),
-                        Col::LabelBool,
-                    )
-                    .expr_as(
-                        Func::cust(crate::db::DuckDbFunc::Concat).args([
-                            Expr::val(Into::<&'static str>::into(Val::Name))
-                                .cast_as(SqlType::VARCHAR)
-                                .into(),
-                            Expr::val(":").into(),
-                            Expr::col((Tbl::Locations, Col::Filename))
-                                .cast_as(SqlType::VARCHAR)
-                                .into(),
-                        ]),
-                        Col::TypedTag,
-                    )
-                    .from_subquery(
-                        crate::util::parquet_query(&parquet_path),
-                        Tbl::Locations,
-                    )
-                    .join_subquery(
-                        sea_query::JoinType::LeftJoin,
-                        crate::util::parquet_query(&path(
-                            TargetTable::FileReferences,
-                        )),
-                        Tbl::FileReferences,
-                        Expr::col((Tbl::Locations, Col::ItemId))
-                            .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-                    );
-                query_parts.push(q_name.to_string(PostgresQueryBuilder));
-
-                // filename type
-                let mut q_filename = Query::select();
-                q_filename
-                    .column((Tbl::Locations, Col::ItemId))
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::System))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::Origin,
-                    )
-                    .expr_as(
-                        Func::cust(crate::db::DuckDbFunc::Coalesce).args([
-                            Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                            Expr::val(0).into(),
-                        ]),
-                        Col::Rank,
-                    )
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::File))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::ItemKind,
-                    )
-                    .expr_as(
-                        Expr::val(Into::<&'static str>::into(Val::Filename))
-                            .cast_as(SqlType::VARCHAR),
-                        Col::Type,
-                    )
-                    .expr_as(
-                        Expr::col((Tbl::Locations, Col::Filename)),
-                        Col::LabelStr,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::BIGINT),
-                        Col::LabelInt,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::DOUBLE),
-                        Col::LabelDouble,
-                    )
-                    .expr_as(
-                        crate::util::null_as(SqlType::BOOLEAN),
-                        Col::LabelBool,
-                    )
-                    .expr_as(
-                        Func::cust(crate::db::DuckDbFunc::Concat).args([
-                            Expr::val(Into::<&'static str>::into(
-                                Val::Filename,
-                            ))
-                            .cast_as(SqlType::VARCHAR)
-                            .into(),
-                            Expr::val(":").into(),
-                            Expr::col((Tbl::Locations, Col::Filename))
-                                .cast_as(SqlType::VARCHAR)
-                                .into(),
-                        ]),
-                        Col::TypedTag,
-                    )
-                    .from_subquery(
-                        crate::util::parquet_query(&parquet_path),
-                        Tbl::Locations,
-                    )
-                    .join_subquery(
-                        sea_query::JoinType::LeftJoin,
-                        crate::util::parquet_query(&path(
-                            TargetTable::FileReferences,
-                        )),
-                        Tbl::FileReferences,
-                        Expr::col((Tbl::Locations, Col::ItemId))
-                            .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-                    );
-                query_parts.push(q_filename.to_string(PostgresQueryBuilder));
+                let file_ref_path = path(TargetTable::FileReferences);
+                query_parts.push(build_location_alias_query(Val::Name, &parquet_path, &file_ref_path));
+                query_parts.push(build_location_alias_query(Val::Filename, &parquet_path, &file_ref_path));
             }
         }
 
