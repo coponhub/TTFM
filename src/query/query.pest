@@ -26,9 +26,9 @@ complement = { comp_prefix ~ expr ~ ")" }
 // PEG priority: Try specific rules first.
 factor = {
     comparison
-  | aggregation
   | typed_tag
   | projection
+  | aggregation
   | "(" ~ expr ~ ")"
 }
 
@@ -48,8 +48,7 @@ comparison = {
 // Label comparison: operand (including projection) followed by label-style operator
 label_comparison = ${
     ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step)+ )
-  | ( (number | quoted_string) ~ (WHITESPACE* ~ label_op)+ )
-  | ( (unquoted_string | unquoted_tag_string) ~ label_op+ )
+  | ( (number | quoted_string | unquoted_string | unquoted_tag_string) ~ (WHITESPACE+ ~ label_op)+ )
 }
 
 // Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
@@ -126,7 +125,7 @@ operand_calc = { type_ref | label | calculation }
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }
 
-tag_type = { quoted_string | identifier }
+tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ &":") ~ identifier) }
 
 // --- Labels and Literals ---
 label = { quoted_string | number | unquoted_string }
@@ -135,7 +134,7 @@ label = { quoted_string | number | unquoted_string }
 identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
-number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC | "/" | "-" | (":" ~ !("=" | "^" | "<" | ">"))) }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ &(WHITESPACE | EOI | ")") }
 
 // Quoted strings
 quoted_string = ${

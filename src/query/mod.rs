@@ -65,8 +65,8 @@ mod tests {
             "size:<=2048",
             "rank: := 5",
             "rank:^=1", // Not Equal
-            "50:< width: :< 100",
-            "10:<= height: :<= 20",
+            "50 :< width: :< 100",
+            "10 :<= height: :<= 20",
             "name:\"My File\" | name:'Other File'",
             "extension:pdf - filename:test.pdf",
         ];
@@ -80,14 +80,12 @@ mod tests {
 
     #[test]
     fn test_pest_grammar_strict_conformance() {
-        // Test spaces (should fail according to DESIGN.md)
+        // Test spaces (should fail according to DESIGN.md / Rule 80)
         let fail_queries = [
             "^ (extension:pdf)", // Space after ^
             "extension : rs",    // Space around :
-            "size :> 100",       // Space before :>
-            "size : > 100",      // Invalid projection with scalar op
             "size: :== 100",     // Old syntax :== should fail (now :=)
-            "size:> 100",        // Stuck comparison with space after operator
+            "size : >100",        // Space between : and > is invalid
         ];
         for q in fail_queries {
             assert!(
@@ -203,5 +201,27 @@ mod tests {
             "Subqueries should select item_kind: {}",
             sql
         );
+    }
+
+    #[test]
+    fn test_numeric_type_limitation() {
+        // 数字のみの type はエラーになるべき
+        assert!(parse("123:foo").is_err(), "Numeric-only type should fail");
+        
+        // 引用符があればOK
+        assert!(parse("\"123\":foo").is_ok(), "Quoted numeric type should pass");
+        
+        // 文字が混じっていればOK
+        assert!(parse("type123:foo").is_ok(), "Alphanumeric type should pass");
+        assert!(parse("123a:foo").is_ok(), "Type starting with numbers but containing non-digits should pass");
+
+        // 50:< (スペースなし、数字のみのType不可) はエラーになるべき
+        assert!(parse("50:<").is_err(), "Invalid fragment '50:<' should fail");
+        
+        // 改めて、size:50:< もエラーになることを確認 (右辺のパースが途中で止まるため)
+        assert!(parse("size:50:<").is_err(), "Tag with invalid stuck operator suffix should fail");
+
+        // 正しい汎用比較 (Rule 80遵守) はOK
+        assert!(parse("50 :< size:").is_ok(), "Valid label comparison '50 :< size:' should pass");
     }
 }
