@@ -103,6 +103,26 @@ impl<'a> Fetcher<'a> {
             .map_err(|e| anyhow::anyhow!("Failed to fetch scalar: {}", e))
     }
 
+    /// ブーリアンのみを返す特殊なクエリを実行します。
+    pub fn fetch_boolean(&self) -> Result<bool> {
+        let sql = crate::query::sql::build_boolean_sql(
+            &self.lens.resolved_query,
+            "oneview",
+        );
+        let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
+
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            println!(
+                "--- FETCH BOOLEAN SQL ---\n{}\n----------------",
+                sql_str
+            );
+        }
+
+        // COALESCE(MAX(item_id), 0) の結果 (1 or 0) が返るはず
+        let id_val: i64 = self.conn.query_row(&sql_str, [], |r| r.get(0))?;
+        Ok(id_val == 1)
+    }
+
     /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
     pub fn fetch_items(
         &self,
@@ -559,5 +579,40 @@ mod tests {
 
         fetcher.fetch_save_flat_table(&path, None).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn test_fetch_boolean() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+
+        // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
+        // データがない -> fetch_boolean は FALSE (0) を返すはず
+        let lens = Lens::with_standard("max(mtime:) < 2026-02-01").unwrap();
+        let fetcher = Fetcher::new(&lens, &conn);
+
+        let res = fetcher.fetch_boolean().unwrap();
+        assert!(!res); // FALSE
+
+        // データ投入
+        conn.execute(
+            "INSERT INTO oneview VALUES 
+            (1, 10, 'file', 'user', 'mtime', NULL, 100, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        // mtime=100 < 2026-02-01 (huge number) -> TRUE
+        // Date parsing happens at lens resolution time, so 2026-02-01 becomes a timestamp integer.
+        // Assuming the query parser works correctly, this should return TRUE.
+
+        let res2 = fetcher.fetch_boolean().unwrap();
+        assert!(res2); // TRUE
     }
 }

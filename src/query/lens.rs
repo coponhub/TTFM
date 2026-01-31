@@ -131,26 +131,53 @@ impl ResolvedNode {
     }
 
     /// 集約のために、このノードから投影（集計対象）とフィルタ条件を分離して返します。
-    pub fn extract_agg_parts(&self) -> (Option<&StorageMapping>, Condition) {
+    pub fn extract_agg_parts(
+        &self,
+    ) -> (Option<&StorageMapping>, Option<ResolvedNode>) {
         match self {
-            ResolvedNode::Projection(_tt, storage) => {
-                (Some(storage), Condition::all())
-            }
-            ResolvedNode::And(nodes) => {
-                let mut storage = None;
-                let mut cond = Condition::all();
-                for n in nodes {
-                    if let ResolvedNode::Projection(_tt, s) = n {
-                        if storage.is_none() {
-                            storage = Some(s);
-                            continue;
-                        }
-                    }
-                    cond = cond.add(n.to_condition());
+            ResolvedNode::Projection(_tt, storage) => (Some(storage), None),
+            ResolvedNode::And(nodes) => self.extract_agg_parts_from_and(nodes),
+            other => (None, Some(other.clone())),
+        }
+    }
+
+    fn extract_agg_parts_from_and<'a>(
+        &self,
+        nodes: &'a [ResolvedNode],
+    ) -> (Option<&'a StorageMapping>, Option<ResolvedNode>) {
+        let mut storage = None;
+        let mut filter_nodes = Vec::with_capacity(nodes.len());
+
+        for n in nodes {
+            match n {
+                ResolvedNode::Projection(_tt, s) if storage.is_none() => {
+                    storage = Some(s);
                 }
-                (storage, cond)
+                _ => filter_nodes.push(n.clone()),
             }
-            other => (None, other.to_condition()),
+        }
+
+        let filter = match filter_nodes.len() {
+            0 => None,
+            1 => Some(filter_nodes[0].clone()),
+            _ => Some(ResolvedNode::And(filter_nodes)),
+        };
+
+        (storage, filter)
+    }
+
+    /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
+    pub fn is_boolean_result(&self) -> bool {
+        match self {
+            ResolvedNode::AggregationMatch { .. } => true,
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
+            }
+            ResolvedNode::Difference(l, r) => {
+                l.is_boolean_result() && r.is_boolean_result()
+            }
+            ResolvedNode::Complement(c) => c.is_boolean_result(),
+            _ => false,
         }
     }
 }
@@ -627,13 +654,54 @@ fn expand_query_node(
             expand_query_node(lens, *c)?,
         ))),
         QueryNode::Comparison(cmp) => {
-            let reg = QueryFunctionRegistry::with_standard();
-            let expanded_node: crate::query::ast::QueryNode =
-                crate::query::functions::expand_comparison_node(cmp, &reg);
-            Ok(expanded_node)
+            expand_comparison_with_recursion(lens, cmp)
+        }
+        QueryNode::Aggregation(agg) => {
+            Ok(QueryNode::Aggregation(expand_aggregation(lens, agg)?))
         }
         other => Ok(other),
     }
+}
+
+fn expand_aggregation(
+    lens: &Lens,
+    agg: crate::query::ast::AggregationNode,
+) -> anyhow::Result<crate::query::ast::AggregationNode> {
+    use crate::query::ast::AggregationNode;
+    match agg {
+        AggregationNode::Count(node) => Ok(AggregationNode::Count(Box::new(
+            expand_query_node(lens, *node)?,
+        ))),
+        AggregationNode::Arithmetic { op, inner } => {
+            Ok(AggregationNode::Arithmetic {
+                op,
+                inner: Box::new(expand_query_node(lens, *inner)?),
+            })
+        }
+    }
+}
+
+fn expand_comparison_with_recursion(
+    lens: &Lens,
+    mut cmp: crate::query::ast::ComparisonNode,
+) -> anyhow::Result<crate::query::ast::QueryNode> {
+    // Firstオペランドの展開
+    if let crate::query::ast::Operand::Aggregation(agg) = &mut cmp.first {
+        *agg = Box::new(expand_aggregation(lens, *agg.clone())?);
+    }
+
+    // Restオペランドの展開
+    for (_op, operand) in &mut cmp.rest {
+        if let crate::query::ast::Operand::Aggregation(agg) = operand {
+            *agg = Box::new(expand_aggregation(lens, *agg.clone())?);
+        }
+    }
+
+    // 標準の比較ノード展開（日付範囲化など）を実行
+    let reg = QueryFunctionRegistry::with_standard();
+    let expanded_node =
+        crate::query::functions::expand_comparison_node(cmp, &reg);
+    Ok(expanded_node)
 }
 
 fn resolve_query_node(
@@ -1126,5 +1194,100 @@ mod helper_tests {
         // Other(Content, String("some_content")) になるはず
         assert_eq!(label.tag_type(), tag_type);
         assert_eq!(label.as_str(), "some_content");
+    }
+
+    #[test]
+    fn test_resolved_node_is_boolean_result() {
+        use crate::query::ast::ComparisonOp;
+        use crate::types::SType;
+
+        // 1. AggregationMatch is boolean
+        let agg =
+            ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![])));
+        let node_bool = ResolvedNode::AggregationMatch {
+            agg,
+            op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Gt),
+            label: Label::from(0),
+        };
+        assert!(node_bool.is_boolean_result());
+
+        // 2. Normal ColumnMatch is NOT boolean
+        let node_normal = ResolvedNode::ColumnMatch {
+            tag: SType::Extension,
+            label: Label::from("rs"),
+        };
+        assert!(!node_normal.is_boolean_result());
+
+        // 3. AND(Boolean, Boolean) is boolean
+        let node_and_bool =
+            ResolvedNode::And(vec![node_bool.clone(), node_bool.clone()]);
+        assert!(node_and_bool.is_boolean_result());
+
+        // 4. AND(Boolean, Normal) is NOT boolean
+        let node_mixed =
+            ResolvedNode::And(vec![node_bool.clone(), node_normal.clone()]);
+        assert!(!node_mixed.is_boolean_result());
+
+        // 5. OR(Boolean, Boolean) is boolean
+        let node_or_bool =
+            ResolvedNode::Or(vec![node_bool.clone(), node_bool.clone()]);
+        assert!(node_or_bool.is_boolean_result());
+
+        // 6. Complement(Boolean) is boolean
+        let node_not_bool =
+            ResolvedNode::Complement(Box::new(node_bool.clone()));
+        assert!(node_not_bool.is_boolean_result());
+    }
+
+    #[test]
+    fn test_expand_simple_and() {
+        use crate::query::ast::QueryNode;
+        use crate::types::TypedTag;
+        let lens = Lens::base_standard();
+        let node = QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new("size", "100")),
+            QueryNode::TypedTag(TypedTag::new("mtime", "today")),
+        ]);
+        let expanded = lens.expand(node).unwrap();
+        // and(size:100, mtime:today) -> and(size:100, and(mtime>=..., mtime<=...))
+        assert!(matches!(expanded, QueryNode::And(_)));
+    }
+
+    #[test]
+    fn test_extract_agg_parts_logic() {
+        use crate::db::Col;
+        use crate::query::lens::{ResolvedNode, StorageMapping};
+        use crate::types::{Label, SType, TagType};
+
+        // Prepare nodes
+        // Case 1: And(Projection, Filter)
+        let projection = ResolvedNode::Projection(
+            TagType::Base(SType::Size),
+            StorageMapping::Column(Col::Size),
+        );
+        let filter = ResolvedNode::ColumnMatch {
+            tag: SType::Extension,
+            label: Label::from("txt"),
+        };
+
+        let and_node =
+            ResolvedNode::And(vec![projection.clone(), filter.clone()]);
+
+        let (storage, extracted_filter) = and_node.extract_agg_parts();
+
+        // Verification
+        assert!(storage.is_some(), "Storage should be extracted");
+        assert_eq!(
+            storage.unwrap(),
+            &StorageMapping::Column(Col::Size),
+            "Storage content mismatch"
+        );
+
+        assert!(extracted_filter.is_some(), "Filter should be extracted");
+        assert_eq!(
+            extracted_filter.unwrap(),
+            filter,
+            "Filter content mismatch"
+        );
     }
 }

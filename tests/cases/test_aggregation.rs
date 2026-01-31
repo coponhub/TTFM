@@ -332,3 +332,91 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// max(mtime:) == YYYY (Equal Comparison with Date Expansion)
+///
+/// This test verifies the fix for the bug where date equality comparison (which expands to a range AND)
+/// returns real items instead of a scalar boolean result.
+#[test]
+fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // Create a file (mtime will be "now", i.e., 2026)
+    std::fs::write(root.join("test.txt"), "content")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 1. max(mtime:) == 2026 -> TRUE
+    // This query expands to: max(mtime:) >= 2026-01-01 AND max(mtime:) <= 2026-12-31
+    // The bug causes this to be treated as a normal filter query, returning the file "test.txt"
+    // instead of a virtual item "TRUE".
+    let res = fm.search("max(mtime:) == 2026", Default::default())?;
+
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].name, "TRUE");
+    assert!(!res.results[0].id.is_real()); // Should be Virtual(Boolean(1))
+
+    // 2. max(mtime:) == 2025 -> FALSE
+    let res_false = fm.search("max(mtime:) == 2025", Default::default())?;
+    assert_eq!(res_false.results.len(), 1);
+    assert_eq!(res_false.results[0].name, "FALSE");
+    assert!(!res_false.results[0].id.is_real()); // Should be Virtual(Boolean(0))
+
+    Ok(())
+}
+
+struct TestContext {
+    _dir: tempfile::TempDir,
+    db_dir: std::path::PathBuf,
+    root: std::path::PathBuf,
+}
+
+impl TestContext {
+    fn new() -> Self {
+        let _dir = tempdir().unwrap();
+        let root = _dir.path().to_path_buf();
+        let db_dir = _dir.path().join("db");
+        std::fs::create_dir(&db_dir).unwrap();
+        Self { _dir, db_dir, root }
+    }
+
+    fn create_file_with_mtime(&self, name: &str, mtime_iso: &str) {
+        let path = self.root.join(name);
+        std::fs::File::create(&path).unwrap();
+        let dt = chrono::DateTime::parse_from_rfc3339(mtime_iso).unwrap();
+        let mtime = filetime::FileTime::from_unix_time(dt.timestamp(), 0);
+        filetime::set_file_mtime(&path, mtime).unwrap();
+    }
+
+    fn search(&self, query: &str) -> ttfm::response::SearchResponse {
+        let fm = FileManager::new_with_db_dir(&self.db_dir).unwrap();
+        fm.index_directory(&self.root, None::<&fn(usize)>, false)
+            .unwrap();
+        fm.search(query, ttfm::SearchOptions::default()).unwrap()
+    }
+}
+
+#[test]
+fn test_max_mtime_with_year_filter() {
+    let context = TestContext::new();
+    context.create_file_with_mtime("a.rs", "2025-06-15T12:00:00Z"); // In 2025
+    context.create_file_with_mtime("b.rs", "2024-12-31T23:59:59Z"); // Out
+    context.create_file_with_mtime("c.txt", "2025-01-01T00:00:00Z"); // In but not rs
+
+    // Query: extension:rs & mtime:2025 & mtime:
+    // Should match only a.rs
+    // mtime of a.rs is 1750075200 (approx)
+    // max(mtime:) should return that value.
+
+    let res = context.search("max(extension:rs & mtime:2025 & mtime:)");
+    // scalar is Option<f64>
+    assert!(res.scalar.is_some());
+    let scalar = res.scalar.unwrap();
+    println!("Scalar result: {}", scalar);
+
+    // 2025-06-15T12:00:00Z = 1750075200
+    assert!(scalar > 1700000000.0);
+}

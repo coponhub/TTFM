@@ -31,6 +31,7 @@ pest = "2.7"
 pest_derive = "2.7"
 
 [dev-dependencies]
+filetime = "0.2.27"
 tempfile = "3.24.0"
 
 # Optimize dependency build times and binary size

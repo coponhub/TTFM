@@ -85,7 +85,7 @@ mod tests {
             "^ (extension:pdf)", // Space after ^
             "extension : rs",    // Space around :
             "size: :== 100",     // Old syntax :== should fail (now :=)
-            "size : >100",        // Space between : and > is invalid
+            "size : >100",       // Space between : and > is invalid
         ];
         for q in fail_queries {
             assert!(
@@ -207,21 +207,39 @@ mod tests {
     fn test_numeric_type_limitation() {
         // 数字のみの type はエラーになるべき
         assert!(parse("123:foo").is_err(), "Numeric-only type should fail");
-        
+
         // 引用符があればOK
-        assert!(parse("\"123\":foo").is_ok(), "Quoted numeric type should pass");
-        
+        assert!(
+            parse("\"123\":foo").is_ok(),
+            "Quoted numeric type should pass"
+        );
+
         // 文字が混じっていればOK
-        assert!(parse("type123:foo").is_ok(), "Alphanumeric type should pass");
-        assert!(parse("123a:foo").is_ok(), "Type starting with numbers but containing non-digits should pass");
+        assert!(
+            parse("type123:foo").is_ok(),
+            "Alphanumeric type should pass"
+        );
+        assert!(
+            parse("123a:foo").is_ok(),
+            "Type starting with numbers but containing non-digits should pass"
+        );
 
         // 50:< (スペースなし、数字のみのType不可) はエラーになるべき
-        assert!(parse("50:<").is_err(), "Invalid fragment '50:<' should fail");
-        
+        assert!(
+            parse("50:<").is_err(),
+            "Invalid fragment '50:<' should fail"
+        );
+
         // 改めて、size:50:< もエラーになることを確認 (右辺のパースが途中で止まるため)
-        assert!(parse("size:50:<").is_err(), "Tag with invalid stuck operator suffix should fail");
+        assert!(
+            parse("size:50:<").is_err(),
+            "Tag with invalid stuck operator suffix should fail"
+        );
 
         // 正しい汎用比較 (Rule 80遵守) はOK
-        assert!(parse("50 :< size:").is_ok(), "Valid label comparison '50 :< size:' should pass");
+        assert!(
+            parse("50 :< size:").is_ok(),
+            "Valid label comparison '50 :< size:' should pass"
+        );
     }
 }

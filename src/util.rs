@@ -323,10 +323,13 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
         .collect();
 
     match parts.len() {
-        1 if parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit()) => {
+        1 if parts[0].len() == 4
+            && parts[0].chars().all(|c| c.is_ascii_digit()) =>
+        {
             return handle_date_yyyy(&parts);
         }
-        2 if (parts[0].len() == 4 || parts[0].parse::<i32>().unwrap_or(0) > 12)
+        2 if (parts[0].len() == 4
+            || parts[0].parse::<i32>().unwrap_or(0) > 12)
             && parts[0].chars().all(|c| c.is_ascii_digit())
             && parts[1].chars().all(|c| c.is_ascii_digit()) =>
         {
@@ -337,39 +340,59 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
 
     // 2. chrono_english によるパース
     // 相対（ago含む）と自然言語を試行
-    if let Ok(dt) = chrono_english::parse_date_string(&s_lower, now, chrono_english::Dialect::Uk) {
+    if let Ok(dt) = chrono_english::parse_date_string(
+        &s_lower,
+        now,
+        chrono_english::Dialect::Uk,
+    ) {
         // 時刻指定を含む場合は精度を確認
         if s_lower.contains(':') {
             // コロンが1つの場合は1分間の範囲とする (HH:MM)
             if s_lower.matches(':').count() == 1 {
                 let start = dt.with_second(0).unwrap_or(dt);
                 let end = dt.with_second(59).unwrap_or(dt);
-                return Some(DatetimeRange { start: start.timestamp(), end: end.timestamp() });
+                return Some(DatetimeRange {
+                    start: start.timestamp(),
+                    end: end.timestamp(),
+                });
             }
             // コロンが2つの場合は時点として扱う (HH:MM:SS)
-            return Some(DatetimeRange { start: dt.timestamp(), end: dt.timestamp() });
+            return Some(DatetimeRange {
+                start: dt.timestamp(),
+                end: dt.timestamp(),
+            });
         }
         // それ以外（"today", "next friday"等）は1日の範囲とする
         let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
         let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
         return make_range(start, end);
     }
-    
+
     // ago 指定の明示的試行 (chrono_english::parse_duration)
     if s_lower.contains("ago") {
         if let Ok(interval) = chrono_english::parse_duration(&s_lower) {
             use chrono_english::Interval;
             let past = match interval {
-                Interval::Seconds(s) => now + chrono::Duration::seconds(s.into()),
+                Interval::Seconds(s) => {
+                    now + chrono::Duration::seconds(s.into())
+                }
                 Interval::Days(d) => now + chrono::Duration::days(d as i64),
                 Interval::Months(m) => {
                     let mut y = now.year();
                     let mut mo = now.month() as i32 + m;
-                    while mo <= 0 { y -= 1; mo += 12; }
-                    now.with_year(y).and_then(|d| d.with_month(mo as u32)).unwrap_or(now)
+                    while mo <= 0 {
+                        y -= 1;
+                        mo += 12;
+                    }
+                    now.with_year(y)
+                        .and_then(|d| d.with_month(mo as u32))
+                        .unwrap_or(now)
                 }
             };
-            return Some(DatetimeRange { start: past.timestamp(), end: past.timestamp() });
+            return Some(DatetimeRange {
+                start: past.timestamp(),
+                end: past.timestamp(),
+            });
         }
     }
 
@@ -380,9 +403,15 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             if s_trimmed.matches(':').count() == 1 {
                 let start = dt.with_second(0).unwrap_or(dt);
                 let end = dt.with_second(59).unwrap_or(dt);
-                return Some(DatetimeRange { start: start.timestamp(), end: end.timestamp() });
+                return Some(DatetimeRange {
+                    start: start.timestamp(),
+                    end: end.timestamp(),
+                });
             }
-            return Some(DatetimeRange { start: dt.timestamp(), end: dt.timestamp() });
+            return Some(DatetimeRange {
+                start: dt.timestamp(),
+                end: dt.timestamp(),
+            });
         }
         let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
         let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
@@ -397,7 +426,8 @@ fn handle_date_yyyy(parts: &[&str]) -> Option<DatetimeRange> {
     let y: i32 = parts[0].parse().ok()?;
     if (1000..=9999).contains(&y) {
         let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
-        let end = NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
+        let end =
+            NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
         make_range(start, end)
     } else {
         None
@@ -405,7 +435,11 @@ fn handle_date_yyyy(parts: &[&str]) -> Option<DatetimeRange> {
 }
 
 /// 2パーツ（YYYY/M or M/D）の処理。
-fn handle_date_ym_md(_s: &str, parts: &[&str], now: DateTime<Local>) -> Option<DatetimeRange> {
+fn handle_date_ym_md(
+    _s: &str,
+    parts: &[&str],
+    now: DateTime<Local>,
+) -> Option<DatetimeRange> {
     let (p1, p2): (i32, u32) = (parts[0].parse().ok()?, parts[1].parse().ok()?);
     if p1 >= 1000 || p1 > 12 {
         // YYYY/M と判定
@@ -413,8 +447,10 @@ fn handle_date_ym_md(_s: &str, parts: &[&str], now: DateTime<Local>) -> Option<D
         make_range(start, get_month_end_hms(p1, p2))
     } else {
         // 今年の M/D と判定
-        let start = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?.and_hms_opt(0, 0, 0)?;
-        let end = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?.and_hms_opt(23, 59, 59)?;
+        let start = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?
+            .and_hms_opt(0, 0, 0)?;
+        let end = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?
+            .and_hms_opt(23, 59, 59)?;
         make_range(start, end)
     }
 }
@@ -611,7 +647,7 @@ mod tests {
         // 新規サポート形式 (YYYY, YYYY/M)
         let yyyy = parse_datetime("2024").unwrap();
         assert!(yyyy.start < yyyy.end);
-        
+
         let ym = parse_datetime("2013/1").unwrap();
         assert!(ym.start < ym.end);
         // 2013/1/1 00:00:00 〜 2013/1/31 23:59:59 のはず

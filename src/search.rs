@@ -56,6 +56,33 @@ impl FileManager {
             });
         }
 
+        // 2-B. ブーリアン・スカラー結果ケース (集約関数の比較など)
+        if lens.resolved_query.is_boolean_result() {
+            use crate::types::{ItemId, VirtualItem};
+            let val = fetcher.fetch_boolean()?;
+            let val_int = if val { 1 } else { 0 };
+            let val_str = if val { "TRUE" } else { "FALSE" };
+            let mut res = SearchResult::new_empty(ItemId::Virtual(
+                VirtualItem::Boolean(val_int),
+            ));
+            res.name = val_str.to_string();
+            res.item_kind = "virtual".to_string();
+            // 互換性のため、Rank=0, Tags=Empty とする
+            return Ok(SearchResponse {
+                results: vec![res],
+                label_results: Vec::new(),
+                scalar: None, // `ttfm` output logic might use this if we wanted pure scalar output, but `ttfm` expects items usually.
+                cid: None,
+                has_more: false,
+                total_count: Some(1),
+                progress: Progress {
+                    current: 1,
+                    total: Some(1),
+                },
+                type_for_projection: None,
+            });
+        }
+
         // プロジェクション（投影タグ）の有無を確認
         let projection = lens.get_projection();
 
