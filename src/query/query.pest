@@ -32,7 +32,7 @@ factor = {
   | "(" ~ expr ~ ")"
 }
 
-projection = { type_ref }
+projection = { type_ref | calculation }
 
 // --- Label/Scalar Comparison ---
 // DESIGN.md:
@@ -71,7 +71,7 @@ stuck_basic_op = @{ "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // Scalar comparison: scalar-only operand followed by scalar-style operator
 // Note: projection (type_ref) is NOT allowed in scalar_operand.
-scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ operand)+ }
+scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ scalar_operand)+ }
 
 scalar_operand = { aggregation | calculation | label }
 
@@ -128,7 +128,7 @@ type_ref = ${ tag_type ~ ":" }
 tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ &":") ~ identifier) }
 
 // --- Labels and Literals ---
-label = { quoted_string | number | unquoted_string }
+label = { quoted_string | number | (!type_ref ~ unquoted_string) }
 
 // Identifiers (boundary is :)
 identifier = @{ (escape | (!reserved_chars ~ ANY))+ }

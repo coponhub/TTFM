@@ -50,7 +50,7 @@ pub enum ResolvedNode {
     Difference(Box<ResolvedNode>, Box<ResolvedNode>),
     Complement(Box<ResolvedNode>),
     /// 投影クエリ用。
-    Projection(TagType, StorageMapping),
+    Projection(ResolvedOperand),
     /// 物理カラムへの直接マッチ。
     ColumnMatch {
         tag: crate::types::SType,
@@ -85,11 +85,24 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         calc: ResolvedCalculationNode,
     },
-    /// 集約関数と算術演算の比較 (例: sum(size:) > (100 * 2))
     AggregationCalculationMatch {
         agg: ResolvedAggregationNode,
         op: ComparisonOp,
         calc: ResolvedCalculationNode,
+    },
+    /// 集約関数同士の比較 (例: sum(size:) > sum(extension:h & size:))
+    AggregationAggregationMatch {
+        left: ResolvedAggregationNode,
+        op: ComparisonOp,
+        right: ResolvedAggregationNode,
+    },
+    /// 集約関数とタグの比較 (例: max(size:) == size:)
+    AggregationTagMatch {
+        agg: ResolvedAggregationNode,
+        op: ComparisonOp,
+        tag_type: TagType,
+        storage: StorageMapping,
+        sql_type: crate::db::SqlType,
     },
 }
 
@@ -128,6 +141,15 @@ impl ResolvedOperand {
             _ => false,
         }
     }
+
+    pub fn to_condition(&self) -> Condition {
+        match self {
+            ResolvedOperand::Literal(_) => Condition::any(),
+            ResolvedOperand::TagRef { storage, .. } => cond_projection(storage),
+            ResolvedOperand::Calculation(calc) => calc.to_condition(),
+            ResolvedOperand::Aggregation(_) => Condition::any(),
+        }
+    }
 }
 
 /// 算術演算の解決済みノード
@@ -142,6 +164,10 @@ impl ResolvedCalculationNode {
     /// 集約関数が含まれているかチェックします。
     pub fn contains_aggregation(&self) -> bool {
         self.left.contains_aggregation() || self.right.contains_aggregation()
+    }
+
+    pub fn to_condition(&self) -> Condition {
+        self.left.to_condition().add(self.right.to_condition())
     }
 }
 
@@ -160,7 +186,7 @@ impl ResolvedNode {
                 // COMPLEMENT も同様
                 Condition::any()
             }
-            ResolvedNode::Projection(_tt, storage) => cond_projection(storage),
+            ResolvedNode::Projection(op) => op.to_condition(),
             ResolvedNode::ColumnMatch { tag, label } => {
                 cond_column_match(*tag, label)
             }
@@ -178,9 +204,12 @@ impl ResolvedNode {
             }
             ResolvedNode::CalculationMatch { .. }
             | ResolvedNode::TagCalculationMatch { .. }
-            | ResolvedNode::AggregationCalculationMatch { .. } => {
-                // 算術演算比較はWHERE句では基本的に扱わない
-                // （build_pick_sqlで専用処理）
+            | ResolvedNode::AggregationCalculationMatch { .. }
+            | ResolvedNode::AggregationAggregationMatch { .. }
+            | ResolvedNode::AggregationTagMatch { .. } => {
+                // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
+                // build_pick_sql 側で完全に SelectStatement を構築する。
+                // 連結用には Condition::any() を返しておく。
                 Condition::any()
             }
         }
@@ -189,7 +218,10 @@ impl ResolvedNode {
     /// このノードが投影（Projection）を目的としている場合、その対象の型を返します。
     pub fn get_projection(&self) -> Option<TagType> {
         match self {
-            ResolvedNode::Projection(tt, _) => Some(tt.clone()),
+            ResolvedNode::Projection(op) => match op {
+                ResolvedOperand::TagRef { tag_type, .. } => Some(tag_type.clone()),
+                _ => None,
+            },
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
             }
@@ -205,7 +237,15 @@ impl ResolvedNode {
         &self,
     ) -> (Option<&StorageMapping>, Option<ResolvedNode>) {
         match self {
-            ResolvedNode::Projection(_tt, storage) => (Some(storage), None),
+            ResolvedNode::Projection(op) => {
+                if let ResolvedOperand::TagRef { storage, .. } = op {
+                    (Some(storage), None)
+                } else {
+                    // Calculation or Aggregation in Projection context
+                    // For now, treat as no storage mapping (generic)
+                    (None, None)
+                }
+            }
             ResolvedNode::And(nodes) => self.extract_agg_parts_from_and(nodes),
             other => (None, Some(other.clone())),
         }
@@ -220,8 +260,10 @@ impl ResolvedNode {
 
         for n in nodes {
             match n {
-                ResolvedNode::Projection(_tt, s) if storage.is_none() => {
-                    storage = Some(s);
+                ResolvedNode::Projection(op) if storage.is_none() => {
+                     if let ResolvedOperand::TagRef { storage: s, .. } = op {
+                        storage = Some(s);
+                     }
                 }
                 _ => filter_nodes.push(n.clone()),
             }
@@ -239,7 +281,12 @@ impl ResolvedNode {
     /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
     pub fn is_boolean_result(&self) -> bool {
         match self {
-            ResolvedNode::AggregationMatch { .. } => true,
+            ResolvedNode::AggregationMatch { .. }
+            | ResolvedNode::AggregationCalculationMatch { .. }
+            | ResolvedNode::AggregationAggregationMatch { .. }
+            | ResolvedNode::AggregationTagMatch { .. } => true,
+            ResolvedNode::TagCalculationMatch { calc, .. }
+            | ResolvedNode::CalculationMatch { calc, .. } => calc.contains_aggregation(),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
             }
@@ -610,6 +657,23 @@ impl Lens {
         }
     }
 
+    /// クエリがトップレベルでのスカラー式（集計計算など）を目的としている場合、そのオペランドを返します。
+    pub fn get_scalar_expression(&self) -> Option<ResolvedOperand> {
+        match &self.resolved_query {
+            ResolvedNode::Aggregation(agg) => {
+                Some(ResolvedOperand::Aggregation(agg.clone()))
+            }
+            ResolvedNode::Projection(op) => {
+                if op.contains_aggregation() {
+                    Some(op.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn decode_label_from_map(
         &self,
         tag_type: &TagType,
@@ -694,13 +758,15 @@ fn expand_query_node(
             }
             Ok(QueryNode::TypedTag(tt))
         }
-        QueryNode::Projection(tagtype) => {
-            if let Some(desc) = lens.look_up(&tagtype) {
-                if let Some(func) = &desc.logical_function {
-                    return Ok(func.expand_projection(tagtype.clone()));
+        QueryNode::Projection(op) => {
+            if let crate::query::ast::Operand::TypeRef(tagtype) = &op {
+                if let Some(desc) = lens.look_up(tagtype) {
+                    if let Some(func) = &desc.logical_function {
+                        return Ok(func.expand_projection(tagtype.clone()));
+                    }
                 }
             }
-            Ok(QueryNode::Projection(tagtype))
+            Ok(QueryNode::Projection(op))
         }
         QueryNode::And(nodes) => {
             let mut expanded = Vec::new();
@@ -774,6 +840,80 @@ fn expand_comparison_with_recursion(
     Ok(expanded_node)
 }
 
+fn resolve_operand(
+    lens: &Lens,
+    op: &crate::query::ast::Operand,
+) -> anyhow::Result<ResolvedOperand> {
+    use crate::query::ast::Operand;
+    match op {
+        Operand::Literal(label) => Ok(ResolvedOperand::Literal(label.clone())),
+        Operand::TypeRef(tt) => resolve_type_ref_operand(lens, tt),
+        Operand::Calculation(calc) => {
+            let resolved_calc = resolve_calculation_node(lens, calc)?;
+            Ok(ResolvedOperand::Calculation(Box::new(resolved_calc)))
+        }
+        Operand::Aggregation(agg) => {
+            let resolved_agg = resolve_aggregation_node(lens, agg)?;
+            Ok(ResolvedOperand::Aggregation(resolved_agg))
+        }
+    }
+}
+
+
+fn resolve_type_ref_operand(
+    lens: &Lens,
+    tt: &TagType,
+) -> anyhow::Result<ResolvedOperand> {
+    let (storage, sql_type) = match lens.look_up(tt) {
+        Some(desc) => (desc.storage.clone(), desc.sql_type),
+        None => (
+            StorageMapping::RowTag {
+                column: crate::db::Col::LabelStr,
+                tag_key: tt.as_str().to_string(),
+            },
+            crate::db::SqlType::VARCHAR,
+        ),
+    };
+    Ok(ResolvedOperand::TagRef {
+        tag_type: tt.clone(),
+        storage,
+        sql_type,
+    })
+}
+
+fn resolve_calculation_node(
+    lens: &Lens,
+    calc: &crate::query::ast::CalculationNode,
+) -> anyhow::Result<ResolvedCalculationNode> {
+    Ok(ResolvedCalculationNode {
+        left: resolve_operand(lens, &calc.left)?,
+        op: calc.op,
+        right: resolve_operand(lens, &calc.right)?,
+    })
+}
+
+fn resolve_aggregation_node(
+    lens: &Lens,
+    agg: &crate::query::ast::AggregationNode,
+) -> anyhow::Result<ResolvedAggregationNode> {
+    use crate::query::ast::AggregationNode;
+    match agg {
+        AggregationNode::Count(node) => {
+            // Count Aggregation wraps a QueryNode
+            let resolved_inner = resolve_query_node(lens, *node.clone())?;
+            Ok(ResolvedAggregationNode::Count(Box::new(resolved_inner)))
+        }
+        AggregationNode::Arithmetic { op, inner } => {
+            // Arithmetic Aggregation wraps a QueryNode (typically Projection)
+            let resolved_inner = resolve_query_node(lens, *inner.clone())?;
+            Ok(ResolvedAggregationNode::Arithmetic {
+                op: *op,
+                inner: Box::new(resolved_inner),
+            })
+        }
+    }
+}
+
 fn resolve_query_node(
     lens: &Lens,
     node: crate::query::ast::QueryNode,
@@ -835,15 +975,9 @@ fn resolve_query_node(
         QueryNode::Complement(c) => Ok(ResolvedNode::Complement(Box::new(
             resolve_query_node(lens, *c)?,
         ))),
-        QueryNode::Projection(tt) => {
-            let storage = match lens.look_up(&tt) {
-                Some(desc) => desc.storage.clone(),
-                None => StorageMapping::RowTag {
-                    column: crate::db::Col::LabelStr,
-                    tag_key: tt.as_str().to_string(),
-                },
-            };
-            Ok(ResolvedNode::Projection(tt, storage))
+        QueryNode::Projection(op) => {
+            let resolved_op = resolve_operand(lens, &op)?;
+            Ok(ResolvedNode::Projection(resolved_op))
         }
         QueryNode::Aggregation(agg) => {
             let res = resolve_aggregation(lens, agg)?;
@@ -1032,6 +1166,50 @@ fn resolve_single_match(
                 agg: res_agg,
                 op: flip_op(op),
                 calc: res_calc,
+            })
+        }
+        // sum(size:) > sum(extension:h & size:)
+        (Operand::Aggregation(l_agg), Operand::Aggregation(r_agg)) => {
+            let res_l = resolve_aggregation(lens, *l_agg)?;
+            let res_r = resolve_aggregation(lens, *r_agg)?;
+            Ok(ResolvedNode::AggregationAggregationMatch {
+                left: res_l,
+                op,
+                right: res_r,
+            })
+        }
+        // max(size:) == size:
+        (Operand::Aggregation(agg), Operand::TypeRef(tt)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationTagMatch {
+                agg: res_agg,
+                op,
+                tag_type: tt,
+                storage,
+                sql_type,
+            })
+        }
+        // size: == max(size:)
+        (Operand::TypeRef(tt), Operand::Aggregation(agg)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationTagMatch {
+                agg: res_agg,
+                op: flip_op(op),
+                tag_type: tt,
+                storage,
+                sql_type,
+            })
+        }
+        // Literal < Calculation のパターン (例: 100MB < (size: / 2))
+        (Operand::Literal(lab), Operand::Calculation(calc)) => {
+            let res_calc = resolve_calculation(lens, *calc)?;
+            // 値のパースは行わない（sql.rsに任せる）
+            Ok(ResolvedNode::CalculationMatch {
+                calc: res_calc,
+                op: flip_op(op),
+                label: lab,
             })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
@@ -1427,8 +1605,11 @@ mod helper_tests {
         // Prepare nodes
         // Case 1: And(Projection, Filter)
         let projection = ResolvedNode::Projection(
-            TagType::Base(SType::Size),
-            StorageMapping::Column(Col::Size),
+            ResolvedOperand::TagRef {
+                tag_type: TagType::Base(SType::Size),
+                storage: StorageMapping::Column(Col::Size),
+                sql_type: crate::db::SqlType::BIGINT,
+            },
         );
         let filter = ResolvedNode::ColumnMatch {
             tag: SType::Extension,
@@ -1587,7 +1768,7 @@ mod helper_tests {
         // sum(size:) のAggregationNode
         let agg_node = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Projection(TagType::Base(SType::Size))),
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(TagType::Base(SType::Size)))),
         };
 
         // (sum(size:) + 100) のCalculationNode
@@ -1622,5 +1803,37 @@ mod helper_tests {
             resolved.right,
             ResolvedOperand::Literal(Label::from(100))
         );
+    }
+    
+    #[test]
+    fn test_resolve_operand_literal() {
+        use crate::query::ast::Operand;
+        use crate::types::Label;
+
+        let lens = Lens::base_standard();
+        let op = Operand::Literal(Label::from(42));
+        let resolved = resolve_operand(&lens, &op).unwrap();
+
+        match resolved {
+            ResolvedOperand::Literal(l) => assert_eq!(l.as_i64(), 42),
+            _ => panic!("Expected Literal"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_operand_tag_ref() {
+        use crate::query::ast::Operand;
+        use crate::types::{SType, TagType};
+
+        let lens = Lens::base_standard();
+        let op = Operand::TypeRef(TagType::Base(SType::Size));
+        let resolved = resolve_operand(&lens, &op).unwrap();
+
+        match resolved {
+            ResolvedOperand::TagRef { tag_type, .. } => {
+                assert_eq!(tag_type, TagType::Base(SType::Size));
+            }
+            _ => panic!("Expected TagRef"),
+        }
     }
 }

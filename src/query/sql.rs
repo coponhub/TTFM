@@ -22,7 +22,7 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
         QueryNode::TypedTag(tt) => {
             build_typed_tag_sql(&tt.label.tag_type(), &tt.label, view_name)
         }
-        QueryNode::Projection(tt) => build_projection_sql(tt, view_name),
+        QueryNode::Projection(op) => build_projection_sql(op, view_name),
         QueryNode::Aggregation(agg) => build_aggregation_sql(agg, view_name),
     };
     stmt
@@ -69,8 +69,8 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
         ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        ResolvedNode::Projection(tt, storage) => {
-            build_resolved_projection_sql(tt, storage, view)
+        ResolvedNode::Projection(op) => {
+            build_resolved_projection_sql(op, view)
         }
         ResolvedNode::ColumnMatch { tag, label } => {
             build_column_match_sql(*tag, label, view)
@@ -100,18 +100,8 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 build_calculation_expr(calc)
             };
 
-            let label_expr: SimpleExpr = match label.value() {
-                crate::types::LabelValue::Integer(i) => {
-                    Expr::val(i).into()
-                }
-                crate::types::LabelValue::String(s)
-                | crate::types::LabelValue::Literal(s) => {
-                    Expr::val(s.clone()).into()
-                }
-                crate::types::LabelValue::Boolean(b) => {
-                    Expr::val(b).into()
-                }
-            };
+            // ヘルパー関数で簡潔に記述（単位パース付き）
+            let label_expr = label_to_unit_aware_expr(label);
             let bin_op = to_bin_op(*op);
             let cond = Expr::expr(calc_expr).binary(bin_op, label_expr);
 
@@ -180,6 +170,48 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             stmt
         }
+        ResolvedNode::AggregationAggregationMatch { left, op, right } => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+
+            // 両方の集約関数をサブクエリとして構築
+            let left_expr = build_aggregation_subquery(left, view);
+            let right_expr = build_aggregation_subquery(right, view);
+
+            let bin_op = to_bin_op(*op);
+            let cond = Expr::expr(left_expr).binary(bin_op, right_expr);
+
+            stmt.cond_where(cond);
+            stmt
+        }
+        ResolvedNode::AggregationTagMatch {
+            agg,
+            op,
+            storage,
+            sql_type,
+            ..
+        } => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+
+            // 集約関数をサブクエリとして構築
+            let agg_expr = build_aggregation_subquery(agg, view);
+            let tag_expr = build_storage_column_expr(storage, *sql_type);
+
+            let bin_op = to_bin_op(*op);
+            let cond = Expr::expr(agg_expr).binary(bin_op, tag_expr);
+
+            stmt.cond_where(cond);
+
+            // RowTagの場合は、typeでフィルタ
+            if let StorageMapping::RowTag { tag_key, .. } = storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+            }
+
+            stmt
+        }
     }
 }
 
@@ -191,7 +223,7 @@ pub fn build_aggregation_sql(
     Query::select().to_owned()
 }
 
-pub(crate) fn build_resolved_aggregation_sql(
+pub fn build_resolved_aggregation_sql(
     agg: &ResolvedAggregationNode,
     view: &str,
 ) -> SelectStatement {
@@ -227,7 +259,7 @@ pub(crate) fn build_resolved_aggregation_sql(
         final_cond = final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
     }
 
-    stmt.expr(expr);
+    stmt.expr_as(expr, Alias::new("scalar_value"));
     stmt.cond_where(final_cond);
 
     let sql = stmt.to_owned();
@@ -238,6 +270,29 @@ pub(crate) fn build_resolved_aggregation_sql(
         );
     }
     sql
+}
+
+/// スカラー式（集計計算など）から単一の結果を得るための SQL を生成します。
+pub fn build_resolved_scalar_sql(
+    op: &crate::query::lens::ResolvedOperand,
+    view: &str,
+) -> SelectStatement {
+    use crate::query::lens::ResolvedOperand;
+    match op {
+        ResolvedOperand::Aggregation(agg) => {
+            build_resolved_aggregation_sql(agg, view)
+        }
+        _ => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.expr_as(
+                build_resolved_operand_subquery(op, view),
+                Alias::new("scalar_value"),
+            );
+            stmt.limit(1);
+            stmt
+        }
+    }
 }
 
 pub(crate) fn build_resolved_aggregation_match_sql(
@@ -401,12 +456,13 @@ fn build_resolved_operand_expr(
             // サイズ単位のパース (例: "1MB" → 1048576)
             let s = lab.as_str();
             if let Some(bytes) = crate::util::parse_size(&s) {
-                Expr::val(bytes).into()
+                // 除算などで整数切り捨てを防ぐため、DOUBLEとして扱う
+                Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
             } else {
                 // ラベルの値をSQL式に変換
                 match lab.value() {
                     crate::types::LabelValue::Integer(i) => {
-                        Expr::val(i).into()
+                        Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
                     }
                     crate::types::LabelValue::String(s)
                     | crate::types::LabelValue::Literal(s) => {
@@ -521,11 +577,12 @@ fn build_resolved_operand_subquery(
     match operand {
         ResolvedOperand::Literal(lab) => {
             if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
-                Expr::val(bytes).into()
+                // 除算などで整数切り捨てを防ぐため、DOUBLEとして扱う
+                Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
             } else {
                 match lab.value() {
                     crate::types::LabelValue::Integer(i) => {
-                        Expr::val(i).into()
+                        Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
                     }
                     crate::types::LabelValue::String(s)
                     | crate::types::LabelValue::Literal(s) => {
@@ -951,28 +1008,50 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
 }
 
 fn build_resolved_projection_sql(
-    tagtype: &TagType,
-    storage: &StorageMapping,
+    op: &crate::query::lens::ResolvedOperand,
     view: &str,
 ) -> SelectStatement {
-    let mut q = Query::select();
-    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .distinct()
-        .from(Alias::new(view));
+    use crate::query::lens::ResolvedOperand;
 
-    // ResolvedNode の Projection 用条件生成を利用
-    let cond = ResolvedNode::Projection(tagtype.clone(), storage.clone())
-        .to_condition();
-    q.cond_where(cond);
+    match op {
+        ResolvedOperand::TagRef {
+            tag_type, storage: _, ..
+        } => {
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
 
-    // 特別なタグの追加条件
-    if let TagType::Base(SType::TypedTag) = tagtype {
-        q.and_where(Expr::col(Col::TypedTag).is_not_null());
-    } else if let TagType::Base(SType::Origin) = tagtype {
-        q.and_where(Expr::col(Col::Origin).is_not_null());
+            // ResolvedNode の Projection 用条件生成を利用
+            let cond = ResolvedNode::Projection(op.clone()).to_condition();
+            q.cond_where(cond);
+
+            // 特別なタグの追加条件
+            if let TagType::Base(SType::TypedTag) = tag_type {
+                q.and_where(Expr::col(Col::TypedTag).is_not_null());
+            } else if let TagType::Base(SType::Origin) = tag_type {
+                q.and_where(Expr::col(Col::Origin).is_not_null());
+            }
+
+            q
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let mut l = build_resolved_projection_sql(&calc.left, view);
+            let r = build_resolved_projection_sql(&calc.right, view);
+            l.union(sea_query::UnionType::Intersect, r);
+            l
+        }
+        _ => {
+            // Literal or Aggregation used as projection filter?
+            // "project:1" or "project:count()" - usually implies "all" or "none" depending on semantics.
+            // For now, return a select all.
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
+            q
+        }
     }
-
-    q
 }
 fn build_resolved_match_sql(
     storage: &StorageMapping,
@@ -991,6 +1070,25 @@ fn build_resolved_match_sql(
 }
 
 // ========== SQL Generation Helper Functions ==========
+
+/// ラベルを Unit-Aware な SQL 式に変換して返します。
+/// 文字列の場合、parse_size を試みます。
+fn label_to_unit_aware_expr(label: &crate::types::Label) -> SimpleExpr {
+    use sea_query::Expr;
+    match label.value() {
+        crate::types::LabelValue::Integer(i) => Expr::val(i).into(),
+        crate::types::LabelValue::String(s)
+        | crate::types::LabelValue::Literal(s) => {
+            // ここで parse_size を適用
+            if let Some(bytes) = crate::util::parse_size(&s) {
+                Expr::val(bytes).into()
+            } else {
+                Expr::val(s.clone()).into()
+            }
+        }
+        crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+    }
+}
 
 /// サブクエリをラップする共通ヘルパー関数。
 ///
@@ -1214,10 +1312,7 @@ fn apply_generic_comparison(
     q
 }
 
-/// プロジェクションクエリのSQLを生成します。
-///
-/// 指定されたタグタイプの値を持つ全アイテムを返します。
-fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
+fn build_single_type_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
@@ -1256,6 +1351,27 @@ fn build_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
         q.and_where(cond.into());
     }
     q
+}
+
+/// プロジェクションクエリのSQLを生成します。
+fn build_projection_sql(op: &Operand, view: &str) -> SelectStatement {
+    match op {
+        Operand::TypeRef(tt) => build_single_type_projection_sql(tt, view),
+        Operand::Calculation(calc) => {
+            let mut l = build_projection_sql(&calc.left, view);
+            let r = build_projection_sql(&calc.right, view);
+            l.union(sea_query::UnionType::Intersect, r);
+            l
+        }
+        _ => {
+            // Fallback for literals etc.
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
+            q
+        }
+    }
 }
 
 /// カラムマッチクエリのSQLを生成します。
@@ -1579,6 +1695,7 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::lens::ResolvedOperand;
     use crate::query::ast::{BasicOp, QueryNode};
     use crate::types::{Label, SType, TagType, TypedTag};
     use sea_query::{PostgresQueryBuilder, Query, SqliteQueryBuilder};
@@ -1765,10 +1882,13 @@ mod tests {
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::Projection(
-                TagType::Base(SType::Size),
-                StorageMapping::RowTag {
-                    column: Col::LabelInt,
-                    tag_key: "size".to_string(),
+                ResolvedOperand::TagRef {
+                    tag_type: TagType::Base(SType::Size),
+                    storage: StorageMapping::RowTag {
+                        column: Col::LabelInt,
+                        tag_key: "size".to_string(),
+                    },
+                    sql_type: crate::db::SqlType::BIGINT,
                 },
             )),
         };
@@ -1809,8 +1929,11 @@ mod tests {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::And(vec![
                 ResolvedNode::Projection(
-                    TagType::Base(SType::Size),
-                    StorageMapping::Column(Col::Size),
+                    ResolvedOperand::TagRef {
+                        tag_type: TagType::Base(SType::Size),
+                        storage: StorageMapping::Column(Col::Size),
+                        sql_type: crate::db::SqlType::BIGINT,
+                    },
                 ),
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),

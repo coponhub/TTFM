@@ -108,8 +108,8 @@
                 - `sum(size: - 10TB :> 10TB)` NG
                 - `sum((size: - 10TB) :> 10TB)` OK
                 - `sum(size: - 2TB) > 10TB` OK 
-                - `sum(size:) == avg(size:) * count()` NG
-                - `sum(size:) == (avg(size:) * count())` OK
+                - `sum(size:) == avg(size:) * count(size:)` NG
+                - `sum(size:) == (avg(size:) * count(size:))` OK
         - 演算子とオペランドの間にはスペースを開ける必要がある。 `1*2` `1 /2` `proj:*2`のような記載は算術演算とはみなされない。
         - TypedTagに対する算術演算はエラーとなる
 - **エスケープと引用符 (Escaping & Quoting)**:

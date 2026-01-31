@@ -64,16 +64,19 @@ impl<'a> Fetcher<'a> {
         })
     }
 
-    /// クエリをトップレベルの集約として実行し、単一のスカラ値を返します。
+    /// クエリをトップレベルのスカラー式（集約計算など）として実行し、単一の数値を返します。
     pub fn fetch_scalar(&self) -> Result<f64> {
-        let agg = self.lens.get_aggregation().ok_or_else(|| {
-            anyhow::anyhow!("Query is not a top-level aggregation")
+        let op = self.lens.get_scalar_expression().ok_or_else(|| {
+            anyhow::anyhow!("Query is not a top-level scalar expression")
         })?;
 
-        let sql =
-            crate::query::sql::build_resolved_aggregation_sql(&agg, "oneview");
+        let sql = crate::query::sql::build_resolved_scalar_sql(&op, "oneview");
 
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            println!("--- FETCH SCALAR SQL ---\n{}\n----------------", sql_str);
+        }
+
         self.conn
             .prepare(&sql_str)?
             .query_row([], |r| {
@@ -87,13 +90,13 @@ impl<'a> Fetcher<'a> {
                     duckdb::types::Value::HugeInt(i) => Ok(i as f64),
                     other => {
                         // 文字列等の場合はパースを試みる
-                        if let Ok(s) = format!("{:?}", other).parse::<f64>() {
-                            Ok(s)
+                        let s_val = format!("{:?}", other);
+                        if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
+                            Ok(f)
                         } else {
-                            // 最終手段としてエラー
                             Err(duckdb::Error::InvalidColumnType(
                                 0,
-                                format!("{:?}", other),
+                                s_val,
                                 duckdb::types::Type::Double,
                             ))
                         }

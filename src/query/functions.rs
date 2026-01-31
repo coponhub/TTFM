@@ -19,7 +19,7 @@ pub trait QueryFunction: Send + Sync {
 
     /// ラベル取得を基本構造へ展開します。
     fn expand_projection(&self, _tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(_tagtype)
+        QueryNode::Projection(crate::query::ast::Operand::from(_tagtype))
     }
 }
 
@@ -102,7 +102,7 @@ impl QueryFunctionRegistry {
     pub fn expand_projection(&self, tagtype: TagType) -> QueryNode {
         // LiteralCustom の場合は魔法（展開関数）をスキップする
         if let TagType::LiteralCustom(_) = tagtype {
-            return QueryNode::Projection(tagtype);
+            return QueryNode::Projection(tagtype.into());
         }
 
         // Baseタグ（SType）であれば、レジストリから展開関数を探す
@@ -114,7 +114,7 @@ impl QueryFunctionRegistry {
         }
 
         // それ以外（カスタムタグまたは未登録の標準タグ）はそのまま Projection として保持
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -159,7 +159,7 @@ fn find_representative_function<'a>(
     // QueryNodeからProjectionを再帰的に探索
     fn find_projection(qnode: &QueryNode) -> Option<&TagType> {
         match qnode {
-            QueryNode::Projection(tt) => Some(tt),
+            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt),
             QueryNode::And(nodes) | QueryNode::Or(nodes) => {
                 nodes.iter().find_map(find_projection)
             }
@@ -372,7 +372,13 @@ pub fn expand_query_node(
         QueryNode::TypedTag(tt) => {
             registry.process_tag(tt.label.tag_type(), tt.label)
         }
-        QueryNode::Projection(tt) => registry.expand_projection(tt),
+        QueryNode::Projection(op) => {
+            if let crate::query::ast::Operand::TypeRef(tt) = op {
+                registry.expand_projection(tt)
+            } else {
+                QueryNode::Projection(op)
+            }
+        }
         QueryNode::Aggregation(agg) => match agg {
             crate::query::ast::AggregationNode::Count(node) => {
                 QueryNode::Aggregation(
@@ -455,7 +461,7 @@ impl QueryFunction for ExtensionQuery {
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
-            QueryNode::Projection(tagtype),
+            QueryNode::Projection(tagtype.into()),
         ])
     }
 }
@@ -555,7 +561,7 @@ impl QueryFunction for SizeQuery {
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -606,7 +612,7 @@ impl QueryFunction for MtimeQuery {
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -623,7 +629,7 @@ impl QueryFunction for OriginQuery {
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -640,7 +646,7 @@ impl QueryFunction for TypeQuery {
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -657,7 +663,7 @@ impl QueryFunction for LabelQuery {
         }
     }
     fn expand_projection(&self, tagtype: TagType) -> QueryNode {
-        QueryNode::Projection(tagtype)
+        QueryNode::Projection(tagtype.into())
     }
 }
 
@@ -744,7 +750,7 @@ mod tests {
             }
             // Mock: projection size -> projection rank
             fn expand_projection(&self, _: TagType) -> QueryNode {
-                QueryNode::Projection(TagType::from("rank"))
+                QueryNode::Projection(TagType::from("rank").into())
             }
         }
 
@@ -754,7 +760,7 @@ mod tests {
         let tag = TagType::from("size");
         let expanded = reg.expand_projection(tag);
 
-        if let QueryNode::Projection(t) = expanded {
+        if let QueryNode::Projection(Operand::TypeRef(t)) = expanded {
             assert_eq!(t.as_str(), "rank");
         } else {
             panic!("Expected Projection rank, got {:?}", expanded);
@@ -869,7 +875,7 @@ mod tests {
         // 2. expand_projection (プロジェクション)
         let expanded_proj = q.expand_projection(SType::TypedTag.into());
 
-        if let QueryNode::Projection(tt) = expanded_proj {
+        if let QueryNode::Projection(Operand::TypeRef(tt)) = expanded_proj {
             assert_eq!(tt, SType::TypedTag.into());
         } else {
             panic!("Expected Projection, got {:?}", expanded_proj);
@@ -883,7 +889,7 @@ mod tests {
         // expand_projection
         let expanded_proj = q.expand_projection(SType::Type.into());
         // Projection(Type)
-        if let QueryNode::Projection(tt) = expanded_proj {
+        if let QueryNode::Projection(Operand::TypeRef(tt)) = expanded_proj {
             assert_eq!(tt, TagType::Base(SType::Type));
         } else {
             panic!("Expected Projection node, got {:?}", expanded_proj);

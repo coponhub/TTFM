@@ -335,6 +335,18 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
         {
             return handle_date_ym_md(s_trimmed, &parts, now);
         }
+        3 if parts[0].len() == 4
+            && parts[0].chars().all(|c| c.is_ascii_digit())
+            && parts[1].chars().all(|c| c.is_ascii_digit())
+            && parts[2].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            let y: i32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            let d: u32 = parts[2].parse().ok()?;
+            let start = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
+            let end = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
+            return make_range(start, end);
+        }
         _ => {}
     }
 

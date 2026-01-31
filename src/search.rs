@@ -46,8 +46,8 @@ impl FileManager {
         let lens = crate::query::lens::Lens::with_standard(query)?;
         let fetcher = crate::query::fetcher::Fetcher::new(&lens, &self.conn);
 
-        // 2-A. トップレベル集約ケース
-        if let Some(_) = lens.get_aggregation() {
+        // 2-A. トップレベル集約・スカラー式ケース
+        if let Some(_) = lens.get_scalar_expression() {
             let val = fetcher.fetch_scalar()?;
             return Ok(SearchResponse {
                 scalar: Some(val),

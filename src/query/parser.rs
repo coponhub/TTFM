@@ -28,9 +28,6 @@ mod errors {
     pub const COMPLEMENT_MISSING_EXPR: &str = "Complement missing expr";
     pub const MISSING_TAG_KEY: &str = "Missing tag key";
     pub const MISSING_TAG_LABEL: &str = "Missing tag label";
-    pub const MISSING_PROJECTION_INNER: &str = "Missing projection inner";
-    pub const MISSING_TAG_KEY_IN_PROJECTION: &str =
-        "Missing tag key in projection";
     pub const UNEXPECTED_TAG_TYPE_RULE: &str = "Unexpected tag_type rule";
     pub const UNKNOWN_COMPARISON_OP: &str = "Unknown comparison op";
     pub const UNKNOWN_OPERAND_RULE: &str = "Unknown operand rule";
@@ -195,25 +192,28 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
 
     // Empty label implies projection (e.g. "extension:")
     if label.as_str().is_empty() {
-        return Ok(QueryNode::Projection(tagtype));
+        return Ok(QueryNode::Projection(Operand::from(tagtype)));
     }
 
     Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
 }
 
 fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
-    // projection = { type_ref }
-    // type_ref = ${ tag_type ~ ":" }
-    let inner = pair
-        .into_inner()
-        .next()
-        .ok_or_else(|| anyhow!(errors::MISSING_PROJECTION_INNER))?;
-    let mut type_ref_inner = inner.into_inner();
-    let type_pair = type_ref_inner
-        .next()
-        .ok_or_else(|| anyhow!(errors::MISSING_TAG_KEY_IN_PROJECTION))?;
-    let tagtype = build_tag_type(type_pair)?;
-    Ok(QueryNode::Projection(tagtype))
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::type_ref => {
+            let tag_type = TagType::from(inner.as_str().trim_end_matches(':'));
+            Ok(QueryNode::Projection(Operand::TypeRef(tag_type)))
+        }
+        Rule::calculation => {
+            let calc = build_calculation(inner)?;
+            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+        }
+        _ => Err(anyhow!(
+            "Unexpected rule in projection: {:?}",
+            inner.as_rule()
+        )),
+    }
 }
 
 fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
@@ -667,7 +667,10 @@ mod tests {
     fn test_parse_origin_projection() {
         let node = parse("origin:").expect("Failed to parse origin:");
         match node {
-            QueryNode::Projection(tt) => assert_eq!(tt.as_str(), "origin"),
+            QueryNode::Projection(op) => match op {
+                Operand::TypeRef(tt) => assert_eq!(tt.as_str(), "origin"),
+                _ => panic!("Expected TypeRef operand, got {:?}", op),
+            },
             _ => panic!("Expected Projection(origin), got {:?}", node),
         }
     }
@@ -701,9 +704,12 @@ mod tests {
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Count(inner) => match &*inner {
-                    QueryNode::Projection(tt) => {
-                        assert_eq!(tt.as_str(), "extension");
-                    }
+                    QueryNode::Projection(op) => match op {
+                        Operand::TypeRef(tt) => {
+                            assert_eq!(tt.as_str(), "extension");
+                        }
+                        _ => panic!("Expected TypeRef operand, got {:?}", op),
+                    },
                     _ => panic!(
                         "Expected Projection inside count, got {:?}",
                         inner
@@ -723,9 +729,12 @@ mod tests {
                 AggregationNode::Arithmetic { op, ref inner } => {
                     assert_eq!(op, ArithmeticAggOp::Sum);
                     match &**inner {
-                        QueryNode::Projection(tt) => {
-                            assert_eq!(tt.as_str(), "size");
-                        }
+                        QueryNode::Projection(op) => match op {
+                            Operand::TypeRef(tt) => {
+                                assert_eq!(tt.as_str(), "size");
+                            }
+                            _ => panic!("Expected TypeRef operand, got {:?}", op),
+                        },
                         _ => panic!(
                             "Expected Projection inside sum, got {:?}",
                             inner

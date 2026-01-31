@@ -295,9 +295,9 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     let res1 = fm.search("max(mtime:)", Default::default())?;
     println!("max(mtime:) = {:?}", res1.scalar);
 
-    // max(mtime:) < 2026-02-01 を比較
-    let res2 = fm.search("max(mtime:) < 2026-02-01", Default::default())?;
-    println!("max(mtime:) < 2026-02-01 = {:?}", res2);
+    // max(mtime:) < 2027-01-01 を比較
+    let res2 = fm.search("max(mtime:) < 2027-01-01", Default::default())?;
+    println!("max(mtime:) < 2027-01-01 = {:?}", res2);
 
     // 今日の日付より前なので TRUE になるはず
     assert_eq!(res2.results.len(), 1);

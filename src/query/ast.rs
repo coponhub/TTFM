@@ -110,7 +110,7 @@ pub enum QueryNode {
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
     ColumnMatch { tag: SType, label: Label },
     /// ラベル取得 (Projection)
-    Projection(TagType),
+    Projection(Operand),
     /// 集約演算 (count(query), sum(size:) など)
     Aggregation(AggregationNode),
 }
@@ -162,8 +162,8 @@ impl QueryNode {
             QueryNode::TypedTag(tt) => {
                 types.insert(tt.label.tag_type().as_str().to_string());
             }
-            QueryNode::Projection(tt) => {
-                types.insert(tt.as_str().to_string());
+            QueryNode::Projection(op) => {
+                op.collect_types(types);
             }
             QueryNode::Aggregation(agg) => {
                 agg.collect_types(types);
@@ -184,17 +184,12 @@ impl QueryNode {
             QueryNode::Complement(c) => {
                 c.collect_projections(projections);
             }
-            QueryNode::Projection(tt) => {
-                projections.insert(tt.as_str().to_string());
+            QueryNode::Projection(op) => {
+                op.collect_projections(projections);
             }
-            QueryNode::Aggregation(agg) => match agg {
-                AggregationNode::Count(node) => {
-                    node.collect_projections(projections)
-                }
-                AggregationNode::Arithmetic { inner, .. } => {
-                    inner.collect_projections(projections)
-                }
-            },
+            QueryNode::Aggregation(agg) => {
+                agg.collect_projections(projections);
+            }
             _ => {}
         }
     }
@@ -220,6 +215,17 @@ impl AggregationNode {
             }
         }
     }
+
+    fn collect_projections(&self, projections: &mut HashSet<String>) {
+        match self {
+            AggregationNode::Count(node) => {
+                node.collect_projections(projections);
+            }
+            AggregationNode::Arithmetic { inner, .. } => {
+                inner.collect_projections(projections);
+            }
+        }
+    }
 }
 
 impl Operand {
@@ -238,6 +244,34 @@ impl Operand {
             }
         }
     }
+
+    fn collect_projections(&self, projections: &mut HashSet<String>) {
+        match self {
+            Operand::Literal(_) => {}
+            Operand::TypeRef(tt) => {
+                projections.insert(tt.as_str().to_string());
+            }
+            Operand::Calculation(calc) => {
+                calc.left.collect_projections(projections);
+                calc.right.collect_projections(projections);
+            }
+            Operand::Aggregation(agg) => {
+                agg.collect_projections(projections);
+            }
+        }
+    }
+}
+
+impl From<TagType> for Operand {
+    fn from(tt: TagType) -> Self {
+        Operand::TypeRef(tt)
+    }
+}
+
+impl From<SType> for Operand {
+    fn from(st: SType) -> Self {
+        Operand::TypeRef(TagType::from(st))
+    }
 }
 
 #[cfg(test)]
@@ -254,7 +288,7 @@ mod tests {
         assert!(types.contains(&"size".to_string()));
 
         // Projection
-        let node = QueryNode::Projection(TagType::from("rank"));
+        let node = QueryNode::Projection(Operand::TypeRef(TagType::from("rank")));
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
         assert!(types.contains(&"rank".to_string()));
@@ -306,7 +340,7 @@ mod tests {
     #[test]
     fn test_get_projections() {
         // Projection only
-        let node = QueryNode::Projection(TagType::from("path"));
+        let node = QueryNode::Projection(Operand::TypeRef(TagType::from("path")));
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
         assert!(projs.contains(&"path".to_string()));
@@ -315,11 +349,30 @@ mod tests {
         // name:foo AND project:size
         let node = QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new("name", "foo")),
-            QueryNode::Projection(TagType::from("size")),
+            QueryNode::Projection(Operand::TypeRef(TagType::from("size"))),
         ]);
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
         assert!(projs.contains(&"size".to_string()));
+    }
+
+    #[test]
+    fn test_projection_with_calculation_collect() {
+        // (width * height) as projection
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::from("width")),
+            op: ArithmeticOp::Mul,
+            right: Operand::TypeRef(TagType::from("height")),
+        };
+        let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
+
+        let types = node.get_all_types();
+        assert!(types.contains(&"width".to_string()));
+        assert!(types.contains(&"height".to_string()));
+
+        let projs = node.get_projections();
+        assert!(projs.contains(&"width".to_string()));
+        assert!(projs.contains(&"height".to_string()));
     }
 
     #[test]
