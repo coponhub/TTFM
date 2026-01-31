@@ -71,6 +71,26 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         label: Label,
     },
+    /// 算術演算とリテラルの比較 (例: (1 + 2) :> size:)
+    CalculationMatch {
+        calc: ResolvedCalculationNode,
+        op: ComparisonOp,
+        label: Label,
+    },
+    /// タグと算術演算の比較 (例: size: > (1000 + 500))
+    TagCalculationMatch {
+        tag_type: TagType,
+        storage: StorageMapping,
+        sql_type: crate::db::SqlType,
+        op: ComparisonOp,
+        calc: ResolvedCalculationNode,
+    },
+    /// 集約関数と算術演算の比較 (例: sum(size:) > (100 * 2))
+    AggregationCalculationMatch {
+        agg: ResolvedAggregationNode,
+        op: ComparisonOp,
+        calc: ResolvedCalculationNode,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -80,6 +100,49 @@ pub enum ResolvedAggregationNode {
         op: crate::query::ast::ArithmeticAggOp,
         inner: Box<ResolvedNode>,
     },
+}
+
+/// 算術演算のオペランド（解決済み）
+#[derive(Debug, PartialEq, Clone)]
+pub enum ResolvedOperand {
+    /// リテラル値（数値または文字列）
+    Literal(Label),
+    /// タグ参照（Projection相当）
+    TagRef {
+        tag_type: TagType,
+        storage: StorageMapping,
+        sql_type: crate::db::SqlType,
+    },
+    /// ネストした算術演算
+    Calculation(Box<ResolvedCalculationNode>),
+    /// 集約関数（スカラー値を返す）
+    Aggregation(ResolvedAggregationNode),
+}
+
+impl ResolvedOperand {
+    /// 集約関数が含まれているかチェックします。
+    pub fn contains_aggregation(&self) -> bool {
+        match self {
+            ResolvedOperand::Aggregation(_) => true,
+            ResolvedOperand::Calculation(calc) => calc.contains_aggregation(),
+            _ => false,
+        }
+    }
+}
+
+/// 算術演算の解決済みノード
+#[derive(Debug, PartialEq, Clone)]
+pub struct ResolvedCalculationNode {
+    pub left: ResolvedOperand,
+    pub op: crate::query::ast::ArithmeticOp,
+    pub right: ResolvedOperand,
+}
+
+impl ResolvedCalculationNode {
+    /// 集約関数が含まれているかチェックします。
+    pub fn contains_aggregation(&self) -> bool {
+        self.left.contains_aggregation() || self.right.contains_aggregation()
+    }
 }
 
 impl ResolvedNode {
@@ -111,6 +174,13 @@ impl ResolvedNode {
             ResolvedNode::Aggregation(_)
             | ResolvedNode::AggregationMatch { .. } => {
                 // 集約は基本的に SELECT 句または HAVING 句で扱われる
+                Condition::any()
+            }
+            ResolvedNode::CalculationMatch { .. }
+            | ResolvedNode::TagCalculationMatch { .. }
+            | ResolvedNode::AggregationCalculationMatch { .. } => {
+                // 算術演算比較はWHERE句では基本的に扱わない
+                // （build_pick_sqlで専用処理）
                 Condition::any()
             }
         }
@@ -800,6 +870,47 @@ fn resolve_aggregation(
     }
 }
 
+fn resolve_calculation(
+    lens: &Lens,
+    calc: crate::query::ast::CalculationNode,
+) -> anyhow::Result<ResolvedCalculationNode> {
+    let left = resolve_operand_for_calc(lens, calc.left)?;
+    let right = resolve_operand_for_calc(lens, calc.right)?;
+
+    Ok(ResolvedCalculationNode {
+        left,
+        op: calc.op,
+        right,
+    })
+}
+
+fn resolve_operand_for_calc(
+    lens: &Lens,
+    operand: crate::query::ast::Operand,
+) -> anyhow::Result<ResolvedOperand> {
+    use crate::query::ast::Operand;
+
+    match operand {
+        Operand::Literal(lab) => Ok(ResolvedOperand::Literal(lab)),
+        Operand::TypeRef(tt) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            Ok(ResolvedOperand::TagRef {
+                tag_type: tt,
+                storage,
+                sql_type,
+            })
+        }
+        Operand::Calculation(calc) => {
+            let resolved = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedOperand::Calculation(Box::new(resolved)))
+        }
+        Operand::Aggregation(agg) => {
+            let resolved = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedOperand::Aggregation(resolved))
+        }
+    }
+}
+
 fn resolve_comparison(
     lens: &Lens,
     cmp: crate::query::ast::ComparisonNode,
@@ -867,6 +978,60 @@ fn resolve_single_match(
                 agg: res_agg,
                 op: flip_op(op),
                 label: lab,
+            })
+        }
+        // (1 + 2) :> size:
+        (Operand::Calculation(calc), Operand::Literal(lab)) => {
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::CalculationMatch {
+                calc: res_calc,
+                op,
+                label: lab,
+            })
+        }
+        // size: > (1000 + 500)
+        (Operand::TypeRef(tt), Operand::Calculation(calc)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::TagCalculationMatch {
+                tag_type: tt,
+                storage,
+                sql_type,
+                op,
+                calc: res_calc,
+            })
+        }
+        // (1 + 2) :> size:
+        // 意味: size: が (1+2) より大きい → size: > (1+2)
+        (Operand::Calculation(calc), Operand::TypeRef(tt)) => {
+            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::TagCalculationMatch {
+                tag_type: tt,
+                storage,
+                sql_type,
+                op,
+                calc: res_calc,
+            })
+        }
+        // sum(size:) > (100 * 2)
+        (Operand::Aggregation(agg), Operand::Calculation(calc)) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::AggregationCalculationMatch {
+                agg: res_agg,
+                op,
+                calc: res_calc,
+            })
+        }
+        // (100 * 2) < sum(size:)
+        (Operand::Calculation(calc), Operand::Aggregation(agg)) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::AggregationCalculationMatch {
+                agg: res_agg,
+                op: flip_op(op),
+                calc: res_calc,
             })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
@@ -1288,6 +1453,174 @@ mod helper_tests {
             extracted_filter.unwrap(),
             filter,
             "Filter content mismatch"
+        );
+    }
+
+    #[test]
+    fn test_resolve_calculation_literal() {
+        use crate::query::ast::{ArithmeticOp, CalculationNode, Operand};
+        use crate::types::Label;
+
+        let lens = Lens::base_standard();
+        let calc = CalculationNode {
+            left: Operand::Literal(Label::from(1)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(2)),
+        };
+
+        let result = resolve_calculation(&lens, calc);
+        assert!(result.is_ok());
+
+        let resolved = result.unwrap();
+        assert_eq!(resolved.op, ArithmeticOp::Add);
+        assert_eq!(
+            resolved.left,
+            ResolvedOperand::Literal(Label::from(1))
+        );
+        assert_eq!(
+            resolved.right,
+            ResolvedOperand::Literal(Label::from(2))
+        );
+    }
+
+    #[test]
+    fn test_resolve_calculation_with_tag_ref() {
+        use crate::query::ast::{ArithmeticOp, CalculationNode, Operand};
+        use crate::types::{Label, SType, TagType};
+
+        let lens = Lens::base_standard();
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::Base(SType::Size)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(100)),
+        };
+
+        let result = resolve_calculation(&lens, calc);
+        assert!(result.is_ok());
+
+        let resolved = result.unwrap();
+        assert_eq!(resolved.op, ArithmeticOp::Add);
+
+        // 左側がTagRefであることを確認
+        match &resolved.left {
+            ResolvedOperand::TagRef {
+                tag_type,
+                storage,
+                ..
+            } => {
+                assert_eq!(*tag_type, TagType::Base(SType::Size));
+                // size:はRowTagとして保存されている
+                assert!(matches!(
+                    storage,
+                    StorageMapping::RowTag { .. }
+                ));
+            }
+            _ => panic!("Expected TagRef"),
+        }
+
+        // 右側がLiteralであることを確認
+        assert_eq!(
+            resolved.right,
+            ResolvedOperand::Literal(Label::from(100))
+        );
+    }
+
+    #[test]
+    fn test_resolve_calculation_nested() {
+        use crate::query::ast::{ArithmeticOp, CalculationNode, Operand};
+        use crate::types::Label;
+
+        let lens = Lens::base_standard();
+
+        // ((1 + 2) * 3) のような入れ子構造
+        let inner_calc = CalculationNode {
+            left: Operand::Literal(Label::from(1)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(2)),
+        };
+
+        let outer_calc = CalculationNode {
+            left: Operand::Calculation(Box::new(inner_calc)),
+            op: ArithmeticOp::Mul,
+            right: Operand::Literal(Label::from(3)),
+        };
+
+        let result = resolve_calculation(&lens, outer_calc);
+        assert!(result.is_ok());
+
+        let resolved = result.unwrap();
+        assert_eq!(resolved.op, ArithmeticOp::Mul);
+
+        // 左側がCalculationであることを確認
+        match &resolved.left {
+            ResolvedOperand::Calculation(nested) => {
+                assert_eq!(nested.op, ArithmeticOp::Add);
+                assert_eq!(
+                    nested.left,
+                    ResolvedOperand::Literal(Label::from(1))
+                );
+                assert_eq!(
+                    nested.right,
+                    ResolvedOperand::Literal(Label::from(2))
+                );
+            }
+            _ => panic!("Expected Calculation"),
+        }
+
+        // 右側がLiteralであることを確認
+        assert_eq!(
+            resolved.right,
+            ResolvedOperand::Literal(Label::from(3))
+        );
+    }
+
+    #[test]
+    fn test_resolve_operand_with_aggregation() {
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, ArithmeticOp, CalculationNode,
+            Operand, QueryNode,
+        };
+        use crate::types::{Label, SType, TagType};
+
+        let lens = Lens::base_standard();
+
+        // sum(size:) のAggregationNode
+        let agg_node = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Projection(TagType::Base(SType::Size))),
+        };
+
+        // (sum(size:) + 100) のCalculationNode
+        let calc = CalculationNode {
+            left: Operand::Aggregation(Box::new(agg_node)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(100)),
+        };
+
+        let result = resolve_calculation(&lens, calc);
+        assert!(result.is_ok());
+
+        let resolved = result.unwrap();
+        assert_eq!(resolved.op, ArithmeticOp::Add);
+
+        // 左側がAggregationであることを確認
+        match &resolved.left {
+            ResolvedOperand::Aggregation(agg) => {
+                // ResolvedAggregationNode::Arithmeticであることを確認
+                match agg {
+                    ResolvedAggregationNode::Arithmetic { op, .. } => {
+                        assert_eq!(*op, ArithmeticAggOp::Sum);
+                    }
+                    _ => panic!("Expected Arithmetic aggregation"),
+                }
+            }
+            _ => panic!("Expected Aggregation"),
+        }
+
+        // 右側がLiteralであることを確認
+        assert_eq!(
+            resolved.right,
+            ResolvedOperand::Literal(Label::from(100))
         );
     }
 }

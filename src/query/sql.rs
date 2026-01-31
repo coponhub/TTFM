@@ -28,6 +28,40 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
     stmt
 }
 
+/// CalculationNodeに含まれるRowTagのtypeフィルタをWHERE句に追加します。
+fn extract_and_add_row_tag_filters(
+    stmt: &mut SelectStatement,
+    calc: &crate::query::lens::ResolvedCalculationNode,
+) {
+    use crate::query::lens::ResolvedOperand;
+
+    // 左オペランドのチェック
+    match &calc.left {
+        ResolvedOperand::TagRef { storage, .. } => {
+            if let StorageMapping::RowTag { tag_key, .. } = storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+            }
+        }
+        ResolvedOperand::Calculation(nested) => {
+            extract_and_add_row_tag_filters(stmt, nested);
+        }
+        _ => {}
+    }
+
+    // 右オペランドのチェック
+    match &calc.right {
+        ResolvedOperand::TagRef { storage, .. } => {
+            if let StorageMapping::RowTag { tag_key, .. } = storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+            }
+        }
+        ResolvedOperand::Calculation(nested) => {
+            extract_and_add_row_tag_filters(stmt, nested);
+        }
+        _ => {}
+    }
+}
+
 /// 物理マッピング解決済みの構造から SQL を生成します (Phase 2)。
 pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
     match node {
@@ -53,6 +87,98 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         }
         ResolvedNode::AggregationMatch { agg, op, label } => {
             build_resolved_aggregation_match_sql(agg, *op, label, view)
+        }
+        ResolvedNode::CalculationMatch { calc, op, label } => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+
+            // 集約関数が含まれている場合はサブクエリを使用
+            let calc_expr = if calc.contains_aggregation() {
+                build_calculation_subquery(calc, view)
+            } else {
+                build_calculation_expr(calc)
+            };
+
+            let label_expr: SimpleExpr = match label.value() {
+                crate::types::LabelValue::Integer(i) => {
+                    Expr::val(i).into()
+                }
+                crate::types::LabelValue::String(s)
+                | crate::types::LabelValue::Literal(s) => {
+                    Expr::val(s.clone()).into()
+                }
+                crate::types::LabelValue::Boolean(b) => {
+                    Expr::val(b).into()
+                }
+            };
+            let bin_op = to_bin_op(*op);
+            let cond = Expr::expr(calc_expr).binary(bin_op, label_expr);
+
+            stmt.cond_where(cond);
+
+            // 集約関数が含まれていない場合のみ、
+            // calcに含まれるRowTagのtypeフィルタを追加
+            if !calc.contains_aggregation() {
+                extract_and_add_row_tag_filters(&mut stmt, calc);
+            }
+
+            stmt
+        }
+        ResolvedNode::TagCalculationMatch {
+            storage,
+            sql_type,
+            op,
+            calc,
+            ..
+        } => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+
+            let tag_expr = build_storage_column_expr(storage, *sql_type);
+
+            // 集約関数が含まれている場合はサブクエリを使用
+            let calc_expr = if calc.contains_aggregation() {
+                build_calculation_subquery(calc, view)
+            } else {
+                build_calculation_expr(calc)
+            };
+
+            // TagCalculationMatchは「calc op tag」の形式で保存されているため、
+            // 「tag flip(op) calc」の形式でSQLを生成する
+            let flipped_op =
+                to_bin_op(crate::query::lens::flip_op(*op));
+            let cond = Expr::expr(tag_expr).binary(flipped_op, calc_expr);
+
+            stmt.cond_where(cond);
+
+            // RowTagの場合は、typeでフィルタ
+            if let StorageMapping::RowTag { tag_key, .. } = storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+            }
+
+            stmt
+        }
+        ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+
+            // 集約関数と算術演算の両方をサブクエリとして構築
+            let agg_expr = build_aggregation_subquery(agg, view);
+            let calc_expr = if calc.contains_aggregation() {
+                build_calculation_subquery(calc, view)
+            } else {
+                build_calculation_expr(calc)
+            };
+
+            let bin_op = to_bin_op(*op);
+            let cond = Expr::expr(agg_expr).binary(bin_op, calc_expr);
+
+            stmt.cond_where(cond);
+
+            stmt
         }
     }
 }
@@ -246,6 +372,195 @@ fn build_aggregation_parts(
             (expr, cond, tag_key)
         }
     }
+}
+
+/// StorageMappingから適切なSQL列式を生成します。
+fn build_storage_column_expr(
+    storage: &StorageMapping,
+    _sql_type: crate::db::SqlType,
+) -> SimpleExpr {
+    match storage {
+        StorageMapping::Column(col) => Expr::col(*col).into(),
+        StorageMapping::RowTag { column, .. } => Expr::col(*column).into(),
+        StorageMapping::Virtual => {
+            // Virtualタグは論理タグのため、直接的な物理カラムは存在しない
+            // Phase 3で適切に実装予定
+            Expr::col(Col::LabelStr).into()
+        }
+    }
+}
+
+/// 算術演算のオペランドをSQL式に変換します。
+fn build_resolved_operand_expr(
+    operand: &crate::query::lens::ResolvedOperand,
+) -> SimpleExpr {
+    use crate::query::lens::ResolvedOperand;
+
+    match operand {
+        ResolvedOperand::Literal(lab) => {
+            // サイズ単位のパース (例: "1MB" → 1048576)
+            let s = lab.as_str();
+            if let Some(bytes) = crate::util::parse_size(&s) {
+                Expr::val(bytes).into()
+            } else {
+                // ラベルの値をSQL式に変換
+                match lab.value() {
+                    crate::types::LabelValue::Integer(i) => {
+                        Expr::val(i).into()
+                    }
+                    crate::types::LabelValue::String(s)
+                    | crate::types::LabelValue::Literal(s) => {
+                        Expr::val(s.clone()).into()
+                    }
+                    crate::types::LabelValue::Boolean(b) => {
+                        Expr::val(b).into()
+                    }
+                }
+            }
+        }
+        ResolvedOperand::TagRef {
+            storage, sql_type, ..
+        } => build_storage_column_expr(storage, *sql_type),
+        ResolvedOperand::Calculation(calc) => build_calculation_expr(calc),
+        ResolvedOperand::Aggregation(agg) => build_aggregation_expr(agg),
+    }
+}
+
+/// 集約関数をSQL式に変換します（算術演算内で使用）。
+fn build_aggregation_expr(
+    agg: &crate::query::lens::ResolvedAggregationNode,
+) -> SimpleExpr {
+    use crate::query::lens::ResolvedAggregationNode;
+
+    match agg {
+        ResolvedAggregationNode::Count(inner) => {
+            let (storage, _cond) = inner.extract_agg_parts();
+            if let Some(s) = storage {
+                // count(projection:) -> COUNT(DISTINCT col)
+                let col = match s {
+                    &StorageMapping::Column(c) => c,
+                    &StorageMapping::RowTag { column, .. } => column,
+                    _ => Col::LabelInt, // Fallback
+                };
+                Expr::col(col).count_distinct().into()
+            } else {
+                // count(query) -> COUNT(DISTINCT item_id)
+                Expr::col(Col::ItemId).count_distinct().into()
+            }
+        }
+        ResolvedAggregationNode::Arithmetic { op, inner } => {
+            let (storage, _cond) = inner.extract_agg_parts();
+            let col = match storage {
+                Some(&StorageMapping::Column(c)) => c,
+                Some(&StorageMapping::RowTag { column, .. }) => column,
+                _ => Col::LabelInt, // Fallback
+            };
+
+            match op {
+                crate::query::ast::ArithmeticAggOp::Sum => {
+                    Func::sum(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Avg => {
+                    Func::avg(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Max => {
+                    Func::max(Expr::col(col)).into()
+                }
+                crate::query::ast::ArithmeticAggOp::Min => {
+                    Func::min(Expr::col(col)).into()
+                }
+            }
+        }
+    }
+}
+
+/// 算術演算ノードをSQL式に変換します。
+fn build_calculation_expr(
+    calc: &crate::query::lens::ResolvedCalculationNode,
+) -> SimpleExpr {
+    let left_expr = build_resolved_operand_expr(&calc.left);
+    let right_expr = build_resolved_operand_expr(&calc.right);
+
+    let bin_op = match calc.op {
+        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
+        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
+        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
+        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
+        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
+    };
+
+    Expr::expr(left_expr).binary(bin_op, right_expr)
+}
+
+/// 集約関数を含む算術演算をサブクエリとして構築します。
+fn build_calculation_subquery(
+    calc: &crate::query::lens::ResolvedCalculationNode,
+    view: &str,
+) -> SimpleExpr {
+    let left_expr = build_resolved_operand_subquery(&calc.left, view);
+    let right_expr = build_resolved_operand_subquery(&calc.right, view);
+
+    let bin_op = match calc.op {
+        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
+        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
+        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
+        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
+        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
+    };
+
+    Expr::expr(left_expr).binary(bin_op, right_expr)
+}
+
+/// オペランドをサブクエリ形式で構築します。
+fn build_resolved_operand_subquery(
+    operand: &crate::query::lens::ResolvedOperand,
+    view: &str,
+) -> SimpleExpr {
+    use crate::query::lens::ResolvedOperand;
+
+    match operand {
+        ResolvedOperand::Literal(lab) => {
+            if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
+                Expr::val(bytes).into()
+            } else {
+                match lab.value() {
+                    crate::types::LabelValue::Integer(i) => {
+                        Expr::val(i).into()
+                    }
+                    crate::types::LabelValue::String(s)
+                    | crate::types::LabelValue::Literal(s) => {
+                        Expr::val(s.clone()).into()
+                    }
+                    crate::types::LabelValue::Boolean(b) => {
+                        Expr::val(b).into()
+                    }
+                }
+            }
+        }
+        ResolvedOperand::TagRef { .. } => {
+            // サブクエリ内でTagRefは使えない（全体の集約値のみ）
+            // これは通常発生しないが、エラー処理として0を返す
+            Expr::val(0).into()
+        }
+        ResolvedOperand::Calculation(calc) => {
+            build_calculation_subquery(calc, view)
+        }
+        ResolvedOperand::Aggregation(agg) => {
+            build_aggregation_subquery(agg, view)
+        }
+    }
+}
+
+/// 集約関数をサブクエリとして構築します。
+fn build_aggregation_subquery(
+    agg: &crate::query::lens::ResolvedAggregationNode,
+    view: &str,
+) -> SimpleExpr {
+    use sea_query::SimpleExpr;
+    // build_resolved_aggregation_sqlを使ってSELECT文を構築
+    let subquery = build_resolved_aggregation_sql(agg, view);
+    // サブクエリとして返す
+    SimpleExpr::SubQuery(None, Box::new(subquery.into_sub_query_statement()))
 }
 
 /// ブーリアン結果を得るための SQL を生成します。
@@ -1523,5 +1838,43 @@ mod tests {
         assert!(sql_str.contains("IN (SELECT"));
         assert!(sql_str.contains("WHERE \"type\" = 'project'"));
         assert!(sql_str.contains("'ttfm'"));
+    }
+
+    #[test]
+    fn test_build_calculation_expr_simple() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::query::lens::{ResolvedCalculationNode, ResolvedOperand};
+        use crate::types::Label;
+
+        let calc = ResolvedCalculationNode {
+            left: ResolvedOperand::Literal(Label::from(1)),
+            op: ArithmeticOp::Add,
+            right: ResolvedOperand::Literal(Label::from(2)),
+        };
+
+        let expr = build_calculation_expr(&calc);
+        let sql_str = format!("{:?}", expr);
+
+        // SQL式に加算演算が含まれていることを確認
+        assert!(
+            sql_str.contains("Add") || sql_str.contains("+"),
+            "Should contain addition operation"
+        );
+    }
+
+    #[test]
+    fn test_build_resolved_operand_literal() {
+        use crate::query::lens::ResolvedOperand;
+        use crate::types::Label;
+
+        let operand = ResolvedOperand::Literal(Label::from(42));
+        let expr = build_resolved_operand_expr(&operand);
+        let sql_str = format!("{:?}", expr);
+
+        // 数値リテラルが含まれていることを確認
+        assert!(
+            sql_str.contains("42"),
+            "Should contain literal value 42"
+        );
     }
 }

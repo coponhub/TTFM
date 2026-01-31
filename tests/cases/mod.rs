@@ -4,6 +4,7 @@ pub mod integration_tags;
 pub mod rank_test;
 pub mod robustness_test;
 pub mod test_aggregation;
+pub mod test_calculation;
 pub mod test_date_regression;
 pub mod test_projection;
 pub mod test_size_units;

@@ -120,7 +120,7 @@ calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
 arith_op = @{ WHITESPACE+ ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)
-operand_calc = { type_ref | label | calculation }
+operand_calc = { aggregation | type_ref | label | calculation }
 
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }

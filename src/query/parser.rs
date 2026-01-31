@@ -407,6 +407,9 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
     };
 
     match inner.as_rule() {
+        Rule::aggregation => {
+            Ok(Operand::Aggregation(Box::new(build_aggregation(inner)?)))
+        }
         Rule::type_ref => {
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
