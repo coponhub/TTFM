@@ -9,6 +9,8 @@ duckdb = { version = "1.0", features = ["bundled", "uuid"] }
 walkdir = "2.4"
 anyhow = "1.0"
 chrono = "0.4"
+chrono-english = "0.1"
+dateparser = "0.2"
 indicatif = "0.18.3"
 wasmtime = { version = "28.0", features = ["component-model", "cranelift", "async"] }
 wasmtime-wasi = "28.0"

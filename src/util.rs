@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use duckdb::Connection;
 use sea_query::{
     ColumnDef, DeleteStatement, Expr, Iden, InsertStatement, IntoIden,
@@ -310,208 +311,135 @@ pub struct DatetimeRange {
 }
 
 /// 様々な形式の日時文字列をパースし、対応する時間範囲を返します。
-///
-/// サポート形式:
-/// - 相対: today, yesterday, Nd ago (y, m, d, h, min, s)
-/// - 日付: YYYY/MM/DD, YYYY-MM-DD (ゼロ埋め不要、年的補完、年的/月的補完)
-/// - 時刻: HH:MM:SS, HH:MM
 pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
-    use chrono::{Datelike, Local, NaiveDate, TimeZone};
-
-    let s_lower = s.trim().to_lowercase();
+    let s_trimmed = s.trim();
+    let s_lower = s_trimmed.to_lowercase();
     let now = Local::now();
 
-    // 1. 相対指定 (today, yesterday)
-    if s_lower == "today" {
-        let start = now.date_naive().and_hms_opt(0, 0, 0)?;
-        let end = now.date_naive().and_hms_opt(23, 59, 59)?;
-        return Some(DatetimeRange {
-            start: Local.from_local_datetime(&start).earliest()?.timestamp(),
-            end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-        });
-    }
-    if s_lower == "yesterday" {
-        let yesterday = now.date_naive().pred_opt()?;
-        let start = yesterday.and_hms_opt(0, 0, 0)?;
-        let end = yesterday.and_hms_opt(23, 59, 59)?;
-        return Some(DatetimeRange {
-            start: Local.from_local_datetime(&start).earliest()?.timestamp(),
-            end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-        });
-    }
-
-    // Nd ago
-    if s_lower.ends_with(" ago") {
-        let part = s_lower.trim_end_matches(" ago").trim();
-        let (num_str, unit) =
-            part.split_at(part.find(|c: char| !c.is_numeric())?);
-        let num: i64 = num_str.parse().ok()?;
-
-        match unit.trim() {
-            "y" => {
-                let past = now
-                    .with_year(now.year() - num as i32)
-                    .or_else(|| now.with_day(1))?; // 閏年考慮
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            "m" => {
-                let mut year = now.year();
-                let mut month = now.month() as i32 - num as i32;
-                while month <= 0 {
-                    year -= 1;
-                    month += 12;
-                }
-                // 日付が存在しない場合（例：3/31の2ヶ月前=1/31は存在）月初に調整
-                let past = now
-                    .with_year(year)
-                    .and_then(|d| d.with_month(month as u32))
-                    .or_else(|| {
-                        now.with_year(year)
-                            .and_then(|d| d.with_month(month as u32))
-                            .or_else(|| {
-                                now.with_day(1)?
-                                    .with_year(year)?
-                                    .with_month(month as u32)
-                            })
-                    })?;
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            "d" => {
-                let past = now - chrono::Duration::days(num);
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            "h" => {
-                let past = now - chrono::Duration::hours(num);
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            "min" => {
-                let past = now - chrono::Duration::minutes(num);
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            "s" => {
-                let past = now - chrono::Duration::seconds(num);
-                return Some(DatetimeRange {
-                    start: past.timestamp(),
-                    end: past.timestamp(),
-                });
-            }
-            _ => return None,
-        }
-    }
-
-    // 2. 絶対指定 (YYYY/M/D, HH:MM:SS 等)
-    // 柔軟なパースのため、記号で分割
-    let parts: Vec<&str> = s
-        .split(|c| c == '/' || c == '-' || c == ':' || c == ' ')
+    // 1. 特殊な範囲指定 (YYYY, YYYY/M) の優先処理 (検索エンジンとしての利便性)
+    let parts: Vec<&str> = s_trimmed
+        .split(|c| c == '/' || c == '-' || c == '.' || c == ' ')
         .filter(|s| !s.is_empty())
         .collect();
 
     match parts.len() {
-        // HH:MM
-        2 if s.contains(':') && !s.contains('/') && !s.contains('-') => {
-            let h: u32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let start = now.date_naive().and_hms_opt(h, m, 0)?;
-            let end = now.date_naive().and_hms_opt(h, m, 59)?;
-            Some(DatetimeRange {
-                start: Local
-                    .from_local_datetime(&start)
-                    .earliest()?
-                    .timestamp(),
-                end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-            })
+        1 if parts[0].len() == 4 && parts[0].chars().all(|c| c.is_ascii_digit()) => {
+            return handle_date_yyyy(&parts);
         }
-        // HH:MM:SS
-        3 if s.contains(':') && !s.contains('/') && !s.contains('-') => {
-            let h: u32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let sec: u32 = parts[2].parse().ok()?;
-            let dt = now.date_naive().and_hms_opt(h, m, sec)?;
-            let ts = Local.from_local_datetime(&dt).earliest()?.timestamp();
-            Some(DatetimeRange { start: ts, end: ts })
+        2 if (parts[0].len() == 4 || parts[0].parse::<i32>().unwrap_or(0) > 12)
+            && parts[0].chars().all(|c| c.is_ascii_digit())
+            && parts[1].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            return handle_date_ym_md(s_trimmed, &parts, now);
         }
-        // M/D (今年の M/D)
-        2 => {
-            let m: u32 = parts[0].parse().ok()?;
-            let d: u32 = parts[1].parse().ok()?;
-            let start = NaiveDate::from_ymd_opt(now.year(), m, d)?
-                .and_hms_opt(0, 0, 0)?;
-            let end = NaiveDate::from_ymd_opt(now.year(), m, d)?
-                .and_hms_opt(23, 59, 59)?;
-            Some(DatetimeRange {
-                start: Local
-                    .from_local_datetime(&start)
-                    .earliest()?
-                    .timestamp(),
-                end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-            })
-        }
-        // YYYY/M/D
-        3 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d: u32 = parts[2].parse().ok()?;
-            let start =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
-            let end =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
-            Some(DatetimeRange {
-                start: Local
-                    .from_local_datetime(&start)
-                    .earliest()?
-                    .timestamp(),
-                end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-            })
-        }
-        // YYYY/M/D HH:MM
-        5 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d: u32 = parts[2].parse().ok()?;
-            let h: u32 = parts[3].parse().ok()?;
-            let min: u32 = parts[4].parse().ok()?;
-            let start =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(h, min, 0)?;
-            let end =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(h, min, 59)?;
-            Some(DatetimeRange {
-                start: Local
-                    .from_local_datetime(&start)
-                    .earliest()?
-                    .timestamp(),
-                end: Local.from_local_datetime(&end).earliest()?.timestamp(),
-            })
-        }
-        // YYYY/M/D HH:MM:SS
-        6 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d: u32 = parts[2].parse().ok()?;
-            let h: u32 = parts[3].parse().ok()?;
-            let min: u32 = parts[4].parse().ok()?;
-            let sec: u32 = parts[5].parse().ok()?;
-            let dt =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(h, min, sec)?;
-            let ts = Local.from_local_datetime(&dt).earliest()?.timestamp();
-            Some(DatetimeRange { start: ts, end: ts })
-        }
-        _ => None,
+        _ => {}
     }
+
+    // 2. chrono_english によるパース
+    // 相対（ago含む）と自然言語を試行
+    if let Ok(dt) = chrono_english::parse_date_string(&s_lower, now, chrono_english::Dialect::Uk) {
+        // 時刻指定を含む場合は精度を確認
+        if s_lower.contains(':') {
+            // コロンが1つの場合は1分間の範囲とする (HH:MM)
+            if s_lower.matches(':').count() == 1 {
+                let start = dt.with_second(0).unwrap_or(dt);
+                let end = dt.with_second(59).unwrap_or(dt);
+                return Some(DatetimeRange { start: start.timestamp(), end: end.timestamp() });
+            }
+            // コロンが2つの場合は時点として扱う (HH:MM:SS)
+            return Some(DatetimeRange { start: dt.timestamp(), end: dt.timestamp() });
+        }
+        // それ以外（"today", "next friday"等）は1日の範囲とする
+        let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
+        let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
+        return make_range(start, end);
+    }
+    
+    // ago 指定の明示的試行 (chrono_english::parse_duration)
+    if s_lower.contains("ago") {
+        if let Ok(interval) = chrono_english::parse_duration(&s_lower) {
+            use chrono_english::Interval;
+            let past = match interval {
+                Interval::Seconds(s) => now + chrono::Duration::seconds(s.into()),
+                Interval::Days(d) => now + chrono::Duration::days(d as i64),
+                Interval::Months(m) => {
+                    let mut y = now.year();
+                    let mut mo = now.month() as i32 + m;
+                    while mo <= 0 { y -= 1; mo += 12; }
+                    now.with_year(y).and_then(|d| d.with_month(mo as u32)).unwrap_or(now)
+                }
+            };
+            return Some(DatetimeRange { start: past.timestamp(), end: past.timestamp() });
+        }
+    }
+
+    // 3. dateparser による多様な絶対パース
+    if let Ok(dt) = dateparser::parse_with_timezone(s_trimmed, &Local) {
+        if s_trimmed.contains(':') {
+            // コロンが1つの場合は1分間の範囲とする
+            if s_trimmed.matches(':').count() == 1 {
+                let start = dt.with_second(0).unwrap_or(dt);
+                let end = dt.with_second(59).unwrap_or(dt);
+                return Some(DatetimeRange { start: start.timestamp(), end: end.timestamp() });
+            }
+            return Some(DatetimeRange { start: dt.timestamp(), end: dt.timestamp() });
+        }
+        let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
+        let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
+        return make_range(start, end);
+    }
+
+    None
+}
+
+/// 1パーツ（YYYY等）の処理。
+fn handle_date_yyyy(parts: &[&str]) -> Option<DatetimeRange> {
+    let y: i32 = parts[0].parse().ok()?;
+    if (1000..=9999).contains(&y) {
+        let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
+        let end = NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
+        make_range(start, end)
+    } else {
+        None
+    }
+}
+
+/// 2パーツ（YYYY/M or M/D）の処理。
+fn handle_date_ym_md(_s: &str, parts: &[&str], now: DateTime<Local>) -> Option<DatetimeRange> {
+    let (p1, p2): (i32, u32) = (parts[0].parse().ok()?, parts[1].parse().ok()?);
+    if p1 >= 1000 || p1 > 12 {
+        // YYYY/M と判定
+        let start = NaiveDate::from_ymd_opt(p1, p2, 1)?.and_hms_opt(0, 0, 0)?;
+        make_range(start, get_month_end_hms(p1, p2))
+    } else {
+        // 今年の M/D と判定
+        let start = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?.and_hms_opt(0, 0, 0)?;
+        let end = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?.and_hms_opt(23, 59, 59)?;
+        make_range(start, end)
+    }
+}
+
+/// ヘルパー: 指定年月の末日（23:59:59）を取得します。
+fn get_month_end_hms(y: i32, m: u32) -> chrono::NaiveDateTime {
+    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    NaiveDate::from_ymd_opt(next_y, next_m, 1)
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(y, m, 28).unwrap()) // 安全策
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        - chrono::Duration::seconds(1)
+}
+
+/// ヘルパー: NaiveDateTime のペアから DatetimeRange を生成します。
+fn make_range(
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> Option<DatetimeRange> {
+    let ts_start = Local.from_local_datetime(&start).earliest()?.timestamp();
+    let ts_end = Local.from_local_datetime(&end).earliest()?.timestamp();
+    Some(DatetimeRange {
+        start: ts_start,
+        end: ts_end,
+    })
 }
 
 /// メタデータ取得エラー時にエラー値を返すためのラッパー。
@@ -678,6 +606,14 @@ mod tests {
 
         // 各種区切り文字
         assert!(parse_datetime("2024-01-01").is_some());
-        assert!(parse_datetime("2024.01.01").is_none()); // サポート外
+        assert!(parse_datetime("2024.01.01").is_some()); // dateparserによりサポート済み
+
+        // 新規サポート形式 (YYYY, YYYY/M)
+        let yyyy = parse_datetime("2024").unwrap();
+        assert!(yyyy.start < yyyy.end);
+        
+        let ym = parse_datetime("2013/1").unwrap();
+        assert!(ym.start < ym.end);
+        // 2013/1/1 00:00:00 〜 2013/1/31 23:59:59 のはず
     }
 }

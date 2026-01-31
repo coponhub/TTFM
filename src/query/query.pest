@@ -135,7 +135,7 @@ label = { quoted_string | number | unquoted_string }
 identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
-number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC | "/" | "-") }
+number = @{ "-"? ~ ASCII_DIGIT+ ~ !("." | ASCII_ALPHANUMERIC | "/" | "-" | (":" ~ !("=" | "^" | "<" | ">"))) }
 
 // Quoted strings
 quoted_string = ${

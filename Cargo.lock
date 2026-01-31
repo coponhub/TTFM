@@ -579,6 +579,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-english"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38a56613410c9249673f4676ab8d27c70949814accb27b6b738009e2ff1034a1"
+dependencies = [
+ "chrono",
+ "scanlex",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -890,6 +900,18 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "dateparser"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2ef451feee09ae5ecd8a02e738bd9adee9266b8fa9b44e22d3ce968d8694238"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "lazy_static",
+ "regex",
 ]
 
 [[package]]
@@ -1764,6 +1786,12 @@ dependencies = [
  "once_cell",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leb128"
@@ -2692,6 +2720,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "scanlex"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "088c5d71572124929ea7549a8ce98e1a6fd33d0a38367b09027b382e67c033db"
+
+[[package]]
 name = "sea-query"
 version = "0.32.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3310,7 +3344,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-english",
  "clap",
+ "dateparser",
  "dirs 5.0.1",
  "duckdb",
  "file-id",

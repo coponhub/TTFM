@@ -52,3 +52,39 @@ fn test_slash_separated_date_query() -> anyhow::Result<()> {
 
     Ok(())
 }
+#[test]
+fn test_unquoted_time_query() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let file_path = root.join("time_test.txt");
+    std::fs::write(&file_path, "time test")?;
+
+    // 本日の12:00:00に設定
+    let now = chrono::Local::now();
+    let target_time = now.date_naive().and_hms_opt(12, 0, 0).unwrap();
+    let status = std::process::Command::new("touch")
+        .args([
+            "-d",
+            &target_time.format("%Y-%m-%d %H:%M:%S").to_string(),
+            file_path.to_str().unwrap(),
+        ])
+        .status()?;
+    assert!(status.success());
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 引用符なしの時刻指定 query: mtime:12:00
+    let query = "mtime:12:00";
+    let res = fm.search(query, Default::default())?;
+
+    assert!(
+        !res.results.is_empty(),
+        "Should match file with unquoted time '12:00'"
+    );
+    assert_eq!(res.results[0].name, "time_test.txt");
+
+    Ok(())
+}
