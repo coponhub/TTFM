@@ -125,12 +125,29 @@ fn expand_comparison_with_recursion(
     // 演算のバリデーションを実施
     validate_comparison_operands(&cmp, schema)?;
 
+    // 連鎖比較 (a < b < c) の展開
+    if cmp.rest.len() > 1 {
+        let mut nodes = Vec::new();
+        let mut left = cmp.first.clone();
+        for (op, right) in cmp.rest {
+            let single_cmp = ComparisonNode {
+                first: left.clone(),
+                rest: vec![(op, right.clone())],
+            };
+            // 各比較を再帰的に展開
+            nodes.push(expand_comparison_with_recursion(schema, single_cmp)?);
+            left = right;
+        }
+        return Ok(QueryNode::And(nodes));
+    }
+
     // Firstオペランドの展開
     if let Operand::Aggregation(agg) = &mut cmp.first {
         *agg = Box::new(expand_aggregation(schema, (**agg).clone())?);
     }
 
     // Restオペランドの展開
+    // ここに来る時は rest.len() == 1 または 0 のはず
     for (_op, operand) in &mut cmp.rest {
         if let Operand::Aggregation(agg) = operand {
             *agg = Box::new(expand_aggregation(schema, (**agg).clone())?);
@@ -286,5 +303,31 @@ mod tests {
         assert!(!LogicalType::String.is_numeric());
         assert!(!LogicalType::Boolean.is_numeric());
         assert!(!LogicalType::Any.is_numeric());
+    }
+
+    #[test]
+    fn test_expand_chain_comparison() {
+        use crate::query::ast::{BasicOp, ComparisonOp};
+        let lens = Lens::base_standard();
+
+        // 10 < size: <= 100
+        let cmp = ComparisonNode {
+            first: Operand::Literal(crate::types::Label::from(10i64)),
+            rest: vec![
+                (ComparisonOp::Scalar(BasicOp::Lt), Operand::TypeRef(TagType::from("size"))),
+                (ComparisonOp::Scalar(BasicOp::Le), Operand::Literal(crate::types::Label::from(100i64))),
+            ],
+        };
+
+        let node = QueryNode::Comparison(cmp);
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 期待値: And([Comparison(10 < size:), Comparison(size: <= 100)])
+        if let QueryNode::And(nodes) = expanded {
+            assert_eq!(nodes.len(), 2);
+            // 内部の各 ComparisonNode は再帰的に展開されているはず
+        } else {
+            panic!("Expected QueryNode::And for chain comparison, got {:?}", expanded);
+        }
     }
 }

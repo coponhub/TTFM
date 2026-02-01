@@ -22,7 +22,7 @@ use crate::db::{Col, SqlType};
 use crate::query::ast::{ComparisonOp, ComparisonNode, Operand, QueryNode};
 use crate::query::lens_schema::{Lens, StorageMapping};
 use crate::types::{Label, SType, TagType};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
 
 /// 物理マッピングが解決された後のクエリノード。
@@ -536,26 +536,14 @@ fn resolve_operand_for_calc(
 
 fn resolve_comparison(
     lens: &Lens,
-    cmp: ComparisonNode,
+    mut cmp: ComparisonNode,
 ) -> Result<ResolvedNode> {
-    let mut nodes = Vec::new();
-    let mut current_left = cmp.first;
-
-    for (op, right) in cmp.rest {
-        nodes.push(resolve_single_match(
-            lens,
-            current_left,
-            op,
-            right.clone(),
-        )?);
-        current_left = right;
+    if cmp.rest.len() != 1 {
+        bail!("Logical resolver should have flattened the comparison chain");
     }
 
-    if nodes.len() == 1 {
-        Ok(nodes.pop().unwrap())
-    } else {
-        Ok(ResolvedNode::And(nodes))
-    }
+    let (op, right) = cmp.rest.pop().unwrap();
+    resolve_single_match(lens, cmp.first, op, right)
 }
 
 /// メイン解決ロジック（15パターンの比較処理）
@@ -1150,6 +1138,32 @@ mod tests {
                 assert_eq!(tag_type, TagType::Base(SType::Size));
             }
             _ => panic!("Expected TagRef"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_comparison_simple() {
+        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        let lens = Lens::base_standard();
+
+        // size: > 100
+        let cmp = ComparisonNode {
+            first: Operand::TypeRef("size".into()),
+            rest: vec![(
+                ComparisonOp::Scalar(BasicOp::Gt),
+                Operand::Literal(crate::types::Label::from(100i64)),
+            )],
+        };
+
+        let resolved = resolve_comparison(&lens, cmp).unwrap();
+        if let crate::query::lens_resolver::ResolvedNode::Match {
+            op, label, ..
+        } = resolved
+        {
+            assert_eq!(op, ComparisonOp::Scalar(BasicOp::Gt));
+            assert_eq!(label.as_i64(), 100);
+        } else {
+            panic!("Expected Match, got {:?}", resolved);
         }
     }
 }
