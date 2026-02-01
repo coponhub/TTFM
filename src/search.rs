@@ -44,7 +44,8 @@ impl FileManager {
         let limit = if n > 0 { n + 1 } else { 0 };
 
         let resolver = crate::query::lens_resolver::Resolver::new(query)?;
-        let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
+        let fetcher =
+            crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
         // 2-A. トップレベル集約・スカラー式ケース
         if let Some(_) = resolver.get_scalar_expression() {
@@ -451,8 +452,10 @@ impl FileManager {
             let res = (|| -> Result<()> {
                 let conn = Connection::open_in_memory()?;
 
-                let resolver = crate::query::lens_resolver::Resolver::new(&query_owned)?;
-                let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &conn);
+                let resolver =
+                    crate::query::lens_resolver::Resolver::new(&query_owned)?;
+                let fetcher =
+                    crate::query::fetcher::Fetcher::new(&resolver, &conn);
 
                 let registry_full = FunctionRegistry::with_standard();
                 let all_columns = registry_full.get_all_columns();

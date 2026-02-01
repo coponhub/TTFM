@@ -18,10 +18,18 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
     // path: は文字列型なので、+ 10（数値演算）は論理展開フェーズで失敗すべき
     let result = fm.search("(path: + 10) > 100", Default::default());
 
-    assert!(result.is_err(), "Non-numeric arithmetic should fail during logical resolution");
+    assert!(
+        result.is_err(),
+        "Non-numeric arithmetic should fail during logical resolution"
+    );
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Arithmetic operations are only possible for numeric types"), 
-            "Error message should indicate invalid arithmetic: {}", err_msg);
+    assert!(
+        err_msg.contains(
+            "Arithmetic operations are only possible for numeric types"
+        ),
+        "Error message should indicate invalid arithmetic: {}",
+        err_msg
+    );
 
     Ok(())
 }
@@ -39,10 +47,18 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
     // 文字列リテラルとの演算も失敗すべき
     let result = fm.search("('str' + 10) > 100", Default::default());
 
-    assert!(result.is_err(), "String literal arithmetic should fail during logical resolution");
+    assert!(
+        result.is_err(),
+        "String literal arithmetic should fail during logical resolution"
+    );
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("Arithmetic operations are only possible for numeric types"), 
-            "Error message should indicate invalid arithmetic: {}", err_msg);
+    assert!(
+        err_msg.contains(
+            "Arithmetic operations are only possible for numeric types"
+        ),
+        "Error message should indicate invalid arithmetic: {}",
+        err_msg
+    );
 
     Ok(())
 }

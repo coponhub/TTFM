@@ -1,7 +1,7 @@
 use crate::db::Col;
 use crate::query::ast::{ComparisonOp, QueryNode};
-use crate::query::logical_resolver::{LogicalSchema, LogicalType};
 use crate::query::functions::*;
+use crate::query::logical_resolver::{LogicalSchema, LogicalType};
 use crate::query::QueryFunction;
 use crate::types::{Label, LabelValue, SType, TagType};
 use duckdb::types::Value;
@@ -41,8 +41,6 @@ impl StorageMapping {
         }
     }
 }
-
-
 
 pub(crate) fn check_tag_match(tag_key: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
@@ -267,7 +265,9 @@ impl LogicalSchema for Lens {
                 return func.expand_projection(tag_type.clone());
             }
         }
-        QueryNode::Projection(crate::query::ast::Operand::TypeRef(tag_type.clone()))
+        QueryNode::Projection(crate::query::ast::Operand::TypeRef(
+            tag_type.clone(),
+        ))
     }
 }
 
@@ -427,8 +427,6 @@ impl ValueExt for Value {
         }
     }
 }
-
-
 
 /// ComparisonOp を sea_query の BinOper に変換します。
 pub fn to_bin_op(op: ComparisonOp) -> BinOper {
@@ -663,21 +661,41 @@ mod tests {
 
     #[test]
     fn test_logical_to_sql_mapping() {
-        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Integer), crate::db::SqlType::BIGINT);
-        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Float), crate::db::SqlType::DOUBLE);
-        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::String), crate::db::SqlType::VARCHAR);
-        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Boolean), crate::db::SqlType::BOOLEAN);
+        assert_eq!(
+            TagDescriptor::logical_to_sql(LogicalType::Integer),
+            crate::db::SqlType::BIGINT
+        );
+        assert_eq!(
+            TagDescriptor::logical_to_sql(LogicalType::Float),
+            crate::db::SqlType::DOUBLE
+        );
+        assert_eq!(
+            TagDescriptor::logical_to_sql(LogicalType::String),
+            crate::db::SqlType::VARCHAR
+        );
+        assert_eq!(
+            TagDescriptor::logical_to_sql(LogicalType::Boolean),
+            crate::db::SqlType::BOOLEAN
+        );
     }
 
     #[test]
     fn test_lens_get_logical_type() {
         let lens = Lens::base_standard();
         // size: is Integer
-        assert_eq!(lens.get_logical_type(&TagType::Base(SType::Size)), LogicalType::Integer);
+        assert_eq!(
+            lens.get_logical_type(&TagType::Base(SType::Size)),
+            LogicalType::Integer
+        );
         // path: is String
-        assert_eq!(lens.get_logical_type(&TagType::Base(SType::Path)), LogicalType::String);
+        assert_eq!(
+            lens.get_logical_type(&TagType::Base(SType::Path)),
+            LogicalType::String
+        );
         // is_dir: is Boolean
-        assert_eq!(lens.get_logical_type(&TagType::Base(SType::IsDir)), LogicalType::Boolean);
+        assert_eq!(
+            lens.get_logical_type(&TagType::Base(SType::IsDir)),
+            LogicalType::Boolean
+        );
     }
 }
-

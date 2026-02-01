@@ -1,5 +1,5 @@
-use ttfm::FileManager;
 use tempfile::tempdir;
+use ttfm::FileManager;
 
 #[test]
 fn test_arithmetic_projection_syntax() {
@@ -12,7 +12,7 @@ fn test_arithmetic_projection_syntax() {
     // This previously caused a syntax error
     let query = "(size: / 1024)";
     let result = fm.search(query, Default::default());
-    
+
     match &result {
         Ok(res) => {
             println!("Success! Parsed arithmetic projection.");
@@ -44,7 +44,7 @@ fn test_arithmetic_comparison_with_units() {
     std::fs::write(root.join("test.txt"), "some content").unwrap();
 
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    
+
     // Index the directory
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
@@ -56,8 +56,8 @@ fn test_arithmetic_comparison_with_units() {
 
     match &result {
         Ok(_) => {
-             println!("Success! Unit-aware arithmetic comparison worked.");
-        },
+            println!("Success! Unit-aware arithmetic comparison worked.");
+        }
         Err(e) => {
             panic!("Failed to parse arithmetic comparison: {}", e);
         }
@@ -85,21 +85,33 @@ fn test_complex_comparisons() {
 
     // 5. Agg vs Agg (Scalar Comparison)
     let query_agg_agg = "sum(size:) > count(extension:rs)";
-    assert!(fm.search(query_agg_agg, Default::default()).is_ok(), "Agg vs Agg should be valid");
+    assert!(
+        fm.search(query_agg_agg, Default::default()).is_ok(),
+        "Agg vs Agg should be valid"
+    );
 
     // 6. Agg Calculation vs Literal (Scalar Comparison)
     let query_agg_calc = "(sum(size:) / 1024) > 100";
-    assert!(fm.search(query_agg_calc, Default::default()).is_ok(), "Agg calculation vs Literal should be valid");
+    assert!(
+        fm.search(query_agg_calc, Default::default()).is_ok(),
+        "Agg calculation vs Literal should be valid"
+    );
 
     // 7. Proj vs Calculation (General Label Comparison - MUST have colon)
     let query_proj_calc = "size: :> (1024 * 1024)";
-    assert!(fm.search(query_proj_calc, Default::default()).is_ok(), "Proj vs Calculation with label op should be valid");
+    assert!(
+        fm.search(query_proj_calc, Default::default()).is_ok(),
+        "Proj vs Calculation with label op should be valid"
+    );
 
     // 8. FORBIDDEN: Proj vs Literal (Scalar Comparison - NO colon)
     // DESIGN: size: > 100 is Syntax Error
     let query_forbidden = "size: > 100";
     let res_forbidden = fm.search(query_forbidden, Default::default());
-    assert!(res_forbidden.is_err(), "size: > 100 should be a syntax error according to design");
+    assert!(
+        res_forbidden.is_err(),
+        "size: > 100 should be a syntax error according to design"
+    );
 
     // 9. FORBIDDEN: Agg vs Proj (Scalar Comparison - NO colon)
     // DESIGN: max(size:) == size: is likely Syntax Error if scalar op is restricted

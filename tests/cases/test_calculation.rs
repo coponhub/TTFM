@@ -31,10 +31,8 @@ fn test_calculation_literal_simple() -> anyhow::Result<()> {
     // デバッグ: Resolverとクエリの確認
     let resolver =
         ttfm::query::lens_resolver::Resolver::new("(1 + 2) :< size:")?;
-    let sql = ttfm::query::sql::build_pick_sql(
-        &resolver.resolved_query,
-        "oneview",
-    );
+    let sql =
+        ttfm::query::sql::build_pick_sql(&resolver.resolved_query, "oneview");
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
     println!("Generated SQL: {}", sql_str);
 
@@ -76,10 +74,8 @@ fn test_calculation_with_tag() -> anyhow::Result<()> {
     let resolver =
         ttfm::query::lens_resolver::Resolver::new("(size: + 100) > 1000")?;
     println!("ResolvedNode: {:?}", resolver.resolved_query);
-    let sql = ttfm::query::sql::build_pick_sql(
-        &resolver.resolved_query,
-        "oneview",
-    );
+    let sql =
+        ttfm::query::sql::build_pick_sql(&resolver.resolved_query, "oneview");
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
     println!("Generated SQL: {}", sql_str);
 
@@ -94,8 +90,10 @@ fn test_calculation_with_tag() -> anyhow::Result<()> {
     // large.txt (1000 + 100 = 1100 > 1000) がマッチする
     // small.txt (500 + 100 = 600 < 1000) はマッチしない
     assert!(!res.results.is_empty());
-    let has_large =
-        res.results.iter().any(|item| item.name.contains("large.txt"));
+    let has_large = res
+        .results
+        .iter()
+        .any(|item| item.name.contains("large.txt"));
     assert!(has_large, "Results should contain large.txt");
 
     // small.txtが含まれる場合は、より詳細な情報を出力
@@ -145,10 +143,8 @@ fn test_calculation_tag_comparison() -> anyhow::Result<()> {
     let resolver =
         ttfm::query::lens_resolver::Resolver::new("(1000 + 500) :< size:")?;
     println!("ResolvedNode: {:?}", resolver.resolved_query);
-    let sql = ttfm::query::sql::build_pick_sql(
-        &resolver.resolved_query,
-        "oneview",
-    );
+    let sql =
+        ttfm::query::sql::build_pick_sql(&resolver.resolved_query, "oneview");
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
     println!("Generated SQL: {}", sql_str);
 
@@ -163,8 +159,10 @@ fn test_calculation_tag_comparison() -> anyhow::Result<()> {
     // huge.txt (2000 > 1500) がマッチする
     // medium.txt (1000 < 1500) はマッチしない
     assert!(!res.results.is_empty());
-    let has_huge =
-        res.results.iter().any(|item| item.name.contains("huge.txt"));
+    let has_huge = res
+        .results
+        .iter()
+        .any(|item| item.name.contains("huge.txt"));
     assert!(has_huge, "Results should contain huge.txt");
 
     let has_medium = res
@@ -202,16 +200,14 @@ fn test_calculation_nested() -> anyhow::Result<()> {
     // big.txt (10 > 9) がマッチする
     // small.txt (5 < 9) はマッチしない
     assert!(!res.results.is_empty());
-    let has_big =
-        res.results.iter().any(|item| item.name.contains("big.txt"));
+    let has_big = res.results.iter().any(|item| item.name.contains("big.txt"));
     assert!(has_big, "Results should contain big.txt");
 
-    let has_small =
-        res.results.iter().any(|item| item.name.contains("small.txt"));
-    assert!(
-        !has_small,
-        "Results should not contain small.txt (5 < 9)"
-    );
+    let has_small = res
+        .results
+        .iter()
+        .any(|item| item.name.contains("small.txt"));
+    assert!(!has_small, "Results should not contain small.txt (5 < 9)");
 
     Ok(())
 }
@@ -237,13 +233,14 @@ fn test_calculation_size_unit() -> anyhow::Result<()> {
     // クエリ: (1MB + 100B) :< size:
     // 1MB + 100B = 1048576 + 100 = 1048676
     // つまりsize: > 1048676
-    let res =
-        fm.search("(1MB + 100B) :< size:", Default::default())?;
+    let res = fm.search("(1MB + 100B) :< size:", Default::default())?;
 
     // large.dat (1048776 > 1048676) がマッチする
     assert!(!res.results.is_empty());
-    let has_large =
-        res.results.iter().any(|item| item.name.contains("large.dat"));
+    let has_large = res
+        .results
+        .iter()
+        .any(|item| item.name.contains("large.dat"));
     assert!(has_large, "Results should contain large.dat");
 
     // medium.dat (1048576 < 1048676) はマッチしない
@@ -254,8 +251,10 @@ fn test_calculation_size_unit() -> anyhow::Result<()> {
     assert!(!has_medium, "Should not contain medium.dat");
 
     // small.dat (1048476 < 1048676) はマッチしない
-    let has_small =
-        res.results.iter().any(|item| item.name.contains("small.dat"));
+    let has_small = res
+        .results
+        .iter()
+        .any(|item| item.name.contains("small.dat"));
     assert!(!has_small, "Should not contain small.dat");
 
     Ok(())
@@ -373,8 +372,7 @@ fn test_calculation_aggregation_complex() -> anyhow::Result<()> {
 
     // クエリ: sum(size:) > (100 * 2)
     // sum = 250 > 200 なので条件を満たす
-    let res =
-        fm.search("sum(size:) > (100 * 2)", Default::default())?;
+    let res = fm.search("sum(size:) > (100 * 2)", Default::default())?;
 
     // 結果を出力
     println!("Results count: {}", res.results.len());

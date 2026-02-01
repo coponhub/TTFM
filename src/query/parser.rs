@@ -5,6 +5,7 @@ use crate::query::ast::{
 use crate::types::{Label, TagType, TypedTag};
 use crate::util::DotOk;
 use anyhow::{anyhow, Result};
+use pest::error::{Error, ErrorVariant};
 use pest::iterators::Pair;
 use pest::pratt_parser::{Assoc, Op, PrattParser};
 use pest::Parser;
@@ -271,9 +272,33 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
                 (ComparisonOp::Label(basic_op), right_op)
             }
             Rule::scalar_comparison => {
+                // 不適切なスカラー演算のチェック (Example: size: > 100)
+                check_invalid_scalar_comparison(
+                    &first_op,
+                    &actual_step,
+                    &inner_pairs,
+                )?;
+
                 let basic_op_str = actual_step.as_str();
                 let basic_op = parse_scalar_basic_op(basic_op_str)?;
                 let right_op = build_operand(inner_pairs.next().unwrap())?;
+
+                if let Operand::TypeRef(tt) = &right_op {
+                    let op_span = actual_step.as_span();
+                    let op_str = op_span.as_str();
+                    let message = format!(
+                        "Invalid operator '{}': Scalar comparison cannot be applied to a Projection ('{}:') on the right side.",
+                        op_str, tt.as_str()
+                    );
+                    // Use the operator span if possible, or just return a general error.
+                    // Since specific span tracking for right_op isn't set up, we use basic error.
+                    // But we can use actual_step.as_span() which is the operator.
+                    return Err(anyhow!(Error::<Rule>::new_from_span(
+                        ErrorVariant::CustomError { message },
+                        actual_step.as_span(),
+                    )));
+                }
+
                 (ComparisonOp::Scalar(basic_op), right_op)
             }
             _ => unreachable!(),
@@ -551,6 +576,39 @@ fn unescape_unquoted(s: &str) -> Result<String> {
     .to_ok()
 }
 
+/// 文法上は許容されたスカラー比較が、意味的に不正（プロジェクションへの適用）でないかチェックします。
+fn check_invalid_scalar_comparison(
+    first_op: &Operand,
+    op_pair: &Pair<Rule>,
+    remaining_pairs: &pest::iterators::Pairs<Rule>,
+) -> Result<()> {
+    if let Operand::TypeRef(tt) = first_op {
+        let op_span = op_pair.as_span();
+        let op_str = op_span.as_str();
+
+        // 右辺のトークンを先読みして修正例のメッセージを構築
+        let mut peek_pairs = remaining_pairs.clone();
+        let right_side = loop {
+            match peek_pairs.next() {
+                Some(p) if p.as_rule() == Rule::WHITESPACE => continue,
+                Some(p) => break p.as_str(),
+                None => break "value",
+            }
+        };
+
+        let message = format!(
+            "Invalid operator '{}': Scalar comparison cannot be applied to a Projection ('{}:'). \nDid you mean: '{}: :{} {}'",
+            op_str, tt.as_str(), tt.as_str(), op_str, right_side
+        );
+
+        return Err(anyhow!(Error::<Rule>::new_from_span(
+            ErrorVariant::CustomError { message },
+            op_span,
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,7 +791,9 @@ mod tests {
                             Operand::TypeRef(tt) => {
                                 assert_eq!(tt.as_str(), "size");
                             }
-                            _ => panic!("Expected TypeRef operand, got {:?}", op),
+                            _ => {
+                                panic!("Expected TypeRef operand, got {:?}", op)
+                            }
                         },
                         _ => panic!(
                             "Expected Projection inside sum, got {:?}",
@@ -765,5 +825,21 @@ mod tests {
             },
             _ => panic!("Expected Comparison, got {:?}", node),
         }
+    }
+
+    #[test]
+    fn test_mismatched_comparison_error() {
+        // size: > 100 (本来は :> であるべき)
+        let result = parse("size: > 100");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        // 期待される詳細なエラーメッセージが含まれているか確認 (Red)
+        assert!(
+            err_msg.contains("Invalid operator '>'"),
+            "Error message should point out the invalid operator. Got: {}",
+            err_msg
+        );
+        assert!(err_msg.contains("Did you mean: 'size: :> 100'"));
     }
 }

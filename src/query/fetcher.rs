@@ -1,5 +1,5 @@
-use crate::query::lens_schema::StorageMapping;
 use crate::query::lens_resolver::Resolver;
+use crate::query::lens_schema::StorageMapping;
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::ItemId;
 use crate::types::{Origin, SType, TagType};
@@ -177,7 +177,11 @@ impl<'a> Fetcher<'a> {
         use sea_query::PostgresQueryBuilder;
 
         let select_sql = crate::query::sql::build_fetch_label_groups_sql(
-            self.resolver, proj_type, "oneview", limit, offset,
+            self.resolver,
+            proj_type,
+            "oneview",
+            limit,
+            offset,
         )?;
 
         let sql_str = select_sql.to_string(PostgresQueryBuilder);
@@ -217,7 +221,10 @@ impl<'a> Fetcher<'a> {
             let results = self.decode_grouped_items(items_list_of_lists);
 
             groups.push(LabelGroup {
-                label: self.resolver.lens().resolve_label(proj_type, &label_val),
+                label: self
+                    .resolver
+                    .lens()
+                    .resolve_label(proj_type, &label_val),
                 results,
                 total_count: total_count as usize,
             });
@@ -393,7 +400,9 @@ impl<'a> Fetcher<'a> {
         };
 
         let tag_type = TagType::from(tag_type_str);
-        if let Some(label) = self.resolver.lens().decode_label_from_map(&tag_type, map) {
+        if let Some(label) =
+            self.resolver.lens().decode_label_from_map(&tag_type, map)
+        {
             let origin = map
                 .get(&origin_key)
                 .and_then(|v| match v {
@@ -435,14 +444,16 @@ pub fn fetch_ids(
 mod tests {
     use super::*;
     use crate::query::ast::QueryNode;
-    use crate::query::lens_schema::StorageMapping;
     use crate::query::lens_resolver::ResolvedNode;
+    use crate::query::lens_schema::StorageMapping;
     use crate::types::{Label, SType, TagType};
 
     #[test]
     fn test_expand_query_recursive() {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
-        let resolver = crate::query::lens_resolver::Resolver::new("directory:docs").unwrap();
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("directory:docs")
+                .unwrap();
         let expanded = &resolver.expanded_query;
 
         let _target_label = Label::from("docs");
@@ -456,7 +467,8 @@ mod tests {
     #[test]
     fn test_resolve_query_physical_mapping() {
         // Focused Lens 生成
-        let resolver = crate::query::lens_resolver::Resolver::new("size:100").unwrap();
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("size:100").unwrap();
         let resolved = &resolver.resolved_query;
 
         if let ResolvedNode::Match {
@@ -511,7 +523,8 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let plan = fetcher.pick(None, None).unwrap();
@@ -543,7 +556,8 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch_flat_table(None, None).unwrap();
@@ -576,7 +590,8 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -600,7 +615,10 @@ mod tests {
 
         // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
         // データがない -> fetch_boolean は FALSE (0) を返すはず
-        let resolver = crate::query::lens_resolver::Resolver::new("max(mtime:) < 2026-02-01").unwrap();
+        let resolver = crate::query::lens_resolver::Resolver::new(
+            "max(mtime:) < 2026-02-01",
+        )
+        .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.fetch_boolean().unwrap();

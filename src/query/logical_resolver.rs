@@ -62,7 +62,9 @@ pub(crate) fn expand_query_node(
     node: QueryNode,
 ) -> Result<QueryNode> {
     match node {
-        QueryNode::TypedTag(tt) => Ok(schema.expand_tag(&tt.label.tag_type(), &tt.label)),
+        QueryNode::TypedTag(tt) => {
+            Ok(schema.expand_tag(&tt.label.tag_type(), &tt.label))
+        }
         QueryNode::Projection(op) => {
             if let Operand::TypeRef(tag_type) = &op {
                 Ok(schema.expand_projection(tag_type))
@@ -172,7 +174,10 @@ fn validate_comparison_operands(
     Ok(())
 }
 
-fn validate_operand(operand: &Operand, schema: &impl LogicalSchema) -> Result<()> {
+fn validate_operand(
+    operand: &Operand,
+    schema: &impl LogicalSchema,
+) -> Result<()> {
     match operand {
         Operand::Calculation(calc) => validate_calculation(calc, schema),
         Operand::Aggregation(agg) => match agg.as_ref() {
@@ -205,7 +210,10 @@ pub fn validate_calculation(
 }
 
 /// オペランドの型を推論
-fn infer_type(operand: &Operand, schema: &impl LogicalSchema) -> Result<LogicalType> {
+fn infer_type(
+    operand: &Operand,
+    schema: &impl LogicalSchema,
+) -> Result<LogicalType> {
     match operand {
         Operand::Literal(label) => Ok(infer_logical_type_from_label(label)),
         Operand::TypeRef(tag_type) => Ok(schema.get_logical_type(tag_type)),
@@ -235,7 +243,9 @@ fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::ast::{CalculationNode, ComparisonNode, Operand, QueryNode};
+    use crate::query::ast::{
+        CalculationNode, ComparisonNode, Operand, QueryNode,
+    };
     use crate::query::lens_schema::Lens;
     use crate::types::{TagType, TypedTag};
 
@@ -263,17 +273,18 @@ mod tests {
         let cmp = ComparisonNode {
             first: Operand::Calculation(Box::new(calc)),
             rest: vec![(
-                crate::query::ast::ComparisonOp::Scalar(crate::query::ast::BasicOp::Gt),
+                crate::query::ast::ComparisonOp::Scalar(
+                    crate::query::ast::BasicOp::Gt,
+                ),
                 Operand::Literal(crate::types::Label::from(100i64)),
             )],
         };
         let node = QueryNode::Comparison(cmp);
         let result = expand_query_node(&lens, node);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Arithmetic operations are only possible for numeric types"));
+        assert!(result.unwrap_err().to_string().contains(
+            "Arithmetic operations are only possible for numeric types"
+        ));
     }
 
     #[test]
@@ -314,8 +325,14 @@ mod tests {
         let cmp = ComparisonNode {
             first: Operand::Literal(crate::types::Label::from(10i64)),
             rest: vec![
-                (ComparisonOp::Scalar(BasicOp::Lt), Operand::TypeRef(TagType::from("size"))),
-                (ComparisonOp::Scalar(BasicOp::Le), Operand::Literal(crate::types::Label::from(100i64))),
+                (
+                    ComparisonOp::Scalar(BasicOp::Lt),
+                    Operand::TypeRef(TagType::from("size")),
+                ),
+                (
+                    ComparisonOp::Scalar(BasicOp::Le),
+                    Operand::Literal(crate::types::Label::from(100i64)),
+                ),
             ],
         };
 
@@ -327,7 +344,10 @@ mod tests {
             assert_eq!(nodes.len(), 2);
             // 内部の各 ComparisonNode は再帰的に展開されているはず
         } else {
-            panic!("Expected QueryNode::And for chain comparison, got {:?}", expanded);
+            panic!(
+                "Expected QueryNode::And for chain comparison, got {:?}",
+                expanded
+            );
         }
     }
 }

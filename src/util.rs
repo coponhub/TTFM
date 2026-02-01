@@ -343,8 +343,10 @@ pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
             let y: i32 = parts[0].parse().ok()?;
             let m: u32 = parts[1].parse().ok()?;
             let d: u32 = parts[2].parse().ok()?;
-            let start = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
-            let end = NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
+            let start =
+                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
+            let end =
+                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
             return make_range(start, end);
         }
         _ => {}

@@ -288,7 +288,8 @@ mod tests {
         assert!(types.contains(&"size".to_string()));
 
         // Projection
-        let node = QueryNode::Projection(Operand::TypeRef(TagType::from("rank")));
+        let node =
+            QueryNode::Projection(Operand::TypeRef(TagType::from("rank")));
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
         assert!(types.contains(&"rank".to_string()));
@@ -340,7 +341,8 @@ mod tests {
     #[test]
     fn test_get_projections() {
         // Projection only
-        let node = QueryNode::Projection(Operand::TypeRef(TagType::from("path")));
+        let node =
+            QueryNode::Projection(Operand::TypeRef(TagType::from("path")));
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
         assert!(projs.contains(&"path".to_string()));

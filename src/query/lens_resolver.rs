@@ -19,7 +19,7 @@
 //! ```
 
 use crate::db::{Col, SqlType};
-use crate::query::ast::{ComparisonOp, ComparisonNode, Operand, QueryNode};
+use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::query::lens_schema::{Lens, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use anyhow::{bail, Result};
@@ -202,7 +202,9 @@ impl ResolvedNode {
     pub fn get_projection(&self) -> Option<TagType> {
         match self {
             ResolvedNode::Projection(op) => match op {
-                ResolvedOperand::TagRef { tag_type, .. } => Some(tag_type.clone()),
+                ResolvedOperand::TagRef { tag_type, .. } => {
+                    Some(tag_type.clone())
+                }
                 _ => None,
             },
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
@@ -244,9 +246,9 @@ impl ResolvedNode {
         for n in nodes {
             match n {
                 ResolvedNode::Projection(op) if storage.is_none() => {
-                     if let ResolvedOperand::TagRef { storage: s, .. } = op {
+                    if let ResolvedOperand::TagRef { storage: s, .. } = op {
                         storage = Some(s);
-                     }
+                    }
                 }
                 _ => filter_nodes.push(n.clone()),
             }
@@ -269,7 +271,9 @@ impl ResolvedNode {
             | ResolvedNode::AggregationAggregationMatch { .. }
             | ResolvedNode::AggregationTagMatch { .. } => true,
             ResolvedNode::TagCalculationMatch { calc, .. }
-            | ResolvedNode::CalculationMatch { calc, .. } => calc.contains_aggregation(),
+            | ResolvedNode::CalculationMatch { calc, .. } => {
+                calc.contains_aggregation()
+            }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
             }
@@ -715,7 +719,9 @@ pub fn flip_op(op: ComparisonOp) -> ComparisonOp {
     }
 }
 
-pub fn flip_basic_op(op: crate::query::ast::BasicOp) -> crate::query::ast::BasicOp {
+pub fn flip_basic_op(
+    op: crate::query::ast::BasicOp,
+) -> crate::query::ast::BasicOp {
     use crate::query::ast::BasicOp;
     match op {
         BasicOp::Gt => BasicOp::Lt,
@@ -770,7 +776,8 @@ impl Resolver {
         };
 
         // 論理展開 + 型チェック（logical_resolver.rsに委譲）
-        let expanded = crate::query::logical_resolver::expand_query_node(&lens, node)?;
+        let expanded =
+            crate::query::logical_resolver::expand_query_node(&lens, node)?;
 
         // 物理解決（このファイル内のresolve_query_node）
         let resolved = resolve_query_node(&lens, expanded.clone())?;
@@ -908,13 +915,11 @@ mod tests {
 
         // Prepare nodes
         // Case 1: And(Projection, Filter)
-        let projection = ResolvedNode::Projection(
-            ResolvedOperand::TagRef {
-                tag_type: TagType::Base(SType::Size),
-                storage: StorageMapping::Column(Col::Size),
-                sql_type: SqlType::BIGINT,
-            },
-        );
+        let projection = ResolvedNode::Projection(ResolvedOperand::TagRef {
+            tag_type: TagType::Base(SType::Size),
+            storage: StorageMapping::Column(Col::Size),
+            sql_type: SqlType::BIGINT,
+        });
         let filter = ResolvedNode::ColumnMatch {
             tag: SType::Extension,
             label: Label::from("txt"),
@@ -958,14 +963,8 @@ mod tests {
 
         let resolved = result.unwrap();
         assert_eq!(resolved.op, ArithmeticOp::Add);
-        assert_eq!(
-            resolved.left,
-            ResolvedOperand::Literal(Label::from(1))
-        );
-        assert_eq!(
-            resolved.right,
-            ResolvedOperand::Literal(Label::from(2))
-        );
+        assert_eq!(resolved.left, ResolvedOperand::Literal(Label::from(1)));
+        assert_eq!(resolved.right, ResolvedOperand::Literal(Label::from(2)));
     }
 
     #[test]
@@ -989,25 +988,17 @@ mod tests {
         // 左側がTagRefであることを確認
         match &resolved.left {
             ResolvedOperand::TagRef {
-                tag_type,
-                storage,
-                ..
+                tag_type, storage, ..
             } => {
                 assert_eq!(*tag_type, TagType::Base(SType::Size));
                 // size:はRowTagとして保存されている
-                assert!(matches!(
-                    storage,
-                    StorageMapping::RowTag { .. }
-                ));
+                assert!(matches!(storage, StorageMapping::RowTag { .. }));
             }
             _ => panic!("Expected TagRef"),
         }
 
         // 右側がLiteralであることを確認
-        assert_eq!(
-            resolved.right,
-            ResolvedOperand::Literal(Label::from(100))
-        );
+        assert_eq!(resolved.right, ResolvedOperand::Literal(Label::from(100)));
     }
 
     #[test]
@@ -1053,10 +1044,7 @@ mod tests {
         }
 
         // 右側がLiteralであることを確認
-        assert_eq!(
-            resolved.right,
-            ResolvedOperand::Literal(Label::from(3))
-        );
+        assert_eq!(resolved.right, ResolvedOperand::Literal(Label::from(3)));
     }
 
     #[test]
@@ -1072,7 +1060,9 @@ mod tests {
         // sum(size:) のAggregationNode
         let agg_node = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(TagType::Base(SType::Size)))),
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::Base(SType::Size),
+            ))),
         };
 
         // (sum(size:) + 100) のCalculationNode
@@ -1103,10 +1093,7 @@ mod tests {
         }
 
         // 右側がLiteralであることを確認
-        assert_eq!(
-            resolved.right,
-            ResolvedOperand::Literal(Label::from(100))
-        );
+        assert_eq!(resolved.right, ResolvedOperand::Literal(Label::from(100)));
     }
 
     #[test]
@@ -1143,7 +1130,9 @@ mod tests {
 
     #[test]
     fn test_resolve_comparison_simple() {
-        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
         let lens = Lens::base_standard();
 
         // size: > 100
@@ -1157,7 +1146,9 @@ mod tests {
 
         let resolved = resolve_comparison(&lens, cmp).unwrap();
         if let crate::query::lens_resolver::ResolvedNode::Match {
-            op, label, ..
+            op,
+            label,
+            ..
         } = resolved
         {
             assert_eq!(op, ComparisonOp::Scalar(BasicOp::Gt));

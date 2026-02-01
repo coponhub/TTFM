@@ -1,7 +1,7 @@
 use crate::db::{Col, Tbl};
 use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
-use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode};
+use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use sea_query::{
     Alias, BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
@@ -68,9 +68,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
         ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        ResolvedNode::Projection(op) => {
-            build_resolved_projection_sql(op, view)
-        }
+        ResolvedNode::Projection(op) => build_resolved_projection_sql(op, view),
         ResolvedNode::ColumnMatch { tag, label } => {
             build_column_match_sql(*tag, label, view)
         }
@@ -467,9 +465,7 @@ fn build_resolved_operand_expr(
                     | crate::types::LabelValue::Literal(s) => {
                         Expr::val(s.clone()).into()
                     }
-                    crate::types::LabelValue::Boolean(b) => {
-                        Expr::val(b).into()
-                    }
+                    crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
                 }
             }
         }
@@ -587,9 +583,7 @@ fn build_resolved_operand_subquery(
                     | crate::types::LabelValue::Literal(s) => {
                         Expr::val(s.clone()).into()
                     }
-                    crate::types::LabelValue::Boolean(b) => {
-                        Expr::val(b).into()
-                    }
+                    crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
                 }
             }
         }
@@ -1014,7 +1008,9 @@ fn build_resolved_projection_sql(
 
     match op {
         ResolvedOperand::TagRef {
-            tag_type, storage: _, ..
+            tag_type,
+            storage: _,
+            ..
         } => {
             let mut q = Query::select();
             q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
@@ -1311,7 +1307,10 @@ fn apply_generic_comparison(
     q
 }
 
-fn build_single_type_projection_sql(tagtype: &TagType, view: &str) -> SelectStatement {
+fn build_single_type_projection_sql(
+    tagtype: &TagType,
+    view: &str,
+) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
@@ -1694,8 +1693,8 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::lens_resolver::ResolvedOperand;
     use crate::query::ast::{BasicOp, QueryNode};
+    use crate::query::lens_resolver::ResolvedOperand;
     use crate::types::{Label, SType, TagType, TypedTag};
     use sea_query::{PostgresQueryBuilder, Query, SqliteQueryBuilder};
 
@@ -1872,7 +1871,9 @@ mod tests {
         assert!(sql_str.contains("COUNT(DISTINCT \"item_id\")"));
         // フィルタ条件 (IN サブクエリ形式: build_pick_sql により階層化される)
         assert!(sql_str.contains("IN (SELECT \"item_id\" FROM (SELECT"));
-        assert!(sql_str.contains("WHERE \"type\" = 'extension' AND \"label_str\" = 'txt'"));
+        assert!(sql_str.contains(
+            "WHERE \"type\" = 'extension' AND \"label_str\" = 'txt'"
+        ));
     }
 
     #[test]
@@ -1928,13 +1929,11 @@ mod tests {
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::And(vec![
-                ResolvedNode::Projection(
-                    ResolvedOperand::TagRef {
-                        tag_type: TagType::Base(SType::Size),
-                        storage: StorageMapping::Column(Col::Size),
-                        sql_type: crate::db::SqlType::BIGINT,
-                    },
-                ),
+                ResolvedNode::Projection(ResolvedOperand::TagRef {
+                    tag_type: TagType::Base(SType::Size),
+                    storage: StorageMapping::Column(Col::Size),
+                    sql_type: crate::db::SqlType::BIGINT,
+                }),
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),
                     storage: StorageMapping::RowTag {
@@ -1966,7 +1965,9 @@ mod tests {
     #[test]
     fn test_build_calculation_expr_simple() {
         use crate::query::ast::ArithmeticOp;
-        use crate::query::lens_resolver::{ResolvedCalculationNode, ResolvedOperand};
+        use crate::query::lens_resolver::{
+            ResolvedCalculationNode, ResolvedOperand,
+        };
         use crate::types::Label;
 
         let calc = ResolvedCalculationNode {
@@ -1995,9 +1996,6 @@ mod tests {
         let sql_str = format!("{:?}", expr);
 
         // 数値リテラルが含まれていることを確認
-        assert!(
-            sql_str.contains("42"),
-            "Should contain literal value 42"
-        );
+        assert!(sql_str.contains("42"), "Should contain literal value 42");
     }
 }
