@@ -357,7 +357,7 @@ fn resolve_type_ref_operand(
     tt: &TagType,
 ) -> Result<ResolvedOperand> {
     let (storage, sql_type) = match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type),
+        Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
             StorageMapping::RowTag {
                 column: Col::LabelStr,
@@ -414,7 +414,7 @@ pub(crate) fn resolve_query_node(
         QueryNode::TypedTag(tt) => {
             let tag_type = tt.label.tag_type();
             let (storage, sql_type) = match lens.look_up(&tag_type) {
-                Some(desc) => (desc.storage.clone(), desc.sql_type),
+                Some(desc) => (desc.storage.clone(), desc.sql_type()),
                 None => (
                     StorageMapping::RowTag {
                         column: Col::LabelStr,
@@ -439,7 +439,7 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Match {
                 tag_type,
                 storage: desc.storage.clone(),
-                sql_type: desc.sql_type,
+                sql_type: desc.sql_type(),
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
             })
@@ -709,7 +709,7 @@ fn get_storage_and_type(
     tt: &TagType,
 ) -> (StorageMapping, SqlType) {
     match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type),
+        Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
             StorageMapping::RowTag {
                 column: Col::LabelStr,

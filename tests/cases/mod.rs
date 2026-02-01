@@ -12,3 +12,4 @@ pub mod verify_search;
 pub mod verify_search_all;
 pub mod wasm_plugin_test;
 pub mod test_label_calc;
+pub mod test_validation;

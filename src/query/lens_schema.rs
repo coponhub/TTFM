@@ -1,5 +1,6 @@
 use crate::db::Col;
-use crate::query::ast::ComparisonOp;
+use crate::query::ast::{ComparisonOp, QueryNode};
+use crate::query::logical_resolver::{LogicalSchema, LogicalType};
 use crate::query::functions::*;
 use crate::query::QueryFunction;
 use crate::types::{Label, LabelValue, SType, TagType};
@@ -215,13 +216,59 @@ pub(crate) fn build_literal_condition(
 pub struct TagDescriptor {
     pub tag_type: TagType,
     pub storage: StorageMapping,
-    pub sql_type: crate::db::SqlType,
+    pub logical_type: LogicalType,
     pub logical_function: Option<Arc<dyn QueryFunction>>,
+}
+
+impl TagDescriptor {
+    /// 論理型から物理型（SqlType）への一方向マッピングを提供します。
+    pub fn logical_to_sql(lt: LogicalType) -> crate::db::SqlType {
+        use crate::db::SqlType;
+        match lt {
+            LogicalType::Integer => SqlType::BIGINT,
+            LogicalType::Float => SqlType::DOUBLE,
+            LogicalType::String => SqlType::VARCHAR,
+            LogicalType::Boolean => SqlType::BOOLEAN,
+            LogicalType::Any => SqlType::VARCHAR,
+        }
+    }
+
+    /// このタグの物理型（SqlType）を返します。
+    pub fn sql_type(&self) -> crate::db::SqlType {
+        Self::logical_to_sql(self.logical_type)
+    }
 }
 
 /// タグ知識の統合レジストリ
 pub struct Lens {
     registry: HashMap<TagType, TagDescriptor>,
+}
+
+impl LogicalSchema for Lens {
+    fn get_logical_type(&self, tag: &TagType) -> LogicalType {
+        self.look_up_or_default(tag).logical_type
+    }
+
+    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode {
+        if let Some(desc) = self.look_up(tag_type) {
+            if let Some(func) = &desc.logical_function {
+                return func.expand(label);
+            }
+        }
+        QueryNode::TypedTag(crate::types::TypedTag::new(
+            tag_type.clone(),
+            label.clone(),
+        ))
+    }
+
+    fn expand_projection(&self, tag_type: &TagType) -> QueryNode {
+        if let Some(desc) = self.look_up(tag_type) {
+            if let Some(func) = &desc.logical_function {
+                return func.expand_projection(tag_type.clone());
+            }
+        }
+        QueryNode::Projection(crate::query::ast::Operand::TypeRef(tag_type.clone()))
+    }
 }
 
 impl Lens {
@@ -257,7 +304,7 @@ impl Lens {
             // 物理ストレージ定義があれば上書き（Virtual は物理を上書きしない）
             if descriptor.storage != StorageMapping::Virtual {
                 existing.storage = descriptor.storage;
-                existing.sql_type = descriptor.sql_type;
+                existing.logical_type = descriptor.logical_type;
             }
             // 論理関数が提供されていれば上書き
             if descriptor.logical_function.is_some() {
@@ -285,7 +332,7 @@ impl Lens {
                 column: crate::db::Col::LabelStr,
                 tag_key: tag.as_str().to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            logical_type: LogicalType::String,
             logical_function: None,
         }
     }
@@ -418,7 +465,7 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
         .map(|(stype, col)| TagDescriptor {
             tag_type: TagType::Base(stype),
             storage: StorageMapping::Column(col),
-            sql_type: col.sql_type(),
+            logical_type: sql_to_logical(col.sql_type()),
             logical_function: None,
         })
         .collect()
@@ -451,7 +498,7 @@ fn row_tag_descriptors() -> Vec<TagDescriptor> {
                     column: col,
                     tag_key: key.to_string(),
                 },
-                sql_type: col.sql_type(),
+                logical_type: sql_to_logical(col.sql_type()),
                 logical_function: None,
             }
         })
@@ -461,10 +508,20 @@ fn row_tag_descriptors() -> Vec<TagDescriptor> {
                 column: Col::LabelStr,
                 tag_key: "name".to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            logical_type: LogicalType::String,
             logical_function: Some(Arc::new(FilenameQuery)),
         }))
         .collect()
+}
+
+fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
+    match st {
+        crate::db::SqlType::BIGINT => LogicalType::Integer,
+        crate::db::SqlType::DOUBLE => LogicalType::Float,
+        crate::db::SqlType::VARCHAR => LogicalType::String,
+        crate::db::SqlType::BOOLEAN => LogicalType::Boolean,
+        _ => LogicalType::Any,
+    }
 }
 
 fn virtual_tag_descriptors() -> Vec<TagDescriptor> {
@@ -488,9 +545,8 @@ fn virtual_tag_descriptors() -> Vec<TagDescriptor> {
         .map(|(stype, func)| TagDescriptor {
             tag_type: TagType::Base(stype),
             storage: StorageMapping::Virtual,
-            // Virtual タグの型は一概に言えないが、検索時は文字列として扱われることが多い
-            // 必要に応じてマッピングを変えるが、デフォルトは VARCHAR
-            sql_type: crate::db::SqlType::VARCHAR,
+            // Virtual タグのデフォルトは文字列
+            logical_type: LogicalType::String,
             logical_function: Some(func),
         })
         .collect()
@@ -603,6 +659,25 @@ mod tests {
                 stype
             );
         }
+    }
+
+    #[test]
+    fn test_logical_to_sql_mapping() {
+        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Integer), crate::db::SqlType::BIGINT);
+        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Float), crate::db::SqlType::DOUBLE);
+        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::String), crate::db::SqlType::VARCHAR);
+        assert_eq!(TagDescriptor::logical_to_sql(LogicalType::Boolean), crate::db::SqlType::BOOLEAN);
+    }
+
+    #[test]
+    fn test_lens_get_logical_type() {
+        let lens = Lens::base_standard();
+        // size: is Integer
+        assert_eq!(lens.get_logical_type(&TagType::Base(SType::Size)), LogicalType::Integer);
+        // path: is String
+        assert_eq!(lens.get_logical_type(&TagType::Base(SType::Path)), LogicalType::String);
+        // is_dir: is Boolean
+        assert_eq!(lens.get_logical_type(&TagType::Base(SType::IsDir)), LogicalType::Boolean);
     }
 }
 
