@@ -1,4 +1,5 @@
-use crate::query::lens::{Lens, StorageMapping};
+use crate::query::lens_schema::StorageMapping;
+use crate::query::lens_resolver::Resolver;
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::ItemId;
 use crate::types::{Origin, SType, TagType};
@@ -18,13 +19,13 @@ pub struct PickPlan {
 
 /// クエリに基づきデータベースからデータを取得（Fetch）を担当する。
 pub struct Fetcher<'a> {
-    pub lens: &'a Lens,
+    pub resolver: &'a Resolver,
     pub conn: &'a duckdb::Connection,
 }
 
 impl<'a> Fetcher<'a> {
-    pub fn new(lens: &'a Lens, conn: &'a duckdb::Connection) -> Self {
-        Self { lens, conn }
+    pub fn new(resolver: &'a Resolver, conn: &'a duckdb::Connection) -> Self {
+        Self { resolver, conn }
     }
 
     /// 合致するアイテムの ID と Rank を抽出する計画を立て、実行します。
@@ -35,15 +36,15 @@ impl<'a> Fetcher<'a> {
     ) -> Result<PickPlan> {
         use sea_query::{Expr, Order};
 
-        let resolved = &self.lens.resolved_query;
+        let resolved = &self.resolver.resolved_query;
 
         // 1. SQL 構築
         let mut select_sql =
             crate::query::sql::build_pick_sql(resolved, "oneview");
 
         // 検索仕様に基づき Rank と ItemId で降順ソート
-        let rank_col = self.lens.resolve_col(SType::Rank)?;
-        let id_col = self.lens.resolve_col(SType::ItemId)?;
+        let rank_col = self.resolver.lens().resolve_col(SType::Rank)?;
+        let id_col = self.resolver.lens().resolve_col(SType::ItemId)?;
 
         select_sql.order_by_expr(Expr::col(rank_col).into(), Order::Desc);
         select_sql.order_by_expr(Expr::col(id_col).into(), Order::Desc);
@@ -66,7 +67,7 @@ impl<'a> Fetcher<'a> {
 
     /// クエリをトップレベルのスカラー式（集約計算など）として実行し、単一の数値を返します。
     pub fn fetch_scalar(&self) -> Result<f64> {
-        let op = self.lens.get_scalar_expression().ok_or_else(|| {
+        let op = self.resolver.get_scalar_expression().ok_or_else(|| {
             anyhow::anyhow!("Query is not a top-level scalar expression")
         })?;
 
@@ -109,7 +110,7 @@ impl<'a> Fetcher<'a> {
     /// ブーリアンのみを返す特殊なクエリを実行します。
     pub fn fetch_boolean(&self) -> Result<bool> {
         let sql = crate::query::sql::build_boolean_sql(
-            &self.lens.resolved_query,
+            &self.resolver.resolved_query,
             "oneview",
         );
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
@@ -135,7 +136,7 @@ impl<'a> Fetcher<'a> {
         use sea_query::PostgresQueryBuilder;
 
         let select_sql = crate::query::sql::build_fetch_items_sql(
-            &self.lens.resolved_query,
+            &self.resolver.resolved_query,
             "oneview",
             limit,
             offset,
@@ -176,7 +177,7 @@ impl<'a> Fetcher<'a> {
         use sea_query::PostgresQueryBuilder;
 
         let select_sql = crate::query::sql::build_fetch_label_groups_sql(
-            self.lens, proj_type, "oneview", limit, offset,
+            self.resolver, proj_type, "oneview", limit, offset,
         )?;
 
         let sql_str = select_sql.to_string(PostgresQueryBuilder);
@@ -191,7 +192,7 @@ impl<'a> Fetcher<'a> {
         let mut rows = stmt.query([])?;
         let mut groups = Vec::new();
 
-        let desc = self.lens.look_up_or_default(proj_type);
+        let desc = self.resolver.lens().look_up_or_default(proj_type);
         let main_col_name = match &desc.storage {
             StorageMapping::Column(col) => col.name(),
             StorageMapping::RowTag { column, .. } => column.name(),
@@ -216,7 +217,7 @@ impl<'a> Fetcher<'a> {
             let results = self.decode_grouped_items(items_list_of_lists);
 
             groups.push(LabelGroup {
-                label: self.lens.resolve_label(proj_type, &label_val),
+                label: self.resolver.lens().resolve_label(proj_type, &label_val),
                 results,
                 total_count: total_count as usize,
             });
@@ -233,8 +234,8 @@ impl<'a> Fetcher<'a> {
     ) -> Result<Vec<RawTagRow>> {
         use sea_query::PostgresQueryBuilder;
         let select_sql = crate::query::sql::build_flat_table_sql(
-            &self.lens.resolved_query,
-            &self.lens.expanded_query,
+            &self.resolver.resolved_query,
+            &self.resolver.expanded_query,
             "oneview",
             limit,
             offset,
@@ -258,8 +259,8 @@ impl<'a> Fetcher<'a> {
         metadata: Option<&HashMap<String, String>>,
     ) -> Result<()> {
         let select_sql = crate::query::sql::build_flat_table_sql(
-            &self.lens.resolved_query,
-            &self.lens.expanded_query,
+            &self.resolver.resolved_query,
+            &self.resolver.expanded_query,
             "oneview",
             None,
             None,
@@ -392,7 +393,7 @@ impl<'a> Fetcher<'a> {
         };
 
         let tag_type = TagType::from(tag_type_str);
-        if let Some(label) = self.lens.decode_label_from_map(&tag_type, map) {
+        if let Some(label) = self.resolver.lens().decode_label_from_map(&tag_type, map) {
             let origin = map
                 .get(&origin_key)
                 .and_then(|v| match v {
@@ -434,14 +435,15 @@ pub fn fetch_ids(
 mod tests {
     use super::*;
     use crate::query::ast::QueryNode;
-    use crate::query::lens::{Lens, ResolvedNode, StorageMapping};
+    use crate::query::lens_schema::StorageMapping;
+    use crate::query::lens_resolver::ResolvedNode;
     use crate::types::{Label, SType, TagType};
 
     #[test]
     fn test_expand_query_recursive() {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
-        let lens = Lens::with_standard("directory:docs").unwrap();
-        let expanded = &lens.expanded_query;
+        let resolver = crate::query::lens_resolver::Resolver::new("directory:docs").unwrap();
+        let expanded = &resolver.expanded_query;
 
         let _target_label = Label::from("docs");
 
@@ -454,8 +456,8 @@ mod tests {
     #[test]
     fn test_resolve_query_physical_mapping() {
         // Focused Lens 生成
-        let lens = Lens::with_standard("size:100").unwrap();
-        let resolved = &lens.resolved_query;
+        let resolver = crate::query::lens_resolver::Resolver::new("size:100").unwrap();
+        let resolved = &resolver.resolved_query;
 
         if let ResolvedNode::Match {
             storage, sql_type, ..
@@ -509,8 +511,8 @@ mod tests {
         )
         .unwrap();
 
-        let lens = Lens::with_standard("extension:rs").unwrap();
-        let fetcher = Fetcher::new(&lens, &conn);
+        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
 
         let plan = fetcher.pick(None, None).unwrap();
 
@@ -541,8 +543,8 @@ mod tests {
         )
         .unwrap();
 
-        let lens = Lens::with_standard("extension:rs").unwrap();
-        let fetcher = Fetcher::new(&lens, &conn);
+        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch_flat_table(None, None).unwrap();
         assert_eq!(results.len(), 2); // extension + is_dir
@@ -574,8 +576,8 @@ mod tests {
         )
         .unwrap();
 
-        let lens = Lens::with_standard("extension:rs").unwrap();
-        let fetcher = Fetcher::new(&lens, &conn);
+        let resolver = crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
 
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("test.parquet");
@@ -598,8 +600,8 @@ mod tests {
 
         // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
         // データがない -> fetch_boolean は FALSE (0) を返すはず
-        let lens = Lens::with_standard("max(mtime:) < 2026-02-01").unwrap();
-        let fetcher = Fetcher::new(&lens, &conn);
+        let resolver = crate::query::lens_resolver::Resolver::new("max(mtime:) < 2026-02-01").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.fetch_boolean().unwrap();
         assert!(!res); // FALSE

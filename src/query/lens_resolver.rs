@@ -1,46 +1,29 @@
-use crate::db::Col;
-use crate::query::ast::ComparisonOp;
-use crate::query::functions::*;
-use crate::query::QueryFunction;
-use crate::types::{Label, LabelValue, SType, TagType};
+//! # 物理解決器（Lens Resolver）
+//!
+//! Query AST を OneView の物理構造にマッピングします。
+//!
+//! ## 責務
+//!
+//! 1. **StorageMappingの決定**: Column/RowTag/Virtual の判定
+//! 2. **SQL型の解決**: タグに対応する物理的なSQL型を決定
+//! 3. **物理解決済みノードの生成**: ResolvedNode への変換
+//!
+//! ## 処理フロー
+//!
+//! ```text
+//! QueryNode (論理展開済み)
+//!   ↓ resolve_query_node()
+//! ResolvedNode (物理解決済み)
+//!   ↓ sql.rs
+//! SQL文（OneViewに対するクエリ）
+//! ```
+
+use crate::db::{Col, SqlType};
+use crate::query::ast::{ComparisonOp, ComparisonNode, Operand, QueryNode};
+use crate::query::lens_schema::{Lens, StorageMapping};
+use crate::types::{Label, SType, TagType};
 use anyhow::Result;
-use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
-use std::collections::HashMap;
-use std::sync::Arc;
-
-/// タグの物理的な格納場所
-#[derive(Debug, PartialEq, Clone)]
-pub enum StorageMapping {
-    /// oneview の直接のカラム
-    Column(Col),
-    /// oneview の行ベースのタグ (特定のラベルカラム + タグ名)
-    RowTag { column: Col, tag_key: String },
-    /// 他のタグに展開される論理タグ
-    Virtual,
-}
-
-impl StorageMapping {
-    /// このストレージマッピングに基づき、指定された演算子とラベルに対する SQL 条件を生成します。
-    pub fn to_condition(
-        &self,
-        op: ComparisonOp,
-        label: &Label,
-        sql_type: crate::db::SqlType,
-    ) -> Condition {
-        match self {
-            StorageMapping::Column(col) => {
-                build_column_condition(*col, op, label, sql_type, false)
-            }
-            StorageMapping::RowTag { column, tag_key } => {
-                Condition::all().add(check_tag_match(tag_key)).add(
-                    build_column_condition(*column, op, label, sql_type, true),
-                )
-            }
-            StorageMapping::Virtual => Condition::any(),
-        }
-    }
-}
 
 /// 物理マッピングが解決された後のクエリノード。
 #[derive(Debug, Clone, PartialEq)]
@@ -53,14 +36,14 @@ pub enum ResolvedNode {
     Projection(ResolvedOperand),
     /// 物理カラムへの直接マッチ。
     ColumnMatch {
-        tag: crate::types::SType,
+        tag: SType,
         label: Label,
     },
     /// 物理的な条件。
     Match {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: crate::db::SqlType,
+        sql_type: SqlType,
         op: ComparisonOp,
         label: Label,
     },
@@ -81,7 +64,7 @@ pub enum ResolvedNode {
     TagCalculationMatch {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: crate::db::SqlType,
+        sql_type: SqlType,
         op: ComparisonOp,
         calc: ResolvedCalculationNode,
     },
@@ -102,7 +85,7 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: crate::db::SqlType,
+        sql_type: SqlType,
     },
 }
 
@@ -124,7 +107,7 @@ pub enum ResolvedOperand {
     TagRef {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: crate::db::SqlType,
+        sql_type: SqlType,
     },
     /// ネストした算術演算
     Calculation(Box<ResolvedCalculationNode>),
@@ -346,505 +329,15 @@ fn check_tag_match(tag_key: &str) -> SimpleExpr {
     if tag_key.contains('*') || tag_key.contains('?') || tag_key.contains('[') {
         tag_op = BinOper::Custom("GLOB");
     }
-    Expr::col(crate::db::Col::Type).binary(tag_op, tag_key)
+    Expr::col(Col::Type).binary(tag_op, tag_key)
 }
 
-fn build_column_condition(
-    col: Col,
-    op: ComparisonOp,
-    label: &Label,
-    sql_type: crate::db::SqlType,
-    _is_generic_context: bool,
-) -> Condition {
-    let bin_op = to_bin_op(op);
+// ========== 物理解決関数群 ==========
 
-    // 汎用カラムか？ (oneviewのRowTag用カラム)
-    let is_generic_row_col = col == Col::LabelStr
-        || col == Col::LabelInt
-        || col == Col::LabelDouble
-        || col == Col::LabelBool;
-
-    match label.value() {
-        crate::types::LabelValue::Integer(i) => {
-            build_int_condition(col, bin_op, i, is_generic_row_col)
-        }
-        crate::types::LabelValue::Boolean(b) => build_str_condition(
-            col,
-            bin_op,
-            &b.to_string(),
-            sql_type,
-            is_generic_row_col,
-        ),
-        crate::types::LabelValue::String(s) => {
-            build_str_condition(col, bin_op, &s, sql_type, is_generic_row_col)
-        }
-        crate::types::LabelValue::Literal(s) => {
-            build_literal_condition(col, bin_op, &s, is_generic_row_col)
-        }
-    }
-}
-
-fn build_int_condition(
-    col: Col,
-    op: BinOper,
-    val: i64,
-    is_generic: bool,
-) -> Condition {
-    let mut cond = Condition::any();
-    if col != Col::LabelStr {
-        cond = cond.add(Expr::col(col).binary(op, Expr::val(val)));
-    }
-    if is_generic {
-        cond = cond
-            .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(val as f64)));
-        if col == Col::LabelStr {
-            cond =
-                cond.add(Expr::col(Col::LabelInt).binary(op, Expr::val(val)));
-        }
-    }
-    cond
-}
-
-fn build_str_condition(
-    col: Col,
-    op: BinOper,
-    val: &str,
-    sql_type: crate::db::SqlType,
-    is_generic: bool,
-) -> Condition {
-    let string_cond = check_string_match(col, op, val, sql_type)
-        .map(|expr| Condition::any().add(expr));
-    let generic_conds = if is_generic {
-        try_parse_generic_value_as_cond(col, op, val)
-    } else {
-        None
-    };
-
-    [string_cond, generic_conds]
-        .into_iter()
-        .flatten() // None を除去
-        .fold(Condition::any(), |acc, cond| acc.add(cond))
-}
-
-fn check_string_match(
-    col: Col,
-    op: BinOper,
-    val: &str,
-    sql_type: crate::db::SqlType,
-) -> Option<sea_query::SimpleExpr> {
-    let is_numeric_field = matches!(
-        sql_type,
-        crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE
-    );
-
-    if is_numeric_field {
-        return None;
-    }
-
-    let (val_str, effective_op) = if val.starts_with('^') {
-        (format!("{}*", &val[1..]), BinOper::Custom("GLOB"))
-    } else if val.contains('*') || val.contains('?') || val.contains('[') {
-        (val.to_string(), BinOper::Custom("GLOB"))
-    } else {
-        (val.to_string(), op)
-    };
-
-    Some(Expr::col(col).binary(effective_op, val_str))
-}
-
-fn try_parse_generic_value_as_cond(
-    col: Col,
-    op: BinOper,
-    val: &str,
-) -> Option<Condition> {
-    // Try Integer -> Float -> Boolean chain
-    val.parse::<i64>()
-        .ok()
-        .map(|i| {
-            let mut c = Condition::any()
-                .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
-                .add(
-                    Expr::col(Col::LabelDouble).binary(op, Expr::val(i as f64)),
-                );
-            if col == Col::LabelStr {
-                c = c.add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)));
-            }
-            c
-        })
-        .or_else(|| {
-            val.parse::<f64>().ok().map(|f| {
-                Condition::any()
-                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)))
-            })
-        })
-        .or_else(|| {
-            match val {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            }
-            .map(|b| {
-                Condition::any()
-                    .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)))
-            })
-        })
-}
-
-fn build_literal_condition(
-    col: Col,
-    op: BinOper,
-    val: &str,
-    is_generic: bool,
-) -> Condition {
-    let literal_cond = Expr::col(col).binary(op, Expr::val(val));
-    let generic_conds = if is_generic {
-        try_parse_generic_value_as_cond(col, op, val)
-    } else {
-        None
-    };
-
-    std::iter::once(Condition::any().add(literal_cond))
-        .chain(generic_conds)
-        .fold(Condition::any(), |acc, cond| acc.add(cond))
-}
-
-/// タグのメタデータ記述
-#[derive(Clone)]
-pub struct TagDescriptor {
-    pub tag_type: TagType,
-    pub storage: StorageMapping,
-    pub sql_type: crate::db::SqlType,
-    pub logical_function: Option<Arc<dyn QueryFunction>>,
-}
-
-/// タグ知識の統合レジストリ
-pub struct Lens {
-    registry: HashMap<TagType, TagDescriptor>,
-    pub expanded_query: crate::query::ast::QueryNode,
-    pub resolved_query: ResolvedNode,
-}
-
-impl Lens {
-    /// 内部初期化用の一時的な空 Lens。外部からは通常 with_standard を使用してください。
-    fn new_empty() -> Self {
-        Self {
-            registry: HashMap::new(),
-            expanded_query: crate::query::ast::QueryNode::And(vec![]),
-            resolved_query: ResolvedNode::And(vec![]),
-        }
-    }
-
-    /// 標準的なタグ定義を登録済みの Lens を返します。
-    /// クエリ解釈を行わない、辞書単体としての Lens が必要な場合に使用します。
-    pub fn base_standard() -> Self {
-        let mut lens = Self::new_empty();
-        for desc in base_column_descriptors() {
-            lens.register(desc);
-        }
-        for desc in row_tag_descriptors() {
-            lens.register(desc);
-        }
-        for desc in virtual_tag_descriptors() {
-            lens.register(desc);
-        }
-        lens
-    }
-
-    /// クエリ文字列を伴う、標準的な Focused Lens を生成します。
-    /// パース、論理展開、物理解決すべてが完了した状態で返されます。
-    pub fn with_standard(query: &str) -> Result<Self> {
-        let base = Self::base_standard();
-        let node = if query.trim().is_empty() {
-            crate::query::ast::QueryNode::And(vec![])
-        } else {
-            crate::query::parse(query)?
-        };
-
-        let expanded = base.expand(node)?;
-        let resolved = base.resolve(expanded.clone())?;
-
-        Ok(Self {
-            registry: base.registry,
-            expanded_query: expanded,
-            resolved_query: resolved,
-        })
-    }
-
-    /// タグ定義を登録します。既存の定義がある場合はマージします。
-    pub fn register(&mut self, descriptor: TagDescriptor) {
-        if let Some(existing) = self.registry.get_mut(&descriptor.tag_type) {
-            // 物理ストレージ定義があれば上書き（Virtual は物理を上書きしない）
-            if descriptor.storage != StorageMapping::Virtual {
-                existing.storage = descriptor.storage;
-                existing.sql_type = descriptor.sql_type;
-            }
-            // 論理関数が提供されていれば上書き
-            if descriptor.logical_function.is_some() {
-                existing.logical_function = descriptor.logical_function;
-            }
-        } else {
-            self.registry
-                .insert(descriptor.tag_type.clone(), descriptor);
-        }
-    }
-
-    /// 指定されたタグの定義を検索します。
-    pub fn look_up(&self, tag: &TagType) -> Option<&TagDescriptor> {
-        self.registry.get(tag)
-    }
-
-    /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの RowTag 定義を返します。
-    pub fn look_up_or_default(&self, tag: &TagType) -> TagDescriptor {
-        if let Some(desc) = self.registry.get(tag) {
-            return (*desc).clone();
-        }
-        TagDescriptor {
-            tag_type: tag.clone(),
-            storage: StorageMapping::RowTag {
-                column: crate::db::Col::LabelStr,
-                tag_key: tag.as_str().to_string(),
-            },
-            sql_type: crate::db::SqlType::VARCHAR,
-            logical_function: None,
-        }
-    }
-
-    /// 特定の標準タグ（SType）に対応する物理カラムを解決します。
-    pub fn resolve_col(
-        &self,
-        stype: crate::types::SType,
-    ) -> anyhow::Result<crate::db::Col> {
-        let tag = TagType::Base(stype);
-        let desc = self.look_up(&tag).ok_or_else(|| {
-            anyhow::anyhow!("Tag definition not found: {:?}", tag)
-        })?;
-        if let StorageMapping::Column(col) = desc.storage {
-            Ok(col)
-        } else {
-            Err(anyhow::anyhow!(
-                "Tag {:?} is not mapped to a direct column",
-                tag
-            ))
-        }
-    }
-
-    /// 論理的なクエリタグを、Lens の定義に基づいて展開（Expand）します。
-    pub fn expand(
-        &self,
-        node: crate::query::ast::QueryNode,
-    ) -> anyhow::Result<crate::query::ast::QueryNode> {
-        expand_query_node(self, node)
-    }
-
-    /// 展開済みノードを、物理的な所在（StorageMapping）を持つ ResolvedNode へ解決します。
-    pub fn resolve(
-        &self,
-        node: crate::query::ast::QueryNode,
-    ) -> anyhow::Result<ResolvedNode> {
-        resolve_query_node(self, node)
-    }
-
-    /// クエリがプロジェクション（投影）を目的としている場合、その対象の型を返します。
-    pub fn get_projection(&self) -> Option<TagType> {
-        self.resolved_query.get_projection()
-    }
-
-    /// クエリがトップレベルでの集約（Aggregation）を目的としている場合、その情報を返します。
-    pub fn get_aggregation(&self) -> Option<ResolvedAggregationNode> {
-        match &self.resolved_query {
-            ResolvedNode::Aggregation(agg) => Some(agg.clone()),
-            _ => None,
-        }
-    }
-
-    /// クエリがトップレベルでのスカラー式（集計計算など）を目的としている場合、そのオペランドを返します。
-    pub fn get_scalar_expression(&self) -> Option<ResolvedOperand> {
-        match &self.resolved_query {
-            ResolvedNode::Aggregation(agg) => {
-                Some(ResolvedOperand::Aggregation(agg.clone()))
-            }
-            ResolvedNode::Projection(op) => {
-                if op.contains_aggregation() {
-                    Some(op.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn decode_label_from_map(
-        &self,
-        tag_type: &TagType,
-        map: &duckdb::types::OrderedMap<String, Value>,
-    ) -> Option<Label> {
-        let from_storage = |desc: &TagDescriptor| match &desc.storage {
-            StorageMapping::Column(col) => {
-                map.get(&col.name()).and_then(val_to_label_value)
-            }
-            StorageMapping::RowTag { column, tag_key } => {
-                let type_val = map.get(&SType::Type.name())?;
-                if type_val.as_str() == Some(tag_key) {
-                    map.get(&column.name()).and_then(val_to_label_value)
-                } else {
-                    None
-                }
-            }
-            StorageMapping::Virtual => None,
-        };
-
-        let from_fallback = || {
-            // Fallback: 物理カラム定義がない場合、汎用ラベルカラムから取得を試みる
-            [
-                SType::LabelInt,
-                SType::LabelStr,
-                SType::LabelBool,
-                SType::LabelDouble,
-            ]
-            .iter()
-            .find_map(|s| map.get(&s.name()).and_then(val_to_label_value))
-        };
-
-        let label_val = self
-            .look_up(tag_type)
-            .and_then(from_storage)
-            .or_else(from_fallback)?;
-
-        Some(Label::resolve(tag_type.clone(), label_val))
-    }
-
-    pub fn resolve_label(&self, tag_type: &TagType, value: &Value) -> Label {
-        let label_val = val_to_label_value(value)
-            .unwrap_or(LabelValue::String(String::new()));
-        Label::resolve(tag_type.clone(), label_val)
-    }
-}
-
-fn val_to_label_value(val: &Value) -> Option<LabelValue> {
-    match val {
-        Value::Text(s) => Some(LabelValue::String(s.clone())),
-        Value::BigInt(i) => Some(LabelValue::Integer(*i)),
-        Value::Double(d) => Some(LabelValue::String(d.to_string())),
-        Value::Boolean(b) => Some(LabelValue::Boolean(*b)),
-        _ => None,
-    }
-}
-
-trait ValueExt {
-    fn as_str(&self) -> Option<&str>;
-}
-
-impl ValueExt for Value {
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Value::Text(s) => Some(s),
-            _ => None,
-        }
-    }
-}
-
-fn expand_query_node(
+pub(crate) fn resolve_operand(
     lens: &Lens,
-    node: crate::query::ast::QueryNode,
-) -> anyhow::Result<crate::query::ast::QueryNode> {
-    use crate::query::ast::QueryNode;
-    match node {
-        QueryNode::TypedTag(tt) => {
-            if let Some(desc) = lens.look_up(&tt.label.tag_type()) {
-                if let Some(func) = &desc.logical_function {
-                    return Ok(func.expand(&tt.label));
-                }
-            }
-            Ok(QueryNode::TypedTag(tt))
-        }
-        QueryNode::Projection(op) => {
-            if let crate::query::ast::Operand::TypeRef(tagtype) = &op {
-                if let Some(desc) = lens.look_up(tagtype) {
-                    if let Some(func) = &desc.logical_function {
-                        return Ok(func.expand_projection(tagtype.clone()));
-                    }
-                }
-            }
-            Ok(QueryNode::Projection(op))
-        }
-        QueryNode::And(nodes) => {
-            let mut expanded = Vec::new();
-            for n in nodes {
-                expanded.push(expand_query_node(lens, n)?);
-            }
-            Ok(QueryNode::And(expanded))
-        }
-        QueryNode::Or(nodes) => {
-            let mut expanded = Vec::new();
-            for n in nodes {
-                expanded.push(expand_query_node(lens, n)?);
-            }
-            Ok(QueryNode::Or(expanded))
-        }
-        QueryNode::Difference(l, r) => Ok(QueryNode::Difference(
-            Box::new(expand_query_node(lens, *l)?),
-            Box::new(expand_query_node(lens, *r)?),
-        )),
-        QueryNode::Complement(c) => Ok(QueryNode::Complement(Box::new(
-            expand_query_node(lens, *c)?,
-        ))),
-        QueryNode::Comparison(cmp) => {
-            expand_comparison_with_recursion(lens, cmp)
-        }
-        QueryNode::Aggregation(agg) => {
-            Ok(QueryNode::Aggregation(expand_aggregation(lens, agg)?))
-        }
-        other => Ok(other),
-    }
-}
-
-fn expand_aggregation(
-    lens: &Lens,
-    agg: crate::query::ast::AggregationNode,
-) -> anyhow::Result<crate::query::ast::AggregationNode> {
-    use crate::query::ast::AggregationNode;
-    match agg {
-        AggregationNode::Count(node) => Ok(AggregationNode::Count(Box::new(
-            expand_query_node(lens, *node)?,
-        ))),
-        AggregationNode::Arithmetic { op, inner } => {
-            Ok(AggregationNode::Arithmetic {
-                op,
-                inner: Box::new(expand_query_node(lens, *inner)?),
-            })
-        }
-    }
-}
-
-fn expand_comparison_with_recursion(
-    lens: &Lens,
-    mut cmp: crate::query::ast::ComparisonNode,
-) -> anyhow::Result<crate::query::ast::QueryNode> {
-    // Firstオペランドの展開
-    if let crate::query::ast::Operand::Aggregation(agg) = &mut cmp.first {
-        *agg = Box::new(expand_aggregation(lens, *agg.clone())?);
-    }
-
-    // Restオペランドの展開
-    for (_op, operand) in &mut cmp.rest {
-        if let crate::query::ast::Operand::Aggregation(agg) = operand {
-            *agg = Box::new(expand_aggregation(lens, *agg.clone())?);
-        }
-    }
-
-    // 標準の比較ノード展開（日付範囲化など）を実行
-    let reg = QueryFunctionRegistry::with_standard();
-    let expanded_node =
-        crate::query::functions::expand_comparison_node(cmp, &reg);
-    Ok(expanded_node)
-}
-
-fn resolve_operand(
-    lens: &Lens,
-    op: &crate::query::ast::Operand,
-) -> anyhow::Result<ResolvedOperand> {
-    use crate::query::ast::Operand;
+    op: &Operand,
+) -> Result<ResolvedOperand> {
     match op {
         Operand::Literal(label) => Ok(ResolvedOperand::Literal(label.clone())),
         Operand::TypeRef(tt) => resolve_type_ref_operand(lens, tt),
@@ -859,19 +352,18 @@ fn resolve_operand(
     }
 }
 
-
 fn resolve_type_ref_operand(
     lens: &Lens,
     tt: &TagType,
-) -> anyhow::Result<ResolvedOperand> {
+) -> Result<ResolvedOperand> {
     let (storage, sql_type) = match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type),
         None => (
             StorageMapping::RowTag {
-                column: crate::db::Col::LabelStr,
+                column: Col::LabelStr,
                 tag_key: tt.as_str().to_string(),
             },
-            crate::db::SqlType::VARCHAR,
+            SqlType::VARCHAR,
         ),
     };
     Ok(ResolvedOperand::TagRef {
@@ -884,7 +376,7 @@ fn resolve_type_ref_operand(
 fn resolve_calculation_node(
     lens: &Lens,
     calc: &crate::query::ast::CalculationNode,
-) -> anyhow::Result<ResolvedCalculationNode> {
+) -> Result<ResolvedCalculationNode> {
     Ok(ResolvedCalculationNode {
         left: resolve_operand(lens, &calc.left)?,
         op: calc.op,
@@ -895,7 +387,7 @@ fn resolve_calculation_node(
 fn resolve_aggregation_node(
     lens: &Lens,
     agg: &crate::query::ast::AggregationNode,
-) -> anyhow::Result<ResolvedAggregationNode> {
+) -> Result<ResolvedAggregationNode> {
     use crate::query::ast::AggregationNode;
     match agg {
         AggregationNode::Count(node) => {
@@ -914,11 +406,10 @@ fn resolve_aggregation_node(
     }
 }
 
-fn resolve_query_node(
+pub(crate) fn resolve_query_node(
     lens: &Lens,
-    node: crate::query::ast::QueryNode,
-) -> anyhow::Result<ResolvedNode> {
-    use crate::query::ast::QueryNode;
+    node: QueryNode,
+) -> Result<ResolvedNode> {
     match node {
         QueryNode::TypedTag(tt) => {
             let tag_type = tt.label.tag_type();
@@ -926,10 +417,10 @@ fn resolve_query_node(
                 Some(desc) => (desc.storage.clone(), desc.sql_type),
                 None => (
                     StorageMapping::RowTag {
-                        column: crate::db::Col::LabelStr,
+                        column: Col::LabelStr,
                         tag_key: tag_type.as_str().to_string(),
                     },
-                    crate::db::SqlType::VARCHAR,
+                    SqlType::VARCHAR,
                 ),
             };
             Ok(ResolvedNode::Match {
@@ -989,7 +480,7 @@ fn resolve_query_node(
 fn resolve_aggregation(
     lens: &Lens,
     agg: crate::query::ast::AggregationNode,
-) -> anyhow::Result<ResolvedAggregationNode> {
+) -> Result<ResolvedAggregationNode> {
     use crate::query::ast::AggregationNode;
     match agg {
         AggregationNode::Count(node) => Ok(ResolvedAggregationNode::Count(
@@ -1004,10 +495,10 @@ fn resolve_aggregation(
     }
 }
 
-fn resolve_calculation(
+pub(crate) fn resolve_calculation(
     lens: &Lens,
     calc: crate::query::ast::CalculationNode,
-) -> anyhow::Result<ResolvedCalculationNode> {
+) -> Result<ResolvedCalculationNode> {
     let left = resolve_operand_for_calc(lens, calc.left)?;
     let right = resolve_operand_for_calc(lens, calc.right)?;
 
@@ -1020,10 +511,8 @@ fn resolve_calculation(
 
 fn resolve_operand_for_calc(
     lens: &Lens,
-    operand: crate::query::ast::Operand,
-) -> anyhow::Result<ResolvedOperand> {
-    use crate::query::ast::Operand;
-
+    operand: Operand,
+) -> Result<ResolvedOperand> {
     match operand {
         Operand::Literal(lab) => Ok(ResolvedOperand::Literal(lab)),
         Operand::TypeRef(tt) => {
@@ -1047,8 +536,8 @@ fn resolve_operand_for_calc(
 
 fn resolve_comparison(
     lens: &Lens,
-    cmp: crate::query::ast::ComparisonNode,
-) -> anyhow::Result<ResolvedNode> {
+    cmp: ComparisonNode,
+) -> Result<ResolvedNode> {
     let mut nodes = Vec::new();
     let mut current_left = cmp.first;
 
@@ -1069,14 +558,13 @@ fn resolve_comparison(
     }
 }
 
+/// メイン解決ロジック（15パターンの比較処理）
 fn resolve_single_match(
     lens: &Lens,
-    left: crate::query::ast::Operand,
-    op: crate::query::ast::ComparisonOp,
-    right: crate::query::ast::Operand,
-) -> anyhow::Result<ResolvedNode> {
-    use crate::query::ast::Operand;
-
+    left: Operand,
+    op: ComparisonOp,
+    right: Operand,
+) -> Result<ResolvedNode> {
     match (left, right) {
         (Operand::TypeRef(tt), Operand::Literal(lab)) => {
             let (storage, sql_type) = get_storage_and_type(lens, &tt);
@@ -1218,32 +706,28 @@ fn resolve_single_match(
 
 fn get_storage_and_type(
     lens: &Lens,
-    tt: &crate::types::TagType,
-) -> (StorageMapping, crate::db::SqlType) {
+    tt: &TagType,
+) -> (StorageMapping, SqlType) {
     match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type),
         None => (
             StorageMapping::RowTag {
-                column: crate::db::Col::LabelStr,
+                column: Col::LabelStr,
                 tag_key: tt.as_str().to_string(),
             },
-            crate::db::SqlType::VARCHAR,
+            SqlType::VARCHAR,
         ),
     }
 }
 
-pub fn flip_op(
-    op: crate::query::ast::ComparisonOp,
-) -> crate::query::ast::ComparisonOp {
+pub fn flip_op(op: ComparisonOp) -> ComparisonOp {
     match op {
         ComparisonOp::Scalar(b) => ComparisonOp::Scalar(flip_basic_op(b)),
         ComparisonOp::Label(b) => ComparisonOp::Label(flip_basic_op(b)),
     }
 }
 
-pub fn flip_basic_op(
-    op: crate::query::ast::BasicOp,
-) -> crate::query::ast::BasicOp {
+pub fn flip_basic_op(op: crate::query::ast::BasicOp) -> crate::query::ast::BasicOp {
     use crate::query::ast::BasicOp;
     match op {
         BasicOp::Gt => BasicOp::Lt,
@@ -1255,6 +739,8 @@ pub fn flip_basic_op(
 }
 
 /// ComparisonOp を sea_query の BinOper に変換します。
+///
+/// **重要**: sql.rs で使用中
 pub fn to_bin_op(op: ComparisonOp) -> BinOper {
     use crate::query::ast::BasicOp;
     let basic = match op {
@@ -1271,216 +757,84 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
     }
 }
 
-// --- 純粋関数 (初期化用データ定義) ---
+// ========== Resolver 構造体 ==========
 
-fn base_column_descriptors() -> Vec<TagDescriptor> {
-    let cols = vec![
-        (SType::ItemId, Col::ItemId),
-        (SType::Rank, Col::Rank),
-        (SType::Origin, Col::Origin),
-        (SType::ItemKind, Col::ItemKind),
-        (SType::Type, Col::Type),
-        (SType::TypedTag, Col::TypedTag),
-        (SType::Label, Col::LabelStr),
-        (SType::ScanHash, Col::ScanHash),
-    ];
-
-    cols.into_iter()
-        .map(|(stype, col)| TagDescriptor {
-            tag_type: TagType::Base(stype),
-            storage: StorageMapping::Column(col),
-            sql_type: col.sql_type(),
-            logical_function: None,
-        })
-        .collect()
+/// クエリの論理展開と物理解決を統合する構造体
+pub struct Resolver {
+    lens: Lens,
+    pub expanded_query: QueryNode,
+    pub resolved_query: ResolvedNode,
 }
 
-fn row_tag_descriptors() -> Vec<TagDescriptor> {
-    let tags = vec![
-        (SType::Path, Col::LabelStr),
-        (SType::Parentdir, Col::LabelStr),
-        (SType::Stem, Col::LabelStr),
-        (SType::Extension, Col::LabelStr),
-        (SType::IsDir, Col::LabelBool),
-        (SType::Size, Col::LabelInt),
-        (SType::Mtime, Col::LabelInt),
-        (SType::Hash, Col::LabelStr),
-        (SType::Content, Col::LabelStr),
-        (SType::Name, Col::LabelStr),
-        (SType::TypeFromExt, Col::LabelStr),
-        (SType::SizeStr, Col::LabelStr),
-        (SType::ModifiedStr, Col::LabelStr),
-        (SType::FileId, Col::LabelStr),
-    ];
+impl Resolver {
+    /// 標準的な Lens を使用してクエリ文字列から Resolver を生成
+    ///
+    /// 処理フロー:
+    /// 1. パース: Query文字列 → QueryNode (AST)
+    /// 2. 論理展開: logical_resolver::expand_query_node()
+    /// 3. 物理解決: resolve_query_node() → ResolvedNode
+    pub fn new(query: &str) -> Result<Self> {
+        let lens = Lens::base_standard();
+        let node = if query.trim().is_empty() {
+            QueryNode::And(vec![])
+        } else {
+            crate::query::parse(query)?
+        };
 
-    tags.into_iter()
-        .map(|(stype, col)| {
-            let key: &'static str = stype.into();
-            TagDescriptor {
-                tag_type: TagType::Base(stype),
-                storage: StorageMapping::RowTag {
-                    column: col,
-                    tag_key: key.to_string(),
-                },
-                sql_type: col.sql_type(),
-                logical_function: None,
+        // 論理展開 + 型チェック（logical_resolver.rsに委譲）
+        let expanded = crate::query::logical_resolver::expand_query_node(&lens, node)?;
+
+        // 物理解決（このファイル内のresolve_query_node）
+        let resolved = resolve_query_node(&lens, expanded.clone())?;
+
+        Ok(Self {
+            lens,
+            expanded_query: expanded,
+            resolved_query: resolved,
+        })
+    }
+
+    /// Lens への参照を返す（Fetcherで使用）
+    pub fn lens(&self) -> &Lens {
+        &self.lens
+    }
+
+    /// 投影対象の型を返す
+    pub fn get_projection(&self) -> Option<TagType> {
+        self.resolved_query.get_projection()
+    }
+
+    /// トップレベル集約を返す
+    pub fn get_aggregation(&self) -> Option<ResolvedAggregationNode> {
+        match &self.resolved_query {
+            ResolvedNode::Aggregation(agg) => Some(agg.clone()),
+            _ => None,
+        }
+    }
+
+    /// スカラー式を返す
+    pub fn get_scalar_expression(&self) -> Option<ResolvedOperand> {
+        match &self.resolved_query {
+            ResolvedNode::Aggregation(agg) => {
+                Some(ResolvedOperand::Aggregation(agg.clone()))
             }
-        })
-        .chain(std::iter::once(TagDescriptor {
-            tag_type: TagType::Base(SType::Filename),
-            storage: StorageMapping::RowTag {
-                column: Col::LabelStr,
-                tag_key: "name".to_string(),
-            },
-            sql_type: crate::db::SqlType::VARCHAR,
-            logical_function: Some(Arc::new(FilenameQuery)),
-        }))
-        .collect()
-}
-
-fn virtual_tag_descriptors() -> Vec<TagDescriptor> {
-    let v_tags: Vec<(SType, Arc<dyn QueryFunction>)> = vec![
-        (SType::Directory, Arc::new(DirectoryQuery)),
-        (SType::Extension, Arc::new(ExtensionQuery)),
-        (SType::Path, Arc::new(PathQuery)),
-        (SType::Parentdir, Arc::new(ParentDirQuery)),
-        (SType::Size, Arc::new(SizeQuery)),
-        (SType::Mtime, Arc::new(MtimeQuery)),
-        (SType::ItemKind, Arc::new(ItemKindQuery)),
-        (SType::Rank, Arc::new(RankQuery)),
-        (SType::Origin, Arc::new(OriginQuery)),
-        (SType::Type, Arc::new(TypeQuery)),
-        (SType::Label, Arc::new(LabelQuery)),
-        (SType::TypedTag, Arc::new(TypedTagQuery)),
-    ];
-
-    v_tags
-        .into_iter()
-        .map(|(stype, func)| TagDescriptor {
-            tag_type: TagType::Base(stype),
-            storage: StorageMapping::Virtual,
-            // Virtual タグの型は一概に言えないが、検索時は文字列として扱われることが多い
-            // 必要に応じてマッピングを変えるが、デフォルトは VARCHAR
-            sql_type: crate::db::SqlType::VARCHAR,
-            logical_function: Some(func),
-        })
-        .collect()
+            ResolvedNode::Projection(op) => {
+                if op.contains_aggregation() {
+                    Some(op.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SType;
-
-    #[test]
-    fn test_lens_with_standard_includes_rank() {
-        let lens = Lens::base_standard();
-        let found = lens.look_up(&TagType::Base(SType::Rank)).unwrap();
-        // マージ論理により、Column 定義が Virtual を上書きしているはず
-        assert_eq!(found.storage, StorageMapping::Column(Col::Rank));
-        assert!(found.logical_function.is_some());
-    }
-
-    #[test]
-    fn test_lens_with_standard_includes_origin() {
-        let lens = Lens::base_standard();
-        let found = lens.look_up(&TagType::Base(SType::Origin)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Column(Col::Origin));
-        assert!(found.logical_function.is_some());
-    }
-
-    #[test]
-    fn test_lens_with_standard_includes_size() {
-        let lens = Lens::base_standard();
-        let found = lens.look_up(&TagType::Base(SType::Size)).unwrap();
-        if let StorageMapping::RowTag { column, tag_key } = &found.storage {
-            assert_eq!(*column, Col::LabelInt);
-            assert_eq!(tag_key, "size");
-        } else {
-            panic!("Expected RowTag mapping for size, got {:?}", found.storage);
-        }
-        assert!(found.logical_function.is_some());
-    }
-
-    #[test]
-    fn test_lens_with_standard_includes_directory_as_virtual() {
-        let lens = Lens::base_standard();
-        let found = lens.look_up(&TagType::Base(SType::Directory)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Virtual);
-        assert!(found.logical_function.is_some());
-    }
-
-    #[test]
-    fn test_lens_look_up_unknown_tag_returns_none() {
-        let lens = Lens::base_standard();
-        let unknown = TagType::from("magic_tag_that_does_not_exist");
-        assert!(lens.look_up(&unknown).is_none());
-    }
-
-    #[test]
-    fn test_lens_filename_is_virtual() {
-        let lens = Lens::base_standard();
-        let found = lens.look_up(&TagType::Base(SType::Filename)).unwrap();
-        // Virtual が最後に登録され、かつマージにより以前の RowTag を上書きしない（関数だけ上書き）
-        // ...はずだが、今回の実装では descriptor.storage != Virtual の時だけ物理をを優先。
-        // Filename は RowTag -> Virtual の順に登録される。
-        // RowTag 登録時: storage=RowTag
-        // Virtual 登録時: storage=Virtual なので existing.storage は更新されない。
-        // 結果、物理情報（RowTag）を保持しつつ論理関数を持つ。
-        if let StorageMapping::RowTag { tag_key, .. } = &found.storage {
-            assert_eq!(tag_key, "name");
-        } else {
-            panic!("Expected RowTag for filename, got {:?}", found.storage);
-        }
-        assert!(found.logical_function.is_some());
-    }
-
-    #[test]
-    fn test_lens_all_standard_tags_are_resolvable() {
-        let lens = Lens::base_standard();
-        let standard_types = vec![
-            SType::ItemId,
-            SType::FileId,
-            SType::Rank,
-            SType::Origin,
-            SType::ItemKind,
-            SType::Type,
-            SType::TypedTag,
-            SType::Label,
-            SType::Size,
-            SType::Extension,
-            SType::Mtime,
-            SType::Path,
-            SType::Filename,
-            SType::Parentdir,
-            SType::Stem,
-            SType::IsDir,
-            SType::Hash,
-            SType::Content,
-            SType::TypeFromExt,
-            SType::SizeStr,
-            SType::ModifiedStr,
-            SType::Directory,
-            SType::Name,
-            SType::ScanHash,
-        ];
-
-        for stype in standard_types {
-            let tag_type = TagType::Base(stype);
-            let found = lens.look_up(&tag_type);
-            assert!(
-                found.is_some(),
-                "Standard tag {:?} should be resolvable",
-                stype
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod helper_tests {
-    use super::*;
-    use sea_query::BinOper;
+    use crate::query::lens_schema::{build_int_condition, build_str_condition};
+    use crate::types::{Label, SType};
 
     #[test]
     fn test_cond_and_basic() {
@@ -1508,35 +862,11 @@ mod helper_tests {
             Col::LabelStr,
             BinOper::Equal,
             "test_val",
-            crate::db::SqlType::VARCHAR,
+            SqlType::VARCHAR,
             true,
         );
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
-    }
-
-    #[test]
-    fn test_decode_label_with_virtual_fallback() {
-        let lens = Lens::base_standard();
-        // SType::Content は定義上 DefinitionOnly or Virtual だが、
-        // 物理的に "label_str" に値が入っていれば取得できるべき
-
-        let tag_type = TagType::Base(SType::Content);
-
-        // 擬似的な DuckDB の Row 構造 (STRUCT)
-        use duckdb::types::OrderedMap;
-        let map = OrderedMap::from(vec![(
-            "label_str".to_string(),
-            Value::Text("some_content".to_string()),
-        )]);
-        let _map_val = Value::Struct(map.clone());
-        let decoded = lens.decode_label_from_map(&tag_type, &map);
-        assert!(decoded.is_some());
-
-        let label = decoded.unwrap();
-        // Other(Content, String("some_content")) になるはず
-        assert_eq!(label.tag_type(), tag_type);
-        assert_eq!(label.as_str(), "some_content");
     }
 
     #[test]
@@ -1583,23 +913,9 @@ mod helper_tests {
     }
 
     #[test]
-    fn test_expand_simple_and() {
-        use crate::query::ast::QueryNode;
-        use crate::types::TypedTag;
-        let lens = Lens::base_standard();
-        let node = QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new("size", "100")),
-            QueryNode::TypedTag(TypedTag::new("mtime", "today")),
-        ]);
-        let expanded = lens.expand(node).unwrap();
-        // and(size:100, mtime:today) -> and(size:100, and(mtime>=..., mtime<=...))
-        assert!(matches!(expanded, QueryNode::And(_)));
-    }
-
-    #[test]
     fn test_extract_agg_parts_logic() {
         use crate::db::Col;
-        use crate::query::lens::{ResolvedNode, StorageMapping};
+        use crate::query::lens_schema::StorageMapping;
         use crate::types::{Label, SType, TagType};
 
         // Prepare nodes
@@ -1608,7 +924,7 @@ mod helper_tests {
             ResolvedOperand::TagRef {
                 tag_type: TagType::Base(SType::Size),
                 storage: StorageMapping::Column(Col::Size),
-                sql_type: crate::db::SqlType::BIGINT,
+                sql_type: SqlType::BIGINT,
             },
         );
         let filter = ResolvedNode::ColumnMatch {
@@ -1804,7 +1120,7 @@ mod helper_tests {
             ResolvedOperand::Literal(Label::from(100))
         );
     }
-    
+
     #[test]
     fn test_resolve_operand_literal() {
         use crate::query::ast::Operand;

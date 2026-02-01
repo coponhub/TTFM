@@ -1,12 +1,15 @@
 pub mod ast;
 pub mod fetcher;
 pub mod functions;
-pub mod lens;
+pub mod lens_resolver;
+pub mod lens_schema;
+pub mod logical_resolver;
 pub mod parser;
 pub mod sql;
 
 pub use ast::*;
 pub use functions::*;
+pub use lens_resolver::*;
 pub use parser::*;
 pub use sql::*;
 

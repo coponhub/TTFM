@@ -28,11 +28,11 @@ fn test_calculation_literal_simple() -> anyhow::Result<()> {
     // クエリ: (1 + 2) :< size:
     // (1 + 2) < size:、つまりsize: > 3
 
-    // デバッグ: Lensとクエリの確認
-    let lens =
-        ttfm::query::lens::Lens::with_standard("(1 + 2) :< size:")?;
+    // デバッグ: Resolverとクエリの確認
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("(1 + 2) :< size:")?;
     let sql = ttfm::query::sql::build_pick_sql(
-        &lens.resolved_query,
+        &resolver.resolved_query,
         "oneview",
     );
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
@@ -73,11 +73,11 @@ fn test_calculation_with_tag() -> anyhow::Result<()> {
     // size: + 100 が 1000 より大きいアイテムを検索
 
     // デバッグ: SQL確認
-    let lens =
-        ttfm::query::lens::Lens::with_standard("(size: + 100) > 1000")?;
-    println!("ResolvedNode: {:?}", lens.resolved_query);
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("(size: + 100) > 1000")?;
+    println!("ResolvedNode: {:?}", resolver.resolved_query);
     let sql = ttfm::query::sql::build_pick_sql(
-        &lens.resolved_query,
+        &resolver.resolved_query,
         "oneview",
     );
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
@@ -142,11 +142,11 @@ fn test_calculation_tag_comparison() -> anyhow::Result<()> {
     // (1000 + 500) が size: より小さい、つまりsize: > 1500
 
     // デバッグ: SQLとResolvedNode確認
-    let lens =
-        ttfm::query::lens::Lens::with_standard("(1000 + 500) :< size:")?;
-    println!("ResolvedNode: {:?}", lens.resolved_query);
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("(1000 + 500) :< size:")?;
+    println!("ResolvedNode: {:?}", resolver.resolved_query);
     let sql = ttfm::query::sql::build_pick_sql(
-        &lens.resolved_query,
+        &resolver.resolved_query,
         "oneview",
     );
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);

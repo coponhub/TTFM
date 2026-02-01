@@ -43,11 +43,11 @@ impl FileManager {
         let offset = options.offset.unwrap_or(0);
         let limit = if n > 0 { n + 1 } else { 0 };
 
-        let lens = crate::query::lens::Lens::with_standard(query)?;
-        let fetcher = crate::query::fetcher::Fetcher::new(&lens, &self.conn);
+        let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+        let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
         // 2-A. トップレベル集約・スカラー式ケース
-        if let Some(_) = lens.get_scalar_expression() {
+        if let Some(_) = resolver.get_scalar_expression() {
             let val = fetcher.fetch_scalar()?;
             return Ok(SearchResponse {
                 scalar: Some(val),
@@ -57,7 +57,7 @@ impl FileManager {
         }
 
         // 2-B. ブーリアン・スカラー結果ケース (集約関数の比較など)
-        if lens.resolved_query.is_boolean_result() {
+        if resolver.resolved_query.is_boolean_result() {
             use crate::types::{ItemId, VirtualItem};
             let val = fetcher.fetch_boolean()?;
             let val_int = if val { 1 } else { 0 };
@@ -84,7 +84,7 @@ impl FileManager {
         }
 
         // プロジェクション（投影タグ）の有無を確認
-        let projection = lens.get_projection();
+        let projection = resolver.get_projection();
 
         let (final_results, has_more) = {
             // 2-B. 通常検索ケース: Fetcher によるシングルパス取得
@@ -106,7 +106,7 @@ impl FileManager {
         };
 
         // 4. ラベルグループの構築
-        if let Some(tag) = lens.get_projection() {
+        if let Some(tag) = resolver.get_projection() {
             let n = options.n.unwrap_or(100);
             let offset = options.offset.unwrap_or(0);
 
@@ -451,9 +451,8 @@ impl FileManager {
             let res = (|| -> Result<()> {
                 let conn = Connection::open_in_memory()?;
 
-                let lens =
-                    crate::query::lens::Lens::with_standard(&query_owned)?;
-                let fetcher = crate::query::fetcher::Fetcher::new(&lens, &conn);
+                let resolver = crate::query::lens_resolver::Resolver::new(&query_owned)?;
+                let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &conn);
 
                 let registry_full = FunctionRegistry::with_standard();
                 let all_columns = registry_full.get_all_columns();

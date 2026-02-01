@@ -1,8 +1,7 @@
 use crate::db::{Col, Tbl};
 use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
-use crate::query::lens::{
-    to_bin_op, ResolvedAggregationNode, ResolvedNode, StorageMapping,
-};
+use crate::query::lens_schema::{to_bin_op, StorageMapping};
+use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode};
 use crate::types::{Label, SType, TagType};
 use sea_query::{
     Alias, BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
@@ -31,9 +30,9 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
 /// CalculationNodeに含まれるRowTagのtypeフィルタをWHERE句に追加します。
 fn extract_and_add_row_tag_filters(
     stmt: &mut SelectStatement,
-    calc: &crate::query::lens::ResolvedCalculationNode,
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
 ) {
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
 
     // 左オペランドのチェック
     match &calc.left {
@@ -138,7 +137,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             // TagCalculationMatchは「calc op tag」の形式で保存されているため、
             // 「tag flip(op) calc」の形式でSQLを生成する
             let flipped_op =
-                to_bin_op(crate::query::lens::flip_op(*op));
+                to_bin_op(crate::query::lens_resolver::flip_op(*op));
             let cond = Expr::expr(tag_expr).binary(flipped_op, calc_expr);
 
             stmt.cond_where(cond);
@@ -274,10 +273,10 @@ pub fn build_resolved_aggregation_sql(
 
 /// スカラー式（集計計算など）から単一の結果を得るための SQL を生成します。
 pub fn build_resolved_scalar_sql(
-    op: &crate::query::lens::ResolvedOperand,
+    op: &crate::query::lens_resolver::ResolvedOperand,
     view: &str,
 ) -> SelectStatement {
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
     match op {
         ResolvedOperand::Aggregation(agg) => {
             build_resolved_aggregation_sql(agg, view)
@@ -447,9 +446,9 @@ fn build_storage_column_expr(
 
 /// 算術演算のオペランドをSQL式に変換します。
 fn build_resolved_operand_expr(
-    operand: &crate::query::lens::ResolvedOperand,
+    operand: &crate::query::lens_resolver::ResolvedOperand,
 ) -> SimpleExpr {
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
 
     match operand {
         ResolvedOperand::Literal(lab) => {
@@ -484,9 +483,9 @@ fn build_resolved_operand_expr(
 
 /// 集約関数をSQL式に変換します（算術演算内で使用）。
 fn build_aggregation_expr(
-    agg: &crate::query::lens::ResolvedAggregationNode,
+    agg: &crate::query::lens_resolver::ResolvedAggregationNode,
 ) -> SimpleExpr {
-    use crate::query::lens::ResolvedAggregationNode;
+    use crate::query::lens_resolver::ResolvedAggregationNode;
 
     match agg {
         ResolvedAggregationNode::Count(inner) => {
@@ -532,7 +531,7 @@ fn build_aggregation_expr(
 
 /// 算術演算ノードをSQL式に変換します。
 fn build_calculation_expr(
-    calc: &crate::query::lens::ResolvedCalculationNode,
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_expr(&calc.left);
     let right_expr = build_resolved_operand_expr(&calc.right);
@@ -550,7 +549,7 @@ fn build_calculation_expr(
 
 /// 集約関数を含む算術演算をサブクエリとして構築します。
 fn build_calculation_subquery(
-    calc: &crate::query::lens::ResolvedCalculationNode,
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     view: &str,
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_subquery(&calc.left, view);
@@ -569,10 +568,10 @@ fn build_calculation_subquery(
 
 /// オペランドをサブクエリ形式で構築します。
 fn build_resolved_operand_subquery(
-    operand: &crate::query::lens::ResolvedOperand,
+    operand: &crate::query::lens_resolver::ResolvedOperand,
     view: &str,
 ) -> SimpleExpr {
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
 
     match operand {
         ResolvedOperand::Literal(lab) => {
@@ -610,7 +609,7 @@ fn build_resolved_operand_subquery(
 
 /// 集約関数をサブクエリとして構築します。
 fn build_aggregation_subquery(
-    agg: &crate::query::lens::ResolvedAggregationNode,
+    agg: &crate::query::lens_resolver::ResolvedAggregationNode,
     view: &str,
 ) -> SimpleExpr {
     use sea_query::SimpleExpr;
@@ -745,7 +744,7 @@ pub fn build_flat_table_sql(
 /// 指定された条件に合致するアイテムをラベル（型）ごとに集約し、
 /// 代表アイテムのリストと総数を 1 クエリで取得するための SQL を生成します。
 pub fn build_fetch_label_groups_sql(
-    lens: &crate::query::lens::Lens,
+    resolver: &crate::query::lens_resolver::Resolver,
     proj_type: &TagType,
     view: &str,
     limit: usize,
@@ -753,10 +752,10 @@ pub fn build_fetch_label_groups_sql(
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
 
-    let pick_sql = build_pick_sql(&lens.resolved_query, view);
+    let pick_sql = build_pick_sql(&resolver.resolved_query, view);
 
     // 1. プロジェクション対象の物理カラムを特定
-    let desc = lens.look_up_or_default(proj_type);
+    let desc = resolver.lens().look_up_or_default(proj_type);
     let col_iden = match &desc.storage {
         StorageMapping::Column(col) => *col,
         StorageMapping::RowTag { column, .. } => *column,
@@ -1008,10 +1007,10 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
 }
 
 fn build_resolved_projection_sql(
-    op: &crate::query::lens::ResolvedOperand,
+    op: &crate::query::lens_resolver::ResolvedOperand,
     view: &str,
 ) -> SelectStatement {
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
 
     match op {
         ResolvedOperand::TagRef {
@@ -1695,7 +1694,7 @@ pub fn build_label_expansion_sql(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::lens::ResolvedOperand;
+    use crate::query::lens_resolver::ResolvedOperand;
     use crate::query::ast::{BasicOp, QueryNode};
     use crate::types::{Label, SType, TagType, TypedTag};
     use sea_query::{PostgresQueryBuilder, Query, SqliteQueryBuilder};
@@ -1804,7 +1803,7 @@ mod tests {
 
     #[test]
     fn test_build_flat_table_sql_structure() {
-        use crate::query::lens::StorageMapping;
+        use crate::query::lens_schema::StorageMapping;
         use sea_query::PostgresQueryBuilder;
 
         let node = ResolvedNode::Match {
@@ -1919,7 +1918,8 @@ mod tests {
     #[test]
     fn test_build_aggregation_sql_structure() {
         use crate::query::ast::ArithmeticAggOp;
-        use crate::query::lens::{ResolvedNode, StorageMapping};
+        use crate::query::lens_resolver::ResolvedNode;
+        use crate::query::lens_schema::StorageMapping;
         use crate::types::{Label, SType, TagType};
         use sea_query::PostgresQueryBuilder;
 
@@ -1966,7 +1966,7 @@ mod tests {
     #[test]
     fn test_build_calculation_expr_simple() {
         use crate::query::ast::ArithmeticOp;
-        use crate::query::lens::{ResolvedCalculationNode, ResolvedOperand};
+        use crate::query::lens_resolver::{ResolvedCalculationNode, ResolvedOperand};
         use crate::types::Label;
 
         let calc = ResolvedCalculationNode {
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[test]
     fn test_build_resolved_operand_literal() {
-        use crate::query::lens::ResolvedOperand;
+        use crate::query::lens_resolver::ResolvedOperand;
         use crate::types::Label;
 
         let operand = ResolvedOperand::Literal(Label::from(42));
