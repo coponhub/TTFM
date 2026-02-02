@@ -338,7 +338,10 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
                 unreachable!()
             }
         }
-        Rule::calculation | Rule::calculation_inner => {
+        Rule::calculation
+        | Rule::calculation_inner
+        | Rule::scalar_calculation
+        | Rule::scalar_calculation_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
         Rule::type_ref => {
@@ -365,11 +368,12 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
 
 fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
     let rule = pair.as_rule();
-    let inner_pair = if rule == Rule::calculation {
+    let inner_pair = if rule == Rule::calculation || rule == Rule::scalar_calculation {
         pair.into_inner().next().unwrap()
     } else {
         pair
     };
+
     let mut pairs = inner_pair.into_inner();
 
     let first_pair = pairs.next().unwrap();
@@ -405,7 +409,10 @@ fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
 
 fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
     let rule = pair.as_rule();
-    let inner = if rule == Rule::operand_calc || rule == Rule::scalar_operand {
+    let inner = if rule == Rule::operand_calc
+        || rule == Rule::scalar_operand
+        || rule == Rule::scalar_operand_calc
+    {
         pair.into_inner().next().unwrap()
     } else {
         pair
@@ -426,9 +433,13 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::unquoted_tag_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
-        Rule::calculation | Rule::calculation_inner => {
+        Rule::calculation
+        | Rule::calculation_inner
+        | Rule::scalar_calculation
+        | Rule::scalar_calculation_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
+
         _ => Err(anyhow!(
             "{}: {:?}",
             error::UNKNOWN_OPERAND_CALC_RULE,

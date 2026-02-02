@@ -52,7 +52,7 @@ fn test_calculation_literal_simple() -> anyhow::Result<()> {
 }
 
 /// Phase 3: タグと演算の組み合わせ
-/// (size: + 100) > 1000
+/// (size: + 100) :> 1000
 #[test]
 fn test_calculation_with_tag() -> anyhow::Result<()> {
     let dir = tempdir()?;
@@ -67,19 +67,19 @@ fn test_calculation_with_tag() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    // クエリ: (size: + 100) > 1000
+    // クエリ: (size: + 100) :> 1000
     // size: + 100 が 1000 より大きいアイテムを検索
 
     // デバッグ: SQL確認
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("(size: + 100) > 1000")?;
+        ttfm::query::lens_resolver::Resolver::new("(size: + 100) :> 1000")?;
     println!("ResolvedNode: {:?}", resolver.resolved_query);
     let sql =
         ttfm::query::sql::build_pick_sql(&resolver.resolved_query, "oneview");
     let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
     println!("Generated SQL: {}", sql_str);
 
-    let res = fm.search("(size: + 100) > 1000", Default::default())?;
+    let res = fm.search("(size: + 100) :> 1000", Default::default())?;
 
     // 結果を出力
     println!("Results count: {}", res.results.len());

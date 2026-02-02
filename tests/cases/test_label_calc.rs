@@ -49,9 +49,9 @@ fn test_arithmetic_comparison_with_units() {
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
     // 3. Arithmetic comparison with units
-    // (size: / 2) > 100MB
-    // This currently fails with "Could not convert string '100MB' to DOUBLE"
-    let query = "(size: / 2) > 100MB";
+    // (size: / 2) :> 100MB (label comparison for projection calculation)
+    // Note: scalar comparison (>) is forbidden for projections
+    let query = "(size: / 2) :> 100MB";
     let result = fm.search(query, Default::default());
 
     match &result {
@@ -63,9 +63,9 @@ fn test_arithmetic_comparison_with_units() {
         }
     }
 
-    // 4. Reverse pattern: Literal < Calculation
-    // 100MB < (size: / 2)
-    let query_rev = "100MB < (size: / 2)";
+    // 4. Reverse pattern: Literal :< Calculation (label comparison)
+    // 100MB :< (size: / 2)
+    let query_rev = "100MB :< (size: / 2)";
     let result_rev = fm.search(query_rev, Default::default());
     match &result_rev {
         Ok(_) => println!("Success! Reverse pattern worked."),

@@ -153,9 +153,39 @@ fn check_proj_scalar_misuse(
     line_str: &str,
     col: usize,
 ) -> Option<String> {
-    if prefix.trim_end().ends_with(':') && is_scalar_op_char(error_char) {
-        let full_proj =
-            prefix.trim_end().split_whitespace().last().unwrap_or("?");
+    if !is_scalar_op_char(error_char) {
+        return None;
+    }
+
+    // Extract projection name from prefix (handles both direct and calculation cases)
+    let proj_name = extract_projection_name(prefix)?;
+
+    // Get the RHS after the operator
+    let rhs: String = line_str
+        .chars()
+        .skip(col)
+        .collect::<String>()
+        .trim_start_matches(is_scalar_op_char)
+        .trim()
+        .to_string();
+
+    Some(invalid_scalar_comparison_msg(
+        &error_char.to_string(),
+        proj_name,
+        rhs.trim(),
+    ))
+}
+
+/// Extract projection name from prefix string
+/// Handles two cases:
+/// 1. Direct projection: "size: " -> "size"
+/// 2. Calculation with projection: "(size: + 1) " -> "size"
+fn extract_projection_name(prefix: &str) -> Option<&str> {
+    let trimmed = prefix.trim_end();
+
+    // Case 1: Direct projection (ends with ':')
+    if trimmed.ends_with(':') {
+        let full_proj = trimmed.split_whitespace().last().unwrap_or("?");
         let proj = full_proj.trim_end_matches(':');
 
         // Check if it starts with a digit - tags shouldn't start with digits!
@@ -163,21 +193,43 @@ fn check_proj_scalar_misuse(
             return None;
         }
 
-        // Skip the error character and any subsequent operator characters to get the true RHS
-        let rhs: String = line_str
-            .chars()
-            .skip(col)
-            .collect::<String>()
-            .trim_start_matches(is_scalar_op_char)
-            .to_string();
-
-        return Some(invalid_scalar_comparison_msg(
-            &error_char.to_string(),
-            proj,
-            rhs.trim(),
-        ));
+        return Some(proj);
     }
-    None
+
+    // Case 2: Calculation with projection (ends with ')')
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+
+    // Find the matching opening paren
+    let mut depth = 0;
+    let mut start_idx = None;
+    for (idx, ch) in trimmed.chars().rev().enumerate() {
+        if ch == ')' {
+            depth += 1;
+        } else if ch == '(' {
+            depth -= 1;
+            if depth == 0 {
+                start_idx = Some(trimmed.len() - idx - 1);
+                break;
+            }
+        }
+    }
+
+    let start = start_idx?;
+    let calc_expr = &trimmed[start..];
+
+    // Check if the calculation contains a projection
+    if !calc_expr.contains(':') {
+        return None;
+    }
+
+    // Extract projection name from the calculation
+    // Look for pattern like "size:" or "mtime:"
+    calc_expr
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
+        .find(|s| s.ends_with(':') && s.len() > 1)
+        .map(|s| s.trim_end_matches(':'))
 }
 
 fn check_mismatched_operator_usage(

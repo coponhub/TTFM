@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_pest_grammar_complex_math() {
         // Multi-level math and negative numbers
-        let q = "(size: - -100) > (width: * (height: / 2))";
+        let q = "(size: - -100) :> (width: * (height: / 2))";
         parse(q)
             .map_err(|e| panic!("Failed to parse math query '{}': {}", q, e))
             .unwrap();

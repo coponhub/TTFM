@@ -14,9 +14,9 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    // クエリ: (path: + 10) > 100
+    // クエリ: (path: + 10) :> 100
     // path: は文字列型なので、+ 10（数値演算）は論理展開フェーズで失敗すべき
-    let result = fm.search("(path: + 10) > 100", Default::default());
+    let result = fm.search("(path: + 10) :> 100", Default::default());
 
     assert!(
         result.is_err(),
@@ -43,9 +43,9 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    // クエリ: ('str' + 10) > 100
+    // クエリ: ('str' + 10) :> 100
     // 文字列リテラルとの演算も失敗すべき
-    let result = fm.search("('str' + 10) > 100", Default::default());
+    let result = fm.search("('str' + 10) :> 100", Default::default());
 
     assert!(
         result.is_err(),

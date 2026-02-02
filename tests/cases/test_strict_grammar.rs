@@ -104,3 +104,41 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
+    // Tests that "(mtime: / 100) < 100" (scalar comparison with projection calculation) is rejected
+    // This is now a parse error because scalar_operand only allows scalar_calculation (no type_ref)
+    // While "(mtime: / 100) :< 100" (label comparison) should work fine.
+
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // Scalar comparison with projection in calculation should fail
+    let res = fm.search("(mtime: / 100) < 100", Default::default());
+    assert!(
+        res.is_err(),
+        "Expected error for '(mtime: / 100) < 100' (projection in scalar comparison)"
+    );
+    let err_msg = res.unwrap_err().to_string();
+    println!("Scalar comparison error: {}", err_msg);
+    // Should produce a parse error (not pass through)
+    assert!(
+        err_msg.contains("-->") || err_msg.contains("Parse error"),
+        "Expected parse error for projection in scalar comparison, got: {}",
+        err_msg
+    );
+
+    // Label comparison with projection calculation should work
+    let res2 = fm.search("(size: / 1024) :> 100", Default::default());
+    assert!(
+        res2.is_ok(),
+        "Expected '(size: / 1024) :> 100' to succeed as label comparison, got: {:?}",
+        res2.err()
+    );
+
+    Ok(())
+}

@@ -74,9 +74,16 @@ stuck_basic_op = @{ "<=" | ">=" | "^" | ">" | "<" }
 
 // Scalar comparison: scalar-only operand followed by scalar-style operator
 // Note: projection (type_ref) is NOT allowed in scalar_operand.
+// Calculations containing projections must use label comparison.
 scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ scalar_operand)+ }
 
-scalar_operand = { aggregation | calculation | label }
+scalar_operand = { aggregation | scalar_calculation | label }
+
+// Scalar-only calculation: does NOT allow type_ref (projections)
+// This ensures "(1 + 2) > 3" is valid but "(size: + 1) > 3" is rejected
+scalar_calculation = { "(" ~ scalar_calculation_inner ~ ")" }
+scalar_calculation_inner = { scalar_operand_calc ~ (arith_op ~ scalar_operand_calc)+ }
+scalar_operand_calc = { aggregation | label | scalar_calculation }
 
 // Scalar comparison operators: == for equality
 scalar_basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
