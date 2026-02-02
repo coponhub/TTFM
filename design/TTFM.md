@@ -18,7 +18,7 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 - **File Reference**: ファイルシステム上の実ファイルを示す参照。InodeおよびDevice IDによって同一性が追跡される。
 - **Item Reference**: ファイル以外の対象を示す参照。
     - **ItemKinds**:
-        `tag`: `Type:Label` 形式のTypedTagそのもの　
+        `tag`: `Type:Label` 形式のTypedTagそのもの
         `type` : TypedTagのType
         `label`：TypedTagのLabel
         `note`: (noteはユーザーがDBに格納可能なメモ)
@@ -60,33 +60,9 @@ TTFMは、従来のディレクトリ階層構造に依存せず、**Typed Tag�
 
 テーブル定義・スキーマについては `STORE.md` を参照
 
-### 4.3 検索・集約エンジン (Lens & Fetcher)
 
-ttfm の 1 パス型検索・集約エンジンは、`Lens`（解決・翻訳層）と `Fetcher`（実行・復元層）の二層構造で構成される。これにより、OneView という抽象化されたデータ構造の多態的なタグ形態を Query 層から隠蔽し、透過的なアクセスを提供する。
 
-#### 1. Lens (解決・翻訳レイヤー)
-OneView という抽象化されたデータ構造の「歩き方」をクエリおよび実行層（Parser, Querynode, sql, Fetcher）に提供するブリッジである。
-
-- **役割**:
-    - **所在の解決**: 指定されたタグが、OneView の「データ型カラムに格納された一般タグ（行）」なのか、それとも「機能上の理由で OneView のカラムとして追加されている特殊なラベル値（列）」なのかを判断する。
-    - **一貫した抽象化**: 各モジュールが、背後の保存形態（行か列か）を意識せずに、すべてのタグを透過的に扱えるようにする。
-- **主要な概念**:
-    - **データ型カラム**: 型によって別々のカラム（`label_str`, `label_int`, `label_bool`）に分類されている実値を格納する器。
-    - **一般タグ**: `type` カラムに Type 名を持ち、データ型カラムに実値を持つ通常の TypedTag。OneView に行として登録されている。
-    - **特殊なラベル値**: `item_kind`, `rank`, `item_id`, `tag`, `type`, `label` など、機能上の理由で OneView の直接的なカラムとして保持されている属性。
-
-#### 2. Fetcher (実行・復元エンジン)
-`Lens` が持つ解決知識を、具体的な SQL アクションとドメインオブジェクト（SearchResult 等）に変換する実働部。
-
-- **役割**:
-    - **動的 SQL 構築**: `Lens` が解決したタグの所在（行か列か）に基づき、最適な SQL（サブクエリ、直接参照、集約等）を動的に組み立てる。
-    - **デコード (Decoding)**: OneView から返される実行結果を、`Lens` の型ルールに従って `SearchResult` などの意味のある構造体へ再構築する。
-
-> [!NOTE]
-> **設計上の要旨**
-> `Lens` はタグの所在と解釈を解決する「定義」であり、`Fetcher` はその定義に従ってデータの抽出とデコードを完結させる「実行」である。
-
-### 4.4 プラグイン・コンポーネント設計 (IndexingFunction パターン)
+### 4.3 プラグイン・コンポーネント設計 (IndexingFunction パターン)
 新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
 
 #### A. `IndexingFunction` trait (`src/functions.rs`)
@@ -103,7 +79,7 @@ OneView という抽象化されたデータ構造の「歩き方」をクエリ
 個別の `IndexingFunction` を一括管理するハブ。
 - インデックス作成時は `IndexingFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `IndexingFunction` にSQL変換を委譲する。
 
-### 4.5 永続化とアトミック性 (IndexStore)
+### 4.4 永続化とアトミック性 (IndexStore)
 インデックス（Parquetファイル）の更新において、データの整合性と堅牢性を確保するため、`IndexStore` は以下の設計指針に基づくアトミックな書き込みを提供する。
 
 #### A. アトミック書き込みロジック (`save_parquet`)
@@ -147,52 +123,71 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 4.  **Merge Phase (Integration)**:
     - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `file_references`, `locations`, `base_tags` 等のParquetファイルを更新・保存する。
 
-### 5.2 検索処理 (`ttfm search`)
+### 5.2 検索システム (`ttfm search`)
 
-1. **クエリ解析**:
-    TTQLで書かれたQueryを用いて検索を行う。クエリはパーサによって AST（抽象構文木）へ変換する。
+本システムの中核となる検索・集約エンジンは、`Logical Resolver`（論理解決）、`Lens`（物理解決）、`Fetcher`（実行）の3層パイプライン構造を採用し、ユーザーの論理クエリを効率的に物理データへと変換・実行する。
 
-2. **TTQL(Typed Tag Query Language)**: 
-    `QUERY.md` を参照
+#### 5.2.1 検索パイプラインとコンポーネント
 
-3.  **論理演算の解決**: 各比較式およびタグに対し、以下の 2 つの側面を持つ **Universal Selector** を生成。`oneview` またはキャッシュに対してクエリを発行する。
-    - **Item Selector**: アイテムを絞り込むための SQL 条件（`WHERE` 句）。
-    - **Tag Selector**: アイテムからどの属性（Tag）を取り出すかを定義する SQL 条件。クエリ内容から自動導出される。
+検索処理は以下のフェーズ順に実行される。
 
-4.  **ソート**: 結果は決定論的な順序（`rank DESC, item_id DESC`）でソートされる。
+1.  **Parsing Phase**:
+    -   入力された TTQL クエリをパーサが解析し、抽象構文木 (AST) を構築する。
+    -   TTQL (Typed Tag Query Language) の仕様については `QUERY.md` を参照。
 
-#### **検索インターフェイスとキャッシュ機構**
-検索エンジンは、初回レスポンスの高速性と大規模結果のページングを両立させるため、**ResultCache** と **Strategic Fetch** を採用する。
+2.  **Logical Resolution Phase (論理解決)**:
+    -   **Logical Resolver** が AST を走査し、意味的な展開を行う。
+    -   **機能**:
+        -   **Virtual Tag の具体化**: エイリアスを物理的なタグ条件へ変換 (例: `directory:` → `is_dir:true`)。
+        -   **日付範囲の展開**: 相対日付等を範囲条件へ展開 (例: `mtime:today` → `mtime >= Start AND mtime <= End`)。
+        -   **型チェック**: 演算の論理的な妥当性検証。
 
-1. **検索関数 `search()`**
-    `search()` は `SearchOptions` 構造体を受け取り、状況に応じて自律的にリソース（Connection）を管理する。
+3.  **Physical Resolution Phase (物理解決)**:
+    -   **Lens** が論理ノードをデータベース上の物理スキーマ (OneView) へマッピングする。
+    -   **機能**:
+        -   **所在の解決**: タグが「行データ (Type/Label)」か「列データ (Metadata)」かを判別する。
+        -   **抽象化**: ストレージ構造の違い（`label_str`, `label_int` 等のデータ型カラムや、`item_kind`, `rank` 等の特殊カラム）を隠蔽し、統一的なアクセスを提供する。
 
-    - **引数 (`SearchOptions`)**:
-        - `query`: 検索クエリ。
-        - `n`: 今回取得するアイテム数（デフォルト 100）。`None`（または0）は全取得。
-        - `offset`: 開始位置。`None` の場合は `ResultCache` のメタデータに基づき「現在の Page + 1」を自動計算する。
-        - `cid`: 利用する `ResultCache` の ID。
-    - **戻り値 (`SearchResponse`)**:
-        - `results`: `n` 件分の結果リスト。
-        - `cid`: キャッシュ ID（続きがある場合のみ発行）。
-        - `has_more`: 続きのデータが存在するかどうかのフラグ。
-        - `total_count`: 検索結果の総件数（判明次第格納）。
-        - `progress`: キャッシュ生成の進捗状況。
+4.  **Fetching & Aggregation Phase (実行)**:
+    -   **Fetcher** が解決済みのクエリから SQL を構築し、DuckDB に対して実行する。
+    -   **機能**:
+        -   **動的 SQL 構築**: Lens の解決結果に基づき、最適な SELECT 文や集約クエリを生成する。
+        -   **デコード**: 実行結果をドメインオブジェクト (SearchResult) へ復元する。
 
-2. **実行プロセスとキャッシュ生成**
-    - **n+1 判定**: `search` は内部的に `n + 1` 件を要求し、実際に $n+1$ 件目が取得できた場合に `has_more = true` と判定する。
-    - **非同期キャッシュ**: `has_more` が true の場合、一意の `cid` を発行し、別スレッドで全結果を `~/ttfm/cache/{cid}.parquet` に書き出す。
-        - 書き出し時、`KV_METADATA` を用いてクエリ文字列やインデックスバージョン等のメタデータを Parquet に直接埋め込む。
-    - **オンデマンド取得**: `cid` が指定された呼び出しでは、キャッシュが生成中であれば進捗のみを返し、完了していれば Parquet から高速にデータを読み取る。
+5.  **Result Caching Phase**:
+    -   ページングが必要な場合、結果セットをキャッシュする（後述）。
 
-3. **ResultCache のライフサイクル**
-    - **整合性**: `ttfm index` 等により本体のインデックスが更新された場合、全てのキャッシュは削除される。
-    - **クリーンアップ**: キャッシュディレクトリの合計サイズが閾値（例: 3GB）を超えた場合、最終アクセス日時が古いものから自動削除（LRU）される。この閾値はコンフィグで設定可能。
+#### 5.2.2 検索インターフェイスと戦略
 
+1.  **検索関数 `search(options)`**
+    -   **引数 (`SearchOptions`)**:
+        -   `query`: 検索クエリ文字列。
+        -   `n`: 取得数。`None`（または0）は全取得。
+        -   `offset`: 開始位置。`None`時はキャッシュから自動計算。
+        -   `cid`: Cache ID。続きを取得する場合に指定。
+    -   **戻り値 (`SearchResponse`)**:
+        -   `results`: 結果リスト。
+        -   `cid`: 生成された Cache ID。
+        -   `has_more`: 続きが存在するか。
+        -   `total_count`: 総件数。
+        -   `progress`: キャッシュ生成進捗。
+
+2.  **Strategic Fetch (n+1 Strategy)**
+    -   内部的に `n + 1` 件を要求し、取得できた場合のみ `has_more = true` と判定する。
+    -   `has_more` が true の場合、非同期でバックグラウンド・キャッシュ生成を開始する。
+
+#### 5.2.3 結果キャッシュ (Result Cache)
+検索結果の高速な再利用と、大規模な結果セットのページングを担う。
+
+- **フォーマット**: Parquet 形式。KV Metadata にクエリ情報等を保持。
+- **ライフサイクル**:
+    -   **生成**: `has_more = true` 時に非同期生成。
+    -   **無効化**: インデックス更新時に全削除。
+    -   **削除**: 容量制限 (LRU) による自動削除。
 
 #### 検索における `name` の扱い
-- クエリ `name:foo` は、ユーザーが明示的に `foo` と名付けたアイテムと、ファイル名に `foo` を含む（かつ名前未定義の）アイテムの両方にマッチする。
-- 物理的なファイル名のみを対象としたい場合は、明示的に `filename:foo` を使用する。
+- クエリ `name:foo` は、ユーザー定義名とファイル名の両方にマッチする。
+- 物理ファイル名のみ対象とする場合は `filename:foo` を使用する。
 
 ### 5.3 優先度の操作 (`ttfm rank`)
 ユーザーは検索クエリを用いて、マッチしたアイテムの優先度を一括で変更できる。
