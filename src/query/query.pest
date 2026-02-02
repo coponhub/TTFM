@@ -67,16 +67,17 @@ colon = { ":" }
 label_basic_op = @{ "=" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // Stuck comparison operators: NO equality (= or ==) since TypedTag handles that
-stuck_basic_op = @{ "^=" | "<=" | ">=" | "^" | ">" | "<" }
+// Stuck comparison operators: NO equality (= or ==) since TypedTag handles that
+stuck_basic_op = @{ "<=" | ">=" | "^" | ">" | "<" }
 
 // Scalar comparison: scalar-only operand followed by scalar-style operator
 // Note: projection (type_ref) is NOT allowed in scalar_operand.
 scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ scalar_operand)+ }
 
-scalar_operand = { aggregation | calculation | type_ref | label }
+scalar_operand = { aggregation | calculation | label }
 
 // Scalar comparison operators: == for equality
-scalar_basic_op = @{ "==" | "^=" | "!=" | "<=" | ">=" | "^" | ">" | "<" }
+scalar_basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
 
 // --- Typed Tag ---
 // DESIGN.md: type:label (no space allowed between them)

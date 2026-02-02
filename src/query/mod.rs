@@ -68,7 +68,7 @@ mod tests {
             "size:<2048",
             "size:<=2048",
             "rank: := 5",
-            "rank:^=1", // Not Equal
+            "rank:^1", // Not Equal
             "50 :< width: :< 100",
             "10 :<= height: :<= 20",
             "name:\"My File\" | name:'Other File'",

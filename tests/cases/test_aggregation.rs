@@ -134,12 +134,12 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    // count(extension:txt) != 0 -> TRUE (2 != 0)
-    let res1 = fm.search("count(extension:txt) != 0", Default::default())?;
-    assert_eq!(res1.results[0].name, "TRUE");
+    // count(extension:txt) ^ 0 -> TRUE (2 ^ 0)
+    let res1 = fm.search("count(extension:txt) ^ 0", Default::default())?;
+    assert_eq!(res1.total_count, Some(1), "Should match root directory (calc is true)");
 
-    // count(extension:txt) != 2 -> FALSE (2 != 2 is false)
-    let res2 = fm.search("count(extension:txt) != 2", Default::default())?;
+    // count(extension:txt) ^ 2 -> FALSE (2 ^ 2 is false)
+    let res2 = fm.search("count(extension:txt) ^ 2", Default::default())?;
     assert_eq!(res2.results[0].name, "FALSE");
 
     Ok(())

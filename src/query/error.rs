@@ -29,6 +29,53 @@ pub fn invalid_scalar_comparison_msg(op: &str, proj: &str, rhs: &str) -> String 
     )
 }
 
+pub fn map_grammar_error(input: &str, mut e: pest::error::Error<crate::query::parser::Rule>) -> anyhow::Error {
+    use pest::error::{ErrorVariant, LineColLocation};
+
+    // Fallback error (e.g. "Parse error: ...") if we don't match our specific cases
+    // We return anyhow!(e) at the end to keep the pretty formatting.
+    
+    // Check if we can improve the error message for invalid scalar comparisons
+    let (line, col) = match e.line_col {
+        LineColLocation::Pos((l, c)) => (l, c),
+        _ => return anyhow::anyhow!(e),
+    };
+
+    let line_str = match input.lines().nth(line - 1) {
+        Some(s) => s,
+        None => return anyhow::anyhow!(e),
+    };
+
+    // col is 1-based index to the error character/position
+    let prefix: String = line_str.chars().take(col - 1).collect();
+    
+    // Check conditions for "Scalar comparison on Projection"
+    if prefix.trim_end().ends_with(':') {
+        let error_char = line_str.chars().nth(col - 1).unwrap_or(' ');
+        
+        if "><=^".contains(error_char) {
+             let proj = prefix.trim_end().split_whitespace().last().unwrap_or("?")
+                .trim_end_matches(':');
+             // Skip the error character and any subsequent operator characters to get the true RHS
+             let rhs: String = line_str.chars().skip(col).collect::<String>()
+                .trim_start_matches(|c: char| "><=^".contains(c)).to_string();
+
+             let message = invalid_scalar_comparison_msg(
+                &error_char.to_string(),
+                proj,
+                rhs.trim()
+             );
+             
+             // Replace the error variant with our custom message
+             // This preserves the line/col and line_string inside 'e', ensuring pretty printing.
+             e.variant = ErrorVariant::CustomError { message };
+             return anyhow::anyhow!(e);
+        }
+    }
+
+    anyhow::anyhow!(e)
+}
+
 // =========================================================================
 // Logical Resolver Errors
 // =========================================================================

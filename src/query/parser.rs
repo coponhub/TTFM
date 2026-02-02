@@ -36,7 +36,7 @@ fn get_parser() -> &'static PrattParser<Rule> {
 /// クエリ文字列を解析し、QueryNode AST を構築します。
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
-        .map_err(|e| anyhow!("{}: {}", error::PARSE_ERROR, e))?;
+        .map_err(|e| error::map_grammar_error(input, e))?;
     let expr_pair = pairs
         .next()
         .ok_or_else(|| anyhow!(error::NO_QUERY_FOUND))?
@@ -257,11 +257,7 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
             }
             Rule::scalar_comparison => {
                 // 不適切なスカラー演算のチェック (Example: size: > 100)
-                check_invalid_scalar_comparison(
-                    &first_op,
-                    &actual_step,
-                    &inner_pairs,
-                )?;
+                // Post-processing error check has been moved to error::map_grammar_error
 
                 let basic_op_str = actual_step.as_str();
                 let basic_op = parse_scalar_basic_op(basic_op_str)?;
@@ -313,7 +309,7 @@ fn parse_label_basic_op(s: &str) -> Result<BasicOp> {
 fn parse_scalar_basic_op(s: &str) -> Result<BasicOp> {
     match s {
         "==" => Ok(BasicOp::Eq),
-        "^=" | "^" | "!=" => Ok(BasicOp::Ne),
+        "^=" | "^" => Ok(BasicOp::Ne),
         ">" => Ok(BasicOp::Gt),
         ">=" => Ok(BasicOp::Ge),
         "<" => Ok(BasicOp::Lt),
@@ -561,38 +557,7 @@ fn unescape_unquoted(s: &str) -> Result<String> {
 }
 
 /// 文法上は許容されたスカラー比較が、意味的に不正（プロジェクションへの適用）でないかチェックします。
-fn check_invalid_scalar_comparison(
-    first_op: &Operand,
-    op_pair: &Pair<Rule>,
-    remaining_pairs: &pest::iterators::Pairs<Rule>,
-) -> Result<()> {
-    if let Operand::TypeRef(tt) = first_op {
-        let op_span = op_pair.as_span();
-        let op_str = op_span.as_str();
-
-        // 右辺のトークンを先読みして修正例のメッセージを構築
-        let mut peek_pairs = remaining_pairs.clone();
-        let right_side = loop {
-            match peek_pairs.next() {
-                Some(p) if p.as_rule() == Rule::WHITESPACE => continue,
-                Some(p) => break p.as_str(),
-                None => break "value",
-            }
-        };
-
-        let message = error::invalid_scalar_comparison_msg(
-            op_str,
-            tt.as_str(),
-            right_side,
-        );
-
-        return Err(anyhow!(Error::<Rule>::new_from_span(
-            ErrorVariant::CustomError { message },
-            op_span,
-        )));
-    }
-    Ok(())
-}
+// check_invalid_scalar_comparison removed (moved to error.rs)
 
 #[cfg(test)]
 mod tests {
