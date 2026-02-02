@@ -20,6 +20,7 @@ use crate::query::ast::{
     AggregationNode, CalculationNode, ComparisonNode, Operand, QueryNode,
 };
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
+use crate::query::error;
 use crate::types::{Label, LabelValue, TagType};
 use anyhow::{bail, Result};
 
@@ -204,7 +205,7 @@ pub fn validate_calculation(
     let right_type = infer_type(&calc.right, schema)?;
 
     if !left_type.is_numeric() || !right_type.is_numeric() {
-        bail!("Arithmetic operations are only possible for numeric types.");
+        bail!(error::ARITHMETIC_ONLY_NUMERIC);
     }
     Ok(())
 }

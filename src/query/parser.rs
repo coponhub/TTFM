@@ -2,6 +2,7 @@ use crate::query::ast::{
     AggregationNode, ArithmeticAggOp, ArithmeticOp, BasicOp, CalculationNode,
     ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
+use crate::query::error;
 use crate::types::{Label, TagType, TypedTag};
 use crate::util::DotOk;
 use anyhow::{anyhow, Result};
@@ -20,24 +21,7 @@ pub struct PestQueryParser;
 static PRATT_PARSER: OnceLock<PrattParser<Rule>> = OnceLock::new();
 
 // ========== Error Messages ==========
-mod errors {
-    pub const PARSE_ERROR: &str = "Parse error";
-    pub const NO_QUERY_FOUND: &str = "No query found";
-    pub const NO_EXPRESSION_FOUND: &str = "No expression found";
-    pub const UNKNOWN_INFIX_RULE: &str = "Unknown infix rule";
-    pub const UNKNOWN_FACTOR_INNER: &str = "Unknown factor inner";
-    pub const COMPLEMENT_MISSING_EXPR: &str = "Complement missing expr";
-    pub const MISSING_TAG_KEY: &str = "Missing tag key";
-    pub const MISSING_TAG_LABEL: &str = "Missing tag label";
-    pub const UNEXPECTED_TAG_TYPE_RULE: &str = "Unexpected tag_type rule";
-    pub const UNKNOWN_COMPARISON_OP: &str = "Unknown comparison op";
-    pub const UNKNOWN_OPERAND_RULE: &str = "Unknown operand rule";
-    pub const UNKNOWN_ARITHMETIC_OP: &str = "Unknown arithmetic op";
-    pub const CALC_REQUIRES_OP: &str =
-        "Calculation must contain at least one operation";
-    pub const UNKNOWN_OPERAND_CALC_RULE: &str = "Unknown operand_calc rule";
-    pub const UNKNOWN_LABEL_RULE: &str = "Unknown label rule";
-}
+// Error definitions are now in crate::query::error
 
 fn get_parser() -> &'static PrattParser<Rule> {
     PRATT_PARSER.get_or_init(|| {
@@ -52,13 +36,13 @@ fn get_parser() -> &'static PrattParser<Rule> {
 /// クエリ文字列を解析し、QueryNode AST を構築します。
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
-        .map_err(|e| anyhow!("{}: {}", errors::PARSE_ERROR, e))?;
+        .map_err(|e| anyhow!("{}: {}", error::PARSE_ERROR, e))?;
     let expr_pair = pairs
         .next()
-        .ok_or_else(|| anyhow!(errors::NO_QUERY_FOUND))?
+        .ok_or_else(|| anyhow!(error::NO_QUERY_FOUND))?
         .into_inner()
         .next()
-        .ok_or_else(|| anyhow!(errors::NO_EXPRESSION_FOUND))?;
+        .ok_or_else(|| anyhow!(error::NO_EXPRESSION_FOUND))?;
     build_ast(expr_pair)
 }
 
@@ -74,7 +58,7 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::primary => build_primary(pair), // Keep primary for now, it delegates to build_ast
         Rule::factor => build_factor(pair), // Keep factor for now, it delegates to build_ast
         Rule::complement => build_complement(pair), // Keep complement for now
-        _ => Err(anyhow!(errors::UNKNOWN_FACTOR_INNER)),
+        _ => Err(anyhow!(error::UNKNOWN_FACTOR_INNER)),
     }
 }
 
@@ -138,7 +122,7 @@ fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
                 }
                 _ => Err(anyhow!(
                     "{}: {:?}",
-                    errors::UNKNOWN_INFIX_RULE,
+                    error::UNKNOWN_INFIX_RULE,
                     op.as_rule()
                 )),
             }
@@ -163,7 +147,7 @@ fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
         }
         _ => Err(anyhow!(
             "{}: {:?}",
-            errors::UNKNOWN_FACTOR_INNER,
+            error::UNKNOWN_FACTOR_INNER,
             inner.as_rule()
         )),
     }
@@ -174,7 +158,7 @@ fn build_complement(pair: Pair<Rule>) -> Result<QueryNode> {
     let _ = inner.next(); // Skip '^' token
     let expr_pair = inner
         .next()
-        .ok_or_else(|| anyhow!(errors::COMPLEMENT_MISSING_EXPR))?;
+        .ok_or_else(|| anyhow!(error::COMPLEMENT_MISSING_EXPR))?;
     Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
 }
 
@@ -183,12 +167,12 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
     let mut inner = pair.into_inner();
     let type_pair = inner
         .next()
-        .ok_or_else(|| anyhow!(errors::MISSING_TAG_KEY))?;
+        .ok_or_else(|| anyhow!(error::MISSING_TAG_KEY))?;
     let tagtype = build_tag_type(type_pair)?;
 
     let label_pair = inner
         .next()
-        .ok_or_else(|| anyhow!(errors::MISSING_TAG_LABEL))?;
+        .ok_or_else(|| anyhow!(error::MISSING_TAG_LABEL))?;
     let label = build_label(label_pair)?;
 
     // Empty label implies projection (e.g. "extension:")
@@ -233,7 +217,7 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
         }
         _ => Err(anyhow!(
             "{}: {:?}",
-            errors::UNEXPECTED_TAG_TYPE_RULE,
+            error::UNEXPECTED_TAG_TYPE_RULE,
             inner.as_rule()
         )),
     }
@@ -321,7 +305,7 @@ fn parse_label_basic_op(s: &str) -> Result<BasicOp> {
         ">=" => Ok(BasicOp::Ge),
         "<" => Ok(BasicOp::Lt),
         "<=" => Ok(BasicOp::Le),
-        s => Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s)),
+        s => Err(anyhow!("{}: {}", error::UNKNOWN_COMPARISON_OP, s)),
     }
 }
 
@@ -334,7 +318,7 @@ fn parse_scalar_basic_op(s: &str) -> Result<BasicOp> {
         ">=" => Ok(BasicOp::Ge),
         "<" => Ok(BasicOp::Lt),
         "<=" => Ok(BasicOp::Le),
-        s => Err(anyhow!("{}: {}", errors::UNKNOWN_COMPARISON_OP, s)),
+        s => Err(anyhow!("{}: {}", error::UNKNOWN_COMPARISON_OP, s)),
     }
 }
 
@@ -377,7 +361,7 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         }
         _ => Err(anyhow!(
             "{}: {:?}",
-            errors::UNKNOWN_OPERAND_RULE,
+            error::UNKNOWN_OPERAND_RULE,
             inner.as_rule()
         )),
     }
@@ -407,7 +391,7 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
 
     match left {
         Operand::Calculation(node) => Ok(*node),
-        _ => Err(anyhow!(errors::CALC_REQUIRES_OP)),
+        _ => Err(anyhow!(error::CALC_REQUIRES_OP)),
     }
 }
 
@@ -419,7 +403,7 @@ fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
         "x" => Ok(ArithmeticOp::Mul), // 'x' is also allowed for multiplication
         "/" => Ok(ArithmeticOp::Div),
         "%" => Ok(ArithmeticOp::Mod),
-        _ => Err(anyhow!(errors::UNKNOWN_ARITHMETIC_OP)),
+        _ => Err(anyhow!(error::UNKNOWN_ARITHMETIC_OP)),
     }
 }
 
@@ -451,7 +435,7 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         }
         _ => Err(anyhow!(
             "{}: {:?}",
-            errors::UNKNOWN_OPERAND_CALC_RULE,
+            error::UNKNOWN_OPERAND_CALC_RULE,
             inner.as_rule()
         )),
     }
@@ -514,7 +498,7 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
         }
         _ => Err(anyhow!(
             "{}: {:?}",
-            errors::UNKNOWN_LABEL_RULE,
+            error::UNKNOWN_LABEL_RULE,
             inner.as_rule()
         )),
     }
@@ -596,9 +580,10 @@ fn check_invalid_scalar_comparison(
             }
         };
 
-        let message = format!(
-            "Invalid operator '{}': Scalar comparison cannot be applied to a Projection ('{}:'). \nDid you mean: '{}: :{} {}'",
-            op_str, tt.as_str(), tt.as_str(), op_str, right_side
+        let message = error::invalid_scalar_comparison_msg(
+            op_str,
+            tt.as_str(),
+            right_side,
         );
 
         return Err(anyhow!(Error::<Rule>::new_from_span(

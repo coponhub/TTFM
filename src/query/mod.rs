@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod error;
 pub mod fetcher;
 pub mod functions;
 pub mod lens_resolver;
