@@ -119,33 +119,40 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             calc,
             ..
         } => {
-            let mut stmt = Query::select();
-            stmt.from(Alias::new(view));
-            stmt.column(Col::ItemId);
+            // RowTag が関与する場合は GROUP BY HAVING で集約計算を行う
+            let needs_eav = calc.contains_row_tag()
+                || matches!(storage, StorageMapping::RowTag { .. });
 
-            let tag_expr = build_storage_column_expr(storage, *sql_type);
-
-            // 集約関数が含まれている場合はサブクエリを使用
-            let calc_expr = if calc.contains_aggregation() {
-                build_calculation_subquery(calc, view)
+            if needs_eav {
+                build_tag_calc_match_eav_sql(storage, *sql_type, *op, calc, view)
             } else {
-                build_calculation_expr(calc)
-            };
+                let mut stmt = Query::select();
+                stmt.from(Alias::new(view));
+                stmt.column(Col::ItemId);
 
-            // TagCalculationMatchは「calc op tag」の形式で保存されているため、
-            // 「tag flip(op) calc」の形式でSQLを生成する
-            let flipped_op =
-                to_bin_op(crate::query::lens_resolver::flip_op(*op));
-            let cond = Expr::expr(tag_expr).binary(flipped_op, calc_expr);
+                let tag_expr = build_storage_column_expr(storage, *sql_type);
 
-            stmt.cond_where(cond);
+                // 集約関数が含まれている場合はサブクエリを使用
+                let calc_expr = if calc.contains_aggregation() {
+                    build_calculation_subquery(calc, view)
+                } else {
+                    build_calculation_expr(calc)
+                };
 
-            // RowTagの場合は、typeでフィルタ
-            if let StorageMapping::RowTag { tag_key, .. } = storage {
-                stmt.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+                // 解決済みの演算子をそのまま使用する（Resolver側ですでに正規化済み）
+                let bin_op = to_bin_op(*op);
+                let cond = Expr::expr(tag_expr).binary(bin_op, calc_expr);
+
+                stmt.cond_where(cond);
+
+                // 集約関数が含まれていない場合のみ、
+                // calcに含まれるRowTagのtypeフィルタを追加
+                if !calc.contains_aggregation() {
+                    extract_and_add_row_tag_filters(&mut stmt, calc);
+                }
+
+                stmt
             }
-
-            stmt
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
             let mut stmt = Query::select();
@@ -182,6 +189,20 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             stmt.cond_where(cond);
             stmt
         }
+        ResolvedNode::TagTagMatch {
+            left_storage,
+            left_sql_type,
+            op,
+            right_storage,
+            right_sql_type,
+        } => build_resolved_tag_tag_match_sql(
+            left_storage,
+            *left_sql_type,
+            *op,
+            right_storage,
+            *right_sql_type,
+            view,
+        ),
         ResolvedNode::AggregationTagMatch {
             agg,
             op,
@@ -350,6 +371,132 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     stmt.limit(1);
 
     stmt.to_owned()
+}
+
+fn build_resolved_tag_tag_match_sql(
+    left_storage: &StorageMapping,
+    left_sql_type: crate::db::SqlType,
+    op: ComparisonOp,
+    right_storage: &StorageMapping,
+    right_sql_type: crate::db::SqlType,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.column(Col::ItemId)
+        .from(Alias::new(view))
+        .group_by_col(Col::ItemId);
+
+    let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
+    let right_expr = build_tag_value_agg_expr(right_storage, right_sql_type);
+
+    q.and_having(left_expr.binary(to_bin_op(op), right_expr));
+
+    q
+}
+
+fn build_tag_value_agg_expr(
+    storage: &StorageMapping,
+    _sql_type: crate::db::SqlType,
+) -> SimpleExpr {
+    use crate::db::CustomFunc;
+    match storage {
+        StorageMapping::Column(col) => {
+            CustomFunc::any_value(Expr::col(*col)).into()
+        }
+        StorageMapping::RowTag { column, tag_key } => {
+            // RowTag は label_str (VARCHAR) として保存されているため、
+            // 算術演算を行う場合は TRY_CAST(... AS DOUBLE) で数値に変換する
+            // TRY_CAST は変換失敗時に NULL を返す（エラーにならない）
+            let cast_expr = Expr::cust_with_exprs(
+                "TRY_CAST($1 AS DOUBLE)",
+                [Expr::col(*column).into()],
+            );
+            CustomFunc::any_value_filter(
+                cast_expr,
+                Expr::col(Col::Type).eq(tag_key.as_str()),
+            )
+        }
+        StorageMapping::Virtual => {
+            // Virtualタグは集約対象外とする
+            CustomFunc::any_value(Expr::val(0)).into()
+        }
+    }
+}
+
+/// EAV 構造における Tag vs Calculation 比較用の SQL を生成します。
+/// GROUP BY item_id HAVING で集約計算を行います。
+fn build_tag_calc_match_eav_sql(
+    left_storage: &StorageMapping,
+    left_sql_type: crate::db::SqlType,
+    op: crate::query::ast::ComparisonOp,
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.column(Col::ItemId)
+        .from(Alias::new(view))
+        .group_by_col(Col::ItemId);
+
+    // 左辺（タグ）を集約式に変換
+    let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
+
+    // 右辺（計算式）を集約式に変換
+    let calc_expr = build_calculation_eav_expr(calc);
+
+    q.and_having(left_expr.binary(to_bin_op(op), calc_expr));
+
+    q
+}
+
+/// EAV 構造用の計算式を集約式として構築します。
+fn build_calculation_eav_expr(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+) -> SimpleExpr {
+    let left_expr = build_resolved_operand_eav_expr(&calc.left);
+    let right_expr = build_resolved_operand_eav_expr(&calc.right);
+
+    let bin_op = match calc.op {
+        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
+        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
+        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
+        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
+        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
+    };
+
+    Expr::expr(left_expr).binary(bin_op, right_expr)
+}
+
+/// EAV 構造用のオペランドを集約式として構築します。
+fn build_resolved_operand_eav_expr(
+    operand: &crate::query::lens_resolver::ResolvedOperand,
+) -> SimpleExpr {
+    use crate::query::lens_resolver::ResolvedOperand;
+
+    match operand {
+        ResolvedOperand::Literal(lab) => {
+            // サイズ単位のパース (例: "1MB" → 1048576)
+            let s = lab.as_str();
+            if let Some(bytes) = crate::util::parse_size(&s) {
+                Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
+            } else {
+                match lab.value() {
+                    crate::types::LabelValue::Integer(i) => {
+                        Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
+                    }
+                    crate::types::LabelValue::String(s)
+                    | crate::types::LabelValue::Literal(s) => {
+                        Expr::val(s.clone()).into()
+                    }
+                    crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+                }
+            }
+        }
+        ResolvedOperand::TagRef {
+            storage, sql_type, ..
+        } => build_tag_value_agg_expr(storage, *sql_type),
+        ResolvedOperand::Calculation(calc) => build_calculation_eav_expr(calc),
+        ResolvedOperand::Aggregation(agg) => build_aggregation_expr(agg),
+    }
 }
 
 fn build_aggregation_parts(

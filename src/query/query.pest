@@ -46,20 +46,22 @@ comparison = {
 }
 
 // Label comparison: operand (including projection) followed by label-style operator
+// Specification: Proj :Op Scalar | Scalar :Op Proj | Scalar :Op Proj :Op Scalar ...
 label_comparison = ${
-    ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step)+ )
-  | ( (number | quoted_string | unquoted_string | unquoted_tag_string) ~ (WHITESPACE+ ~ label_op)+ )
+    ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
+  | ( (number | quoted_string | unquoted_string | unquoted_tag_string | calculation) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
 }
 
 // Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
 // DESIGN.md:71 - Label equality uses single "=" not "=="
 label_op = ${ colon ~ label_basic_op ~ WHITESPACE* ~ operand }
+label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE* ~ (type_ref | calculation) }
 
 // Stuck operator: ^, ^=, >, >=, <, <= (NO equality operator)
 // DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
 // DESIGN.md:88 - NO whitespace allowed between operator and operand
 stuck_op_step = ${ stuck_basic_op ~ stuck_operand }
-stuck_operand = { quoted_string | number | unquoted_tag_string }
+stuck_operand = { quoted_string | number | type_ref | calculation | unquoted_tag_string }
 
 colon = { ":" }
 
@@ -126,7 +128,7 @@ operand_calc = { aggregation | type_ref | label | calculation }
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }
 
-tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ &":") ~ identifier) }
+tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ (WHITESPACE | EOI | ":")) ~ identifier) }
 
 // --- Labels and Literals ---
 label = { quoted_string | number | (!type_ref ~ unquoted_string) }
@@ -147,7 +149,7 @@ inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 
 // Unquoted strings: Allow colons in labels.
 unquoted_string = @{
-    (escape | (!(WHITESPACE | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
+    !number ~ (escape | (!(WHITESPACE | ":" | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
 }
 
 escape = @{ "\\" ~ ANY }

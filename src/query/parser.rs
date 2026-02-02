@@ -245,7 +245,7 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
             Rule::label_comparison => {
                 let step_rule = actual_step.as_rule();
                 let mut step_inner = actual_step.into_inner();
-                let op_str = if step_rule == Rule::label_op {
+                let op_str = if step_rule == Rule::label_op || step_rule == Rule::label_op_to_proj {
                     let _colon = step_inner.next(); // consume the colon pair
                     step_inner.next().unwrap().as_str() // label_basic_op
                 } else {

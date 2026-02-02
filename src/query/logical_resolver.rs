@@ -19,8 +19,8 @@
 use crate::query::ast::{
     AggregationNode, CalculationNode, ComparisonNode, Operand, QueryNode,
 };
-use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
 use crate::query::error;
+use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
 use crate::types::{Label, LabelValue, TagType};
 use anyhow::{bail, Result};
 
@@ -197,6 +197,7 @@ fn validate_operand(
 }
 
 /// 算術演算の型チェック（論理レベル）
+/// Any 型はスキーマに登録されていないカスタムタグを許容するために数値として扱う
 pub fn validate_calculation(
     calc: &CalculationNode,
     schema: &impl LogicalSchema,
@@ -204,7 +205,12 @@ pub fn validate_calculation(
     let left_type = infer_type(&calc.left, schema)?;
     let right_type = infer_type(&calc.right, schema)?;
 
-    if !left_type.is_numeric() || !right_type.is_numeric() {
+    // Any 型はカスタムタグ（width:, height: など）を許容するために数値として扱う
+    // 実際の型チェックはデータベース実行時に行われる
+    let left_ok = left_type.is_numeric() || left_type == LogicalType::Any;
+    let right_ok = right_type.is_numeric() || right_type == LogicalType::Any;
+
+    if !left_ok || !right_ok {
         bail!(error::ARITHMETIC_ONLY_NUMERIC);
     }
     Ok(())

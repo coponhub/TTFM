@@ -70,14 +70,15 @@
     - **演算子**:
         - **ラベル比較演算子**: `:=`, `:^`or`:^=` (不一致), `:>`, `:>=`, `:<`, `:<=` (大小比較)。
     - **ルール**:
-        - 両辺をProjection, 又は両辺をScalarにする事は出来ない
+        - 両辺をScalarにする事は出来ない（少なくとも一方はProjectionまたは集約である必要がある）
             - `Proj :> Scalar` -> OK
             - `Scalar :> Proj` -> OK
+            - `Proj :> Proj` -> OK
             - `Scalar :> Scalar` -> ERROR
-            - `Proj :> Proj` -> ERROR
         - 数式のような柔軟な記述が可能（例: `100 :< size:`）。
         - 連鎖比較が可能（例: `50 :< height: :< 100`）。
         - 演算子とオペランドの間にはスペースを入れなければならない。
+        - Proj同士の場合、同一ItemのLabelを比較し、抽出した集合を返す
 - **密着ラベル比較 (Stuck Label Comparison)**
     - `[Projection][ComparisonOp][Scalar]` 形式
     - **Projection**: 上記「ラベル取得」汎用ラベル比較と違い左辺は必ずProjectionとなる

@@ -87,6 +87,14 @@ pub enum ResolvedNode {
         storage: StorageMapping,
         sql_type: SqlType,
     },
+    /// タグ同士の比較 (例: width: > height:)
+    TagTagMatch {
+        left_storage: StorageMapping,
+        left_sql_type: SqlType,
+        op: ComparisonOp,
+        right_storage: StorageMapping,
+        right_sql_type: SqlType,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -133,6 +141,17 @@ impl ResolvedOperand {
             ResolvedOperand::Aggregation(_) => Condition::any(),
         }
     }
+
+    /// RowTag への参照が含まれているかチェックします（EAV 計算比較用）。
+    pub fn contains_row_tag(&self) -> bool {
+        match self {
+            ResolvedOperand::TagRef { storage, .. } => {
+                matches!(storage, StorageMapping::RowTag { .. })
+            }
+            ResolvedOperand::Calculation(calc) => calc.contains_row_tag(),
+            _ => false,
+        }
+    }
 }
 
 /// 算術演算の解決済みノード
@@ -147,6 +166,11 @@ impl ResolvedCalculationNode {
     /// 集約関数が含まれているかチェックします。
     pub fn contains_aggregation(&self) -> bool {
         self.left.contains_aggregation() || self.right.contains_aggregation()
+    }
+
+    /// RowTag への参照が含まれているかチェックします（EAV 計算比較用）。
+    pub fn contains_row_tag(&self) -> bool {
+        self.left.contains_row_tag() || self.right.contains_row_tag()
     }
 
     pub fn to_condition(&self) -> Condition {
@@ -189,7 +213,8 @@ impl ResolvedNode {
             | ResolvedNode::TagCalculationMatch { .. }
             | ResolvedNode::AggregationCalculationMatch { .. }
             | ResolvedNode::AggregationAggregationMatch { .. }
-            | ResolvedNode::AggregationTagMatch { .. } => {
+            | ResolvedNode::AggregationTagMatch { .. }
+            | ResolvedNode::TagTagMatch { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
                 // 連結用には Condition::any() を返しておく。
@@ -617,6 +642,7 @@ fn resolve_single_match(
         }
         // (1 + 2) :> size:
         // 意味: size: が (1+2) より大きい → size: > (1+2)
+        // 解決後の TagCalculationMatch は (tag op calc) の順なので、演算子を反転させる必要がある
         (Operand::Calculation(calc), Operand::TypeRef(tt)) => {
             let (storage, sql_type) = get_storage_and_type(lens, &tt);
             let res_calc = resolve_calculation(lens, *calc)?;
@@ -624,7 +650,7 @@ fn resolve_single_match(
                 tag_type: tt,
                 storage,
                 sql_type,
-                op,
+                op: flip_op(op),
                 calc: res_calc,
             })
         }
@@ -690,6 +716,18 @@ fn resolve_single_match(
                 calc: res_calc,
                 op: flip_op(op),
                 label: lab,
+            })
+        }
+        // width: > height:
+        (Operand::TypeRef(tt_l), Operand::TypeRef(tt_r)) => {
+            let (sl, tl) = get_storage_and_type(lens, &tt_l);
+            let (sr, tr) = get_storage_and_type(lens, &tt_r);
+            Ok(ResolvedNode::TagTagMatch {
+                left_storage: sl,
+                left_sql_type: tl,
+                op,
+                right_storage: sr,
+                right_sql_type: tr,
             })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
@@ -1155,6 +1193,29 @@ mod tests {
             assert_eq!(label.as_i64(), 100);
         } else {
             panic!("Expected Match, got {:?}", resolved);
+        }
+    }
+
+    #[test]
+    fn test_resolve_tag_tag_comparison() {
+        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::types::TagType;
+        let lens = Lens::base_standard();
+
+        // width: > height:
+        let cmp = ComparisonNode {
+            first: Operand::TypeRef(TagType::from("width")),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::TypeRef(TagType::from("height")),
+            )],
+        };
+
+        let resolved = resolve_comparison(&lens, cmp).unwrap();
+        if let ResolvedNode::TagTagMatch { op, .. } = resolved {
+            assert_eq!(op, ComparisonOp::Label(BasicOp::Gt));
+        } else {
+            panic!("Expected TagTagMatch, got {:?}", resolved);
         }
     }
 }

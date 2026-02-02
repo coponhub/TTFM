@@ -275,6 +275,8 @@ pub enum DuckDbFunc {
     RowNumber,
     #[iden = "count"]
     Count,
+    #[iden = "any_value"]
+    AnyValue,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -383,6 +385,27 @@ impl CustomFunc {
             "MAX($1) FILTER (WHERE $2)",
             [expr.into(), filter_expr.into()],
         )
+    }
+
+    /// ANY_VALUE(expr) FILTER (WHERE cond) を生成します。
+    pub fn any_value_filter<E, F>(expr: E, filter_expr: F) -> sea_query::SimpleExpr
+    where
+        E: Into<sea_query::SimpleExpr>,
+        F: Into<sea_query::SimpleExpr>,
+    {
+        sea_query::Expr::cust_with_exprs(
+            "ANY_VALUE($1) FILTER (WHERE $2)",
+            [expr.into(), filter_expr.into()],
+        )
+    }
+
+    /// any_value(expr) を生成します。
+    pub fn any_value<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::AnyValue)
+            .arg(expr.into())
+            .into()
     }
 
     /// ID割り当て用のウィンドウ関数式を生成します。

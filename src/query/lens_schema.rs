@@ -322,6 +322,7 @@ impl Lens {
     }
 
     /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの RowTag 定義を返します。
+    /// 未知のタグは Any 型として扱い、算術演算を許容します（実行時に DB がチェック）。
     pub fn look_up_or_default(&self, tag: &TagType) -> TagDescriptor {
         if let Some(desc) = self.registry.get(tag) {
             return (*desc).clone();
@@ -332,7 +333,7 @@ impl Lens {
                 column: crate::db::Col::LabelStr,
                 tag_key: tag.as_str().to_string(),
             },
-            logical_type: LogicalType::String,
+            logical_type: LogicalType::Any, // 未知のタグは Any として扱う
             logical_function: None,
         }
     }
