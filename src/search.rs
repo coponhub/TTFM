@@ -47,32 +47,13 @@ impl FileManager {
         let fetcher =
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
-        // 2-A. トップレベル集約・スカラー式ケース
-        if let Some(_) = resolver.get_scalar_expression() {
-            let val = fetcher.fetch_scalar()?;
-            return Ok(SearchResponse {
-                scalar: Some(val),
-                total_count: Some(1),
-                ..SearchResponse::new_empty(None, false, None)
-            });
-        }
-
-        // 2-B. ブーリアン・スカラー結果ケース (集約関数の比較など)
-        if resolver.resolved_query.is_boolean_result() {
-            use crate::types::{ItemId, VirtualItem};
-            let val = fetcher.fetch_boolean()?;
-            let val_int = if val { 1 } else { 0 };
-            let val_str = if val { "TRUE" } else { "FALSE" };
-            let mut res = SearchResult::new_empty(ItemId::Virtual(
-                VirtualItem::Boolean(val_int),
-            ));
-            res.name = val_str.to_string();
-            res.item_kind = "virtual".to_string();
-            // 互換性のため、Rank=0, Tags=Empty とする
+        // 2-A. トップレベル集約・スカラー式 または ブーリアン・スカラー結果ケース
+        if resolver.get_scalar_expression().is_some() || resolver.resolved_query.is_boolean_result() {
+            let res = fetcher.fetch_computation()?;
             return Ok(SearchResponse {
                 results: vec![res],
                 label_results: Vec::new(),
-                scalar: None, // `ttfm` output logic might use this if we wanted pure scalar output, but `ttfm` expects items usually.
+                scalar: None, // スカラーも結果リストに入れるように統一
                 cid: None,
                 has_more: false,
                 total_count: Some(1),

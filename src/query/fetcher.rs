@@ -65,8 +65,19 @@ impl<'a> Fetcher<'a> {
         })
     }
 
-    /// クエリをトップレベルのスカラー式（集約計算など）として実行し、単一の数値を返します。
-    pub fn fetch_scalar(&self) -> Result<f64> {
+    /// 新規：計算クエリ（集約またはブーリアン）を実行し、SearchResult形式で返します。
+    pub fn fetch_computation(&self) -> Result<SearchResult> {
+        if let Some(_) = self.resolver.get_scalar_expression() {
+            self.compute_aggregation()
+        } else if self.resolver.resolved_query.is_boolean_result() {
+            self.compute_boolean()
+        } else {
+            Err(anyhow::anyhow!("Query is not a computation (scalar or boolean expression)"))
+        }
+    }
+
+    /// クエリをトップレベルのスカラー式（集約計算など）として実行し、SearchResultを返します。
+    fn compute_aggregation(&self) -> Result<SearchResult> {
         let op = self.resolver.get_scalar_expression().ok_or_else(|| {
             anyhow::anyhow!("Query is not a top-level scalar expression")
         })?;
@@ -75,10 +86,10 @@ impl<'a> Fetcher<'a> {
 
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {
-            println!("--- FETCH SCALAR SQL ---\n{}\n----------------", sql_str);
+            println!("--- COMPUTE AGGREGATION SQL ---\n{}\n----------------", sql_str);
         }
 
-        self.conn
+        let val_f64 = self.conn
             .prepare(&sql_str)?
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
@@ -90,7 +101,6 @@ impl<'a> Fetcher<'a> {
                     duckdb::types::Value::BigInt(i) => Ok(i as f64),
                     duckdb::types::Value::HugeInt(i) => Ok(i as f64),
                     other => {
-                        // 文字列等の場合はパースを試みる
                         let s_val = format!("{:?}", other);
                         if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
                             Ok(f)
@@ -104,11 +114,16 @@ impl<'a> Fetcher<'a> {
                     }
                 }
             })
-            .map_err(|e| anyhow::anyhow!("Failed to fetch scalar: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to compute aggregation: {}", e))?;
+
+        let id = ItemId::Virtual(crate::types::VirtualItem::Scalar(val_f64.to_bits()));
+        let mut res = SearchResult::new_empty(id);
+        res.item_kind = "virtual".to_string();
+        Ok(res)
     }
 
-    /// ブーリアンのみを返す特殊なクエリを実行します。
-    pub fn fetch_boolean(&self) -> Result<bool> {
+    /// ブーリアンのみを返す特殊なクエリを実行し、SearchResultを返します。
+    fn compute_boolean(&self) -> Result<SearchResult> {
         let sql = crate::query::sql::build_boolean_sql(
             &self.resolver.resolved_query,
             "oneview",
@@ -117,14 +132,18 @@ impl<'a> Fetcher<'a> {
 
         if std::env::var("TTFM_DEBUG").is_ok() {
             println!(
-                "--- FETCH BOOLEAN SQL ---\n{}\n----------------",
+                "--- COMPUTE BOOLEAN SQL ---\n{}\n----------------",
                 sql_str
             );
         }
 
-        // COALESCE(MAX(item_id), 0) の結果 (1 or 0) が返るはず
         let id_val: i64 = self.conn.query_row(&sql_str, [], |r| r.get(0))?;
-        Ok(id_val == 1)
+        let val_int = if id_val == 1 { 1 } else { 0 };
+        
+        let id = ItemId::Virtual(crate::types::VirtualItem::Boolean(val_int));
+        let mut res = SearchResult::new_empty(id);
+        res.item_kind = "virtual".to_string();
+        Ok(res)
     }
 
     /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
@@ -621,8 +640,8 @@ mod tests {
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
-        let res = fetcher.fetch_boolean().unwrap();
-        assert!(!res); // FALSE
+        let res = fetcher.compute_boolean().unwrap();
+        assert_eq!(res.id, ItemId::Virtual(crate::types::VirtualItem::Boolean(0))); // FALSE
 
         // データ投入
         conn.execute(
@@ -635,7 +654,7 @@ mod tests {
         // Date parsing happens at lens resolution time, so 2026-02-01 becomes a timestamp integer.
         // Assuming the query parser works correctly, this should return TRUE.
 
-        let res2 = fetcher.fetch_boolean().unwrap();
-        assert!(res2); // TRUE
+        let res2 = fetcher.compute_boolean().unwrap();
+        assert_eq!(res2.id, ItemId::Virtual(crate::types::VirtualItem::Boolean(1))); // TRUE
     }
 }

@@ -27,8 +27,8 @@ fn test_count_items() -> anyhow::Result<()> {
     let res = fm.search("count(extension:txt)", Default::default())?;
 
     // スカラ結果が含まれていることを確認
-    assert_eq!(res.scalar, Some(2.0));
-    assert!(res.results.is_empty());
+    assert!(!res.results.is_empty());
+    assert_eq!(res.results[0].name, "2");
 
     Ok(())
 }
@@ -49,7 +49,7 @@ fn test_count_unique_labels() -> anyhow::Result<()> {
 
     // count(extension:) -> 2 (txt, rs のユニーク数)
     let res = fm.search("count(extension:)", Default::default())?;
-    assert_eq!(res.scalar, Some(2.0));
+    assert_eq!(res.results[0].name, "2");
 
     Ok(())
 }
@@ -71,7 +71,7 @@ fn test_sum_projection() -> anyhow::Result<()> {
     // sum(size:) は合計サイズ (1100) を返すはず
     // 親ディレクトリ等のサイズが入る可能性があるため、拡張子で絞り込む
     let res = fm.search("sum(extension:txt & size:)", Default::default())?;
-    assert_eq!(res.scalar, Some(1100.0));
+    assert_eq!(res.results[0].name, "1100");
 
     Ok(())
 }
@@ -164,13 +164,14 @@ fn test_count_type_projection() -> anyhow::Result<()> {
     // システム標準で name, extension, size, mtime, hash, item_kind, origin, rank があるはず
     // 少なくとも 3種類以上はある
     let res = fm.search("count(type:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
 
     // 現在のバグだと 1 になると予想される
     // 期待値は > 1
     assert!(
-        res.scalar.unwrap() > 1.0,
+        val > 1.0,
         "Expected multiple types, got {}",
-        res.scalar.unwrap()
+        val
     );
 
     Ok(())
@@ -192,12 +193,13 @@ fn test_count_directory_projection() -> anyhow::Result<()> {
 
     // ディレクトリが1つあるはず (subdir)
     let res = fm.search("count(directory:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
 
     // 現在のバグだと 0 になると予想される
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "Expected at least 1 directory, got {}",
-        res.scalar.unwrap()
+        val
     );
 
     Ok(())
@@ -222,59 +224,66 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
 
     // 1. count(item_id:) -> 全アイテム数 (test.txt, sub, test2.txt = 3)
     let res = fm.search("count(item_id:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 3.0,
+        val >= 3.0,
         "count(item_id) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 2. count(item_kind:) -> 'file', 'directory' など少なくとも1つ以上
     let res = fm.search("count(item_kind:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     // file と directory があるので 2 になる可能性が高い、少なくとも 0 ではない
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "count(item_kind) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 3. count(rank:) -> ランク。デフォルト0だとしても1種類はある
     let res = fm.search("count(rank:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "count(rank) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 4. count(origin:) -> 'system', 'user'。少なくとも system はある
     let res = fm.search("count(origin:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "count(origin) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 5. count(path:) -> パスはユニークなのでアイテム数と同じはず
     let res = fm.search("count(path:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 3.0,
+        val >= 3.0,
         "count(path) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 6. count(parentdir:) -> root, root/sub など複数
     let res = fm.search("count(parentdir:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "count(parentdir) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     // 7. count(filename:) -> test.txt, test2.txt, sub など
     let res = fm.search("count(filename:)", Default::default())?;
+    let val: f64 = res.results[0].name.parse().unwrap();
     assert!(
-        res.scalar.unwrap() >= 1.0,
+        val >= 1.0,
         "count(filename) failed: {}",
-        res.scalar.unwrap()
+        val
     );
 
     Ok(())
@@ -297,7 +306,7 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
 
     // max(mtime:) を取得
     let res1 = fm.search("max(mtime:)", Default::default())?;
-    println!("max(mtime:) = {:?}", res1.scalar);
+    println!("max(mtime:) = {:?}", res1.results.get(0).map(|r| &r.name));
 
     // max(mtime:) < 2027-01-01 を比較
     let res2 = fm.search("max(mtime:) < 2027-01-01", Default::default())?;
@@ -416,9 +425,8 @@ fn test_max_mtime_with_year_filter() {
     // max(mtime:) should return that value.
 
     let res = context.search("max(extension:rs & mtime:2025 & mtime:)");
-    // scalar is Option<f64>
-    assert!(res.scalar.is_some());
-    let scalar = res.scalar.unwrap();
+    assert!(!res.results.is_empty());
+    let scalar: f64 = res.results[0].name.parse().unwrap();
     println!("Scalar result: {}", scalar);
 
     // 2025-06-15T12:00:00Z = 1750075200

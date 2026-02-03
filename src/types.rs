@@ -22,6 +22,8 @@ pub enum ItemId {
 pub enum VirtualItem {
     /// 真偽値 (1=True, 0=False)
     Boolean(u8),
+    /// スカラー数値 (f64 bits)
+    Scalar(u64),
 }
 
 impl ItemId {
@@ -30,6 +32,7 @@ impl ItemId {
         match self {
             ItemId::Real(i) => *i,
             ItemId::Virtual(VirtualItem::Boolean(v)) => *v as i64,
+            ItemId::Virtual(VirtualItem::Scalar(_)) => 0, // スカラーは実IDとしては0
         }
     }
 
@@ -52,6 +55,9 @@ impl std::fmt::Display for ItemId {
             ItemId::Virtual(VirtualItem::Boolean(1)) => write!(f, "1"),
             ItemId::Virtual(VirtualItem::Boolean(0)) => write!(f, "0"),
             ItemId::Virtual(VirtualItem::Boolean(v)) => write!(f, "{}", v),
+            ItemId::Virtual(VirtualItem::Scalar(bits)) => {
+                write!(f, "{}", f64::from_bits(*bits))
+            }
         }
     }
 }

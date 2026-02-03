@@ -4,7 +4,7 @@ use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use sea_query::{
-    Alias, BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
+    Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr,
 };
 
 /// クエリ構造を SQL (SelectStatement) へ変換します。
@@ -355,10 +355,10 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     }
     stmt.cond_where(final_cond);
 
-    // 真なら TRUE (1), 偽なら FALSE (0) の ItemId を返す
+    // 真なら TRUE (1), 偽なら FALSE (NULL) の ItemId を返す
     // 仮想アイテムかどうかは item_kind = 'virtual' で判定する
     let case_expr =
-        Expr::case(condition, Expr::val(1i64)).finally(Expr::val(0i64));
+        Expr::case(condition, Expr::val(1i64));
 
     stmt.expr_as(case_expr, Col::ItemId);
     stmt.expr_as(Expr::val("virtual"), Col::ItemKind);
@@ -760,7 +760,6 @@ fn build_aggregation_subquery(
     SimpleExpr::SubQuery(None, Box::new(subquery.into_sub_query_statement()))
 }
 
-/// ブーリアン結果を得るための SQL を生成します。
 pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
     let pick_sql = build_pick_sql(node, view);
     wrap_boolean_collider(pick_sql)
@@ -768,11 +767,13 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
 fn wrap_boolean_collider(sql: SelectStatement) -> SelectStatement {
     let mut q = Query::select();
+    use crate::db::CustomFunc;
     q.expr_as(
-        Func::coalesce([
-            Func::max(Expr::col((Alias::new("pk"), Col::ItemId))).into(),
-            Expr::val(0i64).into(),
-        ]),
+        Expr::case(
+            CustomFunc::any_value(Expr::col((Alias::new("pk"), Col::ItemId))).is_not_null(),
+            Expr::val(1i64),
+        )
+        .finally(Expr::val(0i64)),
         Col::ItemId,
     )
     .expr_as(Expr::val("virtual"), Col::ItemKind)
@@ -1117,21 +1118,14 @@ fn build_resolved_diff_sql(
 fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
     let mut q = Query::select();
     if c.is_boolean_result() {
-        // Boolean Universe: {TRUE(1), FALSE(0)}
-        // SELECT 1 ... UNION SELECT 0 ...
+        // Boolean Universe: {TRUE(1)}
+        // FALSE is represented by the absence of rows.
         let mut true_q = Query::select();
         true_q
             .expr_as(Expr::val(1i64), Col::ItemId)
             .expr_as(Expr::val(0i64), Col::Rank)
             .expr_as(Expr::val("virtual"), Col::ItemKind);
 
-        let mut false_q = Query::select();
-        false_q
-            .expr_as(Expr::val(0i64), Col::ItemId)
-            .expr_as(Expr::val(0i64), Col::Rank)
-            .expr_as(Expr::val("virtual"), Col::ItemKind);
-
-        true_q.union(sea_query::UnionType::Distinct, false_q);
         q = true_q;
     } else {
         q.columns([Col::ItemId, Col::Rank, Col::ItemKind])

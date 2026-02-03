@@ -282,6 +282,9 @@ impl SearchResult {
             ItemId::Virtual(crate::types::VirtualItem::Boolean(0)) => {
                 "FALSE".to_string()
             }
+            ItemId::Virtual(crate::types::VirtualItem::Scalar(bits)) => {
+                f64::from_bits(bits).to_string()
+            }
             _ => String::new(),
         };
         Self {
@@ -449,7 +452,15 @@ impl SearchResult {
                     types.push(TagType::Base(SType::Size));
                 }
                 if self.item_kind == "virtual" {
-                    types.push(TagType::from("boolean"));
+                    match self.id {
+                        ItemId::Virtual(crate::types::VirtualItem::Boolean(_)) => {
+                            types.push(TagType::from("boolean"));
+                        }
+                        ItemId::Virtual(crate::types::VirtualItem::Scalar(_)) => {
+                            types.push(TagType::from("scalar"));
+                        }
+                        _ => {}
+                    }
                 }
                 if self.intrinsic.mtime.is_some() {
                     types.push(TagType::Base(SType::Mtime));

@@ -16,4 +16,5 @@ pub mod test_strict_grammar;
 pub mod test_validation;
 pub mod verify_search;
 pub mod verify_search_all;
+pub mod test_computation_fetching;
 pub mod wasm_plugin_test;

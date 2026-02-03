@@ -44,11 +44,13 @@ fn test_slash_separated_date_query() -> anyhow::Result<()> {
     // 5. 日時の集約 (max, min)
     // max(mtime:) は最新のファイルのタイムスタンプを返すはず
     let res_max = fm.search("max(mtime:)", Default::default())?;
-    assert!(res_max.scalar.unwrap() > 0.0);
-
+    let val_max: f64 = res_max.results[0].name.parse().unwrap();
+    assert!(val_max > 0.0);
+    
     let res_min = fm.search("min(mtime:)", Default::default())?;
-    assert!(res_min.scalar.unwrap() > 0.0);
-    assert!(res_max.scalar.unwrap() >= res_min.scalar.unwrap());
+    let val_min: f64 = res_min.results[0].name.parse().unwrap();
+    assert!(val_min > 0.0);
+    assert!(val_max >= val_min);
 
     Ok(())
 }
