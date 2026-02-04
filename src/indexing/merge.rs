@@ -7,7 +7,7 @@ use crate::FunctionRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    Condition, Expr, Iden, JoinType, Query, SelectStatement, SimpleExpr,
+    Condition, Expr, Iden, JoinType, Order, Query, SelectStatement, SimpleExpr,
 };
 use std::path::Path;
 
@@ -123,6 +123,7 @@ impl<'a> FileEntityMerger<'a> {
                     .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
+            None,
         )?;
         Ok(self)
     }
@@ -194,6 +195,7 @@ impl<'a> LocationMerger<'a> {
                     .add(Expr::col(Col::ItemId).in_subquery(live_query)),
             ),
             Col::Path,
+            None,
         )?;
         Ok(self)
     }
@@ -258,6 +260,12 @@ impl<'a> BaseTagMerger<'a> {
                     .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
+            Some(vec![
+                Col::Type,
+                Col::LabelInt,
+                Col::LabelStr,
+                Col::ItemId,
+            ]),
         )?;
         Ok(self)
     }
@@ -381,6 +389,7 @@ fn merge_and_save(
     temp_table: impl Iden + Clone + 'static,
     filter: Option<Condition>,
     key_col: Col,
+    order_by: Option<Vec<Col>>,
 ) -> Result<()> {
     let base_query = Query::select()
         .column(sea_query::Asterisk)
@@ -403,6 +412,12 @@ fn merge_and_save(
         query.cond_where(cond);
     }
 
+    if let Some(cols) = order_by {
+        for col in cols {
+            query.order_by(col, Order::Asc);
+        }
+    }
+
     query
         .union(sea_query::UnionType::All, base_query)
         .save_parquet(conn, path)
@@ -413,4 +428,58 @@ fn merge_and_save(
 // ========================================================
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use sea_query::Alias;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_merge_and_save_sorting() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test.parquet");
+        let conn = Connection::open_in_memory()?;
+
+        // 1. Initial Data (Unsorted): id=2, id=1
+        conn.execute(
+            "CREATE TABLE t1 (item_id BIGINT, type VARCHAR)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO t1 VALUES (2, 'B'), (1, 'A')",
+            [],
+        )?;
+        conn.execute(
+            &format!("COPY t1 TO '{}' (FORMAT PARQUET)", db_path.to_string_lossy()),
+            [],
+        )?;
+
+        // 2. New Data (Temp Table): id=3
+        let temp_table = Alias::new("temp_t");
+        conn.execute(
+            "CREATE TABLE temp_t (item_id BIGINT, type VARCHAR)",
+            [],
+        )?;
+        conn.execute("INSERT INTO temp_t VALUES (3, 'C')", [])?;
+
+        // 3. Merge with Sort (ORDER BY item_id ASC)
+        // Original data (2, 1) + New (3) -> Expect (1, 2, 3)
+        merge_and_save(
+            &conn,
+            &db_path,
+            temp_table.clone(), // using alias as table name
+            None,
+            Col::ItemId, // key col
+            Some(vec![Col::ItemId]), // check sort by item_id
+        )?;
+
+        // 4. Verify
+        let rows: Vec<i64> = conn
+            .prepare(&format!("SELECT item_id FROM read_parquet('{}')", db_path.to_string_lossy()))?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(rows, vec![1, 2, 3]);
+
+        Ok(())
+    }
+}

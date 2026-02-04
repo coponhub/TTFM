@@ -207,6 +207,9 @@ pub struct FileManager {
 }
 
 impl FileManager {
+    pub fn get_connection(&self) -> &Connection {
+        &self.conn
+    }
     /// デフォルト設定で `FileManager` を作成します。
     pub fn new() -> Result<Self> {
         let home = get_ttfm_home()?;
@@ -603,7 +606,16 @@ impl FileManager {
             ])
             .execute(&self.conn)?;
 
-        temp_table.write_parquet(&self.conn, &path)?;
+        let query = Query::select()
+            .column(sea_query::Asterisk)
+            .from(temp_table.clone())
+            .order_by(Col::Type, sea_query::Order::Asc)
+            .order_by(Col::LabelInt, sea_query::Order::Asc)
+            .order_by(Col::LabelStr, sea_query::Order::Asc)
+            .order_by(Col::ItemId, sea_query::Order::Asc)
+            .to_owned();
+
+        util::save_parquet(&self.conn, &query, &path, None)?;
         temp_table.drop_table(&self.conn)?;
 
         Ok(())
@@ -674,5 +686,79 @@ impl FileManager {
             &self.db_dir,
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests_file_manager {
+    use super::*;
+    use duckdb::Connection;
+    use tempfile::tempdir;
+
+    fn setup_test_env() -> (FileManager, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let registry = FunctionRegistry::with_standard();
+        
+        // Initialize tables
+        let indexer = crate::indexing::Indexer::new(&conn, &registry, db_dir.clone());
+        indexer.initialize_tables().unwrap();
+
+        let cache_manager = CacheManager::new(db_dir.join("cache"), 0);
+
+        (
+            FileManager {
+                conn,
+                db_dir: db_dir.clone(),
+                registry,
+                cache_manager,
+            },
+            db_dir,
+            dir,
+        )
+    }
+
+    #[test]
+    fn test_user_tags_sorting() {
+        let (fm, db_dir, _dir) = setup_test_env();
+        
+        // Manually create empty user_tags.parquet to ensure existence
+        let path = db_dir.join("user_tags.parquet");
+        fm.conn.execute("CREATE TABLE temp_create (item_id BIGINT, type VARCHAR, label_str VARCHAR, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN)", []).unwrap();
+        fm.conn.execute(&format!("COPY temp_create TO '{}' (FORMAT PARQUET)", path.to_string_lossy()), []).unwrap();
+        fm.conn.execute("DROP TABLE temp_create", []).unwrap();
+
+        let id = -100; // Dummy ID
+
+        fm.append_tag_to_parquet(
+            fm.path_for_target(TargetTable::UserTags),
+            Tbl::UserTagsDiff,
+            Col::ItemId,
+            id,
+            "type_z",
+            "val_1",
+        ).unwrap();
+
+        fm.append_tag_to_parquet(
+            fm.path_for_target(TargetTable::UserTags),
+            Tbl::UserTagsDiff,
+            Col::ItemId,
+            id,
+            "type_a",
+            "val_2",
+        ).unwrap();
+
+        let path = fm.path_for_target(TargetTable::UserTags);
+        let rows: Vec<String> = fm.conn
+            .prepare(&format!("SELECT type FROM read_parquet('{}')", path.to_string_lossy()))
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows, vec!["type_a", "type_z"], "User tags should be sorted by type");
     }
 }

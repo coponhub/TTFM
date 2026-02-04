@@ -354,17 +354,16 @@ impl<'a> Indexer<'a> {
             .and_where(Expr::col(Col::ItemKind).eq("tag"))
             .to_owned();
 
-        let union_sql = format!(
-            "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
-            p1.to_string(PostgresQueryBuilder),
-            p2.to_string(PostgresQueryBuilder),
-            p3.to_string(PostgresQueryBuilder)
+        let ordered_sql = Self::build_ordered_system_tags_sql(
+            &p1.to_string(PostgresQueryBuilder),
+            &p2.to_string(PostgresQueryBuilder),
+            &p3.to_string(PostgresQueryBuilder),
         );
 
         self.conn.execute(
             &format!(
                 "COPY ({}) TO '{}' (FORMAT PARQUET)",
-                union_sql,
+                ordered_sql,
                 tmp_stags.to_string_lossy()
             ),
             [],
@@ -440,6 +439,20 @@ impl<'a> Indexer<'a> {
         Tbl::Item.drop_table(self.conn)?;
         Tbl::IdItem.drop_table(self.conn)?;
         Ok(())
+    }
+
+    /// システムタグ更新用のソート済みUNIONクエリを構築します。
+    fn build_ordered_system_tags_sql(
+        p1_sql: &str,
+        p2_sql: &str,
+        p3_sql: &str,
+    ) -> String {
+        let union_sql =
+            format!("{} UNION ALL BY NAME {} UNION ALL BY NAME {}", p1_sql, p2_sql, p3_sql);
+        format!(
+            "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
+            union_sql
+        )
     }
 }
 
@@ -640,5 +653,21 @@ mod tests {
         }
         assert_eq!(calc_next(0), -1);
         assert_eq!(calc_next(-1), -2);
+    }
+
+    #[test]
+    fn test_build_ordered_system_tags_sql() {
+        let sql = Indexer::build_ordered_system_tags_sql(
+            "SELECT * FROM system_tags",
+            "SELECT * FROM p2",
+            "SELECT * FROM p3",
+        );
+        assert!(sql.contains("UNION ALL BY NAME"), "Should contain UNION ALL BY NAME");
+        assert!(
+            sql.contains("ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"),
+            "Should contain correct ORDER BY clause"
+        );
+        assert!(sql.starts_with("SELECT * FROM ("));
+        assert!(sql.ends_with("ASC"));
     }
 }

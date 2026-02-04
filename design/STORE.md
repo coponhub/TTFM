@@ -72,3 +72,10 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 ### 4.1 Origin & Name Resolution
 - **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
 - **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
+
+## 5. Sorting strategy
+- `base_tags`, `system_tags`, `user_tags`は保存時、以下の順序でソートしておき、DuckDBのZoneMapを活用する
+    - type ASC
+    - label_int ASC
+    - label_str ASC
+    - item_id ASC
