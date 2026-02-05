@@ -46,7 +46,7 @@ fn test_slash_separated_date_query() -> anyhow::Result<()> {
     let res_max = fm.search("max(mtime:)", Default::default())?;
     let val_max: f64 = res_max.results[0].name.parse().unwrap();
     assert!(val_max > 0.0);
-    
+
     let res_min = fm.search("min(mtime:)", Default::default())?;
     let val_min: f64 = res_min.results[0].name.parse().unwrap();
     assert!(val_min > 0.0);

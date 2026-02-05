@@ -57,7 +57,8 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::expr => build_expr(pair),
         Rule::primary => build_primary(pair), // Keep primary for now, it delegates to build_ast
         Rule::factor => build_factor(pair), // Keep factor for now, it delegates to build_ast
-        Rule::complement => build_complement(pair), // Keep complement for now
+        // complement was removed from grammar; Complement nodes are
+        // still generated internally by functions.rs (date Ne expansion).
         _ => Err(anyhow!(error::UNKNOWN_FACTOR_INNER)),
     }
 }
@@ -65,10 +66,23 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
 fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
     let mut inner = pair.into_inner();
     let op_pair = inner.next().ok_or_else(|| anyhow!("Missing aggregator"))?;
-    let expr_pair =
+    let body_pair =
         inner.next().ok_or_else(|| anyhow!("Missing expression"))?;
 
-    let node = build_expr(expr_pair)?;
+    let node = match body_pair.as_rule() {
+        Rule::bare_calculation => {
+            let calc_inner = body_pair.into_inner().next().unwrap();
+            let calc = build_calculation(calc_inner)?;
+            QueryNode::Projection(Operand::Calculation(Box::new(calc)))
+        }
+        Rule::expr => build_expr(body_pair)?,
+        _ => {
+            return Err(anyhow!(
+                "Unexpected rule in aggregation: {:?}",
+                body_pair.as_rule()
+            ))
+        }
+    };
 
     match op_pair.as_str() {
         "count" => Ok(AggregationNode::Count(Box::new(node))),
@@ -151,15 +165,6 @@ fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
             inner.as_rule()
         )),
     }
-}
-
-fn build_complement(pair: Pair<Rule>) -> Result<QueryNode> {
-    let mut inner = pair.into_inner();
-    let _ = inner.next(); // Skip '^' token
-    let expr_pair = inner
-        .next()
-        .ok_or_else(|| anyhow!(error::COMPLEMENT_MISSING_EXPR))?;
-    Ok(QueryNode::Complement(Box::new(build_ast(expr_pair)?)))
 }
 
 fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
@@ -245,7 +250,9 @@ fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
             Rule::label_comparison => {
                 let step_rule = actual_step.as_rule();
                 let mut step_inner = actual_step.into_inner();
-                let op_str = if step_rule == Rule::label_op || step_rule == Rule::label_op_to_proj {
+                let op_str = if step_rule == Rule::label_op
+                    || step_rule == Rule::label_op_to_proj
+                {
                     let _colon = step_inner.next(); // consume the colon pair
                     step_inner.next().unwrap().as_str() // label_basic_op
                 } else {
@@ -368,11 +375,12 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
 
 fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
     let rule = pair.as_rule();
-    let inner_pair = if rule == Rule::calculation || rule == Rule::scalar_calculation {
-        pair.into_inner().next().unwrap()
-    } else {
-        pair
-    };
+    let inner_pair =
+        if rule == Rule::calculation || rule == Rule::scalar_calculation {
+            pair.into_inner().next().unwrap()
+        } else {
+            pair
+        };
 
     let mut pairs = inner_pair.into_inner();
 
@@ -802,5 +810,204 @@ mod tests {
             err_msg
         );
         assert!(err_msg.contains("Did you mean: 'size: :> 100'"));
+    }
+
+    // ========== bare_calculation 単体テスト ==========
+
+    /// bare_calculation: sum(size: - 100) →
+    /// Arithmetic { Sum, Projection(Calculation { TypeRef(size), Sub, Literal(100) }) }
+    #[test]
+    fn test_parse_bare_calc_sum() {
+        let node =
+            parse("sum(size: - 100)").expect("bare_calc sum should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Arithmetic { op, ref inner } => {
+                    assert_eq!(op, ArithmeticAggOp::Sum);
+                    match &**inner {
+                        QueryNode::Projection(operand) => match operand {
+                            Operand::Calculation(calc) => {
+                                // left = TypeRef(size)
+                                match &calc.left {
+                                    Operand::TypeRef(tt) => {
+                                        assert_eq!(tt.as_str(), "size");
+                                    }
+                                    _ => panic!(
+                                        "Expected TypeRef(size) as left, got {:?}",
+                                        calc.left
+                                    ),
+                                }
+                                // op = Sub
+                                assert_eq!(calc.op, ArithmeticOp::Sub);
+                                // right = Literal(100)
+                                match &calc.right {
+                                    Operand::Literal(l) => {
+                                        assert_eq!(l.as_str(), "100");
+                                    }
+                                    _ => panic!(
+                                        "Expected Literal(100) as right, got {:?}",
+                                        calc.right
+                                    ),
+                                }
+                            }
+                            _ => panic!(
+                                "Expected Calculation operand, got {:?}",
+                                operand
+                            ),
+                        },
+                        _ => panic!(
+                            "Expected Projection inside sum, got {:?}",
+                            inner
+                        ),
+                    }
+                }
+                _ => panic!("Expected Arithmetic aggregation, got {:?}", agg),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    /// bare_calculation: sum(size: + 100 - 50) → 左結合 Calculation チェーン
+    /// ((size + 100) - 50)
+    #[test]
+    fn test_parse_bare_calc_multiop() {
+        let node = parse("sum(size: + 100 - 50)")
+            .expect("bare_calc multiop should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Arithmetic { op, ref inner } => {
+                    assert_eq!(op, ArithmeticAggOp::Sum);
+                    match &**inner {
+                        QueryNode::Projection(operand) => match operand {
+                            Operand::Calculation(calc) => {
+                                // 外側の演算子は Sub
+                                assert_eq!(calc.op, ArithmeticOp::Sub);
+                                // right = Literal(50)
+                                match &calc.right {
+                                    Operand::Literal(l) => {
+                                        assert_eq!(l.as_str(), "50");
+                                    }
+                                    _ => panic!(
+                                        "Expected Literal(50) as right, got {:?}",
+                                        calc.right
+                                    ),
+                                }
+                                // left = Calculation(size + 100)
+                                match &calc.left {
+                                    Operand::Calculation(inner_calc) => {
+                                        assert_eq!(inner_calc.op, ArithmeticOp::Add);
+                                        match &inner_calc.left {
+                                            Operand::TypeRef(tt) => {
+                                                assert_eq!(tt.as_str(), "size");
+                                            }
+                                            _ => panic!(
+                                                "Expected TypeRef(size), got {:?}",
+                                                inner_calc.left
+                                            ),
+                                        }
+                                        match &inner_calc.right {
+                                            Operand::Literal(l) => {
+                                                assert_eq!(l.as_str(), "100");
+                                            }
+                                            _ => panic!(
+                                                "Expected Literal(100), got {:?}",
+                                                inner_calc.right
+                                            ),
+                                        }
+                                    }
+                                    _ => panic!(
+                                        "Expected Calculation as left, got {:?}",
+                                        calc.left
+                                    ),
+                                }
+                            }
+                            _ => panic!(
+                                "Expected Calculation operand, got {:?}",
+                                operand
+                            ),
+                        },
+                        _ => panic!(
+                            "Expected Projection inside sum, got {:?}",
+                            inner
+                        ),
+                    }
+                }
+                _ => panic!("Expected Arithmetic aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    /// リグレッション: sum(size:) は既存動作と同一
+    #[test]
+    fn test_parse_agg_projection_no_regression() {
+        let node = parse("sum(size:)").expect("sum(size:) should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Arithmetic { op, ref inner } => {
+                    assert_eq!(op, ArithmeticAggOp::Sum);
+                    match &**inner {
+                        QueryNode::Projection(Operand::TypeRef(tt)) => {
+                            assert_eq!(tt.as_str(), "size");
+                        }
+                        _ => panic!(
+                            "Expected Projection(TypeRef(size)), got {:?}",
+                            inner
+                        ),
+                    }
+                }
+                _ => panic!("Expected Arithmetic aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    /// リグレッション: count(extension:txt) は既存動作と同一
+    #[test]
+    fn test_parse_agg_typed_tag_no_regression() {
+        let node = parse("count(extension:txt)")
+            .expect("count(extension:txt) should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Count(ref inner) => match &**inner {
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.label.tag_type().as_str(), "extension");
+                        assert_eq!(tt.label.as_str(), "txt");
+                    }
+                    _ => panic!(
+                        "Expected TypedTag inside count, got {:?}",
+                        inner
+                    ),
+                },
+                _ => panic!("Expected Count aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    /// リグレッション: count(extension:txt & size:>100) は既存動作と同一 (And ノード)
+    #[test]
+    fn test_parse_agg_set_op_no_regression() {
+        let node = parse("count(extension:txt & size:>100)")
+            .expect("count with set-op should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Count(ref inner) => match &**inner {
+                    QueryNode::And(nodes) => {
+                        assert_eq!(
+                            nodes.len(),
+                            2,
+                            "And should have 2 children"
+                        );
+                    }
+                    _ => panic!(
+                        "Expected And node inside count, got {:?}",
+                        inner
+                    ),
+                },
+                _ => panic!("Expected Count aggregation"),
+            },
+            _ => panic!("Expected Aggregation, got {:?}", node),
+        }
     }
 }

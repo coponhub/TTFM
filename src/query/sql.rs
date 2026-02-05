@@ -1,10 +1,16 @@
 use crate::db::{Col, Tbl};
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::ArithmeticAggOp::*;
+use crate::query::ast::ArithmeticOp::*;
+use crate::query::ast::{
+    ArithmeticAggOp, ArithmeticOp, ComparisonNode, ComparisonOp, Operand,
+    QueryNode,
+};
 use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use sea_query::{
-    Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr,
+    Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement,
+    SimpleExpr,
 };
 
 /// クエリ構造を SQL (SelectStatement) へ変換します。
@@ -124,7 +130,9 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 || matches!(storage, StorageMapping::RowTag { .. });
 
             if needs_eav {
-                build_tag_calc_match_eav_sql(storage, *sql_type, *op, calc, view)
+                build_tag_calc_match_eav_sql(
+                    storage, *sql_type, *op, calc, view,
+                )
             } else {
                 let mut stmt = Query::select();
                 stmt.from(Alias::new(view));
@@ -357,8 +365,7 @@ pub(crate) fn build_resolved_aggregation_match_sql(
 
     // 真なら TRUE (1), 偽なら FALSE (NULL) の ItemId を返す
     // 仮想アイテムかどうかは item_kind = 'virtual' で判定する
-    let case_expr =
-        Expr::case(condition, Expr::val(1i64));
+    let case_expr = Expr::case(condition, Expr::val(1i64));
 
     stmt.expr_as(case_expr, Col::ItemId);
     stmt.expr_as(Expr::val("virtual"), Col::ItemKind);
@@ -454,16 +461,7 @@ fn build_calculation_eav_expr(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_eav_expr(&calc.left);
     let right_expr = build_resolved_operand_eav_expr(&calc.right);
-
-    let bin_op = match calc.op {
-        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
-        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
-        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
-        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
-        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
-    };
-
-    Expr::expr(left_expr).binary(bin_op, right_expr)
+    apply_arithmetic_op(&calc.op, left_expr, right_expr)
 }
 
 /// EAV 構造用のオペランドを集約式として構築します。
@@ -473,24 +471,7 @@ fn build_resolved_operand_eav_expr(
     use crate::query::lens_resolver::ResolvedOperand;
 
     match operand {
-        ResolvedOperand::Literal(lab) => {
-            // サイズ単位のパース (例: "1MB" → 1048576)
-            let s = lab.as_str();
-            if let Some(bytes) = crate::util::parse_size(&s) {
-                Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
-            } else {
-                match lab.value() {
-                    crate::types::LabelValue::Integer(i) => {
-                        Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
-                    }
-                    crate::types::LabelValue::String(s)
-                    | crate::types::LabelValue::Literal(s) => {
-                        Expr::val(s.clone()).into()
-                    }
-                    crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
-                }
-            }
-        }
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
             storage, sql_type, ..
         } => build_tag_value_agg_expr(storage, *sql_type),
@@ -499,12 +480,34 @@ fn build_resolved_operand_eav_expr(
     }
 }
 
+/// リテラル（定数）を SQL 式に変換します。
+fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
+    // サイズ単位のパース (例: "1MB" → 1048576)
+    let s = lab.as_str();
+    if let Some(bytes) = crate::util::parse_size(&s) {
+        // 除算などで整数切り捨てを防ぐため、DOUBLEとして扱う
+        Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
+    } else {
+        // ラベルの値をSQL式に変換
+        match lab.value() {
+            crate::types::LabelValue::Integer(i) => {
+                Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
+            }
+            crate::types::LabelValue::String(s)
+            | crate::types::LabelValue::Literal(s) => {
+                Expr::val(s.clone()).into()
+            }
+            crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+        }
+    }
+}
+
 fn build_aggregation_parts(
     agg: &ResolvedAggregationNode,
 ) -> (SimpleExpr, Option<ResolvedNode>, Option<String>) {
     match agg {
         ResolvedAggregationNode::Count(node) => {
-            let (storage, cond) = node.extract_agg_parts();
+            let (storage, cond, _) = node.extract_agg_parts();
             let tag_key;
             let expr = if let Some(s) = storage {
                 // count(projection:) -> COUNT(DISTINCT col)
@@ -534,7 +537,7 @@ fn build_aggregation_parts(
             (expr, cond, tag_key)
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
-            let (storage, cond) = inner.extract_agg_parts();
+            let (storage, cond, operand) = inner.extract_agg_parts();
             let tag_key;
             let col = match storage {
                 Some(StorageMapping::Column(c)) => {
@@ -554,22 +557,25 @@ fn build_aggregation_parts(
                 } // Fallback
             };
 
-            let expr: SimpleExpr = match op {
-                crate::query::ast::ArithmeticAggOp::Sum => {
-                    Func::sum(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Avg => {
-                    Func::avg(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Max => {
-                    Func::max(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Min => {
-                    Func::min(Expr::col(col)).into()
-                }
+            let expr: SimpleExpr = if let Some(operand) = operand {
+                // オペランド（算術式等）から直接 SQL 式を構築
+                let inner_expr = build_resolved_operand_expr(operand);
+                apply_arithmetic_agg(op, inner_expr)
+            } else {
+                apply_arithmetic_agg(op, Expr::col(col).into())
             };
             (expr, cond, tag_key)
         }
+    }
+}
+
+/// 集約関数を式に適用します。
+fn apply_arithmetic_agg(op: &ArithmeticAggOp, expr: SimpleExpr) -> SimpleExpr {
+    match op {
+        Sum => Func::sum(expr).into(),
+        Avg => Func::avg(expr).into(),
+        Max => Func::max(expr).into(),
+        Min => Func::min(expr).into(),
     }
 }
 
@@ -596,26 +602,7 @@ fn build_resolved_operand_expr(
     use crate::query::lens_resolver::ResolvedOperand;
 
     match operand {
-        ResolvedOperand::Literal(lab) => {
-            // サイズ単位のパース (例: "1MB" → 1048576)
-            let s = lab.as_str();
-            if let Some(bytes) = crate::util::parse_size(&s) {
-                // 除算などで整数切り捨てを防ぐため、DOUBLEとして扱う
-                Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
-            } else {
-                // ラベルの値をSQL式に変換
-                match lab.value() {
-                    crate::types::LabelValue::Integer(i) => {
-                        Expr::val(i).cast_as(crate::db::SqlType::DOUBLE).into()
-                    }
-                    crate::types::LabelValue::String(s)
-                    | crate::types::LabelValue::Literal(s) => {
-                        Expr::val(s.clone()).into()
-                    }
-                    crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
-                }
-            }
-        }
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
             storage, sql_type, ..
         } => build_storage_column_expr(storage, *sql_type),
@@ -632,7 +619,7 @@ fn build_aggregation_expr(
 
     match agg {
         ResolvedAggregationNode::Count(inner) => {
-            let (storage, _cond) = inner.extract_agg_parts();
+            let (storage, _cond, _) = inner.extract_agg_parts();
             if let Some(s) = storage {
                 // count(projection:) -> COUNT(DISTINCT col)
                 let col = match s {
@@ -647,27 +634,20 @@ fn build_aggregation_expr(
             }
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
-            let (storage, _cond) = inner.extract_agg_parts();
+            let (storage, _cond, operand) = inner.extract_agg_parts();
             let col = match storage {
                 Some(&StorageMapping::Column(c)) => c,
                 Some(&StorageMapping::RowTag { column, .. }) => column,
                 _ => Col::LabelInt, // Fallback
             };
 
-            match op {
-                crate::query::ast::ArithmeticAggOp::Sum => {
-                    Func::sum(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Avg => {
-                    Func::avg(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Max => {
-                    Func::max(Expr::col(col)).into()
-                }
-                crate::query::ast::ArithmeticAggOp::Min => {
-                    Func::min(Expr::col(col)).into()
-                }
-            }
+            let inner_expr = if let Some(operand) = operand {
+                build_resolved_operand_expr(operand)
+            } else {
+                Expr::col(col).into()
+            };
+
+            apply_arithmetic_agg(op, inner_expr)
         }
     }
 }
@@ -678,16 +658,23 @@ fn build_calculation_expr(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_expr(&calc.left);
     let right_expr = build_resolved_operand_expr(&calc.right);
+    apply_arithmetic_op(&calc.op, left_expr, right_expr)
+}
 
-    let bin_op = match calc.op {
-        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
-        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
-        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
-        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
-        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
+/// 算術演算子を適用します。
+fn apply_arithmetic_op(
+    op: &ArithmeticOp,
+    left: SimpleExpr,
+    right: SimpleExpr,
+) -> SimpleExpr {
+    let bin_op = match op {
+        Add => BinOper::Add,
+        Sub => BinOper::Sub,
+        Mul => BinOper::Mul,
+        Div => BinOper::Div,
+        Mod => BinOper::Custom("%"),
     };
-
-    Expr::expr(left_expr).binary(bin_op, right_expr)
+    Expr::expr(left).binary(bin_op, right)
 }
 
 /// 集約関数を含む算術演算をサブクエリとして構築します。
@@ -697,16 +684,7 @@ fn build_calculation_subquery(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_subquery(&calc.left, view);
     let right_expr = build_resolved_operand_subquery(&calc.right, view);
-
-    let bin_op = match calc.op {
-        crate::query::ast::ArithmeticOp::Add => BinOper::Add,
-        crate::query::ast::ArithmeticOp::Sub => BinOper::Sub,
-        crate::query::ast::ArithmeticOp::Mul => BinOper::Mul,
-        crate::query::ast::ArithmeticOp::Div => BinOper::Div,
-        crate::query::ast::ArithmeticOp::Mod => BinOper::Custom("%"),
-    };
-
-    Expr::expr(left_expr).binary(bin_op, right_expr)
+    apply_arithmetic_op(&calc.op, left_expr, right_expr)
 }
 
 /// オペランドをサブクエリ形式で構築します。
@@ -770,7 +748,8 @@ fn wrap_boolean_collider(sql: SelectStatement) -> SelectStatement {
     use crate::db::CustomFunc;
     q.expr_as(
         Expr::case(
-            CustomFunc::any_value(Expr::col((Alias::new("pk"), Col::ItemId))).is_not_null(),
+            CustomFunc::any_value(Expr::col((Alias::new("pk"), Col::ItemId)))
+                .is_not_null(),
             Expr::val(1i64),
         )
         .finally(Expr::val(0i64)),

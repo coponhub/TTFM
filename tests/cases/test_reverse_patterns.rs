@@ -109,7 +109,7 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
 fn test_projection_to_projection_comparison() -> Result<()> {
     // Phase 1 TDD: These are expected to FAIL initially.
     // Case: "width: :> height:" or "width:>height:"
-    
+
     let dir = tempdir()?;
     let db_dir = dir.path().join(".ttfm/db");
     let fm = FileManager::new_with_db_dir(&db_dir)?;
@@ -129,7 +129,7 @@ fn test_projection_to_projection_comparison() -> Result<()> {
         "Stuck Proj-Proj comparison 'width:>height:' should be allowed. Got: {:?}",
         res_stuck.err()
     );
-    
+
     Ok(())
 }
 
@@ -137,14 +137,14 @@ fn test_projection_to_projection_comparison() -> Result<()> {
 fn test_double_colon_suggestion_fix() -> Result<()> {
     // Phase 1 TDD: This is expected to FAIL initially (it will suggest 'size: : :>').
     // Case: "size: > path:" (Error at '>')
-    
+
     let dir = tempdir()?;
     let db_dir = dir.path().join(".ttfm/db");
     let fm = FileManager::new_with_db_dir(&db_dir)?;
 
     let res = fm.search("size: > path:", Default::default());
     assert!(res.is_err());
-    
+
     let err_msg = res.unwrap_err().to_string();
     println!("Actual error for 'size: > path:': {}", err_msg);
 
@@ -158,14 +158,14 @@ fn test_double_colon_suggestion_fix() -> Result<()> {
         err_msg.contains("size: :> path:"),
         "Should suggest correct syntax 'size: :> path:'"
     );
-    
+
     Ok(())
 }
 
 #[test]
 fn test_projection_calculation_reverse_consistency() -> Result<()> {
     // Reported case: "size: :> (size: - 1M)"
-    
+
     let dir = tempdir()?;
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
@@ -196,36 +196,36 @@ fn test_projection_calculation_reverse_consistency() -> Result<()> {
 fn test_complex_tag_calculation_comparison_eav() -> Result<()> {
     // Test case for cross-tag calculation: width: :> (height: * 2)
     // This requires ANY_VALUE grouping for RowTag (EAV).
-    
+
     let dir = tempdir()?;
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
     let fm = FileManager::new_with_db_dir(&db_dir)?;
 
     // Create two files
-    let wide_file = root.join("wide_image.jpg");   // width > height * 2
-    let tall_file = root.join("tall_image.jpg");   // width < height * 2
+    let wide_file = root.join("wide_image.jpg"); // width > height * 2
+    let tall_file = root.join("tall_image.jpg"); // width < height * 2
     std::fs::write(&wide_file, "")?;
     std::fs::write(&tall_file, "")?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
-    
+
     // Find item_ids
     let res_wide = fm.search("name:wide_image.jpg", Default::default())?;
     let res_tall = fm.search("name:tall_image.jpg", Default::default())?;
     let wide_id = res_wide.results[0].id.to_string();
     let tall_id = res_tall.results[0].id.to_string();
-    
+
     // wide_image: width=1000, height=400 (1000 > 400*2=800) -> TRUE
     fm.tag_item(&wide_id, "width:1000")?;
     fm.tag_item(&wide_id, "height:400")?;
-    
+
     // tall_image: width=1000, height=600 (1000 < 600*2=1200) -> FALSE
     fm.tag_item(&tall_id, "width:1000")?;
     fm.tag_item(&tall_id, "height:600")?;
 
     println!("Executing search: width: :> (height: * 2)");
     let res = fm.search("width: :> (height: * 2)", Default::default())?;
-    
+
     // Only wide_image should match
     assert_eq!(res.results.len(), 1, "Should find exactly 1 item");
     assert!(

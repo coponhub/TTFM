@@ -38,10 +38,10 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     // 3. Verify Queries
     let test_cases = vec![
         ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
-        ("filename:project_alpha_report.pdf & ^(filename:project_alpha_draft.txt)", 1),
+        ("extension:pdf - filename:project_beta_report.pdf", 1), // Set difference: pdf minus beta = alpha only
         ("filename:image_vacation_2024.jpg | filename:image_work_2024.png", 2),
         ("filename:image_vacation_2024.jpg", 1),
-        ("^(extension:txt | extension:zip | extension:pdf | extension:jpg | extension:png)", 4), // 3 folders + 1 root directory
+        ("(extension:pdf | extension:txt | extension:jpg | extension:png) - extension:txt", 4), // Set difference: 5 files - 1 txt = 4
 
         // --- Added cases to verify set-based search fixes ---
         ("extension:pdf & filename:project_alpha_report.pdf", 1),   // Cross-attribute AND
@@ -254,23 +254,17 @@ fn test_or_negation_complex_behavior() {
 
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    // 2. クエリ実行: item_kind:type | ^(extension:rs)
+    // 2. クエリ実行: item_kind:file - extension:rs (差集合: 全ファイル - rsファイル)
 
-    let query = "item_kind:type | ^(extension:rs)";
+    let query = "item_kind:file - extension:rs";
 
     let results = fm.search(query, Default::default()).unwrap();
-
-    let mut found_type_item = false;
 
     let mut found_txt_file = false;
 
     let mut found_rs_file = false;
 
-    for r in results.results {
-        if r.item_kind != "file" && r.item_kind == "type" {
-            found_type_item = true;
-        }
-
+    for r in &results.results {
         if r.item_kind == "file" {
             if r.get_tag_value("extension")
                 .map(|v| v == "txt")
@@ -288,11 +282,12 @@ fn test_or_negation_complex_behavior() {
         }
     }
 
-    assert!(found_type_item, "Should find system items");
-
     assert!(found_txt_file, "Should find readme.txt");
 
-    assert!(!found_rs_file, "Should NOT find main.rs");
+    assert!(
+        !found_rs_file,
+        "Should NOT find main.rs (excluded by difference)"
+    );
 }
 
 #[test]

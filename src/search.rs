@@ -48,7 +48,9 @@ impl FileManager {
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
         // 2-A. トップレベル集約・スカラー式 または ブーリアン・スカラー結果ケース
-        if resolver.get_scalar_expression().is_some() || resolver.resolved_query.is_boolean_result() {
+        if resolver.get_scalar_expression().is_some()
+            || resolver.resolved_query.is_boolean_result()
+        {
             let res = fetcher.fetch_computation()?;
             return Ok(SearchResponse {
                 results: vec![res],

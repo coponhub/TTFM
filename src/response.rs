@@ -453,10 +453,14 @@ impl SearchResult {
                 }
                 if self.item_kind == "virtual" {
                     match self.id {
-                        ItemId::Virtual(crate::types::VirtualItem::Boolean(_)) => {
+                        ItemId::Virtual(
+                            crate::types::VirtualItem::Boolean(_),
+                        ) => {
                             types.push(TagType::from("boolean"));
                         }
-                        ItemId::Virtual(crate::types::VirtualItem::Scalar(_)) => {
+                        ItemId::Virtual(crate::types::VirtualItem::Scalar(
+                            _,
+                        )) => {
                             types.push(TagType::from("scalar"));
                         }
                         _ => {}

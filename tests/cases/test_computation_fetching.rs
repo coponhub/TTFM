@@ -19,16 +19,19 @@ fn test_aggregation_returns_virtual_scalar() -> anyhow::Result<()> {
     let res = fm.search("sum(extension:txt & size:)", Default::default())?;
 
     // 新しい仕様では results に Scalar 仮想アイテムが入るはず
-    assert!(!res.results.is_empty(), "Results should not be empty for aggregation");
+    assert!(
+        !res.results.is_empty(),
+        "Results should not be empty for aggregation"
+    );
     let first_res = &res.results[0];
-    
+
     // VirtualItem::Scalar の表示名は数値そのものになると期待
     assert_eq!(first_res.name, "1100");
-    
+
     // IDが Scalar(1100.0) であることを確認 (これは types.rs の修正後に有効になる)
     // 今はコンパイルエラーになるはずなので、まずは存在しないことを前提に書くか、
     // あるいは types.rs を先に直す TDD の順序を守る。
-    
+
     Ok(())
 }
 
@@ -50,7 +53,7 @@ fn test_boolean_computation_returns_virtual_boolean() -> anyhow::Result<()> {
     assert!(!res.results.is_empty());
     assert_eq!(res.results[0].name, "TRUE");
     // IDが Boolean(1) であることを確認
-    
+
     Ok(())
 }
 
@@ -74,8 +77,11 @@ fn test_boolean_with_non_id_1() -> anyhow::Result<()> {
     let res = fm.search("sum(extension:rs & size:) > 0", Default::default())?;
 
     assert!(!res.results.is_empty());
-    assert_eq!(res.results[0].name, "TRUE", "Should be TRUE even if matched ID is not 1");
-    
+    assert_eq!(
+        res.results[0].name, "TRUE",
+        "Should be TRUE even if matched ID is not 1"
+    );
+
     Ok(())
 }
 
@@ -106,7 +112,7 @@ fn test_boolean_aggregation_matching() -> anyhow::Result<()> {
 
     assert!(!res.results.is_empty());
     assert_eq!(res.results[0].name, "TRUE");
-    
+
     Ok(())
 }
 
@@ -127,6 +133,6 @@ fn test_boolean_reflexive_aggregation() -> anyhow::Result<()> {
 
     assert!(!res.results.is_empty());
     assert_eq!(res.results[0].name, "TRUE");
-    
+
     Ok(())
 }

@@ -385,3 +385,120 @@ fn test_calculation_aggregation_complex() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ========== bare_calculation: 集約内の括弧省略 ==========
+// QUERY.md:103 — 同じレベルの () 内に算術演算子以外の演算子が無い場合、括弧を省略可
+
+/// bare_calculation — 減算: sum(size: - 100)
+/// sum((size: - 100)) と同意。スカラー結果を返す。
+#[test]
+fn test_aggregation_bare_calc_sub() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 合計サイズ: 200 + 300 = 500
+    std::fs::write(root.join("a.txt"), vec![0u8; 200])?;
+    std::fs::write(root.join("b.txt"), vec![0u8; 300])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(size: - 100) = sum(size - 100) = (200-100)+(300-100) = 300
+    let res = fm.search("sum(size: - 100)", Default::default())?;
+    assert!(!res.results.is_empty(), "Should return a scalar result");
+
+    // 数値として解析出来ることを確認
+    let val: f64 = res.results[0].name.parse().unwrap_or(f64::NAN);
+    assert!(
+        !val.is_nan(),
+        "Result should be a number, got: {}",
+        res.results[0].name
+    );
+
+    Ok(())
+}
+
+/// bare_calculation — スカラー比較: sum(size: * 2) > 1000
+#[test]
+fn test_aggregation_bare_calc_mul_with_cmp() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 合計サイズ: 400 + 600 = 1000、*2 で 2000
+    std::fs::write(root.join("a.txt"), vec![0u8; 400])?;
+    std::fs::write(root.join("b.txt"), vec![0u8; 600])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(size: * 2) > 1000
+    // sum(size*2) = (400*2)+(600*2) = 2000 > 1000 → TRUE
+    let res = fm.search("sum(size: * 2) > 1000", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].name, "TRUE");
+
+    Ok(())
+}
+
+/// bare_calculation — 複数演算子の左結合チェーン: sum(size: + 100 - 50)
+#[test]
+fn test_aggregation_bare_calc_multiop() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 合計サイズ: 200 + 300 = 500
+    std::fs::write(root.join("a.txt"), vec![0u8; 200])?;
+    std::fs::write(root.join("b.txt"), vec![0u8; 300])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(size: + 100 - 50) = sum((size+100)-50) = ((200+100)-50)+((300+100)-50) = 600
+    let res = fm.search("sum(size: + 100 - 50)", Default::default())?;
+    assert!(!res.results.is_empty(), "Should return a scalar result");
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(f64::NAN);
+    assert!(
+        !val.is_nan(),
+        "Result should be a number, got: {}",
+        res.results[0].name
+    );
+
+    Ok(())
+}
+
+/// bare_calculation — ベースライン: 明示的括弧版 sum((size: - 100)) と同じ結果
+#[test]
+fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("a.txt"), vec![0u8; 200])?;
+    std::fs::write(root.join("b.txt"), vec![0u8; 300])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 明示的括弧版: sum((size: - 100))
+    let res_explicit = fm.search("sum((size: - 100))", Default::default())?;
+    assert!(
+        !res_explicit.results.is_empty(),
+        "Explicit paren should work"
+    );
+
+    // 括弧省略版: sum(size: - 100)
+    let res_bare = fm.search("sum(size: - 100)", Default::default())?;
+    assert!(!res_bare.results.is_empty(), "Bare calc should work");
+
+    // 両者が同じ結果を返す
+    assert_eq!(
+        res_explicit.results[0].name, res_bare.results[0].name,
+        "bare_calculation and explicit paren should produce the same result"
+    );
+
+    Ok(())
+}

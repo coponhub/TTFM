@@ -1,6 +1,6 @@
 use tempfile::tempdir;
-use ttfm::FileManager;
 use ttfm::db::TargetTable;
+use ttfm::FileManager;
 
 #[test]
 fn test_parquet_physical_order() {
@@ -20,12 +20,16 @@ fn test_parquet_physical_order() {
 
     // Verify base_tags.parquet order
     let path = fm.path_for_target(TargetTable::BaseTags);
-    
+
     // Read raw rows without ORDER BY
     // DuckDB read_parquet typically follows physical order.
     // We extract type and label_str.
-    let rows: Vec<(String, Option<String>)> = fm.get_connection()
-        .prepare(&format!("SELECT type, label_str FROM read_parquet('{}')", path.to_string_lossy()))
+    let rows: Vec<(String, Option<String>)> = fm
+        .get_connection()
+        .prepare(&format!(
+            "SELECT type, label_str FROM read_parquet('{}')",
+            path.to_string_lossy()
+        ))
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()
@@ -46,5 +50,9 @@ fn test_parquet_physical_order() {
         }
     }
 
-    assert!(is_sorted, "Physical order in BaseTags parquet must be sorted: {:?}", rows);
+    assert!(
+        is_sorted,
+        "Physical order in BaseTags parquet must be sorted: {:?}",
+        rows
+    );
 }

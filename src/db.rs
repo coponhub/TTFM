@@ -388,7 +388,10 @@ impl CustomFunc {
     }
 
     /// ANY_VALUE(expr) FILTER (WHERE cond) を生成します。
-    pub fn any_value_filter<E, F>(expr: E, filter_expr: F) -> sea_query::SimpleExpr
+    pub fn any_value_filter<E, F>(
+        expr: E,
+        filter_expr: F,
+    ) -> sea_query::SimpleExpr
     where
         E: Into<sea_query::SimpleExpr>,
         F: Into<sea_query::SimpleExpr>,

@@ -260,12 +260,7 @@ impl<'a> BaseTagMerger<'a> {
                     .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
-            Some(vec![
-                Col::Type,
-                Col::LabelInt,
-                Col::LabelStr,
-                Col::ItemId,
-            ]),
+            Some(vec![Col::Type, Col::LabelInt, Col::LabelStr, Col::ItemId]),
         )?;
         Ok(self)
     }
@@ -440,25 +435,19 @@ mod tests {
         let conn = Connection::open_in_memory()?;
 
         // 1. Initial Data (Unsorted): id=2, id=1
+        conn.execute("CREATE TABLE t1 (item_id BIGINT, type VARCHAR)", [])?;
+        conn.execute("INSERT INTO t1 VALUES (2, 'B'), (1, 'A')", [])?;
         conn.execute(
-            "CREATE TABLE t1 (item_id BIGINT, type VARCHAR)",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO t1 VALUES (2, 'B'), (1, 'A')",
-            [],
-        )?;
-        conn.execute(
-            &format!("COPY t1 TO '{}' (FORMAT PARQUET)", db_path.to_string_lossy()),
+            &format!(
+                "COPY t1 TO '{}' (FORMAT PARQUET)",
+                db_path.to_string_lossy()
+            ),
             [],
         )?;
 
         // 2. New Data (Temp Table): id=3
         let temp_table = Alias::new("temp_t");
-        conn.execute(
-            "CREATE TABLE temp_t (item_id BIGINT, type VARCHAR)",
-            [],
-        )?;
+        conn.execute("CREATE TABLE temp_t (item_id BIGINT, type VARCHAR)", [])?;
         conn.execute("INSERT INTO temp_t VALUES (3, 'C')", [])?;
 
         // 3. Merge with Sort (ORDER BY item_id ASC)
@@ -468,13 +457,16 @@ mod tests {
             &db_path,
             temp_table.clone(), // using alias as table name
             None,
-            Col::ItemId, // key col
+            Col::ItemId,             // key col
             Some(vec![Col::ItemId]), // check sort by item_id
         )?;
 
         // 4. Verify
         let rows: Vec<i64> = conn
-            .prepare(&format!("SELECT item_id FROM read_parquet('{}')", db_path.to_string_lossy()))?
+            .prepare(&format!(
+                "SELECT item_id FROM read_parquet('{}')",
+                db_path.to_string_lossy()
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 

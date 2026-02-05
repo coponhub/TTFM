@@ -61,8 +61,6 @@ mod tests {
         // Basic parsing test using the new grammar
         let queries = [
             "type:file",
-            "extension:rs & ^(path:*/target/*)",
-            "^(extension:pdf)",
             "size:>1024",
             "size:>=1024",
             "size:<2048",
@@ -86,10 +84,9 @@ mod tests {
     fn test_pest_grammar_strict_conformance() {
         // Test spaces (should fail according to DESIGN.md / Rule 80)
         let fail_queries = [
-            "^ (extension:pdf)", // Space after ^
-            "extension : rs",    // Space around :
-            "size: :== 100",     // Old syntax :== should fail (now :=)
-            "size : >100",       // Space between : and > is invalid
+            "extension : rs", // Space around :
+            "size: :== 100",  // Old syntax :== should fail (now :=)
+            "size : >100",    // Space between : and > is invalid
         ];
         for q in fail_queries {
             assert!(

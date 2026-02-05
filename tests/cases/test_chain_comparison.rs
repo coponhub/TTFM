@@ -58,8 +58,7 @@ fn test_chain_comparison_logic() -> anyhow::Result<()> {
         fm.search("sum((100 :< size: :<= 500) & size:)", Default::default())?;
     assert!(!result_agg.results.is_empty());
     assert_eq!(
-        result_agg.results[0].name,
-        "200",
+        result_agg.results[0].name, "200",
         "Sum of medium file size should be 200"
     );
 

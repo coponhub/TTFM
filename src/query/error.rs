@@ -9,7 +9,6 @@ pub const NO_QUERY_FOUND: &str = "No query found";
 pub const NO_EXPRESSION_FOUND: &str = "No expression found";
 pub const UNKNOWN_INFIX_RULE: &str = "Unknown infix rule";
 pub const UNKNOWN_FACTOR_INNER: &str = "Unknown factor inner";
-pub const COMPLEMENT_MISSING_EXPR: &str = "Complement missing expr";
 pub const MISSING_TAG_KEY: &str = "Missing tag key";
 pub const MISSING_TAG_LABEL: &str = "Missing tag label";
 pub const UNEXPECTED_TAG_TYPE_RULE: &str = "Unexpected tag_type rule";
@@ -115,7 +114,8 @@ pub fn map_grammar_error(
     }
 
     if actual_col != col {
-        let prefix_new: String = line_str.chars().take(actual_col - 1).collect();
+        let prefix_new: String =
+            line_str.chars().take(actual_col - 1).collect();
 
         // 1. Check conditions for "Scalar comparison on Projection" (e.g. size: > 100)
         if let Some(msg) = check_proj_scalar_misuse(
@@ -307,15 +307,15 @@ fn check_label_op_misuse(
     // If LHS was '1', it is numeric scalar.
     // We want to explain that ':>' (Label Op) cannot be used with these.
 
-     let object_type = if lhs_token.ends_with(')') {
-         "Aggregation/Calculation"
-     } else if lhs_token.ends_with(':') {
-         "Projection"
-     } else {
-         "Scalar/Value"
-     };
+    let object_type = if lhs_token.ends_with(')') {
+        "Aggregation/Calculation"
+    } else if lhs_token.ends_with(':') {
+        "Projection"
+    } else {
+        "Scalar/Value"
+    };
 
-     Some(format!(
+    Some(format!(
         "Invalid operator '{}': Label Comparison cannot be applied to {} ('{}'). \nDid you mean: '{} {} ...'",
         full_op, object_type, lhs_token, lhs_token, label_op_suffix
      ))
@@ -387,7 +387,8 @@ mod tests {
         let line_str = "width: > height:";
         let col = 10; // pointing to 'h'
 
-        let msg = check_scalar_op_target_proj_start(prefix, line_str, col).unwrap();
+        let msg =
+            check_scalar_op_target_proj_start(prefix, line_str, col).unwrap();
         assert!(msg.contains("width: :> height:"));
     }
 }

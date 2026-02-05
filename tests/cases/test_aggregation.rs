@@ -168,11 +168,7 @@ fn test_count_type_projection() -> anyhow::Result<()> {
 
     // 現在のバグだと 1 になると予想される
     // 期待値は > 1
-    assert!(
-        val > 1.0,
-        "Expected multiple types, got {}",
-        val
-    );
+    assert!(val > 1.0, "Expected multiple types, got {}", val);
 
     Ok(())
 }
@@ -196,11 +192,7 @@ fn test_count_directory_projection() -> anyhow::Result<()> {
     let val: f64 = res.results[0].name.parse().unwrap();
 
     // 現在のバグだと 0 になると予想される
-    assert!(
-        val >= 1.0,
-        "Expected at least 1 directory, got {}",
-        val
-    );
+    assert!(val >= 1.0, "Expected at least 1 directory, got {}", val);
 
     Ok(())
 }
@@ -225,66 +217,38 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     // 1. count(item_id:) -> 全アイテム数 (test.txt, sub, test2.txt = 3)
     let res = fm.search("count(item_id:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 3.0,
-        "count(item_id) failed: {}",
-        val
-    );
+    assert!(val >= 3.0, "count(item_id) failed: {}", val);
 
     // 2. count(item_kind:) -> 'file', 'directory' など少なくとも1つ以上
     let res = fm.search("count(item_kind:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
     // file と directory があるので 2 になる可能性が高い、少なくとも 0 ではない
-    assert!(
-        val >= 1.0,
-        "count(item_kind) failed: {}",
-        val
-    );
+    assert!(val >= 1.0, "count(item_kind) failed: {}", val);
 
     // 3. count(rank:) -> ランク。デフォルト0だとしても1種類はある
     let res = fm.search("count(rank:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 1.0,
-        "count(rank) failed: {}",
-        val
-    );
+    assert!(val >= 1.0, "count(rank) failed: {}", val);
 
     // 4. count(origin:) -> 'system', 'user'。少なくとも system はある
     let res = fm.search("count(origin:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 1.0,
-        "count(origin) failed: {}",
-        val
-    );
+    assert!(val >= 1.0, "count(origin) failed: {}", val);
 
     // 5. count(path:) -> パスはユニークなのでアイテム数と同じはず
     let res = fm.search("count(path:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 3.0,
-        "count(path) failed: {}",
-        val
-    );
+    assert!(val >= 3.0, "count(path) failed: {}", val);
 
     // 6. count(parentdir:) -> root, root/sub など複数
     let res = fm.search("count(parentdir:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 1.0,
-        "count(parentdir) failed: {}",
-        val
-    );
+    assert!(val >= 1.0, "count(parentdir) failed: {}", val);
 
     // 7. count(filename:) -> test.txt, test2.txt, sub など
     let res = fm.search("count(filename:)", Default::default())?;
     let val: f64 = res.results[0].name.parse().unwrap();
-    assert!(
-        val >= 1.0,
-        "count(filename) failed: {}",
-        val
-    );
+    assert!(val >= 1.0, "count(filename) failed: {}", val);
 
     Ok(())
 }

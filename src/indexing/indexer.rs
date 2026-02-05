@@ -447,8 +447,10 @@ impl<'a> Indexer<'a> {
         p2_sql: &str,
         p3_sql: &str,
     ) -> String {
-        let union_sql =
-            format!("{} UNION ALL BY NAME {} UNION ALL BY NAME {}", p1_sql, p2_sql, p3_sql);
+        let union_sql = format!(
+            "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
+            p1_sql, p2_sql, p3_sql
+        );
         format!(
             "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
             union_sql
@@ -662,9 +664,14 @@ mod tests {
             "SELECT * FROM p2",
             "SELECT * FROM p3",
         );
-        assert!(sql.contains("UNION ALL BY NAME"), "Should contain UNION ALL BY NAME");
         assert!(
-            sql.contains("ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"),
+            sql.contains("UNION ALL BY NAME"),
+            "Should contain UNION ALL BY NAME"
+        );
+        assert!(
+            sql.contains(
+                "ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"
+            ),
             "Should contain correct ORDER BY clause"
         );
         assert!(sql.starts_with("SELECT * FROM ("));

@@ -245,35 +245,38 @@ impl ResolvedNode {
     /// 集約のために、このノードから投影（集計対象）とフィルタ条件を分離して返します。
     pub fn extract_agg_parts(
         &self,
-    ) -> (Option<&StorageMapping>, Option<ResolvedNode>) {
+    ) -> (
+        Option<&StorageMapping>,
+        Option<ResolvedNode>,
+        Option<&ResolvedOperand>,
+    ) {
         match self {
             ResolvedNode::Projection(op) => {
-                if let ResolvedOperand::TagRef { storage, .. } = op {
-                    (Some(storage), None)
-                } else {
-                    // Calculation or Aggregation in Projection context
-                    // For now, treat as no storage mapping (generic)
-                    (None, None)
-                }
+                let storage = extract_storage_from_operand(op);
+                (storage, None, Some(op))
             }
             ResolvedNode::And(nodes) => self.extract_agg_parts_from_and(nodes),
-            other => (None, Some(other.clone())),
+            other => (None, Some(other.clone()), None),
         }
     }
 
     fn extract_agg_parts_from_and<'a>(
         &self,
         nodes: &'a [ResolvedNode],
-    ) -> (Option<&'a StorageMapping>, Option<ResolvedNode>) {
+    ) -> (
+        Option<&'a StorageMapping>,
+        Option<ResolvedNode>,
+        Option<&'a ResolvedOperand>,
+    ) {
         let mut storage = None;
         let mut filter_nodes = Vec::with_capacity(nodes.len());
+        let mut operand = None;
 
         for n in nodes {
             match n {
                 ResolvedNode::Projection(op) if storage.is_none() => {
-                    if let ResolvedOperand::TagRef { storage: s, .. } = op {
-                        storage = Some(s);
-                    }
+                    storage = extract_storage_from_operand(op);
+                    operand = Some(op);
                 }
                 _ => filter_nodes.push(n.clone()),
             }
@@ -285,7 +288,7 @@ impl ResolvedNode {
             _ => Some(ResolvedNode::And(filter_nodes)),
         };
 
-        (storage, filter)
+        (storage, filter, operand)
     }
 
     /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
@@ -308,6 +311,20 @@ impl ResolvedNode {
             ResolvedNode::Complement(c) => c.is_boolean_result(),
             _ => false,
         }
+    }
+}
+
+/// 算術演算の中から再帰的に最初の TagRef のストレージを抽出するヘルパー
+fn extract_storage_from_operand(
+    op: &ResolvedOperand,
+) -> Option<&StorageMapping> {
+    match op {
+        ResolvedOperand::TagRef { storage, .. } => Some(storage),
+        ResolvedOperand::Calculation(calc) => {
+            extract_storage_from_operand(&calc.left)
+                .or_else(|| extract_storage_from_operand(&calc.right))
+        }
+        _ => None,
     }
 }
 
@@ -966,7 +983,7 @@ mod tests {
         let and_node =
             ResolvedNode::And(vec![projection.clone(), filter.clone()]);
 
-        let (storage, extracted_filter) = and_node.extract_agg_parts();
+        let (storage, extracted_filter, _) = and_node.extract_agg_parts();
 
         // Verification
         assert!(storage.is_some(), "Storage should be extracted");
@@ -1198,7 +1215,9 @@ mod tests {
 
     #[test]
     fn test_resolve_tag_tag_comparison() {
-        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
         use crate::types::TagType;
         let lens = Lens::base_standard();
 
@@ -1217,5 +1236,30 @@ mod tests {
         } else {
             panic!("Expected TagTagMatch, got {:?}", resolved);
         }
+    }
+
+    #[test]
+    fn test_extract_agg_parts_calculation() {
+        use crate::query::ast::{ArithmeticOp, CalculationNode, Operand};
+        use crate::types::{Label, SType, TagType};
+
+        let lens = Lens::base_standard();
+        // size: - 100
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::Base(SType::Size)),
+            op: ArithmeticOp::Sub,
+            right: Operand::Literal(Label::from(100)),
+        };
+        let resolved_calc = resolve_calculation(&lens, calc).unwrap();
+        let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
+        let node = ResolvedNode::Projection(operand.clone());
+
+        // 修正後の期待値: (Some(storage), None, Some(operand))
+        let (storage, filter, res_op) = node.extract_agg_parts();
+        assert!(storage.is_some());
+        assert!(matches!(storage.unwrap(), StorageMapping::RowTag { .. }));
+        assert!(filter.is_none());
+        assert!(res_op.is_some());
+        assert_eq!(res_op.unwrap(), &operand);
     }
 }

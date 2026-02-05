@@ -72,7 +72,9 @@ impl<'a> Fetcher<'a> {
         } else if self.resolver.resolved_query.is_boolean_result() {
             self.compute_boolean()
         } else {
-            Err(anyhow::anyhow!("Query is not a computation (scalar or boolean expression)"))
+            Err(anyhow::anyhow!(
+                "Query is not a computation (scalar or boolean expression)"
+            ))
         }
     }
 
@@ -86,10 +88,14 @@ impl<'a> Fetcher<'a> {
 
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {
-            println!("--- COMPUTE AGGREGATION SQL ---\n{}\n----------------", sql_str);
+            println!(
+                "--- COMPUTE AGGREGATION SQL ---\n{}\n----------------",
+                sql_str
+            );
         }
 
-        let val_f64 = self.conn
+        let val_f64 = self
+            .conn
             .prepare(&sql_str)?
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
@@ -114,9 +120,13 @@ impl<'a> Fetcher<'a> {
                     }
                 }
             })
-            .map_err(|e| anyhow::anyhow!("Failed to compute aggregation: {}", e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to compute aggregation: {}", e)
+            })?;
 
-        let id = ItemId::Virtual(crate::types::VirtualItem::Scalar(val_f64.to_bits()));
+        let id = ItemId::Virtual(crate::types::VirtualItem::Scalar(
+            val_f64.to_bits(),
+        ));
         let mut res = SearchResult::new_empty(id);
         res.item_kind = "virtual".to_string();
         Ok(res)
@@ -139,7 +149,7 @@ impl<'a> Fetcher<'a> {
 
         let id_val: i64 = self.conn.query_row(&sql_str, [], |r| r.get(0))?;
         let val_int = if id_val == 1 { 1 } else { 0 };
-        
+
         let id = ItemId::Virtual(crate::types::VirtualItem::Boolean(val_int));
         let mut res = SearchResult::new_empty(id);
         res.item_kind = "virtual".to_string();
@@ -641,7 +651,10 @@ mod tests {
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.compute_boolean().unwrap();
-        assert_eq!(res.id, ItemId::Virtual(crate::types::VirtualItem::Boolean(0))); // FALSE
+        assert_eq!(
+            res.id,
+            ItemId::Virtual(crate::types::VirtualItem::Boolean(0))
+        ); // FALSE
 
         // データ投入
         conn.execute(
@@ -655,6 +668,9 @@ mod tests {
         // Assuming the query parser works correctly, this should return TRUE.
 
         let res2 = fetcher.compute_boolean().unwrap();
-        assert_eq!(res2.id, ItemId::Virtual(crate::types::VirtualItem::Boolean(1))); // TRUE
+        assert_eq!(
+            res2.id,
+            ItemId::Virtual(crate::types::VirtualItem::Boolean(1))
+        ); // TRUE
     }
 }
