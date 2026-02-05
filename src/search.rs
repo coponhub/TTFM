@@ -47,7 +47,7 @@ impl FileManager {
         let fetcher =
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
-        // 2-A. トップレベル集約・スカラー式 または ブーリアン・スカラー結果ケース
+        // 2-A. スカラー/ブーリアン結果ケース
         if resolver.get_scalar_expression().is_some()
             || resolver.resolved_query.is_boolean_result()
         {
@@ -55,7 +55,7 @@ impl FileManager {
             return Ok(SearchResponse {
                 results: vec![res],
                 label_results: Vec::new(),
-                scalar: None, // スカラーも結果リストに入れるように統一
+                scalar: None,
                 cid: None,
                 has_more: false,
                 total_count: Some(1),
@@ -67,38 +67,14 @@ impl FileManager {
             });
         }
 
-        // プロジェクション（投影タグ）の有無を確認
-        let projection = resolver.get_projection();
-
-        let (final_results, has_more) = {
-            // 2-B. 通常検索ケース: Fetcher によるシングルパス取得
-            let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
-            let has_more = n > 0 && results.len() > n;
-            if has_more {
-                results.truncate(n);
-            }
-            (results, has_more)
-        };
-
-        // 3. キャッシュ生成の開始（続きがある場合）
-        let cid = if has_more {
-            let new_cid = uuid::Uuid::new_v4().to_string();
-            self.spawn_cache_worker(&new_cid, query)?;
-            Some(new_cid)
-        } else {
-            None
-        };
-
-        // 4. ラベルグループの構築
+        // 2-B. Projection ケース
         if let Some(tag) = resolver.get_projection() {
-            let n = options.n.unwrap_or(100);
-            let offset = options.offset.unwrap_or(0);
-
             let paged = fetcher.fetch_label_groups(&tag, n, offset)?;
-            let mut results = Vec::new();
-            for group in &paged.items {
-                results.extend(group.results.clone());
-            }
+            let results: Vec<_> = paged
+                .items
+                .iter()
+                .flat_map(|g| g.results.clone())
+                .collect();
 
             return Ok(SearchResponse {
                 results,
@@ -109,8 +85,24 @@ impl FileManager {
             });
         }
 
+        // 2-C. 通常検索ケース
+        let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
+        let has_more = n > 0 && results.len() > n;
+        if has_more {
+            results.truncate(n);
+        }
+
+        // 3. キャッシュ生成の開始（続きがある場合）
+        let cid = if has_more {
+            let new_cid = uuid::Uuid::new_v4().to_string();
+            self.spawn_cache_worker(&new_cid, query)?;
+            Some(new_cid)
+        } else {
+            None
+        };
+
         Ok(SearchResponse {
-            results: final_results,
+            results,
             label_results: Vec::new(),
             scalar: None,
             cid,
@@ -120,7 +112,7 @@ impl FileManager {
                 current: n,
                 total: None,
             },
-            type_for_projection: projection,
+            type_for_projection: None,
         })
     }
 

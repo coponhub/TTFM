@@ -91,6 +91,9 @@ pub enum Tbl {
     NotSide,
     Identities,
     AggTags,
+
+    // --- CTE (WITH Clause) ---
+    PickedIds,
 }
 
 /// SQL型名（CAST用）。データベース上のデータ型ID（`data_types` テーブルと連携）。

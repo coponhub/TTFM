@@ -872,6 +872,7 @@ pub fn build_fetch_label_groups_sql(
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
+    use sea_query::{CommonTableExpression, WithClause};
 
     let pick_sql = build_pick_sql(&resolver.resolved_query, view);
 
@@ -886,10 +887,19 @@ pub fn build_fetch_label_groups_sql(
         ),
     };
 
-    // 2. クエリに合致するアイテムと、それに対応するプロジェクション・ラベルを取得
-    //    ウィンドウ関数を使ってラベル内での順位(rn)と総件数(total)を算出
-    let mut hits_q = Query::select();
-    hits_q
+    // --- CTE 定義開始 ---
+    let mut with_clause = WithClause::new();
+
+    // CTE 1: picked_ids (元々の絞り込み結果)
+    let picked_ids_cte = CommonTableExpression::new()
+        .query(wrap_to_ids(pick_sql))
+        .table_name(Tbl::PickedIds)
+        .to_owned();
+    with_clause.cte(picked_ids_cte);
+
+    // CTE 2: all_hits (Window関数を含む全ヒットアイテム)
+    let mut all_hits_q = Query::select();
+    all_hits_q
         .column(Col::ItemId)
         .column(col_iden)
         .column(Col::Rank)
@@ -907,24 +917,42 @@ pub fn build_fetch_label_groups_sql(
         .distinct()
         .from(Alias::new(view))
         .and_where(
-            Expr::col(Col::ItemId)
-                .in_subquery(wrap_to_ids(pick_sql.to_owned())),
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from(Tbl::PickedIds)
+                    .to_owned(),
+            ),
         );
 
     if let StorageMapping::RowTag { tag_key, .. } = &desc.storage {
-        hits_q.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
+        all_hits_q.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
     }
 
-    // 3. 表示対象アイテムの ID のみを取得する軽量なサブクエリ
+    let all_hits_cte = CommonTableExpression::new()
+        .query(all_hits_q)
+        .table_name(Tbl::AllHits)
+        .to_owned();
+    with_clause.cte(all_hits_cte);
+
+    // CTE 3: top_items (表示対象の上位IDのみ)
     let mut top_items_q = Query::select();
     top_items_q
         .column(col_iden)
         .column(Col::ItemId)
         .column(Tbl::GroupTotal)
-        .from_subquery(hits_q, Tbl::AllHits)
-        .and_where(Expr::col(Tbl::Rn).lte(100)); // プレビュー制限
+        .from(Tbl::AllHits)
+        .and_where(Expr::col(Tbl::Rn).lte(100));
 
-    // 4. 表示対象アイテムについてのみ、全タグをパッキングする
+    let top_items_cte = CommonTableExpression::new()
+        .query(top_items_q)
+        .table_name(Tbl::TopItems)
+        .to_owned();
+    with_clause.cte(top_items_cte);
+
+    // --- CTE 定義終了 ---
+
+    // 4. 表示対象アイテムの全タグをパッキング
     let mut item_packed_q = Query::select();
     item_packed_q
         .column(Col::ItemId)
@@ -940,26 +968,31 @@ pub fn build_fetch_label_groups_sql(
         )
         .from(Alias::new(view))
         .and_where(
-            Expr::col(Col::ItemId)
-                .in_subquery(wrap_to_ids(top_items_q.to_owned())),
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from(Tbl::TopItems)
+                    .to_owned(),
+            ),
         )
         .group_by_col(Col::ItemId);
 
     // 5. 最終集計
     let mut q = Query::select();
-    q.column(col_iden)
+    q.with_cte(with_clause)
+        .column(col_iden)
         .expr_as(Expr::col(Tbl::GroupTotal), Col::Label)
         .expr_as(
             sea_query::Func::cust(crate::db::DuckDbFunc::List)
                 .arg(Expr::col(Tbl::AggregatedItems)),
             Tbl::AggregatedItems,
         )
-        .from_subquery(top_items_q, Tbl::Top)
+        .from(Tbl::TopItems)
         .join_subquery(
             sea_query::JoinType::Join,
             item_packed_q,
             Tbl::TagsGroup,
-            Expr::col((Tbl::Top, Col::ItemId))
+            Expr::col((Tbl::TopItems, Col::ItemId))
                 .eq(Expr::col((Tbl::TagsGroup, Col::ItemId))),
         )
         .group_by_col(col_iden)
