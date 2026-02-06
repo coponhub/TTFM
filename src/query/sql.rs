@@ -368,7 +368,10 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     let case_expr = Expr::case(condition, Expr::val(1i64));
 
     stmt.expr_as(case_expr, Col::ItemId);
-    stmt.expr_as(Expr::val("virtual"), Col::ItemKind);
+    stmt.expr_as(
+        Expr::val(crate::types::VolatileItem::KIND),
+        Col::ItemKind,
+    );
     stmt.expr_as(Expr::val("boolean"), Col::Type);
     stmt.expr_as(Expr::val(0i64), Col::Rank);
     // tags カラムが必要（fetch_items で decode_item_from_row が呼ばれるため）

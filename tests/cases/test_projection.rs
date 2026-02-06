@@ -190,8 +190,8 @@ fn test_projection_queries() {
         .any(|r| r.get_tag_value("category").as_deref() == Some("important"));
     assert!(has_val, "Should find 'important' category value");
 
-    // 10. label: (Virtual Tag -> All Labels)
-    // label: は「全てのタグのラベル」を集約する仮想プロジェクション。
+    // 10. label: (Volatile Tag -> All Labels)
+    // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
     let results = fm.search("label:", Default::default()).unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
     assert!(

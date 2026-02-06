@@ -2,7 +2,7 @@ use crate::query::lens_resolver::Resolver;
 use crate::query::lens_schema::StorageMapping;
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::ItemId;
-use crate::types::{Origin, SType, TagType};
+use crate::types::{Origin, SType, TagType, VolatileItem};
 use anyhow::Result;
 use duckdb::types::Value;
 use std::collections::HashMap;
@@ -99,19 +99,19 @@ impl<'a> Fetcher<'a> {
             .prepare(&sql_str)?
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
-                use crate::types::VirtualItem;
+                use crate::types::VolatileItem;
                 use crate::util::DotOk;
                 match val {
-                    duckdb::types::Value::Null => ItemId::Virtual(VirtualItem::Null).to_ok(),
-                    duckdb::types::Value::Float(f) => ItemId::new_virtual_scalar(f as f64).to_ok(),
-                    duckdb::types::Value::Double(d) => ItemId::new_virtual_scalar(d).to_ok(),
-                    duckdb::types::Value::Int(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
-                    duckdb::types::Value::BigInt(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
-                    duckdb::types::Value::HugeInt(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::Null => ItemId::Volatile(VolatileItem::Null).to_ok(),
+                    duckdb::types::Value::Float(f) => ItemId::new_volatile_scalar(f as f64).to_ok(),
+                    duckdb::types::Value::Double(d) => ItemId::new_volatile_scalar(d).to_ok(),
+                    duckdb::types::Value::Int(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::BigInt(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::HugeInt(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
                     other => {
                         let s_val = format!("{:?}", other);
                         if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
-                            ItemId::new_virtual_scalar(f).to_ok()
+                            ItemId::new_volatile_scalar(f).to_ok()
                         } else {
                             Err(duckdb::Error::InvalidColumnType(
                                 0,
@@ -127,7 +127,20 @@ impl<'a> Fetcher<'a> {
             })?;
 
         let mut res = SearchResult::new_empty(id);
-        res.item_kind = "virtual".to_string();
+        res.item_kind = VolatileItem::KIND.to_string();
+
+        // NULL の場合、型情報が失われるため、明示的にタグとして注入する
+        if let ItemId::Volatile(crate::types::VolatileItem::Null) = id {
+            use crate::types::{Label, LabelValue, TagType};
+            res.apply_tag(
+                Label::resolve(
+                    TagType::from("scalar"),
+                    LabelValue::String("null".to_string()),
+                ),
+                crate::types::Origin::System,
+            );
+        }
+
         Ok(res)
     }
 
@@ -150,15 +163,28 @@ impl<'a> Fetcher<'a> {
         let id_val: Option<i64> =
             self.conn.query_row(&sql_str, [], |r| r.get(0))?;
 
-        use crate::types::VirtualItem;
+        use crate::types::VolatileItem;
         let id = match id_val {
-            Some(1) => ItemId::Virtual(VirtualItem::Boolean(1)),
-            Some(_) => ItemId::Virtual(VirtualItem::Boolean(0)),
-            None => ItemId::Virtual(VirtualItem::Null),
+            Some(1) => ItemId::Volatile(VolatileItem::Boolean(1)),
+            Some(_) => ItemId::Volatile(VolatileItem::Boolean(0)),
+            None => ItemId::Volatile(VolatileItem::Null),
         };
 
         let mut res = SearchResult::new_empty(id);
-        res.item_kind = "virtual".to_string();
+        res.item_kind = VolatileItem::KIND.to_string();
+
+        // NULL の場合、型情報が失われるため、明示的にタグとして注入する
+        if let ItemId::Volatile(crate::types::VolatileItem::Null) = id {
+            use crate::types::{Label, LabelValue, TagType};
+            res.apply_tag(
+                Label::resolve(
+                    TagType::from("boolean"),
+                    LabelValue::String("null".to_string()),
+                ),
+                crate::types::Origin::System,
+            );
+        }
+
         Ok(res)
     }
 
@@ -347,11 +373,11 @@ impl<'a> Fetcher<'a> {
         let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
         let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
 
-        let id = if item_kind == "virtual" {
-            // "virtual" の場合、id_val は 1 (True) or 0 (False)
+        let id = if item_kind == crate::types::VolatileItem::KIND {
+            // "volatile" の場合、id_val は 1 (True) or 0 (False)
             // もし値が想定外なら 0 (False) 扱いにする等の安全策
             let val = if id_val != 0 { 1 } else { 0 };
-            ItemId::Virtual(crate::types::VirtualItem::Boolean(val))
+            ItemId::Volatile(crate::types::VolatileItem::Boolean(val))
         } else {
             ItemId::Real(id_val)
         };
@@ -657,7 +683,7 @@ mod tests {
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.compute_boolean().unwrap();
-        assert_eq!(res.id, ItemId::Virtual(crate::types::VirtualItem::Null)); // NULL (データがないので判定不能)
+        assert_eq!(res.id, ItemId::Volatile(crate::types::VolatileItem::Null)); // NULL (データがないので判定不能)
 
         // データ投入
         conn.execute(
@@ -673,7 +699,7 @@ mod tests {
         let res2 = fetcher.compute_boolean().unwrap();
         assert_eq!(
             res2.id,
-            ItemId::Virtual(crate::types::VirtualItem::Boolean(1))
+            ItemId::Volatile(crate::types::VolatileItem::Boolean(1))
         ); // TRUE
     }
 }

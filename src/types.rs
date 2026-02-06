@@ -13,13 +13,13 @@ pub type Rank = i64;
 pub enum ItemId {
     /// データベースに存在する実アイテム
     Real(i64),
-    /// 集約結果など、DBに存在しない仮想アイテム
-    Virtual(VirtualItem),
+    /// 集約結果など、DBに存在しない揮発性アイテム
+    Volatile(VolatileItem),
 }
 
-/// 仮想アイテムの種類
+/// 揮発性アイテムの種類
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
-pub enum VirtualItem {
+pub enum VolatileItem {
     /// 真偽値 (1=True, 0=False)
     Boolean(u8),
     /// スカラー数値 (f64 bits)
@@ -28,20 +28,24 @@ pub enum VirtualItem {
     Null,
 }
 
+impl VolatileItem {
+    pub const KIND: &'static str = "volatile";
+}
+
 impl ItemId {
-    /// i64 値を取得（Virtual の場合は負の値: True=-1, False=-2）
+    /// i64 値を取得（Volatile の場合は負の値: True=-1, False=-2）
     pub fn as_i64(&self) -> i64 {
         match self {
             ItemId::Real(i) => *i,
-            ItemId::Virtual(VirtualItem::Boolean(v)) => *v as i64,
-            ItemId::Virtual(VirtualItem::Scalar(_)) => 0,
-            ItemId::Virtual(VirtualItem::Null) => -1,
+            ItemId::Volatile(VolatileItem::Boolean(v)) => *v as i64,
+            ItemId::Volatile(VolatileItem::Scalar(_)) => 0,
+            ItemId::Volatile(VolatileItem::Null) => -1,
         }
     }
 
-    /// 新しい仮想スカラーアイテムを作成する
-    pub fn new_virtual_scalar(f: f64) -> Self {
-        ItemId::Virtual(VirtualItem::Scalar(f.to_bits()))
+    /// 新しい揮発性スカラーアイテムを作成する
+    pub fn new_volatile_scalar(f: f64) -> Self {
+        ItemId::Volatile(VolatileItem::Scalar(f.to_bits()))
     }
 
     /// Real かどうか
@@ -60,13 +64,13 @@ impl std::fmt::Display for ItemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ItemId::Real(i) => write!(f, "{}", i),
-            ItemId::Virtual(VirtualItem::Boolean(1)) => write!(f, "1"),
-            ItemId::Virtual(VirtualItem::Boolean(0)) => write!(f, "0"),
-            ItemId::Virtual(VirtualItem::Boolean(v)) => write!(f, "{}", v),
-            ItemId::Virtual(VirtualItem::Scalar(bits)) => {
+            ItemId::Volatile(VolatileItem::Boolean(1)) => write!(f, "1"),
+            ItemId::Volatile(VolatileItem::Boolean(0)) => write!(f, "0"),
+            ItemId::Volatile(VolatileItem::Boolean(v)) => write!(f, "{}", v),
+            ItemId::Volatile(VolatileItem::Scalar(bits)) => {
                 write!(f, "{}", f64::from_bits(*bits))
             }
-            ItemId::Virtual(VirtualItem::Null) => write!(f, "-1"),
+            ItemId::Volatile(VolatileItem::Null) => write!(f, "-1"),
         }
     }
 }
@@ -708,22 +712,22 @@ mod tests_types {
     }
 
     #[test]
-    fn test_virtual_item_null_as_i64() {
-        // VirtualItem::Null は -1 を返すべき
-        let id = ItemId::Virtual(VirtualItem::Null);
+    fn test_volatile_item_null_as_i64() {
+        // VolatileItem::Null は -1 を返すべき
+        let id = ItemId::Volatile(VolatileItem::Null);
         assert_eq!(id.as_i64(), -1);
     }
 
     #[test]
-    fn test_virtual_item_null_display() {
-        // VirtualItem::Null は "-1" と表示されるべき
-        let id = ItemId::Virtual(VirtualItem::Null);
+    fn test_volatile_item_null_display() {
+        // VolatileItem::Null は "-1" と表示されるべき
+        let id = ItemId::Volatile(VolatileItem::Null);
         assert_eq!(id.to_string(), "-1");
     }
 
     #[test]
-    fn test_virtual_item_null_is_not_real() {
-        let id = ItemId::Virtual(VirtualItem::Null);
+    fn test_volatile_item_null_is_not_real() {
+        let id = ItemId::Volatile(VolatileItem::Null);
         assert!(!id.is_real());
     }
 }

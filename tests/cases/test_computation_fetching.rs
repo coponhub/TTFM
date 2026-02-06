@@ -2,7 +2,7 @@ use tempfile::tempdir;
 use ttfm::FileManager;
 
 #[test]
-fn test_aggregation_returns_virtual_scalar() -> anyhow::Result<()> {
+fn test_aggregation_returns_volatile_scalar() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
     let db_parent = tempdir()?;
@@ -18,14 +18,14 @@ fn test_aggregation_returns_virtual_scalar() -> anyhow::Result<()> {
     // sum(size:) の集計クエリ
     let res = fm.search("sum(extension:txt & size:)", Default::default())?;
 
-    // 新しい仕様では results に Scalar 仮想アイテムが入るはず
+    // 新しい仕様では results に Scalar 揮発性アイテムが入るはず
     assert!(
         !res.results.is_empty(),
         "Results should not be empty for aggregation"
     );
     let first_res = &res.results[0];
 
-    // VirtualItem::Scalar の表示名は数値そのものになると期待
+    // VolatileItem::Scalar の表示名は数値そのものになると期待
     assert_eq!(first_res.name, "1100");
 
     // IDが Scalar(1100.0) であることを確認 (これは types.rs の修正後に有効になる)
@@ -36,7 +36,7 @@ fn test_aggregation_returns_virtual_scalar() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_boolean_computation_returns_virtual_boolean() -> anyhow::Result<()> {
+fn test_boolean_computation_returns_volatile_boolean() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
     let db_parent = tempdir()?;

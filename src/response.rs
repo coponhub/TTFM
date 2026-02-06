@@ -1,5 +1,5 @@
 use crate::types::{
-    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags,
+    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags, VolatileItem,
 };
 
 /// 検索結果を表す構造体。
@@ -193,7 +193,7 @@ impl SearchResponse {
             }
             if !res.item_kind.is_empty() {
                 keys.insert(TagType::from(SType::ItemKind));
-                if res.item_kind == "virtual" {
+                if res.item_kind == VolatileItem::KIND {
                     keys.insert(TagType::from(SType::Type));
                 }
             }
@@ -276,16 +276,16 @@ impl SearchResult {
     /// 指定された ID で空の検索結果を作成します。
     pub fn new_empty(id: ItemId) -> Self {
         let name = match id {
-            ItemId::Virtual(crate::types::VirtualItem::Boolean(1)) => {
+            ItemId::Volatile(crate::types::VolatileItem::Boolean(1)) => {
                 "TRUE".to_string()
             }
-            ItemId::Virtual(crate::types::VirtualItem::Boolean(0)) => {
+            ItemId::Volatile(crate::types::VolatileItem::Boolean(0)) => {
                 "FALSE".to_string()
             }
-            ItemId::Virtual(crate::types::VirtualItem::Scalar(bits)) => {
+            ItemId::Volatile(crate::types::VolatileItem::Scalar(bits)) => {
                 f64::from_bits(bits).to_string()
             }
-            ItemId::Virtual(crate::types::VirtualItem::Null) => {
+            ItemId::Volatile(crate::types::VolatileItem::Null) => {
                 "NULL".to_string()
             }
             _ => String::new(),
@@ -295,7 +295,7 @@ impl SearchResult {
             item_kind: if id.is_real() {
                 String::new()
             } else {
-                "virtual".to_string()
+                VolatileItem::KIND.to_string()
             },
             name,
             rank: 0,
@@ -454,14 +454,14 @@ impl SearchResult {
                 if self.intrinsic.size.is_some() {
                     types.push(TagType::Base(SType::Size));
                 }
-                if self.item_kind == "virtual" {
+                if self.item_kind == VolatileItem::KIND {
                     match self.id {
-                        ItemId::Virtual(
-                            crate::types::VirtualItem::Boolean(_),
+                        ItemId::Volatile(
+                            crate::types::VolatileItem::Boolean(_),
                         ) => {
                             types.push(TagType::from("boolean"));
                         }
-                        ItemId::Virtual(crate::types::VirtualItem::Scalar(
+                        ItemId::Volatile(crate::types::VolatileItem::Scalar(
                             _,
                         )) => {
                             types.push(TagType::from("scalar"));
@@ -681,12 +681,12 @@ mod tests {
 
     #[test]
     fn test_search_result_new_empty_null() {
-        use crate::types::{ItemId, VirtualItem};
-        let id = ItemId::Virtual(VirtualItem::Null);
+        use crate::types::{ItemId, VolatileItem};
+        let id = ItemId::Volatile(VolatileItem::Null);
         let res = SearchResult::new_empty(id);
 
-        // VirtualItem::Null の場合は "NULL" と表示されるべき
+        // VolatileItem::Null の場合は "NULL" と表示されるべき
         assert_eq!(res.name, "NULL");
-        assert_eq!(res.item_kind, "virtual");
+        assert_eq!(res.item_kind, VolatileItem::KIND);
     }
 }

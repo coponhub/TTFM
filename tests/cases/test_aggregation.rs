@@ -334,13 +334,13 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
 
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].name, "TRUE");
-    assert!(!res.results[0].id.is_real()); // Should be Virtual(Boolean(1))
+    assert!(!res.results[0].id.is_real()); // Should be Volatile(Boolean(1))
 
     // 2. max(mtime:) == 2025 -> FALSE
     let res_false = fm.search("max(mtime:) == 2025", Default::default())?;
     assert_eq!(res_false.results.len(), 1);
     assert_eq!(res_false.results[0].name, "FALSE");
-    assert!(!res_false.results[0].id.is_real()); // Should be Virtual(Boolean(0))
+    assert!(!res_false.results[0].id.is_real()); // Should be Volatile(Boolean(0))
 
     Ok(())
 }

@@ -95,5 +95,9 @@ fn test_null_propagation_single_aggregation_empty() -> anyhow::Result<()> {
     // 現在は "0" が返るが、"NULL" を期待するように変更
     assert_eq!(res.results[0].name, "NULL");
 
+    // NULL でも型情報 (scalar) は保持されているべき
+    let types = res.results[0].get_all_values("type");
+    assert!(types.contains(&"scalar".to_string()));
+
     Ok(())
 }
