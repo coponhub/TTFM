@@ -70,11 +70,8 @@ impl FileManager {
         // 2-B. Projection ケース
         if let Some(tag) = resolver.get_projection() {
             let paged = fetcher.fetch_label_groups(&tag, n, offset)?;
-            let results: Vec<_> = paged
-                .items
-                .iter()
-                .flat_map(|g| g.results.clone())
-                .collect();
+            let results: Vec<_> =
+                paged.items.iter().flat_map(|g| g.results.clone()).collect();
 
             return Ok(SearchResponse {
                 results,

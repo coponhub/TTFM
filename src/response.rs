@@ -285,6 +285,9 @@ impl SearchResult {
             ItemId::Virtual(crate::types::VirtualItem::Scalar(bits)) => {
                 f64::from_bits(bits).to_string()
             }
+            ItemId::Virtual(crate::types::VirtualItem::Null) => {
+                "NULL".to_string()
+            }
             _ => String::new(),
         };
         Self {
@@ -674,5 +677,16 @@ mod tests {
 
         let groups = response.iter_label_groups();
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_search_result_new_empty_null() {
+        use crate::types::{ItemId, VirtualItem};
+        let id = ItemId::Virtual(VirtualItem::Null);
+        let res = SearchResult::new_empty(id);
+
+        // VirtualItem::Null の場合は "NULL" と表示されるべき
+        assert_eq!(res.name, "NULL");
+        assert_eq!(res.item_kind, "virtual");
     }
 }

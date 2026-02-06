@@ -12,6 +12,7 @@ pub mod test_computation_fetching;
 pub mod test_date_regression;
 pub mod test_errors;
 pub mod test_label_calc;
+pub mod test_null_propagation;
 pub mod test_projection;
 pub mod test_reverse_patterns;
 pub mod test_size_units;

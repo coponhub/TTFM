@@ -739,8 +739,81 @@ fn build_aggregation_subquery(
 }
 
 pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
-    let pick_sql = build_pick_sql(node, view);
-    wrap_boolean_collider(pick_sql)
+    // 比較系ノードの場合は直接 SELECT で比較結果を計算
+    // これによりFALSEとNULLを区別できる
+    match node {
+        ResolvedNode::AggregationMatch { agg, op, label } => {
+            build_direct_boolean_select(
+                build_aggregation_subquery(agg, view),
+                *op,
+                label_to_unit_aware_expr(label),
+                view,
+            )
+        }
+        ResolvedNode::AggregationAggregationMatch { left, op, right } => {
+            build_direct_boolean_select(
+                build_aggregation_subquery(left, view),
+                *op,
+                build_aggregation_subquery(right, view),
+                view,
+            )
+        }
+        ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
+            let calc_expr = if calc.contains_aggregation() {
+                build_calculation_subquery(calc, view)
+            } else {
+                build_calculation_expr(calc)
+            };
+            build_direct_boolean_select(
+                build_aggregation_subquery(agg, view),
+                *op,
+                calc_expr,
+                view,
+            )
+        }
+        ResolvedNode::AggregationTagMatch { .. } => {
+            // タグ側は行ごとに異なる可能性があるのでWHERE方式を使用
+            // （将来的に改善の余地があるが、一旦現状維持）
+            let pick_sql = build_pick_sql(node, view);
+            wrap_boolean_collider(pick_sql)
+        }
+        _ => {
+            // その他のノード（TagMatch等）は従来のWHERE方式
+            let pick_sql = build_pick_sql(node, view);
+            wrap_boolean_collider(pick_sql)
+        }
+    }
+}
+
+/// 比較結果を直接SELECTで計算するSQL
+/// CASE WHEN left IS NULL OR right IS NULL THEN NULL WHEN left op right THEN 1 ELSE 0 END
+fn build_direct_boolean_select(
+    left: SimpleExpr,
+    op: ComparisonOp,
+    right: SimpleExpr,
+    _view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    let bin_op = to_bin_op(op);
+
+    // 比較結果を直接計算
+    // CASE WHEN left IS NULL THEN NULL WHEN (left op right) THEN 1 ELSE 0 END
+    let comparison = Expr::expr(left).binary(bin_op, right);
+
+    // NULL 伝播: 比較結果が NULL の場合は NULL を返す
+    // CASE WHEN comparison THEN 1 WHEN comparison IS NULL THEN NULL ELSE 0 END
+    q.expr_as(
+        Expr::case(comparison.clone(), Expr::val(1i64))
+            .case(comparison.is_null(), Expr::cust("NULL"))
+            .finally(Expr::val(0i64)),
+        Col::ItemId,
+    )
+    .expr_as(Expr::val("virtual"), Col::ItemKind)
+    .expr_as(Expr::val("boolean"), Col::Type)
+    .expr_as(Expr::val(0i64), Col::Rank)
+    .expr_as(Expr::cust("[]"), crate::db::QueryResultCol::Tags);
+
+    q
 }
 
 fn wrap_boolean_collider(sql: SelectStatement) -> SelectStatement {
@@ -2150,5 +2223,46 @@ mod tests {
 
         // 数値リテラルが含まれていることを確認
         assert!(sql_str.contains("42"), "Should contain literal value 42");
+    }
+
+    /// TDD: build_direct_boolean_select のテスト
+    /// 生成されるSQLにNULLチェックが含まれていることを確認
+    #[test]
+    fn test_build_direct_boolean_select_null_propagation() {
+        use sea_query::PostgresQueryBuilder;
+
+        // 左辺: サブクエリ (NULL可能)
+        let left = SimpleExpr::SubQuery(
+            None,
+            Box::new(
+                Query::select()
+                    .expr(Expr::val(100i64))
+                    .to_owned()
+                    .into_sub_query_statement(),
+            ),
+        );
+        // 右辺: リテラル
+        let right = Expr::val(50i64).into();
+
+        let sql = build_direct_boolean_select(
+            left,
+            ComparisonOp::Scalar(BasicOp::Gt),
+            right,
+            "oneview",
+        );
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // NULL チェックが含まれていることを確認
+        // CASE WHEN (...) THEN 1 WHEN (...) IS NULL THEN NULL ELSE 0 END
+        assert!(
+            sql_str.contains("IS NULL"),
+            "SQL should contain NULL check: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("CASE"),
+            "SQL should contain CASE: {}",
+            sql_str
+        );
     }
 }

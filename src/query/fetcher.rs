@@ -94,22 +94,24 @@ impl<'a> Fetcher<'a> {
             );
         }
 
-        let val_f64 = self
+        let id = self
             .conn
             .prepare(&sql_str)?
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
+                use crate::types::VirtualItem;
+                use crate::util::DotOk;
                 match val {
-                    duckdb::types::Value::Null => Ok(0.0),
-                    duckdb::types::Value::Float(f) => Ok(f as f64),
-                    duckdb::types::Value::Double(d) => Ok(d),
-                    duckdb::types::Value::Int(i) => Ok(i as f64),
-                    duckdb::types::Value::BigInt(i) => Ok(i as f64),
-                    duckdb::types::Value::HugeInt(i) => Ok(i as f64),
+                    duckdb::types::Value::Null => ItemId::Virtual(VirtualItem::Null).to_ok(),
+                    duckdb::types::Value::Float(f) => ItemId::new_virtual_scalar(f as f64).to_ok(),
+                    duckdb::types::Value::Double(d) => ItemId::new_virtual_scalar(d).to_ok(),
+                    duckdb::types::Value::Int(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::BigInt(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::HugeInt(i) => ItemId::new_virtual_scalar(i as f64).to_ok(),
                     other => {
                         let s_val = format!("{:?}", other);
                         if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
-                            Ok(f)
+                            ItemId::new_virtual_scalar(f).to_ok()
                         } else {
                             Err(duckdb::Error::InvalidColumnType(
                                 0,
@@ -124,9 +126,6 @@ impl<'a> Fetcher<'a> {
                 anyhow::anyhow!("Failed to compute aggregation: {}", e)
             })?;
 
-        let id = ItemId::Virtual(crate::types::VirtualItem::Scalar(
-            val_f64.to_bits(),
-        ));
         let mut res = SearchResult::new_empty(id);
         res.item_kind = "virtual".to_string();
         Ok(res)
@@ -147,10 +146,17 @@ impl<'a> Fetcher<'a> {
             );
         }
 
-        let id_val: i64 = self.conn.query_row(&sql_str, [], |r| r.get(0))?;
-        let val_int = if id_val == 1 { 1 } else { 0 };
+        // NULL対応: Option<i64> で受け取る
+        let id_val: Option<i64> =
+            self.conn.query_row(&sql_str, [], |r| r.get(0))?;
 
-        let id = ItemId::Virtual(crate::types::VirtualItem::Boolean(val_int));
+        use crate::types::VirtualItem;
+        let id = match id_val {
+            Some(1) => ItemId::Virtual(VirtualItem::Boolean(1)),
+            Some(_) => ItemId::Virtual(VirtualItem::Boolean(0)),
+            None => ItemId::Virtual(VirtualItem::Null),
+        };
+
         let mut res = SearchResult::new_empty(id);
         res.item_kind = "virtual".to_string();
         Ok(res)
@@ -651,10 +657,7 @@ mod tests {
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.compute_boolean().unwrap();
-        assert_eq!(
-            res.id,
-            ItemId::Virtual(crate::types::VirtualItem::Boolean(0))
-        ); // FALSE
+        assert_eq!(res.id, ItemId::Virtual(crate::types::VirtualItem::Null)); // NULL (データがないので判定不能)
 
         // データ投入
         conn.execute(

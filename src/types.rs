@@ -24,6 +24,8 @@ pub enum VirtualItem {
     Boolean(u8),
     /// スカラー数値 (f64 bits)
     Scalar(u64),
+    /// NULL（判定不能）
+    Null,
 }
 
 impl ItemId {
@@ -32,8 +34,14 @@ impl ItemId {
         match self {
             ItemId::Real(i) => *i,
             ItemId::Virtual(VirtualItem::Boolean(v)) => *v as i64,
-            ItemId::Virtual(VirtualItem::Scalar(_)) => 0, // スカラーは実IDとしては0
+            ItemId::Virtual(VirtualItem::Scalar(_)) => 0,
+            ItemId::Virtual(VirtualItem::Null) => -1,
         }
+    }
+
+    /// 新しい仮想スカラーアイテムを作成する
+    pub fn new_virtual_scalar(f: f64) -> Self {
+        ItemId::Virtual(VirtualItem::Scalar(f.to_bits()))
     }
 
     /// Real かどうか
@@ -58,6 +66,7 @@ impl std::fmt::Display for ItemId {
             ItemId::Virtual(VirtualItem::Scalar(bits)) => {
                 write!(f, "{}", f64::from_bits(*bits))
             }
+            ItemId::Virtual(VirtualItem::Null) => write!(f, "-1"),
         }
     }
 }
@@ -696,5 +705,25 @@ mod tests_types {
         assert!(results.contains(&"project:A".to_string()));
         assert!(results.contains(&"project:B".to_string()));
         assert!(results.contains(&"extension:rs".to_string()));
+    }
+
+    #[test]
+    fn test_virtual_item_null_as_i64() {
+        // VirtualItem::Null は -1 を返すべき
+        let id = ItemId::Virtual(VirtualItem::Null);
+        assert_eq!(id.as_i64(), -1);
+    }
+
+    #[test]
+    fn test_virtual_item_null_display() {
+        // VirtualItem::Null は "-1" と表示されるべき
+        let id = ItemId::Virtual(VirtualItem::Null);
+        assert_eq!(id.to_string(), "-1");
+    }
+
+    #[test]
+    fn test_virtual_item_null_is_not_real() {
+        let id = ItemId::Virtual(VirtualItem::Null);
+        assert!(!id.is_real());
     }
 }
