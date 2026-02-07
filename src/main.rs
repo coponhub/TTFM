@@ -299,7 +299,8 @@ fn print_results(
     query: &str,
     current_n: usize,
 ) {
-    if !response.progress.is_finished() {
+    // 続きがある場合のみ、進捗状況（キャッシュ生成待ち）をチェックして表示
+    if response.has_more && !response.progress.is_finished() {
         safe_println!(
             "\x1b[1;33mSearching... (Background cache generating: {})\x1b[0m",
             response.progress.current

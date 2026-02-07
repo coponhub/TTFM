@@ -62,6 +62,7 @@ impl FileManager {
                 progress: Progress {
                     current: 1,
                     total: Some(1),
+                    is_done: true,
                 },
                 type_for_projection: None,
             });
@@ -94,6 +95,14 @@ impl FileManager {
             results.truncate(n);
         }
 
+        // 検索が完了している場合（これ以上ページがない場合）は総件数を確定させる
+        let (total_count, progress_total) = if has_more {
+            (None, None)
+        } else {
+            let total = offset + results.len();
+            (Some(total), Some(total))
+        };
+
         // 3. キャッシュ生成の開始（続きがある場合）
         let cid = if has_more {
             let new_cid = uuid::Uuid::new_v4().to_string();
@@ -109,10 +118,11 @@ impl FileManager {
             scalar: None,
             cid,
             has_more,
-            total_count: None,
+            total_count,
             progress: Progress {
-                current: n,
-                total: None,
+                current: total_count.unwrap_or(n),
+                total: progress_total,
+                is_done: !has_more,
             },
             type_for_projection: None,
         })
@@ -436,6 +446,7 @@ impl FileManager {
                 progress: Progress {
                     current: current_n,
                     total: None,
+                    is_done: !has_more,
                 },
                 type_for_projection: projection
                     .map(|s| TagType::from(s.as_str())),
@@ -451,6 +462,7 @@ impl FileManager {
                 progress: Progress {
                     current: current_n,
                     total: None,
+                    is_done: !has_more,
                 },
                 type_for_projection: None,
             })

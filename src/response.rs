@@ -254,6 +254,7 @@ impl SearchResponse {
             progress: crate::types::Progress {
                 current: 0,
                 total: Some(0),
+                is_done: true,
             },
         }
     }

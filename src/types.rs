@@ -591,6 +591,8 @@ pub struct Progress {
     pub current: usize,
     /// 全体の予定件数（不明な場合は None）
     pub total: Option<usize>,
+    /// 完了フラグ（明示的な完了状態）
+    pub is_done: bool,
 }
 
 impl Progress {
@@ -604,10 +606,7 @@ impl Progress {
 
     /// 全て完了しているかどうかを判定します。
     pub fn is_finished(&self) -> bool {
-        match self.total {
-            Some(t) => self.current >= t,
-            None => false,
-        }
+        self.is_done
     }
 }
 

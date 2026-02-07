@@ -79,6 +79,7 @@ impl CacheManager {
             return Ok(Progress {
                 current: 0,
                 total: None,
+                is_done: false,
             });
         }
 
@@ -90,6 +91,7 @@ impl CacheManager {
         Ok(Progress {
             current: 1, // ダミー
             total: Some(1),
+            is_done: true,
         })
     }
 
