@@ -132,11 +132,10 @@ fn test_system_item_metadata_integration() {
         .expect("rs label not found");
     assert_eq!(rs_label.item_kind, "label", "Should be a label item");
     // このラベルの tags に "item:test.rs#..." が含まれているはず
-    let has_test_rs = rs_label.tags.entries.iter().any(|entry| {
-        entry.label.as_str().contains("test.rs")
-    });
-    assert!(
-        has_test_rs,
-        "rs label should contain reference to test.rs"
-    );
+    let has_test_rs = rs_label
+        .tags
+        .entries
+        .iter()
+        .any(|entry| entry.label.as_str().contains("test.rs"));
+    assert!(has_test_rs, "rs label should contain reference to test.rs");
 }

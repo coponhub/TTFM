@@ -1,5 +1,6 @@
 use crate::types::{
-    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags, VolatileItem,
+    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags,
+    VolatileItem,
 };
 
 /// 検索結果を表す構造体。
@@ -298,7 +299,7 @@ impl SearchResult {
             ItemId::Volatile(crate::types::VolatileItem::Label(_)) => {
                 VolatileItem::LABEL_KIND.to_string()
             }
-            _ if id.is_real() => String::new(),
+            _ if id.is_stored() => String::new(),
             _ => VolatileItem::KIND.to_string(),
         };
 
@@ -469,9 +470,9 @@ impl SearchResult {
                         ) => {
                             types.push(TagType::from("boolean"));
                         }
-                        ItemId::Volatile(crate::types::VolatileItem::Scalar(
-                            _,
-                        )) => {
+                        ItemId::Volatile(
+                            crate::types::VolatileItem::Scalar(_),
+                        ) => {
                             types.push(TagType::from("scalar"));
                         }
                         _ => {}
@@ -732,7 +733,8 @@ mod tests {
         ];
 
         for (input, expected_name) in test_cases {
-            let label_id = ItemId::Volatile(VolatileItem::Label(input.to_string()));
+            let label_id =
+                ItemId::Volatile(VolatileItem::Label(input.to_string()));
             let result = SearchResult::new_empty(label_id);
 
             assert_eq!(result.name, expected_name);

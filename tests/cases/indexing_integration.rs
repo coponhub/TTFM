@@ -184,9 +184,10 @@ fn test_system_items_registration() {
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     // 転置: results には label items が格納されるため、name が "extension:txt" であることを確認
-    let has_target_val = results_projection.results.iter().any(|r| {
-        r.item_kind == "label" && r.name == "extension:txt"
-    });
+    let has_target_val = results_projection
+        .results
+        .iter()
+        .any(|r| r.item_kind == "label" && r.name == "extension:txt");
     assert!(
         has_target_val,
         "Should contain label item with name='extension:txt'"
@@ -209,9 +210,11 @@ fn test_system_items_registration() {
         .expect("system label not found for origin check");
     assert_eq!(system_label.item_kind, "label", "Should be a label item");
     // このラベルの tags に "item:hello.txt#..." が含まれているはず
-    let has_hello_txt = system_label.tags.entries.iter().any(|entry| {
-        entry.label.as_str().contains("hello.txt")
-    });
+    let has_hello_txt = system_label
+        .tags
+        .entries
+        .iter()
+        .any(|entry| entry.label.as_str().contains("hello.txt"));
     assert!(
         has_hello_txt,
         "system origin label should contain reference to hello.txt"

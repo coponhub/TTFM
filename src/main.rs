@@ -477,7 +477,9 @@ fn print_compact_projections(
 
         // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
         let mut all_items_str = String::new();
-        for (i, tag_entry) in label_item.tags.entries.iter().take(200).enumerate() {
+        for (i, tag_entry) in
+            label_item.tags.entries.iter().take(200).enumerate()
+        {
             if i > 0 {
                 all_items_str.push_str(", ");
             }
@@ -513,12 +515,6 @@ fn print_compact_projections(
 fn print_simple_results(response: &ttfm::SearchResponse) {
     if let Some(scalar) = response.scalar {
         safe_println!("{}", scalar);
-        return;
-    }
-
-    // 仮想アイテム（True/False）のみの場合は、単にその文字列を出す
-    if response.results.len() == 1 && !response.results[0].id.is_real() {
-        safe_println!("{}", response.results[0].id);
         return;
     }
 

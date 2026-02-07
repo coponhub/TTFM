@@ -255,7 +255,8 @@ fn test_projection_returns_label_volatile_items() {
             // 検証6: tags に "item:name#id" 形式のタグが含まれている
             // Type="item", Label="name#id" 形式であることを確認
             let has_item_ref = item.tags.entries.iter().any(|entry| {
-                entry.label.tag_type().as_str() == "item" && entry.label.as_str().contains('#')
+                entry.label.tag_type().as_str() == "item"
+                    && entry.label.as_str().contains('#')
             });
             assert!(
                 has_item_ref,
@@ -269,12 +270,12 @@ fn test_projection_returns_label_volatile_items() {
                 "Label volatile item should have projected_label (total_count)"
             );
 
-            let total_count_str = item.projected_label.as_ref().unwrap().as_str();
-            let total_count: usize = total_count_str.parse().expect("projected_label should be parseable as usize");
-            assert!(
-                total_count > 0,
-                "total_count should be greater than 0"
-            );
+            let total_count_str =
+                item.projected_label.as_ref().unwrap().as_str();
+            let total_count: usize = total_count_str
+                .parse()
+                .expect("projected_label should be parseable as usize");
+            assert!(total_count > 0, "total_count should be greater than 0");
 
             // 検証8: tagsの数が100件以下である（100件制限）かつtotal_count以下である
             assert!(
@@ -289,7 +290,10 @@ fn test_projection_returns_label_volatile_items() {
                 total_count
             );
         } else {
-            panic!("Projection should return Label volatile items, but got: {:?}", item.id);
+            panic!(
+                "Projection should return Label volatile items, but got: {:?}",
+                item.id
+            );
         }
     }
 
@@ -310,12 +314,16 @@ fn test_projection_returns_label_volatile_items() {
         );
 
         // item:test.rs または item:another.rs が含まれているか確認
-        let has_test_rs = rs_item.tags.entries.iter().any(|entry| {
-            entry.label.as_str().contains("test.rs")
-        });
-        let has_another_rs = rs_item.tags.entries.iter().any(|entry| {
-            entry.label.as_str().contains("another.rs")
-        });
+        let has_test_rs = rs_item
+            .tags
+            .entries
+            .iter()
+            .any(|entry| entry.label.as_str().contains("test.rs"));
+        let has_another_rs = rs_item
+            .tags
+            .entries
+            .iter()
+            .any(|entry| entry.label.as_str().contains("another.rs"));
         assert!(
             has_test_rs || has_another_rs,
             "rs label should contain references to test.rs or another.rs"
@@ -339,10 +347,10 @@ fn test_projection_no_empty_labels() {
 
     // extension: 検索
     let results = fm.search("extension:", Default::default()).unwrap();
-    
+
     // "txt" ラベルが存在し、ファイルが含まれていることを確認
     assert!(
-        results.results.iter().any(|r| r.name == "txt"), 
+        results.results.iter().any(|r| r.name == "txt"),
         "Output should contain 'txt' label for file_with_ext.txt"
     );
 

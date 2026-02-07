@@ -100,12 +100,24 @@ impl<'a> Fetcher<'a> {
                 use crate::types::VolatileItem;
                 use crate::util::DotOk;
                 match val {
-                    duckdb::types::Value::Null => ItemId::Volatile(VolatileItem::Null).to_ok(),
-                    duckdb::types::Value::Float(f) => ItemId::new_volatile_scalar(f as f64).to_ok(),
-                    duckdb::types::Value::Double(d) => ItemId::new_volatile_scalar(d).to_ok(),
-                    duckdb::types::Value::Int(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
-                    duckdb::types::Value::BigInt(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
-                    duckdb::types::Value::HugeInt(i) => ItemId::new_volatile_scalar(i as f64).to_ok(),
+                    duckdb::types::Value::Null => {
+                        ItemId::Volatile(VolatileItem::Null).to_ok()
+                    }
+                    duckdb::types::Value::Float(f) => {
+                        ItemId::new_volatile_scalar(f as f64).to_ok()
+                    }
+                    duckdb::types::Value::Double(d) => {
+                        ItemId::new_volatile_scalar(d).to_ok()
+                    }
+                    duckdb::types::Value::Int(i) => {
+                        ItemId::new_volatile_scalar(i as f64).to_ok()
+                    }
+                    duckdb::types::Value::BigInt(i) => {
+                        ItemId::new_volatile_scalar(i as f64).to_ok()
+                    }
+                    duckdb::types::Value::HugeInt(i) => {
+                        ItemId::new_volatile_scalar(i as f64).to_ok()
+                    }
                     other => {
                         let s_val = format!("{:?}", other);
                         if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
@@ -265,11 +277,13 @@ impl<'a> Fetcher<'a> {
             };
 
             // ラベル値を解決
-            let label = self.resolver.lens().resolve_label(proj_type, &label_val);
+            let label =
+                self.resolver.lens().resolve_label(proj_type, &label_val);
             let label_str = label.as_str();
 
             // Label volatile item を作成
-            let label_id = ItemId::Volatile(VolatileItem::Label(label_str.clone()));
+            let label_id =
+                ItemId::Volatile(VolatileItem::Label(label_str.clone()));
             let mut label_item = SearchResult::new_empty(label_id);
 
             // SQLで生成済みの "name#id" 文字列をタグとして追加（Type="item"は明示的に指定）
@@ -284,7 +298,8 @@ impl<'a> Fetcher<'a> {
             }
 
             // total_count を projected_label に保存
-            label_item.projected_label = Some(Label::from(format!("{}", total_count)));
+            label_item.projected_label =
+                Some(Label::from(format!("{}", total_count)));
 
             results.push(label_item);
         }
@@ -350,7 +365,7 @@ impl<'a> Fetcher<'a> {
             let val = if id_val != 0 { 1 } else { 0 };
             ItemId::Volatile(crate::types::VolatileItem::Boolean(val))
         } else {
-            ItemId::Real(id_val)
+            ItemId::Stored(id_val)
         };
 
         let mut res = SearchResult::new_empty(id);

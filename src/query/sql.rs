@@ -368,10 +368,7 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     let case_expr = Expr::case(condition, Expr::val(1i64));
 
     stmt.expr_as(case_expr, Col::ItemId);
-    stmt.expr_as(
-        Expr::val(crate::types::VolatileItem::KIND),
-        Col::ItemKind,
-    );
+    stmt.expr_as(Expr::val(crate::types::VolatileItem::KIND), Col::ItemKind);
     stmt.expr_as(Expr::val("boolean"), Col::Type);
     stmt.expr_as(Expr::val(0i64), Col::Rank);
     // tags カラムが必要（fetch_items で decode_item_from_row が呼ばれるため）
@@ -998,7 +995,6 @@ pub fn build_fetch_label_groups_sql(
                     .column(Col::ItemId)
                     .from(Tbl::PickedIds)
                     .to_owned(),
-
             ),
         );
 
@@ -1068,7 +1064,10 @@ pub fn build_fetch_label_groups_sql(
     ));
 
     q.with_cte(with_clause)
-        .expr_as(Expr::col((Tbl::TopItems, col_iden)), Alias::new("label_value"))
+        .expr_as(
+            Expr::col((Tbl::TopItems, col_iden)),
+            Alias::new("label_value"),
+        )
         .expr_as(
             Expr::col((Tbl::TopItems, Tbl::GroupTotal)),
             Alias::new("group_total"),
@@ -1768,7 +1767,8 @@ pub fn build_label_aggregation_sql(
     q.expr_as(col_str, Col::LabelStr)
         .expr_as(col_int, Col::LabelInt)
         .expr_as(col_double, Col::LabelDouble)
-        .expr_as(col_bool, Col::LabelBool);
+        .expr_as(col_bool, Col::LabelBool)
+        .expr_as(Expr::cust("COUNT(*)"), Alias::new("total_count"));
 
     // FROM 句とフィルタリング
     if from_table {
@@ -2282,14 +2282,15 @@ mod tests {
         let query_str = "extension:";
         let resolver = Resolver::new(query_str).expect("Failed to resolve");
 
-        let proj_type = resolver.get_projection().expect("Should have projection");
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
 
         // SQL生成
-        let sql = build_fetch_label_groups_sql(&resolver, &proj_type, "oneview", 100, 0)
-            .expect("Failed to build SQL");
+        let sql = build_fetch_label_groups_sql(
+            &resolver, &proj_type, "oneview", 100, 0,
+        )
+        .expect("Failed to build SQL");
         let sql_str = sql.to_string(PostgresQueryBuilder);
-
-
 
         // 検証: label_value, group_total, item_refs カラムが含まれているか
         assert!(
@@ -2312,6 +2313,28 @@ mod tests {
         assert!(
             !sql_str.contains("struct_pack"),
             "SQL should NOT contain struct_pack (simplified): {}",
+            sql_str
+        );
+    }
+
+    #[test]
+    fn test_build_label_aggregation_sql_has_count() {
+        use sea_query::PostgresQueryBuilder;
+
+        let proj_type = TagType::from("extension");
+        let sql = build_label_aggregation_sql(&proj_type, true, None, 10, 0);
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // total_count カラムが含まれているか
+        assert!(
+            sql_str.contains("total_count"),
+            "SQL should contain total_count alias: {}",
+            sql_str
+        );
+        // COUNT(*) が含まれているか（期待値）
+        assert!(
+            sql_str.contains("COUNT(*)"),
+            "SQL should contain COUNT(*): {}",
             sql_str
         );
     }

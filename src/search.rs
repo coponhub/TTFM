@@ -69,7 +69,8 @@ impl FileManager {
 
         // 2-B. Projection ケース（転置: Label → Items）
         if let Some(tag) = resolver.get_projection() {
-            let mut label_items = fetcher.fetch_label_groups(&tag, n, offset)?;
+            let mut label_items =
+                fetcher.fetch_label_groups(&tag, n, offset)?;
             let has_more = n > 0 && label_items.len() > n;
 
             // limit+1件取得している場合は、最後の1件を削除
@@ -297,7 +298,7 @@ impl FileManager {
         proj_type: &TagType,
         n: usize,
         offset: usize,
-    ) -> Result<Vec<crate::types::Label>> {
+    ) -> Result<Vec<(crate::types::Label, usize)>> {
         let label_query = crate::query::sql::build_label_aggregation_sql(
             proj_type,
             from_table,
@@ -310,9 +311,12 @@ impl FileManager {
             .conn
             .prepare(&label_query.to_string(PostgresQueryBuilder))?
             .query_map([], |r| {
-                Ok(crate::types::Label::from_raw_row(proj_type.clone(), r, 0))
+                let label =
+                    crate::types::Label::from_raw_row(proj_type.clone(), r, 0);
+                let count: i64 = r.get("total_count")?;
+                Ok((label, count as usize))
             })?
-            .collect::<Result<Vec<crate::types::Label>, _>>()?;
+            .collect::<Result<Vec<(crate::types::Label, usize)>, _>>()?;
 
         Ok(labels)
     }
@@ -322,11 +326,11 @@ impl FileManager {
         from_table: bool,
         path_str: Option<String>,
         proj_type: &TagType,
-        labels: &[crate::types::Label],
-    ) -> Result<Vec<(i64, Option<crate::types::Label>)>> {
+        labels: &[(crate::types::Label, usize)],
+    ) -> Result<Vec<(i64, Option<(crate::types::Label, usize)>)>> {
         let mut entries = Vec::new();
 
-        for label in labels {
+        for (label, count) in labels {
             let id_query = crate::query::sql::build_label_expansion_sql(
                 proj_type,
                 label,
@@ -341,7 +345,7 @@ impl FileManager {
                 .collect::<Result<Vec<i64>, _>>()?;
 
             for id in ids {
-                entries.push((id, Some(label.clone())));
+                entries.push((id, Some((label.clone(), *count))));
             }
         }
         Ok(entries)
@@ -349,13 +353,15 @@ impl FileManager {
 
     fn fetch_and_build(
         &self,
-        target_entries: Vec<(i64, Option<crate::types::Label>)>,
+        target_entries: Vec<(i64, Option<(crate::types::Label, usize)>)>,
         fetch_sql: String,
         cid: Option<String>,
         has_more: bool,
         current_n: usize,
         projection: Option<&String>,
     ) -> Result<SearchResponse> {
+        use crate::types::{Origin, TagEntry, VolatileItem};
+
         let raw_results = self
             .conn
             .prepare(&fetch_sql)?
@@ -368,50 +374,87 @@ impl FileManager {
         }
 
         let mut label_map: std::collections::BTreeMap<
-            crate::types::Label,
+            (crate::types::Label, usize),
             Vec<SearchResult>,
         > = std::collections::BTreeMap::new();
 
         let final_results: Vec<SearchResult> = target_entries
             .into_iter()
-            .map(|(id, label)| {
+            .map(|(id, label_info)| {
                 let mut res = SearchResult::new_empty(id.into());
-                res.projected_label = label.clone();
+                if let Some((ref l, _)) = label_info {
+                    res.projected_label = Some(l.clone());
+                }
                 if let Some(tags) = tag_cache.get(&id) {
                     for tag in tags {
                         #[allow(deprecated)]
                         res.apply_raw_tag(tag.clone());
                     }
                 }
-                if let Some(l) = label {
-                    label_map.entry(l).or_default().push(res.clone());
+                if let Some(info) = label_info {
+                    label_map.entry(info).or_default().push(res.clone());
                 }
                 res
             })
             .collect();
 
-        let label_results: Vec<crate::response::LabelGroup> = label_map
-            .into_iter()
-            .map(|(label, results)| crate::response::LabelGroup {
-                label,
-                results,
-                total_count: 0,
-            })
-            .collect();
+        if projection.is_some() {
+            // 転置形式: ラベルを ID とする SearchResult を構築
+            let transposed_results: Vec<SearchResult> = label_map
+                .into_iter()
+                .map(|((label, count), items)| {
+                    let label_str = label.as_str().to_string();
+                    let label_id = crate::types::ItemId::Volatile(
+                        VolatileItem::Label(label_str),
+                    );
+                    let mut res = SearchResult::new_empty(label_id);
 
-        Ok(SearchResponse {
-            results: final_results,
-            label_results,
-            scalar: None,
-            cid,
-            has_more,
-            total_count: None,
-            progress: Progress {
-                current: current_n,
-                total: None,
-            },
-            type_for_projection: projection.map(|s| TagType::from(s.as_str())),
-        })
+                    // 各アイテムを "item:name#id" タグとして格納
+                    for item in items.into_iter().take(200) {
+                        res.tags.entries.push(TagEntry {
+                            label: crate::types::Label::from(format!(
+                                "item:{}#{}",
+                                item.name, item.id
+                            )),
+                            origin: Origin::System,
+                        });
+                    }
+                    // そのラベルを持つアイテム総数
+                    res.projected_label =
+                        Some(crate::types::Label::from(count.to_string()));
+                    res
+                })
+                .collect();
+
+            Ok(SearchResponse {
+                results: transposed_results,
+                label_results: Vec::new(), // 新形式では使用しない
+                scalar: None,
+                cid,
+                has_more,
+                total_count: None,
+                progress: Progress {
+                    current: current_n,
+                    total: None,
+                },
+                type_for_projection: projection
+                    .map(|s| TagType::from(s.as_str())),
+            })
+        } else {
+            Ok(SearchResponse {
+                results: final_results,
+                label_results: Vec::new(),
+                scalar: None,
+                cid,
+                has_more,
+                total_count: None,
+                progress: Progress {
+                    current: current_n,
+                    total: None,
+                },
+                type_for_projection: None,
+            })
+        }
     }
 
     /// 非同期に全件検索結果を Parquet キャッシュとして書き出します。
@@ -796,6 +839,87 @@ mod tests {
         assert_eq!(item.name, "test.bin");
         // Size 属性が正しくマッピングされているか
         assert_eq!(item.intrinsic.size.unwrap().0, 123);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_projection_cache_consistency() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let db_dir = root.join("db");
+        std::fs::create_dir(&db_dir)?;
+
+        // テストデータ作成
+        File::create(root.join("test.rs"))?;
+        File::create(root.join("another.rs"))?;
+        File::create(root.join("test.txt"))?;
+
+        let fm = FileManager::new_with_db_dir(&db_dir)?;
+        fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+        let query = "extension:";
+
+        // 1. 通常検索 (DBから)
+        let res_db = fm.search(query, SearchOptions::default())?;
+        assert!(res_db.type_for_projection.is_some());
+        assert!(!res_db.results.is_empty());
+        // 転置形式: results はラベルアイテム
+        assert!(res_db.results.iter().all(|r| r.item_kind == "label"));
+
+        // 2. キャッシュを作成
+        let cid = "test-proj-cache-cid";
+        fm.spawn_cache_worker(cid, query)?;
+
+        // 完了待機
+        let cache_path = fm.cache_manager.path_for(cid);
+        for _ in 0..20 {
+            if cache_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(cache_path.exists());
+
+        // 3. キャッシュから取得
+        let res_cache = fm.search(
+            query,
+            SearchOptions {
+                cid: Some(cid.to_string()),
+                ..Default::default()
+            },
+        )?;
+
+        // 整合性チェック
+        assert_eq!(
+            res_db.type_for_projection, res_cache.type_for_projection,
+            "type_for_projection mismatch"
+        );
+        assert_eq!(
+            res_db.results.len(),
+            res_cache.results.len(),
+            "Result length mismatch"
+        );
+
+        // 転置形式の確認
+        for (i, (db_item, cache_item)) in res_db
+            .results
+            .iter()
+            .zip(res_cache.results.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                db_item.item_kind, cache_item.item_kind,
+                "item_kind mismatch at index {}",
+                i
+            );
+            assert_eq!(
+                db_item.name, cache_item.name,
+                "name mismatch at index {}",
+                i
+            );
+            assert_eq!(db_item.id, cache_item.id, "id mismatch at index {}", i);
+        }
 
         Ok(())
     }

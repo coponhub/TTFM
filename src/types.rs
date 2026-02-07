@@ -8,11 +8,11 @@ pub const METADATA_ERROR: i64 = -1;
 pub type Rank = i64;
 
 /// アイテムの一意なID。
-/// 実際のDBアイテム (Real) または仮想アイテム (Virtual) を表現。
+/// 実際のDBアイテム (Stored) または揮発性アイテム (Volatile) を表現。
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum ItemId {
-    /// データベースに存在する実アイテム
-    Real(i64),
+    /// データベースに存在する実アイテム（永続化済み）
+    Stored(i64),
     /// 集約結果など、DBに存在しない揮発性アイテム
     Volatile(VolatileItem),
 }
@@ -39,7 +39,7 @@ impl ItemId {
     /// i64 値を取得（Volatile の場合は負の値: True=-1, False=-2）
     pub fn as_i64(&self) -> i64 {
         match self {
-            ItemId::Real(i) => *i,
+            ItemId::Stored(i) => *i,
             ItemId::Volatile(VolatileItem::Boolean(v)) => *v as i64,
             ItemId::Volatile(VolatileItem::Scalar(_)) => 0,
             ItemId::Volatile(VolatileItem::Null) => -1,
@@ -52,22 +52,22 @@ impl ItemId {
         ItemId::Volatile(VolatileItem::Scalar(f.to_bits()))
     }
 
-    /// Real かどうか
-    pub fn is_real(&self) -> bool {
-        matches!(self, ItemId::Real(_))
+    /// Stored かどうか
+    pub fn is_stored(&self) -> bool {
+        matches!(self, ItemId::Stored(_))
     }
 }
 
 impl From<i64> for ItemId {
     fn from(i: i64) -> Self {
-        ItemId::Real(i)
+        ItemId::Stored(i)
     }
 }
 
 impl std::fmt::Display for ItemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ItemId::Real(i) => write!(f, "{}", i),
+            ItemId::Stored(i) => write!(f, "{}", i),
             ItemId::Volatile(VolatileItem::Boolean(1)) => write!(f, "1"),
             ItemId::Volatile(VolatileItem::Boolean(0)) => write!(f, "0"),
             ItemId::Volatile(VolatileItem::Boolean(v)) => write!(f, "{}", v),
@@ -75,7 +75,7 @@ impl std::fmt::Display for ItemId {
                 write!(f, "{}", f64::from_bits(*bits))
             }
             ItemId::Volatile(VolatileItem::Null) => write!(f, "-1"),
-            ItemId::Volatile(VolatileItem::Label(_)) => write!(f, "-100"),
+            ItemId::Volatile(VolatileItem::Label(s)) => write!(f, "{}", s),
         }
     }
 }
@@ -731,9 +731,9 @@ mod tests_types {
     }
 
     #[test]
-    fn test_volatile_item_null_is_not_real() {
+    fn test_volatile_item_null_is_not_stored() {
         let id = ItemId::Volatile(VolatileItem::Null);
-        assert!(!id.is_real());
+        assert!(!id.is_stored());
     }
 
     #[test]
@@ -745,16 +745,16 @@ mod tests_types {
 
     #[test]
     fn test_volatile_item_label_display() {
-        // VolatileItem::Label は "-100" と表示されるべき
+        // VolatileItem::Label は名前そのものを表示すべき
         let id = ItemId::Volatile(VolatileItem::Label("extension".to_string()));
-        assert_eq!(id.to_string(), "-100");
+        assert_eq!(id.to_string(), "extension");
     }
 
     #[test]
-    fn test_volatile_item_label_is_not_real() {
-        // VolatileItem::Label は Real ではない
+    fn test_volatile_item_label_is_not_stored() {
+        // VolatileItem::Label は Stored ではない
         let id = ItemId::Volatile(VolatileItem::Label("myapp".to_string()));
-        assert!(!id.is_real());
+        assert!(!id.is_stored());
     }
 
     #[test]

@@ -89,7 +89,8 @@ fn test_null_propagation_single_aggregation_empty() -> anyhow::Result<()> {
     fm.index_directory(&src_dir, None::<&fn(usize)>, false)?;
 
     // 単体集約（存在しないタグを条件に含めて確実に空集合にする）
-    let res = fm.search("max(extension:nonexistent & size:)", Default::default())?;
+    let res =
+        fm.search("max(extension:nonexistent & size:)", Default::default())?;
 
     assert_eq!(res.results.len(), 1);
     // 現在は "0" が返るが、"NULL" を期待するように変更
