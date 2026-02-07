@@ -447,6 +447,12 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::scalar_calculation_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
+        Rule::parenthesized_expr => {
+            // 括弧で囲まれた式: (is_dir:false & size:)
+            let expr_pair = inner.into_inner().next().unwrap();
+            let node = build_expr(expr_pair)?;
+            Ok(Operand::Query(Box::new(node)))
+        }
 
         _ => Err(anyhow!(
             "{}: {:?}",
@@ -1008,6 +1014,60 @@ mod tests {
                 _ => panic!("Expected Count aggregation"),
             },
             _ => panic!("Expected Aggregation, got {:?}", node),
+        }
+    }
+
+    /// 新機能: 集合演算と算術演算の混在
+    /// sum((is_dir:false & size:) + 1000)
+    #[test]
+    fn test_parse_parenthesized_expr_in_arithmetic() {
+        let node = parse("sum((is_dir:false & size:) + 1000)")
+            .expect("parenthesized expr with arithmetic should parse");
+        match node {
+            QueryNode::Aggregation(agg) => match agg {
+                AggregationNode::Arithmetic { op, ref inner } => {
+                    assert_eq!(op, ArithmeticAggOp::Sum);
+                    // inner は Projection(Calculation(...))
+                    match &**inner {
+                        QueryNode::Projection(Operand::Calculation(calc)) => {
+                            // left = Query(And(...))
+                            match &calc.left {
+                                Operand::Query(node) => match &**node {
+                                    QueryNode::And(nodes) => {
+                                        assert_eq!(nodes.len(), 2);
+                                    }
+                                    _ => panic!(
+                                        "Expected And node in Query, got {:?}",
+                                        node
+                                    ),
+                                },
+                                _ => panic!(
+                                    "Expected Query operand, got {:?}",
+                                    calc.left
+                                ),
+                            }
+                            // op = Add
+                            assert_eq!(calc.op, ArithmeticOp::Add);
+                            // right = Literal(1000)
+                            match &calc.right {
+                                Operand::Literal(l) => {
+                                    assert_eq!(l.as_str(), "1000");
+                                }
+                                _ => panic!(
+                                    "Expected Literal operand, got {:?}",
+                                    calc.right
+                                ),
+                            }
+                        }
+                        _ => panic!(
+                            "Expected Projection(Calculation) inside sum, got {:?}",
+                            inner
+                        ),
+                    }
+                }
+                _ => panic!("Expected Sum aggregation"),
+            }
+            _ => panic!("Expected Aggregation"),
         }
     }
 }

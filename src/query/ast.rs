@@ -66,6 +66,8 @@ pub enum Operand {
     Calculation(Box<CalculationNode>),
     /// 集約演算結果 (sum(size:), count(*) など)
     Aggregation(Box<AggregationNode>),
+    /// 括弧で囲まれた式 (集合演算を含む): `(is_dir:false & size:)`
+    Query(Box<QueryNode>),
 }
 
 /// 算術演算ノード（加算、減算、乗算、除算）。
@@ -242,6 +244,9 @@ impl Operand {
             Operand::Aggregation(agg) => {
                 agg.collect_types(types);
             }
+            Operand::Query(node) => {
+                node.collect_types(types);
+            }
         }
     }
 
@@ -257,6 +262,9 @@ impl Operand {
             }
             Operand::Aggregation(agg) => {
                 agg.collect_projections(projections);
+            }
+            Operand::Query(node) => {
+                node.collect_projections(projections);
             }
         }
     }

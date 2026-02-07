@@ -1,5 +1,7 @@
 // Error messages for the query module
 
+use crate::query::ast::{AggregationNode, ArithmeticAggOp, Operand, QueryNode};
+
 // =========================================================================
 // Parser Errors
 // =========================================================================
@@ -31,6 +33,107 @@ pub fn invalid_scalar_comparison_msg(
         "Invalid operator '{}': Scalar comparison cannot be applied to a Projection ('{}:'). \nDid you mean: '{}: :{} {}'",
         op, proj, proj, op, rhs
     )
+}
+
+/// QueryNodeを簡易的に文字列化（提案生成用）
+fn node_to_simple_string(node: &QueryNode) -> String {
+    match node {
+        QueryNode::TypedTag(tt) => format!("{}:{}", tt.label.tag_type().as_str(), tt.label.as_str()),
+        QueryNode::Projection(Operand::TypeRef(tt)) => format!("{}:", tt.as_str()),
+        QueryNode::Aggregation(agg) => match agg {
+            AggregationNode::Count(inner) => format!("count({})", node_to_simple_string(inner)),
+            AggregationNode::Arithmetic { op, inner } => {
+                let op_str = match op {
+                    ArithmeticAggOp::Sum => "sum",
+                    ArithmeticAggOp::Avg => "avg",
+                    ArithmeticAggOp::Max => "max",
+                    ArithmeticAggOp::Min => "min",
+                };
+                format!("{}({})", op_str, node_to_simple_string(inner))
+            }
+        },
+        QueryNode::And(_) => "...".to_string(),
+        _ => "...".to_string(),
+    }
+}
+
+/// 集合演算のスカラーオペランドエラーに対する修正提案を生成
+fn generate_suggestion(nodes: &[QueryNode], operation: &str, left_is_set: bool, right_is_set: bool) -> Option<String> {
+    if nodes.len() != 2 {
+        return None;
+    }
+
+    let left = &nodes[0];
+    let right = &nodes[1];
+
+    // 片方が集約で、もう片方が集合の場合のみ提案を生成
+    match (left, right, left_is_set, right_is_set, operation) {
+        // 左が集約、右が集合、演算子が & の場合：sum(size:) & type:file → sum(type:file & size:)
+        (QueryNode::Aggregation(agg), set_node, false, true, "&") => {
+            match agg {
+                AggregationNode::Count(inner) => {
+                    Some(format!("count({} & {})", node_to_simple_string(set_node), node_to_simple_string(inner)))
+                }
+                AggregationNode::Arithmetic { op, inner } => {
+                    let op_str = match op {
+                        ArithmeticAggOp::Sum => "sum",
+                        ArithmeticAggOp::Avg => "avg",
+                        ArithmeticAggOp::Max => "max",
+                        ArithmeticAggOp::Min => "min",
+                    };
+                    Some(format!("{}({} & {})", op_str, node_to_simple_string(set_node), node_to_simple_string(inner)))
+                }
+            }
+        }
+        // 左が集合、右が集約、演算子が & の場合：type:file & sum(size:) → sum(type:file & size:)
+        (set_node, QueryNode::Aggregation(agg), true, false, "&") => {
+            match agg {
+                AggregationNode::Count(inner) => {
+                    Some(format!("count({} & {})", node_to_simple_string(set_node), node_to_simple_string(inner)))
+                }
+                AggregationNode::Arithmetic { op, inner } => {
+                    let op_str = match op {
+                        ArithmeticAggOp::Sum => "sum",
+                        ArithmeticAggOp::Avg => "avg",
+                        ArithmeticAggOp::Max => "max",
+                        ArithmeticAggOp::Min => "min",
+                    };
+                    Some(format!("{}({} & {})", op_str, node_to_simple_string(set_node), node_to_simple_string(inner)))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn invalid_set_operation_operand_msg(
+    nodes: &[QueryNode],
+    op: &str,
+    operand_type: &str,
+    left_is_set: bool,
+    right_is_set: bool,
+) -> String {
+    let mut msg = if !left_is_set && !right_is_set {
+        // 両方がスカラーの場合
+        format!(
+            "Set operations between scalars are not implemented.\n\
+             Set operation '{}' contains only scalar values ({}).",
+            op, operand_type
+        )
+    } else {
+        // 片方がスカラー、片方が集合の場合
+        format!(
+            "Set operations between sets and scalars are not implemented.\n\
+             Set operation '{}' contains a scalar value ({}).",
+            op, operand_type
+        )
+    };
+
+    if let Some(hint) = generate_suggestion(nodes, op, left_is_set, right_is_set) {
+        msg.push_str(&format!("\n\nDid you mean?: '{}'", hint));
+    }
+
+    msg
 }
 
 pub fn map_grammar_error(
@@ -358,6 +461,14 @@ fn check_scalar_op_target_proj_start(
 
 pub const ARITHMETIC_ONLY_NUMERIC: &str =
     "Arithmetic operations are only possible for numeric types.";
+
+pub const PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION: &str =
+    "Parenthesized expression '(...)' in arithmetic context must return a Projection. \
+    For example, '(is_dir:false & size:)' returns a Projection and is valid, \
+    but '(is_dir:false & is_dir:true)' returns an item set and is invalid.";
+
+pub const PARENTHESIZED_EXPR_IN_COMPARISON_MUST_RETURN_PROJECTION: &str =
+    "Parenthesized expression '(...)' in comparison or arithmetic context must return a Projection";
 
 #[cfg(test)]
 mod tests {

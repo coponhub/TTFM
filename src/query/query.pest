@@ -132,7 +132,11 @@ calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
 arith_op = @{ WHITESPACE+ ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)
-operand_calc = { aggregation | type_ref | label | calculation }
+operand_calc = { aggregation | type_ref | label | calculation | parenthesized_expr }
+
+// Parenthesized expression: allows set operations as arithmetic operands
+// e.g., sum((is_dir:false & size:) + 1000)
+parenthesized_expr = { "(" ~ expr ~ ")" }
 
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }

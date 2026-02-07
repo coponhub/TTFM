@@ -395,6 +395,11 @@ pub(crate) fn resolve_operand(
             let resolved_agg = resolve_aggregation_node(lens, agg)?;
             Ok(ResolvedOperand::Aggregation(resolved_agg))
         }
+        Operand::Query(_) => {
+            // 論理リゾルバで展開されているはずなので、ここに来ることはないはずだが、
+            // 型定義上はあり得るのでエラーを返す
+            bail!("Operand::Query should have been flattened by logical resolver");
+        }
     }
 }
 
@@ -576,6 +581,9 @@ fn resolve_operand_for_calc(
         Operand::Aggregation(agg) => {
             let resolved = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedOperand::Aggregation(resolved))
+        }
+        Operand::Query(_) => {
+            bail!("Operand::Query should have been flattened by logical resolver");
         }
     }
 }

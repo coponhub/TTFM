@@ -17,7 +17,7 @@
 //! ```
 
 use crate::query::ast::{
-    AggregationNode, CalculationNode, ComparisonNode, Operand, QueryNode,
+    AggregationNode, CalculationNode, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
 use crate::query::error;
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
@@ -67,13 +67,25 @@ pub(crate) fn expand_query_node(
             Ok(schema.expand_tag(&tt.label.tag_type(), &tt.label))
         }
         QueryNode::Projection(op) => {
+            // TypeRef の場合は schema による展開を適用
             if let Operand::TypeRef(tag_type) = &op {
                 Ok(schema.expand_projection(tag_type))
             } else {
-                Ok(QueryNode::Projection(op))
+                // それ以外の Operand (Calculation, Aggregation, Query) は展開
+                let expanded_op = expand_operand(schema, op)?;
+
+                // Calculation の中に Query(And([filter, proj])) がある場合、書き換え
+                if let Operand::Calculation(calc) = &expanded_op {
+                    if let Some(rewritten) = try_rewrite_filtered_calculation(calc) {
+                        return Ok(rewritten);
+                    }
+                }
+
+                Ok(QueryNode::Projection(expanded_op))
             }
         }
         QueryNode::And(nodes) => {
+            validate_set_operation_operands(&nodes, "&")?;
             let mut expanded = Vec::new();
             for n in nodes {
                 expanded.push(expand_query_node(schema, n)?);
@@ -81,16 +93,20 @@ pub(crate) fn expand_query_node(
             Ok(QueryNode::And(expanded))
         }
         QueryNode::Or(nodes) => {
+            validate_set_operation_operands(&nodes, "|")?;
             let mut expanded = Vec::new();
             for n in nodes {
                 expanded.push(expand_query_node(schema, n)?);
             }
             Ok(QueryNode::Or(expanded))
         }
-        QueryNode::Difference(l, r) => Ok(QueryNode::Difference(
-            Box::new(expand_query_node(schema, *l)?),
-            Box::new(expand_query_node(schema, *r)?),
-        )),
+        QueryNode::Difference(l, r) => {
+            validate_set_operation_operands(&[*l.clone(), *r.clone()], "-")?;
+            Ok(QueryNode::Difference(
+                Box::new(expand_query_node(schema, *l)?),
+                Box::new(expand_query_node(schema, *r)?),
+            ))
+        }
         QueryNode::Complement(c) => Ok(QueryNode::Complement(Box::new(
             expand_query_node(schema, *c)?,
         ))),
@@ -104,22 +120,6 @@ pub(crate) fn expand_query_node(
     }
 }
 
-fn expand_aggregation(
-    schema: &impl LogicalSchema,
-    agg: AggregationNode,
-) -> Result<AggregationNode> {
-    match agg {
-        AggregationNode::Count(node) => Ok(AggregationNode::Count(Box::new(
-            expand_query_node(schema, *node)?,
-        ))),
-        AggregationNode::Arithmetic { op, inner } => {
-            Ok(AggregationNode::Arithmetic {
-                op,
-                inner: Box::new(expand_query_node(schema, *inner)?),
-            })
-        }
-    }
-}
 
 fn expand_comparison_with_recursion(
     schema: &impl LogicalSchema,
@@ -145,17 +145,16 @@ fn expand_comparison_with_recursion(
     }
 
     // Firstオペランドの展開
-    if let Operand::Aggregation(agg) = &mut cmp.first {
-        *agg = Box::new(expand_aggregation(schema, (**agg).clone())?);
-    }
+    cmp.first = expand_operand(schema, cmp.first)?;
 
     // Restオペランドの展開
     // ここに来る時は rest.len() == 1 または 0 のはず
-    for (_op, operand) in &mut cmp.rest {
-        if let Operand::Aggregation(agg) = operand {
-            *agg = Box::new(expand_aggregation(schema, (**agg).clone())?);
-        }
+    let mut expanded_rest = Vec::new();
+    for (op, operand) in cmp.rest {
+        let expanded_operand = expand_operand(schema, operand)?;
+        expanded_rest.push((op, expanded_operand));
     }
+    cmp.rest = expanded_rest;
 
     // 標準の比較ノード展開（日付範囲化など）を実行
     let reg = QueryFunctionRegistry::with_standard();
@@ -192,6 +191,13 @@ fn validate_operand(
                 Ok(())
             }
         },
+        Operand::Query(node) => {
+            // 括弧で囲まれた式が算術演算のコンテキストで使用される場合、Projection を返す必要がある
+            if !returns_projection(node) {
+                bail!(error::PARENTHESIZED_EXPR_IN_COMPARISON_MUST_RETURN_PROJECTION);
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -216,6 +222,233 @@ pub fn validate_calculation(
     Ok(())
 }
 
+/// QueryNodeが集合を返すか（true）、スカラーを返すか（false）を判定
+fn is_set_operation(node: &QueryNode) -> bool {
+    match node {
+        // 集合を返す
+        QueryNode::And(_)
+        | QueryNode::Or(_)
+        | QueryNode::Difference(_, _)
+        | QueryNode::Complement(_)
+        | QueryNode::TypedTag(_)
+        | QueryNode::ColumnMatch { .. }
+        | QueryNode::Projection(_) => true,
+
+        // ラベル比較は集合を返す、スカラー比較は真偽値を返す
+        QueryNode::Comparison(cmp) => {
+            // すべての演算子がラベル比較（ComparisonOp::Label）ならば集合を返す
+            cmp.rest.iter().all(|(op, _)| matches!(op, ComparisonOp::Label(_)))
+        }
+
+        // スカラーを返す
+        QueryNode::Aggregation(_) => false,
+    }
+}
+
+/// 集合演算のオペランド型検証
+fn validate_set_operation_operands(
+    nodes: &[QueryNode],
+    operation: &str,
+) -> Result<()> {
+    // 各オペランドが集合を返すかチェック
+    let set_flags: Vec<bool> = nodes.iter().map(|n| is_set_operation(n)).collect();
+
+    for (idx, &is_set) in set_flags.iter().enumerate() {
+        if !is_set {
+            let node = &nodes[idx];
+            let operand_type = match node {
+                QueryNode::Comparison(_) => "scalar comparison",
+                QueryNode::Aggregation(_) => "aggregation function",
+                _ => "scalar value",
+            };
+
+            // 二項演算の場合、left_is_set と right_is_set を渡す
+            let (left_is_set, right_is_set) = if nodes.len() == 2 {
+                (set_flags[0], set_flags[1])
+            } else {
+                (false, false)
+            };
+
+            bail!(error::invalid_set_operation_operand_msg(
+                nodes,
+                operation,
+                operand_type,
+                left_is_set,
+                right_is_set,
+            ));
+        }
+    }
+    Ok(())
+}
+
+
+
+
+
+
+/// Calculation の中に Query(And([filter, Projection])) がある場合、書き換えます。
+///
+/// 例: Projection(Calculation(Query(And([filter, proj])), *, 2))
+///  → And([filter, Projection(Calculation(proj, *, 2))])
+fn try_rewrite_filtered_calculation(calc: &CalculationNode) -> Option<QueryNode> {
+    // left が Query(And([filter, Projection])) の場合
+    if let Operand::Query(node) = &calc.left {
+        if let QueryNode::And(nodes) = &**node {
+            // And の中から filter と Projection を抽出
+            let (filters, projs): (Vec<_>, Vec<_>) = nodes.iter()
+                .cloned()
+                .partition(|n| !matches!(n, QueryNode::Projection(_)));
+
+            if !projs.is_empty() && !filters.is_empty() {
+                // 最初の Projection を取り出す
+                if let QueryNode::Projection(proj_op) = &projs[0] {
+                    // 新しい Calculation を作成: Calculation(proj, op, right)
+                    let new_calc = CalculationNode {
+                        left: proj_op.clone(),
+                        op: calc.op,
+                        right: calc.right.clone(),
+                    };
+
+                    // And([filters..., Projection(new_calc)])
+                    let mut new_nodes = filters;
+                    new_nodes.push(QueryNode::Projection(
+                        Operand::Calculation(Box::new(new_calc))
+                    ));
+
+                    return Some(QueryNode::And(new_nodes));
+                }
+            }
+        }
+    }
+
+    // right が Query(And([filter, Projection])) の場合も同様
+    if let Operand::Query(node) = &calc.right {
+        if let QueryNode::And(nodes) = &**node {
+            let (filters, projs): (Vec<_>, Vec<_>) = nodes.iter()
+                .cloned()
+                .partition(|n| !matches!(n, QueryNode::Projection(_)));
+
+            if !projs.is_empty() && !filters.is_empty() {
+                if let QueryNode::Projection(proj_op) = &projs[0] {
+                    let new_calc = CalculationNode {
+                        left: calc.left.clone(),
+                        op: calc.op,
+                        right: proj_op.clone(),
+                    };
+
+                    let mut new_nodes = filters;
+                    new_nodes.push(QueryNode::Projection(
+                        Operand::Calculation(Box::new(new_calc))
+                    ));
+
+                    return Some(QueryNode::And(new_nodes));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// QueryNodeが意味論的にProjectionを返すかどうかを判定します。
+///
+/// 集合演算の意味論:
+/// - TypedTag & TypedTag → アイテム集合
+/// - TypedTag & Projection → Projection (フィルタ付き)
+/// - Projection & Projection → Projection
+/// - Comparison & Projection → Projection (フィルタ付き)
+/// - TypedTag | TypedTag → アイテム集合
+/// - TypedTag | Projection → Projection (複数の可能性)
+/// - Projection | Projection → Projection
+///
+/// 注: Comparison, TypedTag, ColumnMatch は意味的にアイテム集合を返すため、
+/// 集合演算と組み合わせた場合の動作は TypedTag と同様に扱う。
+fn returns_projection(node: &QueryNode) -> bool {
+    match node {
+        QueryNode::Projection(_) => true,
+        QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+            // 少なくとも1つがProjectionなら、結果もProjection
+            nodes.iter().any(returns_projection)
+        }
+        QueryNode::Difference(l, _) => {
+            // 差集合の左辺がProjectionなら、結果もProjection
+            returns_projection(l)
+        }
+        QueryNode::Complement(_) => {
+            // 補集合は通常アイテム集合を返す
+            false
+        }
+        QueryNode::TypedTag(_)
+        | QueryNode::ColumnMatch { .. }
+        | QueryNode::Comparison(_)
+        | QueryNode::Aggregation(_) => false,
+    }
+}
+
+/// Operandを論理展開し、必要に応じて検証を行います。
+fn expand_operand(
+    schema: &impl LogicalSchema,
+    operand: Operand,
+) -> Result<Operand> {
+    match operand {
+        Operand::Literal(label) => Ok(Operand::Literal(label)),
+        Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
+        Operand::Calculation(calc) => {
+            let expanded = expand_calculation(schema, *calc)?;
+            Ok(Operand::Calculation(Box::new(expanded)))
+        }
+        Operand::Aggregation(agg) => {
+            let expanded = expand_aggregation(schema, *agg)?;
+            Ok(Operand::Aggregation(Box::new(expanded)))
+        }
+        Operand::Query(node) => {
+            // 括弧で囲まれた式を論理展開
+            let expanded_node = expand_query_node(schema, *node)?;
+
+            // Queryが算術演算のコンテキストで使用される場合、Projectionを返す必要がある
+            if !returns_projection(&expanded_node) {
+                bail!(error::PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION);
+            }
+
+            Ok(Operand::Query(Box::new(expanded_node)))
+        }
+    }
+}
+
+/// 算術演算ノードを論理展開します。
+fn expand_calculation(
+    schema: &impl LogicalSchema,
+    calc: CalculationNode,
+) -> Result<CalculationNode> {
+    let left = expand_operand(schema, calc.left)?;
+    let right = expand_operand(schema, calc.right)?;
+    Ok(CalculationNode {
+        left,
+        op: calc.op,
+        right,
+    })
+}
+
+/// 集約ノードを論理展開します。
+fn expand_aggregation(
+    schema: &impl LogicalSchema,
+    agg: AggregationNode,
+) -> Result<AggregationNode> {
+    match agg {
+        AggregationNode::Count(node) => {
+            let expanded = expand_query_node(schema, *node)?;
+            Ok(AggregationNode::Count(Box::new(expanded)))
+        }
+        AggregationNode::Arithmetic { op, inner } => {
+            let expanded = expand_query_node(schema, *inner)?;
+            Ok(AggregationNode::Arithmetic {
+                op,
+                inner: Box::new(expanded),
+            })
+        }
+    }
+}
+
 /// オペランドの型を推論
 fn infer_type(
     operand: &Operand,
@@ -229,6 +462,37 @@ fn infer_type(
             Ok(LogicalType::Integer) // 暫定：演算結果は一旦数値
         }
         Operand::Aggregation(_) => Ok(LogicalType::Integer),
+        Operand::Query(node) => {
+            // 括弧で囲まれた式の型を推論
+            // Projection を返す必要がある (returns_projection でチェック済み)
+            // Projection の場合、その中の Operand の型を推論
+            // 集合演算の場合、結果の Projection の型を推論
+            match &**node {
+                QueryNode::Projection(op) => infer_type(op, schema),
+                QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                    // 集合演算の中から Projection を見つけて型を推論
+                    for n in nodes {
+                        if let QueryNode::Projection(op) = n {
+                            return infer_type(op, schema);
+                        }
+                    }
+                    // 見つからない場合は Any (実際には returns_projection で保証されている)
+                    Ok(LogicalType::Any)
+                }
+                QueryNode::Difference(l, _) => {
+                    // 差集合の左辺から型を推論（再帰）
+                    match &**l {
+                        QueryNode::Projection(op) => infer_type(op, schema),
+                        _ => Ok(LogicalType::Any),
+                    }
+                }
+                _ => {
+                    // returns_projection が true であることが保証されているはずだが、
+                    // ここに到達する場合は念のため Any を返す
+                    Ok(LogicalType::Any)
+                }
+            }
+        }
     }
 }
 

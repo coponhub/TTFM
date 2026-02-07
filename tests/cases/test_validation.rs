@@ -62,3 +62,200 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ========== 集合演算スカラーオペランド検証テスト ==========
+
+#[test]
+fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: count(path:) & type:file
+    // 左オペランドが集約関数（スカラー値）
+    let result = fm.search("count(path:) & type:file", Default::default());
+
+    assert!(
+        result.is_err(),
+        "Set operation with scalar aggregation on left should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Set operations between sets and scalars are not implemented"),
+        "Error message should indicate invalid set operation: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("Did you mean?"),
+        "Error message should include suggestion: {}",
+        err_msg
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: type:file & sum(size:)
+    // 右オペランドが集約関数（スカラー値）
+    let result = fm.search("type:file & sum(size:)", Default::default());
+
+    assert!(
+        result.is_err(),
+        "Set operation with scalar aggregation on right should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Set operations between sets and scalars are not implemented"),
+        "Error message should indicate invalid set operation: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("Did you mean?"),
+        "Error message should include suggestion: {}",
+        err_msg
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: (1 > 0) & type:file
+    // 左オペランドがスカラー比較（真偽値）
+    let result = fm.search("(1 > 0) & type:file", Default::default());
+
+    assert!(
+        result.is_err(),
+        "Set operation with scalar comparison should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Set operations between sets and scalars are not implemented"),
+        "Error message should indicate invalid set operation: {}",
+        err_msg
+    );
+    // スカラー比較の場合は提案が含まれないことを確認
+    assert!(
+        !err_msg.contains("Did you mean?"),
+        "Error message should not include suggestion for scalar comparison: {}",
+        err_msg
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: type:file - sum(size:)
+    // 右オペランドが集約関数（スカラー値）
+    let result = fm.search("type:file - sum(size:)", Default::default());
+
+    assert!(
+        result.is_err(),
+        "Difference operation with scalar aggregation should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Set operations between sets and scalars are not implemented"),
+        "Error message should indicate invalid set operation: {}",
+        err_msg
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // テスト用のファイルを作成
+    std::fs::create_dir_all(root.join("test_dir"))?;
+    std::fs::write(root.join("test_file.txt"), "test content")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 正常な集合演算: type:file & path:
+    let result = fm.search("type:file & path:", Default::default());
+    assert!(
+        result.is_ok(),
+        "Valid set operation (type & projection) should succeed"
+    );
+
+    // 正常な集合演算: ラベル比較（集合） & 集合
+    // size: :> 0 はラベル比較として集合を返す
+    let result = fm.search("(size: :> 0) & type:file", Default::default());
+    assert!(
+        result.is_ok(),
+        "Valid set operation (label comparison & type) should succeed"
+    );
+
+    // 正常な集合演算: type:file | type:directory
+    let result = fm.search("type:file | type:directory", Default::default());
+    assert!(
+        result.is_ok(),
+        "Valid set operation (type | type) should succeed"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: sum(size:) & count(path:)
+    // 両方のオペランドがスカラー値
+    let result = fm.search("sum(size:) & count(path:)", Default::default());
+
+    assert!(
+        result.is_err(),
+        "Set operation with both scalars should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Set operations between scalars are not implemented"),
+        "Error message should indicate scalar-to-scalar set operation: {}",
+        err_msg
+    );
+    // スカラー同士の場合は提案が含まれないことを確認
+    assert!(
+        !err_msg.contains("Did you mean?"),
+        "Error message should not include suggestion for scalar-to-scalar: {}",
+        err_msg
+    );
+
+    Ok(())
+}
