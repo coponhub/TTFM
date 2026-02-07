@@ -459,27 +459,30 @@ fn print_compact_projections(
 ) {
     let term_width = get_terminal_width();
 
-    // iter_label_groups ですでに一意化されているため、それを利用
-    let groups = response.iter_label_groups();
+    // Phase 2: results には label items（転置）が格納されている
+    for label_item in &response.results {
+        // total_count を projected_label から取得
+        let total_count = label_item
+            .projected_label
+            .as_ref()
+            .and_then(|l| l.as_str().parse::<usize>().ok())
+            .unwrap_or(label_item.tags.entries.len());
 
-    for group in groups {
-        let label = group.label;
-        let items = group.results;
-
-        // 1行目: ヘッダー (:label (X items))
+        // 1行目: ヘッダー (ラベル値 (X items))
         safe_println!(
             "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-            label,
-            group.total_count
+            label_item.name,
+            total_count
         );
 
-        // 2行目: アイテムリスト (  #ID:name, ...)
+        // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
         let mut all_items_str = String::new();
-        for (i, item) in items.iter().take(200).enumerate() {
+        for (i, tag_entry) in label_item.tags.entries.iter().take(200).enumerate() {
             if i > 0 {
                 all_items_str.push_str(", ");
             }
-            all_items_str.push_str(&format!("#{}:{}", item.id, item.name));
+            // タグは "item:name#id" 形式
+            all_items_str.push_str(&tag_entry.label.as_str());
             if all_items_str.chars().count() > term_width + 10 {
                 break;
             }
@@ -492,7 +495,7 @@ fn print_compact_projections(
     }
 
     safe_println!(
-        "Total: {} unique items matched the projection.",
+        "Total: {} unique labels matched the projection.",
         response.results.len()
     );
 
@@ -526,10 +529,8 @@ fn print_simple_results(response: &ttfm::SearchResponse) {
             safe_println!("{}", line);
         }
     } else {
-        // プロジェクションあり: LabelGroup を用いて一意な値の一覧を出力
-        let groups = response.iter_label_groups();
-        for group in groups {
-            safe_println!("{}", group.label);
+        for label_item in &response.results {
+            safe_println!("{}", label_item.name);
         }
     }
 }

@@ -258,8 +258,8 @@ fn process_entry(
     );
 
     // ハッシュがキャッシュにあれば生存 ID として報告
-    if let Some(&id) = cache.get(&hash) {
-        if tx.send(ScanMessage::Live(id)).is_err() {
+    if let Some(id) = cache.get(&hash) {
+        if tx.send(ScanMessage::Live(id.clone())).is_err() {
             return ignore::WalkState::Quit;
         }
         return ignore::WalkState::Continue;

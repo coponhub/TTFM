@@ -118,22 +118,25 @@ fn test_system_item_metadata_integration() {
     );
 
     // 4. 代わりにプロジェクションで確認
-    // extension: で検索し、test.rs がヒットすること、そのタグに rs が含まれていることを確認
+    // extension: で検索し、"rs" ラベルが存在し、そのラベルが test.rs を参照していることを確認
     let results_proj = fm.search("extension:", Default::default()).unwrap();
     assert!(
         !results_proj.results.is_empty(),
-        "Should find files via projection"
+        "Should find label items via projection"
     );
-    let test_file = results_proj
+    // 転置: results には label items が格納されるため、name="rs" のラベルを探す
+    let rs_label = results_proj
         .results
         .iter()
-        .find(|r| r.name == "test.rs")
-        .expect("test.rs not found");
-    // SearchResult.tags に (extension, rs) が含まれているはず
-    let ext_val = test_file.get_tag_value("extension");
-    assert_eq!(
-        ext_val.as_deref(),
-        Some("rs"),
-        "Projection should return extension value"
+        .find(|r| r.name == "rs")
+        .expect("rs label not found");
+    assert_eq!(rs_label.item_kind, "label", "Should be a label item");
+    // このラベルの tags に "item:test.rs#..." が含まれているはず
+    let has_test_rs = rs_label.tags.entries.iter().any(|entry| {
+        entry.label.as_str().contains("test.rs")
+    });
+    assert!(
+        has_test_rs,
+        "rs label should contain reference to test.rs"
     );
 }

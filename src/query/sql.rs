@@ -998,8 +998,12 @@ pub fn build_fetch_label_groups_sql(
                     .column(Col::ItemId)
                     .from(Tbl::PickedIds)
                     .to_owned(),
+
             ),
         );
+
+    // Locationsテーブル由来のNULL（例: extensionなし）を除外
+    all_hits_q.and_where(Expr::col(col_iden).is_not_null());
 
     if let StorageMapping::RowTag { tag_key, .. } = &desc.storage {
         all_hits_q.and_where(Expr::col(Col::Type).eq(tag_key.as_str()));
@@ -1011,11 +1015,12 @@ pub fn build_fetch_label_groups_sql(
         .to_owned();
     with_clause.cte(all_hits_cte);
 
-    // CTE 3: top_items (表示対象の上位IDのみ)
+    // CTE 3: top_items (表示対象の上位IDのみ、rankも含める)
     let mut top_items_q = Query::select();
     top_items_q
         .column(col_iden)
         .column(Col::ItemId)
+        .column(Col::Rank)
         .column(Tbl::GroupTotal)
         .from(Tbl::AllHits)
         .and_where(Expr::col(Tbl::Rn).lte(100));
@@ -1028,52 +1033,51 @@ pub fn build_fetch_label_groups_sql(
 
     // --- CTE 定義終了 ---
 
-    // 4. 表示対象アイテムの全タグをパッキング
-    let mut item_packed_q = Query::select();
-    item_packed_q
-        .column(Col::ItemId)
-        .expr_as(
-            CustomFunc::list_with_order(
-                CustomFunc::struct_pack(&Col::raw_tag_row_columns()),
-                vec![
-                    (Col::Rank, sea_query::Order::Desc),
-                    (Col::ItemId, sea_query::Order::Desc),
-                ],
-            ),
-            Tbl::AggregatedItems,
-        )
-        .from(Alias::new(view))
-        .and_where(
-            Expr::col(Col::ItemId).in_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .from(Tbl::TopItems)
-                    .to_owned(),
-            ),
-        )
-        .group_by_col(Col::ItemId);
-
-    // 5. 最終集計
+    // 4. 最終SELECT: シンプルな文字列連結で item:name#id 形式のリストを生成
+    use sea_query::Iden;
     let mut q = Query::select();
+
+    // nameを取得するサブクエリを文字列で構築
+    // (SELECT label_str FROM oneview WHERE item_id = top_items.item_id AND type = 'name' LIMIT 1)
+    let name_subquery = format!(
+        "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
+        Iden::to_string(&Col::LabelStr),
+        view,
+        Iden::to_string(&Col::ItemId),
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Col::ItemId),
+        Iden::to_string(&Col::Type)
+    );
+
+    // CONCAT式を文字列で構築（COALESCEでサブクエリの結果を使用）
+    let concat_expr = format!(
+        "CONCAT(COALESCE({}, 'unknown'), '#', CAST({}.{} AS VARCHAR))",
+        name_subquery,
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Col::ItemId)
+    );
+
+    // list()関数全体を文字列で構築（rankはtop_itemsから取得）
+    let list_expr = Expr::cust(format!(
+        "list({} ORDER BY {}.{} DESC, {}.{} DESC)",
+        concat_expr,
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Col::Rank),
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Col::ItemId)
+    ));
+
     q.with_cte(with_clause)
-        .column(col_iden)
-        .expr_as(Expr::col(Tbl::GroupTotal), Col::Label)
+        .expr_as(Expr::col((Tbl::TopItems, col_iden)), Alias::new("label_value"))
         .expr_as(
-            sea_query::Func::cust(crate::db::DuckDbFunc::List)
-                .arg(Expr::col(Tbl::AggregatedItems)),
-            Tbl::AggregatedItems,
+            Expr::col((Tbl::TopItems, Tbl::GroupTotal)),
+            Alias::new("group_total"),
         )
+        .expr_as(list_expr, Alias::new("item_refs"))
         .from(Tbl::TopItems)
-        .join_subquery(
-            sea_query::JoinType::Join,
-            item_packed_q,
-            Tbl::TagsGroup,
-            Expr::col((Tbl::TopItems, Col::ItemId))
-                .eq(Expr::col((Tbl::TagsGroup, Col::ItemId))),
-        )
-        .group_by_col(col_iden)
-        .group_by_col(Tbl::GroupTotal)
-        .order_by(col_iden, sea_query::Order::Asc);
+        .group_by_col((Tbl::TopItems, col_iden))
+        .group_by_col((Tbl::TopItems, Tbl::GroupTotal))
+        .order_by((Tbl::TopItems, col_iden), sea_query::Order::Asc);
 
     if limit > 0 {
         q.limit((limit + 1) as u64);
@@ -2265,6 +2269,49 @@ mod tests {
         assert!(
             sql_str.contains("CASE"),
             "SQL should contain CASE: {}",
+            sql_str
+        );
+    }
+
+    #[test]
+    fn test_build_fetch_label_groups_sql_generates_concat() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // 単純な projection クエリを作成
+        let query_str = "extension:";
+        let resolver = Resolver::new(query_str).expect("Failed to resolve");
+
+        let proj_type = resolver.get_projection().expect("Should have projection");
+
+        // SQL生成
+        let sql = build_fetch_label_groups_sql(&resolver, &proj_type, "oneview", 100, 0)
+            .expect("Failed to build SQL");
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+
+
+        // 検証: label_value, group_total, item_refs カラムが含まれているか
+        assert!(
+            sql_str.contains("label_value"),
+            "SQL should contain label_value alias: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("group_total"),
+            "SQL should contain group_total alias: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("item_refs"),
+            "SQL should contain item_refs alias: {}",
+            sql_str
+        );
+
+        // 検証: struct_pack が含まれていないこと（簡素化されているべき）
+        assert!(
+            !sql_str.contains("struct_pack"),
+            "SQL should NOT contain struct_pack (simplified): {}",
             sql_str
         );
     }

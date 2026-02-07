@@ -275,7 +275,7 @@ impl SearchResponse {
 impl SearchResult {
     /// 指定された ID で空の検索結果を作成します。
     pub fn new_empty(id: ItemId) -> Self {
-        let name = match id {
+        let name = match &id {
             ItemId::Volatile(crate::types::VolatileItem::Boolean(1)) => {
                 "TRUE".to_string()
             }
@@ -283,20 +283,28 @@ impl SearchResult {
                 "FALSE".to_string()
             }
             ItemId::Volatile(crate::types::VolatileItem::Scalar(bits)) => {
-                f64::from_bits(bits).to_string()
+                f64::from_bits(*bits).to_string()
             }
             ItemId::Volatile(crate::types::VolatileItem::Null) => {
                 "NULL".to_string()
             }
+            ItemId::Volatile(crate::types::VolatileItem::Label(ref s)) => {
+                s.clone()
+            }
             _ => String::new(),
         };
+
+        let item_kind = match &id {
+            ItemId::Volatile(crate::types::VolatileItem::Label(_)) => {
+                VolatileItem::LABEL_KIND.to_string()
+            }
+            _ if id.is_real() => String::new(),
+            _ => VolatileItem::KIND.to_string(),
+        };
+
         Self {
             id,
-            item_kind: if id.is_real() {
-                String::new()
-            } else {
-                VolatileItem::KIND.to_string()
-            },
+            item_kind,
             name,
             rank: 0,
             intrinsic: Intrinsic::default(),
@@ -688,5 +696,48 @@ mod tests {
         // VolatileItem::Null の場合は "NULL" と表示されるべき
         assert_eq!(res.name, "NULL");
         assert_eq!(res.item_kind, VolatileItem::KIND);
+    }
+
+    #[test]
+    fn test_search_result_new_empty_label() {
+        use crate::types::{ItemId, VolatileItem};
+
+        // ラベル値 "rs" で Label volatile item を作成
+        let label_id = ItemId::Volatile(VolatileItem::Label("rs".to_string()));
+        let result = SearchResult::new_empty(label_id);
+
+        // name がラベル値と一致するか
+        assert_eq!(result.name, "rs");
+
+        // item_kind が "label" か
+        assert_eq!(result.item_kind, VolatileItem::LABEL_KIND);
+
+        // id が正しく設定されているか
+        assert_eq!(result.id.as_i64(), -100);
+
+        // タグは空であるべき
+        assert!(result.tags.is_empty());
+    }
+
+    #[test]
+    fn test_search_result_new_empty_label_various_values() {
+        use crate::types::{ItemId, VolatileItem};
+
+        // 異なるラベル値でテスト
+        let test_cases = vec![
+            ("extension", "extension"),
+            ("myapp", "myapp"),
+            ("日本語", "日本語"),
+            ("", ""),
+        ];
+
+        for (input, expected_name) in test_cases {
+            let label_id = ItemId::Volatile(VolatileItem::Label(input.to_string()));
+            let result = SearchResult::new_empty(label_id);
+
+            assert_eq!(result.name, expected_name);
+            assert_eq!(result.item_kind, "label");
+            assert_eq!(result.id.as_i64(), -100);
+        }
     }
 }

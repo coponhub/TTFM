@@ -1,10 +1,8 @@
 use crate::query::lens_resolver::Resolver;
-use crate::query::lens_schema::StorageMapping;
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::ItemId;
-use crate::types::{Origin, SType, TagType, VolatileItem};
+use crate::types::{SType, TagType, VolatileItem};
 use anyhow::Result;
-use duckdb::types::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -126,7 +124,7 @@ impl<'a> Fetcher<'a> {
                 anyhow::anyhow!("Failed to compute aggregation: {}", e)
             })?;
 
-        let mut res = SearchResult::new_empty(id);
+        let mut res = SearchResult::new_empty(id.clone());
         res.item_kind = VolatileItem::KIND.to_string();
 
         // NULL の場合、型情報が失われるため、明示的にタグとして注入する
@@ -170,7 +168,7 @@ impl<'a> Fetcher<'a> {
             None => ItemId::Volatile(VolatileItem::Null),
         };
 
-        let mut res = SearchResult::new_empty(id);
+        let mut res = SearchResult::new_empty(id.clone());
         res.item_kind = VolatileItem::KIND.to_string();
 
         // NULL の場合、型情報が失われるため、明示的にタグとして注入する
@@ -219,7 +217,7 @@ impl<'a> Fetcher<'a> {
         let mut seen_ids = std::collections::HashSet::new();
         for item in item_iter {
             let item = item?;
-            if seen_ids.insert(item.id) {
+            if seen_ids.insert(item.id.clone()) {
                 results.push(item);
             }
         }
@@ -232,8 +230,9 @@ impl<'a> Fetcher<'a> {
         proj_type: &TagType,
         limit: usize,
         offset: usize,
-    ) -> Result<crate::response::PagedResult<crate::response::LabelGroup>> {
-        use crate::response::{LabelGroup, PagedResult};
+    ) -> Result<Vec<SearchResult>> {
+        use crate::response::SearchResult;
+        use crate::types::{ItemId, Label, VolatileItem};
         use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
 
@@ -255,43 +254,42 @@ impl<'a> Fetcher<'a> {
 
         let mut stmt = self.conn.prepare(&sql_str)?;
         let mut rows = stmt.query([])?;
-        let mut groups = Vec::new();
-
-        let desc = self.resolver.lens().look_up_or_default(proj_type);
-        let main_col_name = match &desc.storage {
-            StorageMapping::Column(col) => col.name(),
-            StorageMapping::RowTag { column, .. } => column.name(),
-            _ => anyhow::bail!(
-                "Unsupported storage for projection: {:?}",
-                desc.storage
-            ),
-        };
+        let mut results = Vec::new();
 
         while let Some(row) = rows.next()? {
-            use sea_query::Iden;
-            let label_val: Value = row.get(main_col_name.as_str())?;
-            let total_count: i64 =
-                row.get(Iden::to_string(&SType::Label).as_str())?;
-            let Value::List(items_list_of_lists) = row.get(
-                Iden::to_string(&crate::db::Tbl::AggregatedItems).as_str(),
-            )?
-            else {
+            // SQLから label_value, group_total, item_refs を取得
+            let label_val: Value = row.get("label_value")?;
+            let total_count: i64 = row.get("group_total")?;
+            let Value::List(item_refs_list) = row.get("item_refs")? else {
                 continue;
             };
 
-            let results = self.decode_grouped_items(items_list_of_lists);
+            // ラベル値を解決
+            let label = self.resolver.lens().resolve_label(proj_type, &label_val);
+            let label_str = label.as_str();
 
-            groups.push(LabelGroup {
-                label: self
-                    .resolver
-                    .lens()
-                    .resolve_label(proj_type, &label_val),
-                results,
-                total_count: total_count as usize,
-            });
+            // Label volatile item を作成
+            let label_id = ItemId::Volatile(VolatileItem::Label(label_str.clone()));
+            let mut label_item = SearchResult::new_empty(label_id);
+
+            // SQLで生成済みの "name#id" 文字列をタグとして追加（Type="item"は明示的に指定）
+            for item_ref in item_refs_list {
+                if let Value::Text(s) = item_ref {
+                    let typed_tag = crate::types::TypedTag::new("item", s);
+                    label_item.tags.entries.push(crate::types::TagEntry {
+                        label: typed_tag.label,
+                        origin: crate::types::Origin::System,
+                    });
+                }
+            }
+
+            // total_count を projected_label に保存
+            label_item.projected_label = Some(Label::from(format!("{}", total_count)));
+
+            results.push(label_item);
         }
 
-        Ok(PagedResult::new(groups, limit, offset))
+        Ok(results)
     }
 
     /// 平坦なタグデータのリストを取得（メモリ上での利用・デバッグ用）
@@ -336,33 +334,6 @@ impl<'a> Fetcher<'a> {
         crate::util::save_parquet(self.conn, &select_sql, path, metadata)
     }
 
-    /// プロジェクション（ラベル集計）で得られた、入れ子構造のアイテムリストをデコードします。
-    fn decode_grouped_items(
-        &self,
-        items_list: Vec<Value>,
-    ) -> Vec<SearchResult> {
-        items_list
-            .into_iter()
-            .filter_map(|v| match v {
-                Value::List(l) => Some(l),
-                _ => None,
-            })
-            .filter_map(|item_tags| {
-                let mut it = item_tags.into_iter().filter_map(|v| match v {
-                    Value::Struct(m) => Some(m),
-                    _ => None,
-                });
-
-                let first_map = it.next()?;
-                let mut res = self.decode_item_from_map(&first_map).ok()?;
-                for tag_map in it {
-                    let _ = self.decode_item_tags_from_map(&mut res, &tag_map);
-                }
-                Some(res)
-            })
-            .collect()
-    }
-
     /// DuckDB の Row から SearchResult を構築します。
     fn decode_item_from_row(
         &self,
@@ -404,78 +375,6 @@ impl<'a> Fetcher<'a> {
             }
         }
         Ok(res)
-    }
-
-    /// 物理カラムの Map (struct_pack 結果) から SearchResult を構築します。
-    fn decode_item_from_map(
-        &self,
-        map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
-    ) -> Result<SearchResult> {
-        use duckdb::types::Value;
-
-        let id = map
-            .get(&SType::ItemId.name())
-            .and_then(|v| match v {
-                Value::BigInt(i) => Some(*i),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("Missing item_id in packed data"))?;
-
-        let mut res = SearchResult::new_empty(id.into());
-        res.rank = map
-            .get(&SType::Rank.name())
-            .and_then(|v| match v {
-                Value::BigInt(i) => Some(*i),
-                _ => None,
-            })
-            .unwrap_or(0);
-        res.item_kind = map
-            .get(&SType::ItemKind.name())
-            .and_then(|v| match v {
-                Value::Text(s) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        self.decode_item_tags_from_map(&mut res, map)?;
-
-        Ok(res)
-    }
-
-    /// Map 形式のタグデータ（1行分）を SearchResult に適用します。
-    fn decode_item_tags_from_map(
-        &self,
-        res: &mut SearchResult,
-        map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
-    ) -> Result<()> {
-        use duckdb::types::Value;
-
-        let type_key = SType::Type.name();
-        let origin_key = SType::Origin.name();
-
-        let Some(tag_type_str) = map.get(&type_key).and_then(|v| match v {
-            Value::Text(s) => Some(s.as_str()),
-            _ => None,
-        }) else {
-            return Ok(());
-        };
-
-        let tag_type = TagType::from(tag_type_str);
-        if let Some(label) =
-            self.resolver.lens().decode_label_from_map(&tag_type, map)
-        {
-            let origin = map
-                .get(&origin_key)
-                .and_then(|v| match v {
-                    Value::Text(s) if s == "user" => Some(Origin::User),
-                    _ => None,
-                })
-                .unwrap_or(Origin::System);
-
-            res.apply_tag(label, origin);
-        }
-
-        Ok(())
     }
 }
 

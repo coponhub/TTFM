@@ -59,7 +59,8 @@ fn test_incremental_indexing_full_flow() {
         .search("filename:a.txt", Default::default())
         .unwrap()
         .results[0]
-        .id;
+        .id
+        .clone();
     std::fs::write(&path_a, "updated content with more bytes").unwrap();
     fm.index_directory(&root, None::<&fn(usize)>, false)
         .unwrap();
@@ -182,14 +183,13 @@ fn test_system_items_registration() {
 
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
+    // 転置: results には label items が格納されるため、name が "extension:txt" であることを確認
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.get_all_values("tag")
-            .iter()
-            .any(|val| val == "extension:txt")
+        r.item_kind == "label" && r.name == "extension:txt"
     });
     assert!(
         has_target_val,
-        "Should contain 'extension:txt' in projected tag values"
+        "Should contain label item with name='extension:txt'"
     );
 
     // 3. origin のプロジェクションも確認
@@ -201,16 +201,20 @@ fn test_system_items_registration() {
     );
     assert!(!results_origin.results.is_empty());
 
-    let file_item_origin = results_origin
+    // 転置: results には label items が格納され、name が "system" であることを確認
+    let system_label = results_origin
         .results
         .iter()
-        .find(|r| r.name == "hello.txt")
-        .expect("hello.txt not found for origin check");
-    let origin_val = file_item_origin.get_tag_value("origin");
-    assert_eq!(
-        origin_val.as_deref(),
-        Some("system"),
-        "File item should have 'system' origin via projection"
+        .find(|r| r.name == "system")
+        .expect("system label not found for origin check");
+    assert_eq!(system_label.item_kind, "label", "Should be a label item");
+    // このラベルの tags に "item:hello.txt#..." が含まれているはず
+    let has_hello_txt = system_label.tags.entries.iter().any(|entry| {
+        entry.label.as_str().contains("hello.txt")
+    });
+    assert!(
+        has_hello_txt,
+        "system origin label should contain reference to hello.txt"
     );
 }
 

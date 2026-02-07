@@ -9,7 +9,7 @@ pub type Rank = i64;
 
 /// アイテムの一意なID。
 /// 実際のDBアイテム (Real) または仮想アイテム (Virtual) を表現。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum ItemId {
     /// データベースに存在する実アイテム
     Real(i64),
@@ -18,7 +18,7 @@ pub enum ItemId {
 }
 
 /// 揮発性アイテムの種類
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
 pub enum VolatileItem {
     /// 真偽値 (1=True, 0=False)
     Boolean(u8),
@@ -26,10 +26,13 @@ pub enum VolatileItem {
     Scalar(u64),
     /// NULL（判定不能）
     Null,
+    /// ラベル値（投影時の転置表現）
+    Label(String),
 }
 
 impl VolatileItem {
     pub const KIND: &'static str = "volatile";
+    pub const LABEL_KIND: &'static str = "label";
 }
 
 impl ItemId {
@@ -40,6 +43,7 @@ impl ItemId {
             ItemId::Volatile(VolatileItem::Boolean(v)) => *v as i64,
             ItemId::Volatile(VolatileItem::Scalar(_)) => 0,
             ItemId::Volatile(VolatileItem::Null) => -1,
+            ItemId::Volatile(VolatileItem::Label(_)) => -100,
         }
     }
 
@@ -71,6 +75,7 @@ impl std::fmt::Display for ItemId {
                 write!(f, "{}", f64::from_bits(*bits))
             }
             ItemId::Volatile(VolatileItem::Null) => write!(f, "-1"),
+            ItemId::Volatile(VolatileItem::Label(_)) => write!(f, "-100"),
         }
     }
 }
@@ -729,5 +734,35 @@ mod tests_types {
     fn test_volatile_item_null_is_not_real() {
         let id = ItemId::Volatile(VolatileItem::Null);
         assert!(!id.is_real());
+    }
+
+    #[test]
+    fn test_volatile_item_label_as_i64() {
+        // VolatileItem::Label は -100 を返すべき
+        let id = ItemId::Volatile(VolatileItem::Label("rs".to_string()));
+        assert_eq!(id.as_i64(), -100);
+    }
+
+    #[test]
+    fn test_volatile_item_label_display() {
+        // VolatileItem::Label は "-100" と表示されるべき
+        let id = ItemId::Volatile(VolatileItem::Label("extension".to_string()));
+        assert_eq!(id.to_string(), "-100");
+    }
+
+    #[test]
+    fn test_volatile_item_label_is_not_real() {
+        // VolatileItem::Label は Real ではない
+        let id = ItemId::Volatile(VolatileItem::Label("myapp".to_string()));
+        assert!(!id.is_real());
+    }
+
+    #[test]
+    fn test_volatile_item_label_clone() {
+        // VolatileItem::Label は Clone 可能
+        let id1 = ItemId::Volatile(VolatileItem::Label("test".to_string()));
+        let id2 = id1.clone();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.as_i64(), id2.as_i64());
     }
 }

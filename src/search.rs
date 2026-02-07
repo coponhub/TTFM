@@ -67,18 +67,22 @@ impl FileManager {
             });
         }
 
-        // 2-B. Projection ケース
+        // 2-B. Projection ケース（転置: Label → Items）
         if let Some(tag) = resolver.get_projection() {
-            let paged = fetcher.fetch_label_groups(&tag, n, offset)?;
-            let results: Vec<_> =
-                paged.items.iter().flat_map(|g| g.results.clone()).collect();
+            let mut label_items = fetcher.fetch_label_groups(&tag, n, offset)?;
+            let has_more = n > 0 && label_items.len() > n;
+
+            // limit+1件取得している場合は、最後の1件を削除
+            if has_more {
+                label_items.truncate(n);
+            }
 
             return Ok(SearchResponse {
-                results,
-                label_results: paged.items,
-                has_more: paged.has_more,
+                results: label_items,
+                label_results: Vec::new(),
+                has_more,
                 type_for_projection: Some(tag),
-                ..SearchResponse::new_empty(None, paged.has_more, None)
+                ..SearchResponse::new_empty(None, has_more, None)
             });
         }
 

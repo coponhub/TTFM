@@ -16,8 +16,8 @@ fn test_projection_queries() {
     let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
     fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
 
-    // 1. extension: (投影)
-    // 拡張子を持つファイル（test.rs, test.txt）がヒットするはず。
+    // 1. extension: (投影 - 転置: Label → Items)
+    // 投影結果はラベル値（rs, txt）のリストとして返される
     let results = fm.search("extension:", Default::default()).unwrap();
     println!(
         "Matches for 'extension:': {:?}",
@@ -26,26 +26,27 @@ fn test_projection_queries() {
     assert_eq!(
         results.results.len(),
         2,
-        "extension: should match items with any extension. Found: {:?}",
+        "extension: should return 2 label values (rs, txt). Found: {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
-    assert!(results.results.iter().any(|r| r.name == "test.rs"));
-    assert!(results.results.iter().any(|r| r.name == "test.txt"));
+    // 転置: results には label items が格納される（name="rs", name="txt"）
+    assert!(results.results.iter().any(|r| r.name == "rs"));
+    assert!(results.results.iter().any(|r| r.name == "txt"));
     assert_eq!(
         results.type_for_projection,
         Some(ttfm::types::TagType::from("extension"))
     );
 
-    // 2. directory: (投影 -> is_dir:true + projection:filename)
+    // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
     let results = fm.search("directory:", Default::default()).unwrap();
     println!(
         "Matches for 'directory:': {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
-    // root (tmpdir), test_dir, .ttfm -> 3 items
+    // 転置: label items として filename 値が返される（test_dir など）
     assert!(
         results.results.len() >= 1,
-        "directory: should match at least test_dir"
+        "directory: should return at least 1 label (test_dir filename)"
     );
     assert!(results.results.iter().any(|r| r.name == "test_dir"));
     // 仮想ラベル directory: は内部で filename を投影する
@@ -55,20 +56,21 @@ fn test_projection_queries() {
         "directory: projection should resolve to filename"
     );
 
-    // 3. filename: (投影 -> is_dir:false + projection:filename)
+    // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
     let results = fm.search("filename:", Default::default()).unwrap();
     println!(
         "Matches for 'filename:': {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
-    // test.rs, test.txt -> 2 items.
+    // 転置: label items として filename 値が返される（:test.rs, :test.txt）
     assert_eq!(
         results.results.len(),
         2,
-        "filename: (files only) should match test.rs and test.txt. Found: {:?}",
+        "filename: should return 2 label values (test.rs, test.txt). Found: {:?}",
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
-    assert!(results.results.iter().all(|r| r.item_kind == "file"));
+    // 転置後は全て label items
+    assert!(results.results.iter().all(|r| r.item_kind == "label"));
     // 仮想ラベル filename: は内部で filename を投影する
     assert_eq!(
         results.type_for_projection,
@@ -99,12 +101,11 @@ fn test_projection_queries() {
         Some(ttfm::types::TagType::from("type"))
     );
 
-    // 結果に含まれる全てのタグキー（Type）を収集
+    // 転置: results には label items が格納され、各 label の name がタグタイプ名
+    // 結果に含まれる全てのタグタイプ（label の name）を収集
     let mut found_types = std::collections::HashSet::new();
     for r in &results.results {
-        for (tag_type, _) in &r.tags {
-            found_types.insert(tag_type.as_str().to_string());
-        }
+        found_types.insert(r.name.clone());
     }
 
     // 主要なSTypeが含まれているか確認
@@ -113,7 +114,7 @@ fn test_projection_queries() {
     for t in expected_types {
         assert!(
             found_types.contains(t),
-            "type: projection results should contain items with tag '{}'. Found types: {:?}",
+            "type: projection results should contain label with name '{}'. Found types: {:?}",
             t,
             found_types
         );
@@ -183,12 +184,12 @@ fn test_projection_queries() {
         results.type_for_projection,
         Some(ttfm::types::TagType::from("category"))
     );
-    // 値チェック
+    // 転置: results には label items が格納され、name が "important" であることを確認
     let has_val = results
         .results
         .iter()
-        .any(|r| r.get_tag_value("category").as_deref() == Some("important"));
-    assert!(has_val, "Should find 'important' category value");
+        .any(|r| r.item_kind == "label" && r.name == "important");
+    assert!(has_val, "Should find 'important' category label");
 
     // 10. label: (Volatile Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
@@ -201,5 +202,155 @@ fn test_projection_queries() {
     assert_eq!(
         results.type_for_projection,
         Some(ttfm::types::TagType::from("label"))
+    );
+}
+
+#[test]
+fn test_projection_returns_label_volatile_items() {
+    use ttfm::types::{ItemId, VolatileItem};
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // テストデータの作成
+    File::create(root.join("test.rs")).unwrap();
+    File::create(root.join("test.txt")).unwrap();
+    File::create(root.join("another.rs")).unwrap();
+
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // extension: で投影
+    let results = fm.search("extension:", Default::default()).unwrap();
+
+    // 検証1: type_for_projection が設定されている
+    assert_eq!(
+        results.type_for_projection,
+        Some(ttfm::types::TagType::from("extension"))
+    );
+
+    // 検証2: results に label items が格納されている
+    assert!(
+        !results.results.is_empty(),
+        "projection should return label items"
+    );
+
+    // 検証3: 各 SearchResult が Label volatile item である
+    for item in &results.results {
+        // ID が Volatile(Label(...)) であることを確認
+        if let ItemId::Volatile(VolatileItem::Label(ref label_val)) = item.id {
+            // 検証4: item_kind が "label" である
+            assert_eq!(
+                item.item_kind, "label",
+                "Label volatile item should have item_kind='label'"
+            );
+
+            // 検証5: name がラベル値と一致する
+            assert_eq!(
+                item.name, *label_val,
+                "Label volatile item name should match label value"
+            );
+
+            // 検証6: tags に "item:name#id" 形式のタグが含まれている
+            // Type="item", Label="name#id" 形式であることを確認
+            let has_item_ref = item.tags.entries.iter().any(|entry| {
+                entry.label.tag_type().as_str() == "item" && entry.label.as_str().contains('#')
+            });
+            assert!(
+                has_item_ref,
+                "Label volatile item should contain Type='item' tags with Label='name#id', found: {:?}",
+                item.tags.entries.iter().map(|e| format!("{}:{}", e.label.tag_type().as_str(), e.label.as_str())).collect::<Vec<_>>()
+            );
+
+            // 検証7: projected_label に total_count が保存されている
+            assert!(
+                item.projected_label.is_some(),
+                "Label volatile item should have projected_label (total_count)"
+            );
+
+            let total_count_str = item.projected_label.as_ref().unwrap().as_str();
+            let total_count: usize = total_count_str.parse().expect("projected_label should be parseable as usize");
+            assert!(
+                total_count > 0,
+                "total_count should be greater than 0"
+            );
+
+            // 検証8: tagsの数が100件以下である（100件制限）かつtotal_count以下である
+            assert!(
+                item.tags.entries.len() <= 100,
+                "tags count should be <= 100 (with 100-item limit), found {}",
+                item.tags.entries.len()
+            );
+            assert!(
+                item.tags.entries.len() <= total_count || total_count > 100,
+                "tags count ({}) should be <= total_count ({}) or total_count should be > 100",
+                item.tags.entries.len(),
+                total_count
+            );
+        } else {
+            panic!("Projection should return Label volatile items, but got: {:?}", item.id);
+        }
+    }
+
+    // 検証9: "rs" ラベルが存在する（test.rs, another.rs）
+    let rs_label = results.results.iter().find(|item| item.name == "rs");
+    assert!(
+        rs_label.is_some(),
+        "Should find 'rs' label in projection results"
+    );
+
+    if let Some(rs_item) = rs_label {
+        // rs ラベルは2つのファイルを参照しているはず
+        let item_ref_count = rs_item.tags.entries.len();
+        assert!(
+            item_ref_count >= 2,
+            "rs label should reference at least 2 files (test.rs, another.rs), found {}",
+            item_ref_count
+        );
+
+        // item:test.rs または item:another.rs が含まれているか確認
+        let has_test_rs = rs_item.tags.entries.iter().any(|entry| {
+            entry.label.as_str().contains("test.rs")
+        });
+        let has_another_rs = rs_item.tags.entries.iter().any(|entry| {
+            entry.label.as_str().contains("another.rs")
+        });
+        assert!(
+            has_test_rs || has_another_rs,
+            "rs label should contain references to test.rs or another.rs"
+        );
+    }
+}
+
+#[test]
+
+fn test_projection_no_empty_labels() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // テストデータの作成
+    File::create(root.join("file_with_ext.txt")).unwrap();
+    File::create(root.join("file_no_ext")).unwrap(); // 拡張子なし
+
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // extension: 検索
+    let results = fm.search("extension:", Default::default()).unwrap();
+    
+    // "txt" ラベルが存在し、ファイルが含まれていることを確認
+    assert!(
+        results.results.iter().any(|r| r.name == "txt"), 
+        "Output should contain 'txt' label for file_with_ext.txt"
+    );
+
+    // 空ラベル（拡張子なしファイルの集計）が含まれていないことを確認
+    let has_empty = results.results.iter().any(|r| r.name.is_empty());
+    assert!(
+        !has_empty,
+        "Output should NOT contain empty label name. Found labels: {:?}",
+        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
 }
