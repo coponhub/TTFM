@@ -1,7 +1,7 @@
 use anyhow::Result;
-use ttfm::{FileManager, SearchOptions};
 use std::fs::File;
 use tempfile::tempdir;
+use ttfm::{FileManager, SearchOptions};
 
 #[test]
 fn test_search_progress_zero_results() -> Result<()> {
@@ -17,12 +17,19 @@ fn test_search_progress_zero_results() -> Result<()> {
     // 1. total_count が Some(0) であること
     // 2. has_more が false であること
     // 3. progress.is_finished() が true であること
-    assert_eq!(res.total_count, Some(0), "total_count should be Some(0) for zero results");
+    assert_eq!(
+        res.total_count,
+        Some(0),
+        "total_count should be Some(0) for zero results"
+    );
     assert_eq!(res.has_more, false, "has_more should be false");
-    
+
     // Progress構造体の改修後、is_finished() は is_done フラグを見るようになるため
     // total が None であっても is_done = true なら is_finished() = true となるべき
-    assert!(res.progress.is_finished(), "progress should be finished for zero results");
+    assert!(
+        res.progress.is_finished(),
+        "progress should be finished for zero results"
+    );
 
     Ok(())
 }
@@ -36,7 +43,7 @@ fn test_search_progress_finished_small_results() -> Result<()> {
 
     // データ作成
     File::create(root.join("test.txt"))?;
-    
+
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
@@ -44,14 +51,21 @@ fn test_search_progress_finished_small_results() -> Result<()> {
     let res = fm.search("extension:txt", SearchOptions::default())?;
 
     assert_eq!(res.results.len(), 1);
-    
+
     // 期待値:
     // 1. total_count が Some(1) であること
     // 2. has_more が false であること
     // 3. progress.is_finished() が true であること
-    assert_eq!(res.total_count, Some(1), "total_count should be Some(1) for small results");
+    assert_eq!(
+        res.total_count,
+        Some(1),
+        "total_count should be Some(1) for small results"
+    );
     assert_eq!(res.has_more, false, "has_more should be false");
-    assert!(res.progress.is_finished(), "progress should be finished for small results");
+    assert!(
+        res.progress.is_finished(),
+        "progress should be finished for small results"
+    );
 
     Ok(())
 }
@@ -59,7 +73,7 @@ fn test_search_progress_finished_small_results() -> Result<()> {
 #[test]
 fn test_progress_struct_behavior() {
     use ttfm::Progress;
-    
+
     // case 1: total=None, is_done=false -> unfinished
     let p = Progress {
         current: 0,
@@ -75,7 +89,7 @@ fn test_progress_struct_behavior() {
         is_done: true,
     };
     assert!(p_done.is_finished());
-    
+
     // case 3: total=Some(10), current=5, is_done=false -> unfinished
     let p_mid = Progress {
         current: 5,

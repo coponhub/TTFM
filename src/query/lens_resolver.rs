@@ -398,7 +398,9 @@ pub(crate) fn resolve_operand(
         Operand::Query(_) => {
             // 論理リゾルバで展開されているはずなので、ここに来ることはないはずだが、
             // 型定義上はあり得るのでエラーを返す
-            bail!("Operand::Query should have been flattened by logical resolver");
+            bail!(
+                "Operand::Query should have been flattened by logical resolver"
+            );
         }
     }
 }
@@ -583,7 +585,9 @@ fn resolve_operand_for_calc(
             Ok(ResolvedOperand::Aggregation(resolved))
         }
         Operand::Query(_) => {
-            bail!("Operand::Query should have been flattened by logical resolver");
+            bail!(
+                "Operand::Query should have been flattened by logical resolver"
+            );
         }
     }
 }

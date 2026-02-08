@@ -1,4 +1,6 @@
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use std::sync::atomic::{AtomicU64, Ordering};
+use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 use uuid::Uuid;
 
 /// メタデータ取得に失敗した際のデフォルト値。
@@ -9,52 +11,39 @@ pub type Rank = i64;
 
 /// アイテムの一意なID。
 /// 実際のDBアイテム (Stored) または揮発性アイテム (Volatile) を表現。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub enum ItemId {
     /// データベースに存在する実アイテム（永続化済み）
     Stored(i64),
     /// 集約結果など、DBに存在しない揮発性アイテム
-    Volatile(VolatileItem),
+    Volatile(u64),
 }
 
-/// 揮発性アイテムの種類
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-pub enum VolatileItem {
-    /// 真偽値 (1=True, 0=False)
-    Boolean(u8),
-    /// スカラー数値 (f64 bits)
-    Scalar(u64),
-    /// NULL（判定不能）
-    Null,
-    /// ラベル値（投影時の転置表現）
-    Label(String),
-}
-
-impl VolatileItem {
-    pub const KIND: &'static str = "volatile";
-    pub const LABEL_KIND: &'static str = "label";
-}
+// 揮発性ID生成用のカウンター
+static VOLATILE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl ItemId {
-    /// i64 値を取得（Volatile の場合は負の値: True=-1, False=-2）
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            ItemId::Stored(i) => *i,
-            ItemId::Volatile(VolatileItem::Boolean(v)) => *v as i64,
-            ItemId::Volatile(VolatileItem::Scalar(_)) => 0,
-            ItemId::Volatile(VolatileItem::Null) => -1,
-            ItemId::Volatile(VolatileItem::Label(_)) => -100,
-        }
+    /// 新しい揮発性IDを生成します。
+    pub fn new_volatile() -> Self {
+        Self::Volatile(VOLATILE_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
     }
 
-    /// 新しい揮発性スカラーアイテムを作成する
-    pub fn new_volatile_scalar(f: f64) -> Self {
-        ItemId::Volatile(VolatileItem::Scalar(f.to_bits()))
+    /// 整数表現を取得します。
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            Self::Stored(id) => *id,
+            Self::Volatile(id) => *id as i64,
+        }
     }
 
     /// Stored かどうか
     pub fn is_stored(&self) -> bool {
         matches!(self, ItemId::Stored(_))
+    }
+
+    /// Volatile かどうか
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, ItemId::Volatile(_))
     }
 }
 
@@ -68,14 +57,7 @@ impl std::fmt::Display for ItemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ItemId::Stored(i) => write!(f, "{}", i),
-            ItemId::Volatile(VolatileItem::Boolean(1)) => write!(f, "1"),
-            ItemId::Volatile(VolatileItem::Boolean(0)) => write!(f, "0"),
-            ItemId::Volatile(VolatileItem::Boolean(v)) => write!(f, "{}", v),
-            ItemId::Volatile(VolatileItem::Scalar(bits)) => {
-                write!(f, "{}", f64::from_bits(*bits))
-            }
-            ItemId::Volatile(VolatileItem::Null) => write!(f, "-1"),
-            ItemId::Volatile(VolatileItem::Label(s)) => write!(f, "{}", s),
+            ItemId::Volatile(v) => write!(f, "{}", v),
         }
     }
 }
@@ -98,8 +80,71 @@ impl ToSql for ItemId {
 /// ファイルの実体（Inode/FileID）を一意に表す 128ビット識別子。
 pub type FileRef = Uuid;
 
-/// アイテムの種類 (file, note 等) を表す型エイリアス。
-pub type ItemKind = String;
+/// アイテムの種類 (file, note 等) を表す。
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    Hash,
+    PartialOrd,
+    Ord,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum ItemKind {
+    // --- Stored (DB) ---
+    File,
+    Note,
+    Type,
+    Tag,
+    // --- Volatile (Result) ---
+    Volatile,
+}
+
+impl ItemKind {
+    pub fn is_stored(&self) -> bool {
+        matches!(self, Self::File | Self::Note | Self::Type | Self::Tag)
+    }
+
+    pub fn is_volatile(&self) -> bool {
+        matches!(self, Self::Volatile)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.into()
+    }
+}
+
+// strum(EnumString) が TryFrom<&str> を自動実装するため、手動実装は削除。
+
+impl FromSql for ItemKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let s = value.as_str()?;
+        use std::str::FromStr;
+        // DB上の古い値（label等）も Volatile に丸めるためのフォールバック
+        Ok(Self::from_str(s).unwrap_or(Self::Volatile))
+    }
+}
+
+impl ToSql for ItemKind {
+    fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl From<ItemKind> for Label {
+    fn from(kind: ItemKind) -> Self {
+        Label::resolve(
+            TagType::from(crate::types::SType::ItemKind),
+            LabelValue::String(kind.to_string()),
+        )
+    }
+}
 
 /// アイテムの表示名を表す型エイリアス。
 pub type ItemName = String;
@@ -109,7 +154,16 @@ pub type TagNumber = usize;
 
 /// データの由来を表す Enum。
 #[derive(
-    Debug, PartialEq, Eq, Hash, Clone, Copy, strum::Display, strum::EnumString,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Clone,
+    Copy,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum Origin {
@@ -206,6 +260,12 @@ impl TagType {
             TagType::Custom(s) => s.as_str(),
             TagType::LiteralCustom(s) => s.as_str(),
         }
+    }
+}
+
+impl std::fmt::Display for TagType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -616,21 +676,7 @@ pub type Name<'a> = &'a str;
 /// プログラム終了まで有効なタグ名（静的文字列）。
 pub type StaticName = &'static str;
 
-/// システムで使用される標準的なタグ名のシンボル定義。
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    strum::IntoStaticStr,
-    strum::EnumString,
-    strum::Display,
-)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SType {
     ItemId,
     FileId,
@@ -657,7 +703,6 @@ pub enum SType {
     Types,
     Labels,
     ScanHash,
-    #[strum(serialize = "tag")]
     TypedTag,
     // 検索専用仮想タグ
     Directory,
@@ -671,8 +716,90 @@ pub enum SType {
 }
 
 impl SType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ItemId => "item_id",
+            Self::FileId => "file_id",
+            Self::Path => "path",
+            Self::Parentdir => "parentdir",
+            Self::Filename => "filename",
+            Self::Stem => "stem",
+            Self::Extension => "extension",
+            Self::IsDir => "is_dir",
+            Self::Size => "size",
+            Self::Mtime => "mtime",
+            Self::TypeFromExt => "type_from_ext",
+            Self::SizeStr => "size_str",
+            Self::ModifiedStr => "modified_str",
+            Self::Hash => "hash",
+            Self::Type => "type",
+            Self::Label => "label",
+            Self::ItemKind => "item_kind",
+            Self::Content => "content",
+            Self::Rank => "rank",
+            Self::Origin => "origin",
+            Self::Name => "name",
+            Self::Types => "types",
+            Self::Labels => "labels",
+            Self::ScanHash => "scan_hash",
+            Self::TypedTag => "tag",
+            Self::Directory => "directory",
+            Self::LabelStr => "label_str",
+            Self::LabelInt => "label_int",
+            Self::LabelDouble => "label_double",
+            Self::LabelBool => "label_bool",
+            Self::DataType => "data_type",
+        }
+    }
+
     pub fn name(&self) -> String {
-        self.to_string()
+        self.as_str().to_string()
+    }
+}
+
+impl std::fmt::Display for SType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for SType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "item_id" => Ok(Self::ItemId),
+            "file_id" => Ok(Self::FileId),
+            "path" => Ok(Self::Path),
+            "parentdir" => Ok(Self::Parentdir),
+            "filename" => Ok(Self::Filename),
+            "stem" => Ok(Self::Stem),
+            "extension" => Ok(Self::Extension),
+            "is_dir" => Ok(Self::IsDir),
+            "size" => Ok(Self::Size),
+            "mtime" => Ok(Self::Mtime),
+            "type_from_ext" => Ok(Self::TypeFromExt),
+            "size_str" => Ok(Self::SizeStr),
+            "modified_str" => Ok(Self::ModifiedStr),
+            "hash" => Ok(Self::Hash),
+            "type" => Ok(Self::Type),
+            "label" => Ok(Self::Label),
+            "item_kind" => Ok(Self::ItemKind),
+            "content" => Ok(Self::Content),
+            "rank" => Ok(Self::Rank),
+            "origin" => Ok(Self::Origin),
+            "name" => Ok(Self::Name),
+            "types" => Ok(Self::Types),
+            "labels" => Ok(Self::Labels),
+            "scan_hash" => Ok(Self::ScanHash),
+            "tag" => Ok(Self::TypedTag),
+            "directory" => Ok(Self::Directory),
+            "label_str" => Ok(Self::LabelStr),
+            "label_int" => Ok(Self::LabelInt),
+            "label_double" => Ok(Self::LabelDouble),
+            "label_bool" => Ok(Self::LabelBool),
+            "data_type" => Ok(Self::DataType),
+            _ => Err(format!("Unknown SType: {}", s)),
+        }
     }
 }
 
@@ -716,52 +843,61 @@ mod tests_types {
     }
 
     #[test]
-    fn test_volatile_item_null_as_i64() {
-        // VolatileItem::Null は -1 を返すべき
-        let id = ItemId::Volatile(VolatileItem::Null);
-        assert_eq!(id.as_i64(), -1);
+    fn test_item_id_volatile_serial() {
+        // Volatile ID は連番になるはず (0から開始)
+        let id1 = ItemId::new_volatile();
+        let id2 = ItemId::new_volatile();
+
+        if let (ItemId::Volatile(v1), ItemId::Volatile(v2)) = (id1, id2) {
+            assert_eq!(v2, v1 + 1);
+        } else {
+            panic!("Should be Volatile");
+        }
     }
 
     #[test]
-    fn test_volatile_item_null_display() {
-        // VolatileItem::Null は "-1" と表示されるべき
-        let id = ItemId::Volatile(VolatileItem::Null);
-        assert_eq!(id.to_string(), "-1");
+    fn test_item_id_as_i64() {
+        let sid = ItemId::Stored(123);
+        assert_eq!(sid.as_i64(), 123);
+
+        let vid = ItemId::Volatile(456);
+        assert_eq!(vid.as_i64(), 456);
     }
 
     #[test]
-    fn test_volatile_item_null_is_not_stored() {
-        let id = ItemId::Volatile(VolatileItem::Null);
-        assert!(!id.is_stored());
+    fn test_item_id_display() {
+        let sid = ItemId::Stored(123);
+        assert_eq!(sid.to_string(), "123");
+
+        let vid = ItemId::Volatile(456);
+        assert_eq!(vid.to_string(), "456");
     }
 
     #[test]
-    fn test_volatile_item_label_as_i64() {
-        // VolatileItem::Label は -100 を返すべき
-        let id = ItemId::Volatile(VolatileItem::Label("rs".to_string()));
-        assert_eq!(id.as_i64(), -100);
+    fn test_item_id_from_i64() {
+        let id1 = ItemId::from(10);
+        assert_eq!(id1, ItemId::Stored(10));
+
+        let id2 = ItemId::from(-10);
+        assert_eq!(id2, ItemId::Stored(-10));
     }
 
     #[test]
-    fn test_volatile_item_label_display() {
-        // VolatileItem::Label は名前そのものを表示すべき
-        let id = ItemId::Volatile(VolatileItem::Label("extension".to_string()));
-        assert_eq!(id.to_string(), "extension");
-    }
+    fn test_item_kind_properties() {
+        let k = ItemKind::File;
+        assert!(k.is_stored());
+        assert!(!k.is_volatile());
+        assert_eq!(k.to_string(), "file");
 
-    #[test]
-    fn test_volatile_item_label_is_not_stored() {
-        // VolatileItem::Label は Stored ではない
-        let id = ItemId::Volatile(VolatileItem::Label("myapp".to_string()));
-        assert!(!id.is_stored());
+        let kv = ItemKind::Volatile;
+        assert!(!kv.is_stored());
+        assert!(kv.is_volatile());
+        assert_eq!(kv.to_string(), "volatile");
     }
+}
 
-    #[test]
-    fn test_volatile_item_label_clone() {
-        // VolatileItem::Label は Clone 可能
-        let id1 = ItemId::Volatile(VolatileItem::Label("test".to_string()));
-        let id2 = id1.clone();
-        assert_eq!(id1, id2);
-        assert_eq!(id1.as_i64(), id2.as_i64());
+impl From<SType> for &'static str {
+    fn from(stype: SType) -> Self {
+        stype.as_str()
     }
 }

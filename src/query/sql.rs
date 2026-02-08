@@ -364,12 +364,17 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     stmt.cond_where(final_cond);
 
     // 真なら TRUE (1), 偽なら FALSE (NULL) の ItemId を返す
-    // 仮想アイテムかどうかは item_kind = 'virtual' で判定する
     let case_expr = Expr::case(condition, Expr::val(1i64));
 
     stmt.expr_as(case_expr, Col::ItemId);
-    stmt.expr_as(Expr::val(crate::types::VolatileItem::KIND), Col::ItemKind);
-    stmt.expr_as(Expr::val("boolean"), Col::Type);
+    stmt.expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::ItemKind,
+    );
+    stmt.expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::Type,
+    );
     stmt.expr_as(Expr::val(0i64), Col::Rank);
     // tags カラムが必要（fetch_items で decode_item_from_row が呼ばれるため）
     // 空のリフト（リスト）をダミーとして設定
@@ -808,8 +813,14 @@ fn build_direct_boolean_select(
             .finally(Expr::val(0i64)),
         Col::ItemId,
     )
-    .expr_as(Expr::val("virtual"), Col::ItemKind)
-    .expr_as(Expr::val("boolean"), Col::Type)
+    .expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::ItemKind,
+    )
+    .expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::Type,
+    )
     .expr_as(Expr::val(0i64), Col::Rank)
     .expr_as(Expr::cust("[]"), crate::db::QueryResultCol::Tags);
 
@@ -828,8 +839,14 @@ fn wrap_boolean_collider(sql: SelectStatement) -> SelectStatement {
         .finally(Expr::val(0i64)),
         Col::ItemId,
     )
-    .expr_as(Expr::val("virtual"), Col::ItemKind)
-    .expr_as(Expr::val("boolean"), Col::Type)
+    .expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::ItemKind,
+    )
+    .expr_as(
+        Expr::val(<&'static str>::from(crate::types::ItemKind::Volatile)),
+        Col::Type,
+    )
     .expr_as(Expr::val(0i64), Col::Rank)
     .expr_as(Expr::cust("[]"), crate::db::QueryResultCol::Tags)
     .from_subquery(sql, Alias::new("pk"));
@@ -1215,7 +1232,12 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
         true_q
             .expr_as(Expr::val(1i64), Col::ItemId)
             .expr_as(Expr::val(0i64), Col::Rank)
-            .expr_as(Expr::val("virtual"), Col::ItemKind);
+            .expr_as(
+                Expr::val(<&'static str>::from(
+                    crate::types::ItemKind::Volatile,
+                )),
+                Col::ItemKind,
+            );
 
         q = true_q;
     } else {

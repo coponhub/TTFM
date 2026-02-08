@@ -1,7 +1,7 @@
 use crate::db::TargetTable;
 use crate::db::{Col, Tbl};
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
-use crate::types::{Progress, TagType};
+use crate::types::{ItemKind, Progress, TagType};
 use crate::{FileManager, FunctionRegistry};
 use anyhow::Result;
 use duckdb::Connection;
@@ -370,7 +370,7 @@ impl FileManager {
         current_n: usize,
         projection: Option<&String>,
     ) -> Result<SearchResponse> {
-        use crate::types::{Origin, TagEntry, VolatileItem};
+        use crate::types::{Origin, TagEntry};
 
         let raw_results = self
             .conn
@@ -390,22 +390,31 @@ impl FileManager {
 
         let final_results: Vec<SearchResult> = target_entries
             .into_iter()
-            .map(|(id, label_info)| {
-                let mut res = SearchResult::new_empty(id.into());
-                if let Some((ref l, _)) = label_info {
-                    res.projected_label = Some(l.clone());
-                }
-                if let Some(tags) = tag_cache.get(&id) {
-                    for tag in tags {
-                        #[allow(deprecated)]
-                        res.apply_raw_tag(tag.clone());
+            .map(
+                |(id, label_info): (
+                    i64,
+                    Option<(crate::types::Label, usize)>,
+                )| {
+                    let mut res = SearchResult::new_empty(
+                        id.into(),
+                        ItemKind::Volatile,
+                        String::new(),
+                    );
+                    if let Some((ref l, _)) = label_info {
+                        res.projected_label = Some(l.clone());
                     }
-                }
-                if let Some(info) = label_info {
-                    label_map.entry(info).or_default().push(res.clone());
-                }
-                res
-            })
+                    if let Some(tags) = tag_cache.get(&id) {
+                        for tag in tags {
+                            #[allow(deprecated)]
+                            res.apply_raw_tag(tag.clone());
+                        }
+                    }
+                    if let Some(info) = label_info {
+                        label_map.entry(info).or_default().push(res.clone());
+                    }
+                    res
+                },
+            )
             .collect();
 
         if projection.is_some() {
@@ -414,10 +423,25 @@ impl FileManager {
                 .into_iter()
                 .map(|((label, count), items)| {
                     let label_str = label.as_str().to_string();
-                    let label_id = crate::types::ItemId::Volatile(
-                        VolatileItem::Label(label_str),
+                    let label_id = crate::types::ItemId::new_volatile();
+                    let mut res = SearchResult::new_empty(
+                        label_id,
+                        ItemKind::Volatile,
+                        label_str,
                     );
-                    let mut res = SearchResult::new_empty(label_id);
+
+                    // 正確な型情報を type: タグとして注入
+                    res.apply_tag(
+                        crate::types::Label::resolve(
+                            crate::types::TagType::Base(
+                                crate::types::SType::Type,
+                            ),
+                            crate::types::LabelValue::String(
+                                "label".to_string(),
+                            ),
+                        ),
+                        Origin::System,
+                    );
 
                     // 各アイテムを "item:name#id" タグとして格納
                     for item in items.into_iter().take(200) {
@@ -877,7 +901,10 @@ mod tests {
         assert!(res_db.type_for_projection.is_some());
         assert!(!res_db.results.is_empty());
         // 転置形式: results はラベルアイテム
-        assert!(res_db.results.iter().all(|r| r.item_kind == "label"));
+        assert!(res_db
+            .results
+            .iter()
+            .all(|r| r.item_kind == ItemKind::Volatile));
 
         // 2. キャッシュを作成
         let cid = "test-proj-cache-cid";
@@ -930,7 +957,19 @@ mod tests {
                 "name mismatch at index {}",
                 i
             );
-            assert_eq!(db_item.id, cache_item.id, "id mismatch at index {}", i);
+            if !db_item.id.is_volatile() {
+                assert_eq!(
+                    db_item.id, cache_item.id,
+                    "id mismatch at index {}",
+                    i
+                );
+            } else {
+                assert!(
+                    cache_item.id.is_volatile(),
+                    "id mismatch at index {} (expected volatile)",
+                    i
+                );
+            }
         }
 
         Ok(())

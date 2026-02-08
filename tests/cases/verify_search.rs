@@ -265,7 +265,7 @@ fn test_or_negation_complex_behavior() {
     let mut found_rs_file = false;
 
     for r in &results.results {
-        if r.item_kind == "file" {
+        if r.item_kind == ttfm::ItemKind::File {
             if r.get_tag_value("extension")
                 .map(|v| v == "txt")
                 .unwrap_or(false)

@@ -17,7 +17,8 @@
 //! ```
 
 use crate::query::ast::{
-    AggregationNode, CalculationNode, ComparisonNode, ComparisonOp, Operand, QueryNode,
+    AggregationNode, CalculationNode, ComparisonNode, ComparisonOp, Operand,
+    QueryNode,
 };
 use crate::query::error;
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
@@ -76,7 +77,9 @@ pub(crate) fn expand_query_node(
 
                 // Calculation の中に Query(And([filter, proj])) がある場合、書き換え
                 if let Operand::Calculation(calc) = &expanded_op {
-                    if let Some(rewritten) = try_rewrite_filtered_calculation(calc) {
+                    if let Some(rewritten) =
+                        try_rewrite_filtered_calculation(calc)
+                    {
                         return Ok(rewritten);
                     }
                 }
@@ -119,7 +122,6 @@ pub(crate) fn expand_query_node(
         other => Ok(other),
     }
 }
-
 
 fn expand_comparison_with_recursion(
     schema: &impl LogicalSchema,
@@ -237,7 +239,9 @@ fn is_set_operation(node: &QueryNode) -> bool {
         // ラベル比較は集合を返す、スカラー比較は真偽値を返す
         QueryNode::Comparison(cmp) => {
             // すべての演算子がラベル比較（ComparisonOp::Label）ならば集合を返す
-            cmp.rest.iter().all(|(op, _)| matches!(op, ComparisonOp::Label(_)))
+            cmp.rest
+                .iter()
+                .all(|(op, _)| matches!(op, ComparisonOp::Label(_)))
         }
 
         // スカラーを返す
@@ -251,7 +255,8 @@ fn validate_set_operation_operands(
     operation: &str,
 ) -> Result<()> {
     // 各オペランドが集合を返すかチェック
-    let set_flags: Vec<bool> = nodes.iter().map(|n| is_set_operation(n)).collect();
+    let set_flags: Vec<bool> =
+        nodes.iter().map(|n| is_set_operation(n)).collect();
 
     for (idx, &is_set) in set_flags.iter().enumerate() {
         if !is_set {
@@ -281,21 +286,19 @@ fn validate_set_operation_operands(
     Ok(())
 }
 
-
-
-
-
-
 /// Calculation の中に Query(And([filter, Projection])) がある場合、書き換えます。
 ///
 /// 例: Projection(Calculation(Query(And([filter, proj])), *, 2))
 ///  → And([filter, Projection(Calculation(proj, *, 2))])
-fn try_rewrite_filtered_calculation(calc: &CalculationNode) -> Option<QueryNode> {
+fn try_rewrite_filtered_calculation(
+    calc: &CalculationNode,
+) -> Option<QueryNode> {
     // left が Query(And([filter, Projection])) の場合
     if let Operand::Query(node) = &calc.left {
         if let QueryNode::And(nodes) = &**node {
             // And の中から filter と Projection を抽出
-            let (filters, projs): (Vec<_>, Vec<_>) = nodes.iter()
+            let (filters, projs): (Vec<_>, Vec<_>) = nodes
+                .iter()
                 .cloned()
                 .partition(|n| !matches!(n, QueryNode::Projection(_)));
 
@@ -312,7 +315,7 @@ fn try_rewrite_filtered_calculation(calc: &CalculationNode) -> Option<QueryNode>
                     // And([filters..., Projection(new_calc)])
                     let mut new_nodes = filters;
                     new_nodes.push(QueryNode::Projection(
-                        Operand::Calculation(Box::new(new_calc))
+                        Operand::Calculation(Box::new(new_calc)),
                     ));
 
                     return Some(QueryNode::And(new_nodes));
@@ -324,7 +327,8 @@ fn try_rewrite_filtered_calculation(calc: &CalculationNode) -> Option<QueryNode>
     // right が Query(And([filter, Projection])) の場合も同様
     if let Operand::Query(node) = &calc.right {
         if let QueryNode::And(nodes) = &**node {
-            let (filters, projs): (Vec<_>, Vec<_>) = nodes.iter()
+            let (filters, projs): (Vec<_>, Vec<_>) = nodes
+                .iter()
                 .cloned()
                 .partition(|n| !matches!(n, QueryNode::Projection(_)));
 
@@ -338,7 +342,7 @@ fn try_rewrite_filtered_calculation(calc: &CalculationNode) -> Option<QueryNode>
 
                     let mut new_nodes = filters;
                     new_nodes.push(QueryNode::Projection(
-                        Operand::Calculation(Box::new(new_calc))
+                        Operand::Calculation(Box::new(new_calc)),
                     ));
 
                     return Some(QueryNode::And(new_nodes));

@@ -60,7 +60,10 @@ fn test_integration_tag_tagging() {
 
     // さらに、ファイル検索に影響しないことも確認
     let file_results = fm.search("project:mars", Default::default()).unwrap();
-    assert!(file_results.results.iter().any(|r| r.item_kind == "file"));
+    assert!(file_results
+        .results
+        .iter()
+        .any(|r| r.item_kind == ttfm::ItemKind::File));
 }
 
 #[test]
@@ -83,7 +86,7 @@ fn test_integration_note_tagging() {
         .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, ItemId::from(note_id));
-    assert_eq!(results.results[0].item_kind, "note");
+    assert_eq!(results.results[0].item_kind, ttfm::ItemKind::Note);
     assert_eq!(results.results[0].primary_value().unwrap(), "Meeting Memo");
 }
 
@@ -130,7 +133,11 @@ fn test_system_item_metadata_integration() {
         .iter()
         .find(|r| r.name == "rs")
         .expect("rs label not found");
-    assert_eq!(rs_label.item_kind, "label", "Should be a label item");
+    assert_eq!(
+        rs_label.item_kind,
+        ttfm::ItemKind::Volatile,
+        "Should be a label item"
+    );
     // このラベルの tags に "item:test.rs#..." が含まれているはず
     let has_test_rs = rs_label
         .tags

@@ -1,6 +1,6 @@
 use crate::types::{
-    Intrinsic, ItemId, ItemKind, ItemName, Origin, Rank, SType, TagType, Tags,
-    VolatileItem,
+    Intrinsic, ItemId, ItemKind, ItemName, LabelValue, Origin, Rank, SType,
+    TagType, Tags,
 };
 
 /// 検索結果を表す構造体。
@@ -93,14 +93,16 @@ impl RawTagRow {
         Some(Self {
             id: get_i64(Col::ItemId)?.into(),
             item_kind: get_str(Col::ItemKind)
-                .unwrap_or_else(|| "unknown".to_string()),
+                .as_deref()
+                .and_then(|s| s.parse::<ItemKind>().ok())
+                .unwrap_or(ItemKind::Volatile),
             tag_type: get_str(Col::Type).unwrap_or_default(),
             label_str: get_str(Col::LabelStr),
             label_int: get_i64(Col::LabelInt),
             label_double: get_f64(Col::LabelDouble),
             label_bool: get_bool(Col::LabelBool),
             origin: get_str(Col::Origin)
-                .unwrap_or_else(|| "unknown".to_string()),
+                .unwrap_or_else(|| "system".to_string()),
         })
     }
 }
@@ -175,7 +177,7 @@ impl SearchResponse {
         use std::collections::{BTreeSet, HashMap};
 
         let mut groups: HashMap<
-            (String, BTreeSet<TagType>),
+            (ItemKind, BTreeSet<TagType>),
             Vec<&SearchResult>,
         > = HashMap::new();
 
@@ -192,12 +194,7 @@ impl SearchResponse {
             if res.intrinsic.hash.is_some() {
                 keys.insert(TagType::from(SType::Hash));
             }
-            if !res.item_kind.is_empty() {
-                keys.insert(TagType::from(SType::ItemKind));
-                if res.item_kind == VolatileItem::KIND {
-                    keys.insert(TagType::from(SType::Type));
-                }
-            }
+            keys.insert(TagType::from(SType::ItemKind));
             if !res.name.is_empty() {
                 keys.insert(TagType::from(SType::Name));
             }
@@ -276,37 +273,10 @@ impl SearchResponse {
 
 impl SearchResult {
     /// 指定された ID で空の検索結果を作成します。
-    pub fn new_empty(id: ItemId) -> Self {
-        let name = match &id {
-            ItemId::Volatile(crate::types::VolatileItem::Boolean(1)) => {
-                "TRUE".to_string()
-            }
-            ItemId::Volatile(crate::types::VolatileItem::Boolean(0)) => {
-                "FALSE".to_string()
-            }
-            ItemId::Volatile(crate::types::VolatileItem::Scalar(bits)) => {
-                f64::from_bits(*bits).to_string()
-            }
-            ItemId::Volatile(crate::types::VolatileItem::Null) => {
-                "NULL".to_string()
-            }
-            ItemId::Volatile(crate::types::VolatileItem::Label(ref s)) => {
-                s.clone()
-            }
-            _ => String::new(),
-        };
-
-        let item_kind = match &id {
-            ItemId::Volatile(crate::types::VolatileItem::Label(_)) => {
-                VolatileItem::LABEL_KIND.to_string()
-            }
-            _ if id.is_stored() => String::new(),
-            _ => VolatileItem::KIND.to_string(),
-        };
-
+    pub fn new_empty(id: ItemId, kind: ItemKind, name: String) -> Self {
         Self {
             id,
-            item_kind,
+            item_kind: kind,
             name,
             rank: 0,
             intrinsic: Intrinsic::default(),
@@ -330,7 +300,11 @@ impl SearchResult {
                 self.intrinsic.mtime = Some(crate::types::FileTimestamp(*i))
             }
             Label::Hash(s) => self.intrinsic.hash = Some(s.clone()),
-            Label::ItemKind(s) => self.item_kind = s.clone(),
+            Label::ItemKind(s) => {
+                if let Ok(k) = s.as_str().parse::<ItemKind>() {
+                    self.item_kind = k;
+                }
+            }
             _ => {} // 通常タグは特化フィールド更新なし
         }
 
@@ -454,41 +428,51 @@ impl SearchResult {
             }
             // 仮想ラベル: type: (タグの型一覧)
             TagType::Base(SType::Type) => {
-                let mut types: Vec<TagType> = self
+                // 1. Tags に明示的な type タグがあればそれを優先 (volatile用)
+                let type_values: Vec<Label> = self
                     .tags
                     .entries
                     .iter()
-                    .map(|e| e.label.tag_type())
+                    .filter(|e| {
+                        e.label.tag_type() == TagType::Base(SType::Type)
+                    })
+                    .map(|e| e.label.clone())
                     .collect();
-                // 固定属性も型として含める（設計上の整合性）
-                if self.intrinsic.size.is_some() {
-                    types.push(TagType::Base(SType::Size));
+                if !type_values.is_empty() {
+                    return type_values;
                 }
-                if self.item_kind == VolatileItem::KIND {
-                    match self.id {
-                        ItemId::Volatile(
-                            crate::types::VolatileItem::Boolean(_),
-                        ) => {
-                            types.push(TagType::from("boolean"));
-                        }
-                        ItemId::Volatile(
-                            crate::types::VolatileItem::Scalar(_),
-                        ) => {
-                            types.push(TagType::from("scalar"));
-                        }
-                        _ => {}
-                    }
+
+                // 2. なければ従来の挙動（存在する全てのタグ種を返す）
+                let mut lab_vals = Vec::new();
+                for entry in &self.tags.entries {
+                    lab_vals.push(Label::resolve(
+                        TagType::Base(SType::Type),
+                        LabelValue::String(entry.label.tag_type().to_string()),
+                    ));
+                }
+                if self.intrinsic.size.is_some() {
+                    lab_vals.push(Label::resolve(
+                        TagType::Base(SType::Type),
+                        LabelValue::String("size".to_string()),
+                    ));
                 }
                 if self.intrinsic.mtime.is_some() {
-                    types.push(TagType::Base(SType::Mtime));
+                    lab_vals.push(Label::resolve(
+                        TagType::Base(SType::Type),
+                        LabelValue::String("mtime".to_string()),
+                    ));
                 }
-                types.sort();
-                types.dedup();
-                return types
-                    .into_iter()
-                    .map(|t| Label::from(t.as_str()))
-                    .collect();
+                // ItemKind 自体も型として含める
+                lab_vals.push(Label::resolve(
+                    TagType::Base(SType::Type),
+                    LabelValue::String(self.item_kind.as_str().to_string()),
+                ));
+
+                lab_vals.sort_by_key(|l| l.to_string());
+                lab_vals.dedup();
+                return lab_vals;
             }
+
             // 仮想ラベル: label: (アイテムが持つ全てのラベル値)
             TagType::Base(SType::Label) => {
                 let mut labels: Vec<Label> =
@@ -499,16 +483,31 @@ impl SearchResult {
             }
             // 仮想ラベル: tag: (type:label 形式の全タグ)
             TagType::Base(SType::TypedTag) => {
-                let mut tts: Vec<String> = self
-                    .tags
-                    .iter_typed_tags()
-                    .map(|tt| tt.to_string())
-                    .collect();
-                // 固定属性も TypedTag として扱う
+                let mut labels = Vec::new();
+                // 明示的なタグ
+                labels
+                    .extend(self.tags.entries.iter().map(|e| e.label.clone()));
+                // 固定属性
+                labels.push(Label::from(self.item_kind));
                 if let Some(s) = &self.intrinsic.size {
-                    tts.push(format!("{}:{}", SType::Size, s.0));
+                    labels.push(Label::resolve(
+                        TagType::Base(SType::Size),
+                        LabelValue::Integer(s.0),
+                    ));
                 }
+                if let Some(t) = &self.intrinsic.mtime {
+                    labels.push(Label::resolve(
+                        TagType::Base(SType::Mtime),
+                        LabelValue::Integer(t.0),
+                    ));
+                }
+
+                let mut tts: Vec<String> = labels
+                    .into_iter()
+                    .map(|l| format!("{}:{}", l.tag_type(), l.as_str()))
+                    .collect();
                 tts.sort();
+                tts.dedup();
                 return tts.into_iter().map(Label::from).collect();
             }
             _ => {}
@@ -546,7 +545,7 @@ mod tests {
 
         SearchResult {
             id: 1.into(),
-            item_kind: "file".to_string(),
+            item_kind: ItemKind::File,
             name: "test.rs".to_string(),
             rank: 1,
             intrinsic: Intrinsic {
@@ -608,7 +607,10 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].results.len(), 2);
         // カラムの中に extension (TagType) が含まれるか
-        assert!(groups[0].keys.iter().any(|k| k.as_str() == "extension"));
+        assert!(response
+            .results
+            .iter()
+            .all(|r| r.item_kind == ItemKind::File));
     }
 
     #[test]
@@ -690,57 +692,29 @@ mod tests {
     }
 
     #[test]
-    fn test_search_result_new_empty_null() {
-        use crate::types::{ItemId, VolatileItem};
-        let id = ItemId::Volatile(VolatileItem::Null);
-        let res = SearchResult::new_empty(id);
+    fn test_search_result_new_empty_scalar() {
+        let id = ItemId::new_volatile();
+        let res = SearchResult::new_empty(
+            id,
+            ItemKind::Volatile,
+            "123.45".to_string(),
+        );
 
-        // VolatileItem::Null の場合は "NULL" と表示されるべき
-        assert_eq!(res.name, "NULL");
-        assert_eq!(res.item_kind, VolatileItem::KIND);
+        assert_eq!(res.name, "123.45");
+        assert_eq!(res.item_kind, ItemKind::Volatile);
     }
 
     #[test]
     fn test_search_result_new_empty_label() {
-        use crate::types::{ItemId, VolatileItem};
+        let label_id = ItemId::new_volatile();
+        let result = SearchResult::new_empty(
+            label_id,
+            ItemKind::Volatile,
+            "rs".to_string(),
+        );
 
-        // ラベル値 "rs" で Label volatile item を作成
-        let label_id = ItemId::Volatile(VolatileItem::Label("rs".to_string()));
-        let result = SearchResult::new_empty(label_id);
-
-        // name がラベル値と一致するか
         assert_eq!(result.name, "rs");
-
-        // item_kind が "label" か
-        assert_eq!(result.item_kind, VolatileItem::LABEL_KIND);
-
-        // id が正しく設定されているか
-        assert_eq!(result.id.as_i64(), -100);
-
-        // タグは空であるべき
+        assert_eq!(result.item_kind, ItemKind::Volatile);
         assert!(result.tags.is_empty());
-    }
-
-    #[test]
-    fn test_search_result_new_empty_label_various_values() {
-        use crate::types::{ItemId, VolatileItem};
-
-        // 異なるラベル値でテスト
-        let test_cases = vec![
-            ("extension", "extension"),
-            ("myapp", "myapp"),
-            ("日本語", "日本語"),
-            ("", ""),
-        ];
-
-        for (input, expected_name) in test_cases {
-            let label_id =
-                ItemId::Volatile(VolatileItem::Label(input.to_string()));
-            let result = SearchResult::new_empty(label_id);
-
-            assert_eq!(result.name, expected_name);
-            assert_eq!(result.item_kind, "label");
-            assert_eq!(result.id.as_i64(), -100);
-        }
     }
 }

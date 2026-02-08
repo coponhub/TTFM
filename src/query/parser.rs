@@ -1066,7 +1066,7 @@ mod tests {
                     }
                 }
                 _ => panic!("Expected Sum aggregation"),
-            }
+            },
             _ => panic!("Expected Aggregation"),
         }
     }

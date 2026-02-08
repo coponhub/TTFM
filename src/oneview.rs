@@ -1,5 +1,6 @@
 use crate::db::{Col, SqlType, TargetTable, Tbl, Val};
 use crate::taggers::ColumnDef;
+use crate::types::ItemKind;
 use duckdb::{Connection, Result};
 use sea_query::{CaseStatement, Expr, Func, PostgresQueryBuilder, Query};
 use std::path::Path;
@@ -96,13 +97,13 @@ fn build_item_kind_expr() -> sea_query::SimpleExpr {
     CaseStatement::new()
         .case(
             Expr::col((Tbl::FileReferences, Col::ItemId)).is_not_null(),
-            Expr::val(Into::<&'static str>::into(Val::File)),
+            Expr::val(Into::<&'static str>::into(ItemKind::File)),
         )
         .case(
             Expr::col((Tbl::ItemReferences, Col::ItemId)).is_not_null(),
             Expr::col((Tbl::ItemReferences, Col::ItemKind)),
         )
-        .finally(Expr::val(Into::<&'static str>::into(Val::Unknown)))
+        .finally(Expr::val(Into::<&'static str>::into(ItemKind::Volatile)))
         .into()
 }
 
@@ -180,7 +181,7 @@ fn spec_item_kind(source: &OneViewSource) -> sea_query::SimpleExpr {
 
         // Physical系およびエイリアスは常に File 確定
         OneViewSource::Physical { .. } | OneViewSource::LocationAlias(_) => {
-            Expr::val(Into::<&'static str>::into(Val::File))
+            Expr::val(Into::<&'static str>::into(ItemKind::File))
                 .cast_as(SqlType::VARCHAR)
                 .into()
         }

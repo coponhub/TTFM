@@ -94,7 +94,8 @@ fn test_aggregation_comparison_true() -> anyhow::Result<()> {
 
     assert!(!res.results.is_empty());
     assert_eq!(res.results[0].name, "TRUE");
-    assert_eq!(res.results[0].id.as_i64(), 1);
+    assert!(res.results[0].id.is_volatile());
+    assert_eq!(res.results[0].item_kind, ttfm::ItemKind::Volatile);
 
     Ok(())
 }
@@ -116,7 +117,8 @@ fn test_aggregation_comparison_false() -> anyhow::Result<()> {
 
     assert!(!res.results.is_empty());
     assert_eq!(res.results[0].name, "FALSE");
-    assert_eq!(res.results[0].id.as_i64(), 0);
+    assert!(res.results[0].id.is_volatile());
+    assert_eq!(res.results[0].item_kind, ttfm::ItemKind::Volatile);
 
     Ok(())
 }
@@ -334,13 +336,13 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
 
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].name, "TRUE");
-    assert!(!res.results[0].id.is_stored()); // Should be Volatile(Boolean(1))
+    assert!(res.results[0].id.is_volatile()); // Should be Volatile(...)
 
     // 2. max(mtime:) == 2025 -> FALSE
     let res_false = fm.search("max(mtime:) == 2025", Default::default())?;
     assert_eq!(res_false.results.len(), 1);
     assert_eq!(res_false.results[0].name, "FALSE");
-    assert!(!res_false.results[0].id.is_stored()); // Should be Volatile(Boolean(0))
+    assert!(res_false.results[0].id.is_volatile()); // Should be Volatile(...)
 
     Ok(())
 }

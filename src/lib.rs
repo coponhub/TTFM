@@ -35,7 +35,7 @@ use indexing::functions::{
 pub use query::{parse, QueryNode};
 pub use response::{SearchResponse, SearchResult};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use types::{FileRef, Label, Progress, TagType, TypedTag};
+pub use types::{FileRef, ItemKind, Label, Progress, TagType, TypedTag};
 
 mod cache;
 pub use cache::CacheManager;
@@ -383,7 +383,7 @@ impl FileManager {
 
         // 1. タグ自体の Item Entity が存在することを確認（なければ作成）
         self.get_or_create_item("type", key)?;
-        self.get_or_create_item("label", value)?;
+        // label はデフォルトで揮発性のため、エンティティ作成をスキップ
         self.get_or_create_item("tag", tag_str)?;
 
         // 2. ターゲットの ID を特定
@@ -444,12 +444,12 @@ impl FileManager {
     ) -> Result<()> {
         let file_ids: Vec<i64> = results
             .iter()
-            .filter(|r| r.item_kind == "file")
+            .filter(|r| r.item_kind == crate::types::ItemKind::File)
             .map(|r| r.id.as_i64())
             .collect();
         let item_ids: Vec<i64> = results
             .iter()
-            .filter(|r| r.item_kind != "file")
+            .filter(|r| r.item_kind != crate::types::ItemKind::File)
             .map(|r| r.id.as_i64())
             .collect();
 

@@ -69,7 +69,7 @@ fn test_incremental_indexing_full_flow() {
     let files_edit: Vec<_> = res_edit
         .results
         .iter()
-        .filter(|r| r.item_kind == "file")
+        .filter(|r| r.item_kind == ttfm::ItemKind::File)
         .collect();
     assert_eq!(files_edit.len(), 1, "Should find exactly one a.txt");
     assert_eq!(
@@ -93,7 +93,7 @@ fn test_incremental_indexing_full_flow() {
     let files_b_del: Vec<_> = res_b_del
         .results
         .iter()
-        .filter(|r| r.item_kind == "file")
+        .filter(|r| r.item_kind == ttfm::ItemKind::File)
         .collect();
     assert_eq!(
         files_b_del.len(),
@@ -133,7 +133,7 @@ fn test_incremental_indexing_full_flow() {
     let _files_inode: Vec<_> = _res_inode
         .results
         .iter()
-        .filter(|r| r.item_kind == "file")
+        .filter(|r| r.item_kind == ttfm::ItemKind::File)
         .collect();
 
     /* TODO: Fix hardlink indexing/search consistency.
@@ -184,10 +184,9 @@ fn test_system_items_registration() {
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     // 転置: results には label items が格納されるため、name が "extension:txt" であることを確認
-    let has_target_val = results_projection
-        .results
-        .iter()
-        .any(|r| r.item_kind == "label" && r.name == "extension:txt");
+    let has_target_val = results_projection.results.iter().any(|r| {
+        r.item_kind == ttfm::ItemKind::Volatile && r.name == "extension:txt"
+    });
     assert!(
         has_target_val,
         "Should contain label item with name='extension:txt'"
@@ -208,7 +207,11 @@ fn test_system_items_registration() {
         .iter()
         .find(|r| r.name == "system")
         .expect("system label not found for origin check");
-    assert_eq!(system_label.item_kind, "label", "Should be a label item");
+    assert_eq!(
+        system_label.item_kind,
+        ttfm::ItemKind::Volatile,
+        "Should be a label item"
+    );
     // このラベルの tags に "item:hello.txt#..." が含まれているはず
     let has_hello_txt = system_label
         .tags
@@ -237,7 +240,9 @@ fn test_typedtag_listing_via_type_query() {
     let tt_items: Vec<_> = results
         .results
         .iter()
-        .filter(|r| r.item_kind == "tag" && r.name == "extension:txt")
+        .filter(|r| {
+            r.item_kind == ttfm::ItemKind::Tag && r.name == "extension:txt"
+        })
         .collect();
     assert_eq!(
         tt_items.len(),
@@ -251,12 +256,12 @@ fn test_typedtag_listing_via_type_query() {
     let files: Vec<_> = results
         .results
         .iter()
-        .filter(|r| r.item_kind == "file")
+        .filter(|r| r.item_kind == ttfm::ItemKind::File)
         .collect();
     let tags: Vec<_> = results
         .results
         .iter()
-        .filter(|r| r.item_kind == "tag")
+        .filter(|r| r.item_kind == ttfm::ItemKind::Tag)
         .collect();
 
     assert_eq!(files.len(), 1, "Should find the file");

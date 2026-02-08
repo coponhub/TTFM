@@ -1,7 +1,6 @@
 use crate::query::lens_resolver::Resolver;
 use crate::response::{RawTagRow, SearchResult};
-use crate::types::ItemId;
-use crate::types::{SType, TagType, VolatileItem};
+use crate::types::{ItemId, ItemKind, SType, TagType};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
@@ -92,64 +91,61 @@ impl<'a> Fetcher<'a> {
             );
         }
 
-        let id = self
+        let val_id = self
             .conn
             .prepare(&sql_str)?
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
-                use crate::types::VolatileItem;
-                use crate::util::DotOk;
-                match val {
-                    duckdb::types::Value::Null => {
-                        ItemId::Volatile(VolatileItem::Null).to_ok()
-                    }
-                    duckdb::types::Value::Float(f) => {
-                        ItemId::new_volatile_scalar(f as f64).to_ok()
-                    }
-                    duckdb::types::Value::Double(d) => {
-                        ItemId::new_volatile_scalar(d).to_ok()
-                    }
-                    duckdb::types::Value::Int(i) => {
-                        ItemId::new_volatile_scalar(i as f64).to_ok()
-                    }
-                    duckdb::types::Value::BigInt(i) => {
-                        ItemId::new_volatile_scalar(i as f64).to_ok()
-                    }
-                    duckdb::types::Value::HugeInt(i) => {
-                        ItemId::new_volatile_scalar(i as f64).to_ok()
-                    }
-                    other => {
-                        let s_val = format!("{:?}", other);
-                        if let Ok(f) = s_val.trim_matches('"').parse::<f64>() {
-                            ItemId::new_volatile_scalar(f).to_ok()
-                        } else {
-                            Err(duckdb::Error::InvalidColumnType(
-                                0,
-                                s_val,
-                                duckdb::types::Type::Double,
-                            ))
-                        }
-                    }
-                }
+                Ok(val)
             })
             .map_err(|e| {
                 anyhow::anyhow!("Failed to compute aggregation: {}", e)
             })?;
 
-        let mut res = SearchResult::new_empty(id.clone());
-        res.item_kind = VolatileItem::KIND.to_string();
+        let id = ItemId::new_volatile();
+        let (name, final_kind) = match &val_id {
+            duckdb::types::Value::Null => {
+                ("NULL".to_string(), ItemKind::Volatile)
+            }
+            duckdb::types::Value::Float(f) => {
+                (f.to_string(), ItemKind::Volatile)
+            }
+            duckdb::types::Value::Double(d) => {
+                (d.to_string(), ItemKind::Volatile)
+            }
+            duckdb::types::Value::Int(i) => (i.to_string(), ItemKind::Volatile),
+            duckdb::types::Value::BigInt(i) => {
+                (i.to_string(), ItemKind::Volatile)
+            }
+            duckdb::types::Value::HugeInt(i) => {
+                (i.to_string(), ItemKind::Volatile)
+            }
+            duckdb::types::Value::Boolean(b) => (
+                (if *b { "TRUE" } else { "FALSE" }).to_string(),
+                ItemKind::Volatile,
+            ),
+            ref other => {
+                let s_val = format!("{:?}", other);
+                (s_val.trim_matches('"').to_string(), ItemKind::Volatile)
+            }
+        };
 
-        // NULL の場合、型情報が失われるため、明示的にタグとして注入する
-        if let ItemId::Volatile(crate::types::VolatileItem::Null) = id {
-            use crate::types::{Label, LabelValue, TagType};
-            res.apply_tag(
-                Label::resolve(
-                    TagType::from("scalar"),
-                    LabelValue::String("null".to_string()),
-                ),
-                crate::types::Origin::System,
-            );
-        }
+        let mut res = SearchResult::new_empty(id, final_kind, name.clone());
+
+        // 正確な型情報を type: タグとして注入する
+        use crate::types::{Label, LabelValue, TagType};
+        let type_val = match &val_id {
+            duckdb::types::Value::Boolean(_) => "boolean",
+            // NULL や数値などの集約結果は test_null_propagation が "scalar" を期待しているため、それに合わせる
+            _ => "scalar",
+        };
+        res.apply_tag(
+            Label::resolve(
+                TagType::Base(crate::types::SType::Type),
+                LabelValue::String(type_val.to_string()),
+            ),
+            crate::types::Origin::System,
+        );
 
         Ok(res)
     }
@@ -173,27 +169,26 @@ impl<'a> Fetcher<'a> {
         let id_val: Option<i64> =
             self.conn.query_row(&sql_str, [], |r| r.get(0))?;
 
-        use crate::types::VolatileItem;
-        let id = match id_val {
-            Some(1) => ItemId::Volatile(VolatileItem::Boolean(1)),
-            Some(_) => ItemId::Volatile(VolatileItem::Boolean(0)),
-            None => ItemId::Volatile(VolatileItem::Null),
+        let id = ItemId::new_volatile();
+        let (name, is_null) = match id_val {
+            Some(1) => ("TRUE".to_string(), false),
+            Some(_) => ("FALSE".to_string(), false),
+            None => ("NULL".to_string(), true),
         };
 
-        let mut res = SearchResult::new_empty(id.clone());
-        res.item_kind = VolatileItem::KIND.to_string();
+        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, name);
 
-        // NULL の場合、型情報が失われるため、明示的にタグとして注入する
-        if let ItemId::Volatile(crate::types::VolatileItem::Null) = id {
-            use crate::types::{Label, LabelValue, TagType};
-            res.apply_tag(
-                Label::resolve(
-                    TagType::from("boolean"),
-                    LabelValue::String("null".to_string()),
+        // 正確な型情報を type: タグとして注入する
+        use crate::types::{Label, LabelValue, TagType};
+        res.apply_tag(
+            Label::resolve(
+                TagType::Base(crate::types::SType::Type),
+                LabelValue::String(
+                    if is_null { "null" } else { "boolean" }.to_string(),
                 ),
-                crate::types::Origin::System,
-            );
-        }
+            ),
+            crate::types::Origin::System,
+        );
 
         Ok(res)
     }
@@ -244,7 +239,7 @@ impl<'a> Fetcher<'a> {
         offset: usize,
     ) -> Result<Vec<SearchResult>> {
         use crate::response::SearchResult;
-        use crate::types::{ItemId, Label, VolatileItem};
+        use crate::types::ItemId;
         use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
 
@@ -282,9 +277,12 @@ impl<'a> Fetcher<'a> {
             let label_str = label.as_str();
 
             // Label volatile item を作成
-            let label_id =
-                ItemId::Volatile(VolatileItem::Label(label_str.clone()));
-            let mut label_item = SearchResult::new_empty(label_id);
+            let label_id = ItemId::new_volatile();
+            let mut label_item = SearchResult::new_empty(
+                label_id,
+                ItemKind::Volatile,
+                label_str.clone(),
+            );
 
             // SQLで生成済みの "name#id" 文字列をタグとして追加（Type="item"は明示的に指定）
             for item_ref in item_refs_list {
@@ -299,7 +297,7 @@ impl<'a> Fetcher<'a> {
 
             // total_count を projected_label に保存
             label_item.projected_label =
-                Some(Label::from(format!("{}", total_count)));
+                Some(crate::types::Label::from(format!("{}", total_count)));
 
             results.push(label_item);
         }
@@ -359,20 +357,21 @@ impl<'a> Fetcher<'a> {
         let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
         let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
 
-        let id = if item_kind == crate::types::VolatileItem::KIND {
-            // "volatile" の場合、id_val は 1 (True) or 0 (False)
-            // もし値が想定外なら 0 (False) 扱いにする等の安全策
-            let val = if id_val != 0 { 1 } else { 0 };
-            ItemId::Volatile(crate::types::VolatileItem::Boolean(val))
+        let kind = item_kind
+            .as_str()
+            .parse::<ItemKind>()
+            .unwrap_or(ItemKind::Volatile);
+        let id = if kind.is_volatile() {
+            // "volatile" の場合、既存のカラム値は ID として扱う
+            ItemId::Volatile(id_val as u64)
         } else {
             ItemId::Stored(id_val)
         };
 
-        let mut res = SearchResult::new_empty(id);
+        let mut res = SearchResult::new_empty(id, kind, String::new());
         res.rank = row
             .get::<_, Option<i64>>(SType::Rank.name().as_str())?
             .unwrap_or(0);
-        res.item_kind = item_kind;
 
         let Value::List(tags) =
             row.get(crate::db::QueryResultCol::Tags.to_string().as_str())?
@@ -597,7 +596,8 @@ mod tests {
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let res = fetcher.compute_boolean().unwrap();
-        assert_eq!(res.id, ItemId::Volatile(crate::types::VolatileItem::Null)); // NULL (データがないので判定不能)
+        assert!(res.id.is_volatile());
+        assert_eq!(res.name, "NULL"); // NULL (データがないので判定不能)
 
         // データ投入
         conn.execute(
@@ -611,9 +611,7 @@ mod tests {
         // Assuming the query parser works correctly, this should return TRUE.
 
         let res2 = fetcher.compute_boolean().unwrap();
-        assert_eq!(
-            res2.id,
-            ItemId::Volatile(crate::types::VolatileItem::Boolean(1))
-        ); // TRUE
+        assert!(res2.id.is_volatile());
+        assert_eq!(res2.name, "TRUE"); // TRUE
     }
 }

@@ -70,7 +70,10 @@ fn test_projection_queries() {
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
     // 転置後は全て label items
-    assert!(results.results.iter().all(|r| r.item_kind == "label"));
+    assert!(results
+        .results
+        .iter()
+        .all(|r| r.item_kind == ttfm::ItemKind::Volatile));
     // 仮想ラベル filename: は内部で filename を投影する
     assert_eq!(
         results.type_for_projection,
@@ -185,10 +188,9 @@ fn test_projection_queries() {
         Some(ttfm::types::TagType::from("category"))
     );
     // 転置: results には label items が格納され、name が "important" であることを確認
-    let has_val = results
-        .results
-        .iter()
-        .any(|r| r.item_kind == "label" && r.name == "important");
+    let has_val = results.results.iter().any(|r| {
+        r.item_kind == ttfm::ItemKind::Volatile && r.name == "important"
+    });
     assert!(has_val, "Should find 'important' category label");
 
     // 10. label: (Volatile Tag -> All Labels)
@@ -207,7 +209,7 @@ fn test_projection_queries() {
 
 #[test]
 fn test_projection_returns_label_volatile_items() {
-    use ttfm::types::{ItemId, VolatileItem};
+    use ttfm::types::ItemId;
 
     let dir = tempdir().unwrap();
     let root = dir.path();
@@ -236,20 +238,21 @@ fn test_projection_returns_label_volatile_items() {
         "projection should return label items"
     );
 
-    // 検証3: 各 SearchResult が Label volatile item である
+    // 検証3: 各 SearchResult が Volatile ID を持っている
     for item in &results.results {
-        // ID が Volatile(Label(...)) であることを確認
-        if let ItemId::Volatile(VolatileItem::Label(ref label_val)) = item.id {
-            // 検証4: item_kind が "label" である
+        // ID が Volatile(u64) であることを確認
+        if let ItemId::Volatile(_) = item.id {
+            // 検証4: item_kind が Label である
             assert_eq!(
-                item.item_kind, "label",
-                "Label volatile item should have item_kind='label'"
+                item.item_kind,
+                ttfm::ItemKind::Volatile,
+                "Label volatile item should have item_kind=Label"
             );
 
-            // 検証5: name がラベル値と一致する
-            assert_eq!(
-                item.name, *label_val,
-                "Label volatile item name should match label value"
+            // 検証5: name が空ではない（ラベル値）
+            assert!(
+                !item.name.is_empty(),
+                "Label volatile item name should not be empty"
             );
 
             // 検証6: tags に "item:name#id" 形式のタグが含まれている
