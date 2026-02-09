@@ -363,6 +363,8 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
     let val = match label.value() {
         crate::types::LabelValue::Integer(i) => Expr::val(i),
         crate::types::LabelValue::Boolean(b) => Expr::val(b),
+        crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)),
+        crate::types::LabelValue::Null => Expr::val(None::<i32>),
         crate::types::LabelValue::String(s)
         | crate::types::LabelValue::Literal(s) => Expr::val(s),
     };

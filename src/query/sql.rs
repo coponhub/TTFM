@@ -503,6 +503,8 @@ fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
                 Expr::val(s.clone()).into()
             }
             crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+            crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+            crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
         }
     }
 }
@@ -714,6 +716,8 @@ fn build_resolved_operand_subquery(
                         Expr::val(s.clone()).into()
                     }
                     crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+                    crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+                    crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
                 }
             }
         }
@@ -1336,6 +1340,8 @@ fn label_to_unit_aware_expr(label: &crate::types::Label) -> SimpleExpr {
             }
         }
         crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
+        crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+        crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
     }
 }
 
@@ -1677,6 +1683,12 @@ fn build_column_match_sql(
         crate::types::LabelValue::Boolean(b) => {
             q.and_where(Expr::col(Col::LabelBool).eq(b));
         }
+        crate::types::LabelValue::Double(bits) => {
+            q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+        }
+        crate::types::LabelValue::Null => {
+            q.and_where(Expr::col(Col::LabelStr).is_null());
+        }
     }
     q
 }
@@ -1737,6 +1749,12 @@ fn build_typed_tag_sql(
         }
         crate::types::LabelValue::Boolean(b) => {
             cond = cond.add(Expr::col(Col::LabelBool).eq(b));
+        }
+        crate::types::LabelValue::Double(bits) => {
+            cond = cond.add(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+        }
+        crate::types::LabelValue::Null => {
+            cond = cond.add(Expr::col(Col::LabelStr).is_null());
         }
     }
     q.and_where(cond.into());
@@ -1922,6 +1940,12 @@ pub fn build_label_expansion_sql(
                 crate::types::LabelValue::Boolean(b) => {
                     q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
+                crate::types::LabelValue::Double(bits) => {
+                    q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+                }
+                crate::types::LabelValue::Null => {
+                    q.and_where(Expr::col(Col::LabelStr).is_null());
+                }
             }
         }
         _ => {
@@ -1937,6 +1961,12 @@ pub fn build_label_expansion_sql(
                 }
                 crate::types::LabelValue::Boolean(b) => {
                     q.and_where(Expr::col(Col::LabelBool).eq(b));
+                }
+                crate::types::LabelValue::Double(bits) => {
+                    q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+                }
+                crate::types::LabelValue::Null => {
+                    q.and_where(Expr::col(Col::LabelStr).is_null());
                 }
             }
         }

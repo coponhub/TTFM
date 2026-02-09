@@ -504,6 +504,8 @@ fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
     match label.value() {
         LabelValue::Integer(_) => LogicalType::Integer,
         LabelValue::Boolean(_) => LogicalType::Boolean,
+        LabelValue::Double(_) => LogicalType::Float,
+        LabelValue::Null => LogicalType::Any,
         LabelValue::String(s) | LabelValue::Literal(s) => {
             // "1MB" などのサイズ単位付きリテラルは数値として扱う
             if crate::util::parse_size(&s).is_some() {

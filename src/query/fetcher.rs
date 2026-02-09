@@ -91,9 +91,8 @@ impl<'a> Fetcher<'a> {
             );
         }
 
-        let val_id = self
-            .conn
-            .prepare(&sql_str)?
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let val_id = stmt
             .query_row([], |r| {
                 let val: duckdb::types::Value = r.get(0)?;
                 Ok(val)
@@ -101,48 +100,35 @@ impl<'a> Fetcher<'a> {
             .map_err(|e| {
                 anyhow::anyhow!("Failed to compute aggregation: {}", e)
             })?;
+        let duckdb_type_str = format!("{:?}", stmt.column_type(0));
+        use crate::types::{Label, LabelValue, TagType};
+
+        let label_val = LabelValue::from(val_id.clone());
+        let type_name = if let LabelValue::Null = label_val {
+            crate::util::get_db_coltype(&duckdb_type_str)
+        } else {
+            (&label_val).into()
+        };
 
         let id = ItemId::new_volatile();
-        let (name, final_kind) = match &val_id {
-            duckdb::types::Value::Null => {
-                ("NULL".to_string(), ItemKind::Volatile)
-            }
-            duckdb::types::Value::Float(f) => {
-                (f.to_string(), ItemKind::Volatile)
-            }
-            duckdb::types::Value::Double(d) => {
-                (d.to_string(), ItemKind::Volatile)
-            }
-            duckdb::types::Value::Int(i) => (i.to_string(), ItemKind::Volatile),
-            duckdb::types::Value::BigInt(i) => {
-                (i.to_string(), ItemKind::Volatile)
-            }
-            duckdb::types::Value::HugeInt(i) => {
-                (i.to_string(), ItemKind::Volatile)
-            }
-            duckdb::types::Value::Boolean(b) => (
-                (if *b { "TRUE" } else { "FALSE" }).to_string(),
-                ItemKind::Volatile,
-            ),
-            ref other => {
-                let s_val = format!("{:?}", other);
-                (s_val.trim_matches('"').to_string(), ItemKind::Volatile)
-            }
-        };
+        let name = label_val.as_display_name();
 
-        let mut res = SearchResult::new_empty(id, final_kind, name.clone());
+        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, name);
 
-        // 正確な型情報を type: タグとして注入する
-        use crate::types::{Label, LabelValue, TagType};
-        let type_val = match &val_id {
-            duckdb::types::Value::Boolean(_) => "boolean",
-            // NULL や数値などの集約結果は test_null_propagation が "scalar" を期待しているため、それに合わせる
-            _ => "scalar",
-        };
+        // 1. 型分類タグ (type:integer 等)
         res.apply_tag(
             Label::resolve(
                 TagType::Base(crate::types::SType::Type),
-                LabelValue::String(type_val.to_string()),
+                LabelValue::String(type_name.to_string()),
+            ),
+            crate::types::Origin::System,
+        );
+
+        // 2. 実値タグ (value:123 等)
+        res.apply_tag(
+            Label::resolve(
+                TagType::Base(crate::types::SType::Value),
+                label_val,
             ),
             crate::types::Origin::System,
         );
@@ -166,26 +152,36 @@ impl<'a> Fetcher<'a> {
         }
 
         // NULL対応: Option<i64> で受け取る
-        let id_val: Option<i64> =
-            self.conn.query_row(&sql_str, [], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let id_val: Option<i64> = stmt.query_row([], |r| r.get(0))?;
 
         let id = ItemId::new_volatile();
-        let (name, is_null) = match id_val {
-            Some(1) => ("TRUE".to_string(), false),
-            Some(_) => ("FALSE".to_string(), false),
-            None => ("NULL".to_string(), true),
+        let label_val = match id_val {
+            Some(1) => LabelValue::Boolean(true),
+            Some(_) => LabelValue::Boolean(false),
+            None => LabelValue::Null,
         };
 
-        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, name);
+        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, label_val.as_display_name());
 
-        // 正確な型情報を type: タグとして注入する
+        // 正確な型情報を型付きタグとして注入する
         use crate::types::{Label, LabelValue, TagType};
+        let type_name: &str = (&LabelValue::Boolean(true)).into();
+
+        // 1. 型分類タグ (type:boolean 等)
         res.apply_tag(
             Label::resolve(
                 TagType::Base(crate::types::SType::Type),
-                LabelValue::String(
-                    if is_null { "null" } else { "boolean" }.to_string(),
-                ),
+                LabelValue::String(type_name.to_string()),
+            ),
+            crate::types::Origin::System,
+        );
+
+        // 2. 実値タグ (value:true 等)
+        res.apply_tag(
+            Label::resolve(
+                TagType::Base(crate::types::SType::Value),
+                label_val,
             ),
             crate::types::Origin::System,
         );

@@ -30,6 +30,10 @@ fn test_null_propagation_empty_data() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].name, "NULL");
 
+    // 比較演算の結果なので、NULL でも型は boolean であるべき
+    let types = res.results[0].get_all_values("type");
+    assert!(types.contains(&"boolean".to_string()));
+
     Ok(())
 }
 
@@ -96,9 +100,13 @@ fn test_null_propagation_single_aggregation_empty() -> anyhow::Result<()> {
     // 現在は "0" が返るが、"NULL" を期待するように変更
     assert_eq!(res.results[0].name, "NULL");
 
-    // NULL でも型情報 (scalar) は保持されているべき
+    // NULL でも型情報 (max(size:) なので numeric) は保持されているべき
     let types = res.results[0].get_all_values("type");
-    assert!(types.contains(&"scalar".to_string()));
+    assert!(types.contains(&"numeric".to_string()));
+
+    // NULL でも実値 (value:NULL) は保持されているべき
+    let values = res.results[0].get_all_values("value");
+    assert!(values.contains(&"NULL".to_string()));
 
     Ok(())
 }

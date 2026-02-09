@@ -317,13 +317,46 @@ pub enum Label {
 }
 
 /// Label が保持する生の値の種類。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, strum::Display, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum LabelValue {
     String(String),
-    Integer(i64),
-    Boolean(bool),
-    /// 引用符で囲まれたリテラル文字列。
+    Integer(i64), // -> "integer"
+    Boolean(bool), // -> "boolean"
+    Double(u64),   // -> "double" (f64::to_bits() で保持)
+    Null,          // -> "null"
     Literal(String),
+}
+
+impl LabelValue {
+    /// 検索結果の名前 (SearchResult.name) などに使用する、人間が読みやすい文字列表現。
+    pub fn as_display_name(&self) -> String {
+        match self {
+            LabelValue::String(s) | LabelValue::Literal(s) => s.clone(),
+            LabelValue::Integer(i) => i.to_string(),
+            LabelValue::Boolean(true) => "TRUE".to_string(),
+            LabelValue::Boolean(false) => "FALSE".to_string(),
+            LabelValue::Double(bits) => f64::from_bits(*bits).to_string(),
+            LabelValue::Null => "NULL".to_string(),
+        }
+    }
+}
+
+impl From<duckdb::types::Value> for LabelValue {
+    fn from(v: duckdb::types::Value) -> Self {
+        use duckdb::types::Value;
+        match v {
+            Value::Boolean(b) => LabelValue::Boolean(b),
+            Value::Int(i) => LabelValue::Integer(i as i64),
+            Value::BigInt(i) => LabelValue::Integer(i),
+            Value::HugeInt(i) => LabelValue::Integer(i as i64),
+            Value::Float(f) => LabelValue::Double((f as f64).to_bits()),
+            Value::Double(d) => LabelValue::Double(d.to_bits()),
+            Value::Text(s) => LabelValue::String(s),
+            Value::Null => LabelValue::Null,
+            _ => LabelValue::String(format!("{:?}", v)),
+        }
+    }
 }
 
 impl std::fmt::Display for Label {
@@ -346,12 +379,8 @@ impl Label {
             | Label::Mtime(i)
             | Label::ItemId(i) => i.to_string(),
             Label::FileId(u) => u.to_string(),
-            Label::IsDir(b) => b.to_string(),
-            Label::Other(_, val) => match val {
-                LabelValue::String(s) | LabelValue::Literal(s) => s.clone(),
-                LabelValue::Integer(i) => i.to_string(),
-                LabelValue::Boolean(b) => b.to_string(),
-            },
+            Label::IsDir(b) => LabelValue::Boolean(*b).as_display_name(),
+            Label::Other(_, val) => val.as_display_name(),
         }
     }
 
@@ -363,6 +392,10 @@ impl Label {
             | Label::Mtime(i)
             | Label::ItemId(i) => *i,
             Label::Other(_, LabelValue::Integer(i)) => *i,
+            Label::Other(_, LabelValue::Double(bits)) => {
+                f64::from_bits(*bits) as i64
+            }
+            Label::Other(_, LabelValue::Null) => 0,
             _ => self.as_str().parse::<i64>().unwrap_or_default(),
         }
     }
@@ -395,7 +428,7 @@ impl Label {
         } else if let Ok(b) = r.get::<_, bool>(offset + 3) {
             LabelValue::Boolean(b)
         } else if let Ok(d) = r.get::<_, f64>(offset + 2) {
-            LabelValue::String(d.to_string())
+            LabelValue::Double(d.to_bits())
         } else {
             LabelValue::String(String::new())
         };
@@ -527,6 +560,22 @@ impl From<Label> for LabelValue {
 impl From<&Label> for LabelValue {
     fn from(l: &Label) -> Self {
         l.value()
+    }
+}
+
+impl duckdb::ToSql for LabelValue {
+    fn to_sql(&self) -> duckdb::Result<duckdb::types::ToSqlOutput<'_>> {
+        use duckdb::types::Value;
+        let val = match self {
+            LabelValue::Integer(i) => Value::BigInt(*i),
+            LabelValue::Boolean(b) => Value::Boolean(*b),
+            LabelValue::Double(bits) => Value::Double(f64::from_bits(*bits)),
+            LabelValue::Null => Value::Null,
+            LabelValue::String(s) | LabelValue::Literal(s) => {
+                Value::Text(s.clone())
+            }
+        };
+        Ok(duckdb::types::ToSqlOutput::Owned(val))
     }
 }
 
@@ -713,6 +762,12 @@ pub enum SType {
     LabelBool,
     // Schema Table Columns
     DataType,
+    Value,
+    // Type-specific tags
+    Integer,
+    Boolean,
+    Double,
+    Null,
 }
 
 impl SType {
@@ -749,6 +804,11 @@ impl SType {
             Self::LabelDouble => "label_double",
             Self::LabelBool => "label_bool",
             Self::DataType => "data_type",
+            Self::Value => "value",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Double => "double",
+            Self::Null => "null",
         }
     }
 
@@ -798,6 +858,11 @@ impl std::str::FromStr for SType {
             "label_double" => Ok(Self::LabelDouble),
             "label_bool" => Ok(Self::LabelBool),
             "data_type" => Ok(Self::DataType),
+            "value" => Ok(Self::Value),
+            "integer" => Ok(Self::Integer),
+            "boolean" => Ok(Self::Boolean),
+            "double" => Ok(Self::Double),
+            "null" => Ok(Self::Null),
             _ => Err(format!("Unknown SType: {}", s)),
         }
     }
@@ -812,7 +877,7 @@ mod tests_types {
         let tt = TypedTag::new("extension", "rs");
         assert_eq!(tt.to_string(), "extension:rs");
 
-        let tt_int = TypedTag::new("size", 1024);
+        let tt_int = TypedTag::new("size", 1024i64);
         assert_eq!(tt_int.to_string(), "size:1024");
     }
 

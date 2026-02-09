@@ -330,9 +330,9 @@ impl SearchResult {
         } else if let Some(b) = row.label_bool {
             LabelValue::Boolean(b)
         } else if let Some(d) = row.label_double {
-            LabelValue::String(d.to_string())
+            LabelValue::Double(d.to_bits())
         } else {
-            return;
+            LabelValue::Null
         };
 
         let label = Label::resolve(TagType::from(row.tag_type), label_val);

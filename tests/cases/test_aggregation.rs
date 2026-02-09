@@ -398,3 +398,26 @@ fn test_max_mtime_with_year_filter() {
     // 2025-06-15T12:00:00Z = 1750075200
     assert!(scalar > 1700000000.0);
 }
+
+#[test]
+fn test_max_on_empty() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+    
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    
+    // MAX on nonexistent tag -> Should be NULL and numeric/consistent
+    let res = fm.search("max(nonexistent_tag:)", Default::default())?;
+    
+    if let Some(r) = res.results.first() {
+        let types = r.get_all_values("type");
+        // User requires type:numeric for NULL aggregation results
+        assert!(types.contains(&"numeric".to_string()), "Expected type:numeric, got {:?}", types);
+    } else {
+        panic!("Expected a result for MAX aggregation");
+    }
+    
+    Ok(())
+}

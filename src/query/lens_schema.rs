@@ -76,6 +76,12 @@ pub(crate) fn build_column_condition(
             sql_type,
             is_generic_row_col,
         ),
+        crate::types::LabelValue::Double(bits) => {
+            Condition::any().add(Expr::col(Col::LabelDouble).binary(bin_op, Expr::val(f64::from_bits(bits))))
+        }
+        crate::types::LabelValue::Null => {
+            Condition::any().add(Expr::col(Col::LabelStr).is_null())
+        }
         crate::types::LabelValue::String(s) => {
             build_str_condition(col, bin_op, &s, sql_type, is_generic_row_col)
         }
@@ -410,8 +416,11 @@ fn val_to_label_value(val: &Value) -> Option<LabelValue> {
     match val {
         Value::Text(s) => Some(LabelValue::String(s.clone())),
         Value::BigInt(i) => Some(LabelValue::Integer(*i)),
-        Value::Double(d) => Some(LabelValue::String(d.to_string())),
+        Value::Int(i) => Some(LabelValue::Integer(*i as i64)),
+        Value::Float(f) => Some(LabelValue::Double((*f as f64).to_bits())),
+        Value::Double(d) => Some(LabelValue::Double(d.to_bits())),
         Value::Boolean(b) => Some(LabelValue::Boolean(*b)),
+        Value::Null => Some(LabelValue::Null),
         _ => None,
     }
 }

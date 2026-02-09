@@ -9,6 +9,28 @@ use sea_query::{
 use std::collections::HashMap;
 use std::path::Path;
 
+/// DuckDB の型情報文字列から、TTFM で使用する型名文字列を取得します。
+pub fn get_db_coltype(s: &str) -> &'static str {
+    let s = s.to_lowercase();
+    if s.contains("bool") {
+        "boolean"
+    } else if s.contains("int")
+        || s.contains("long")
+        || s.contains("float")
+        || s.contains("double")
+        || s.contains("decimal")
+        || s.contains("timestamp")
+        || s.contains("date")
+        || s.contains("time")
+    {
+        "numeric"
+    } else if s.contains("varchar") || s.contains("text") || s.contains("string") {
+        "string"
+    } else {
+        "numeric"
+    }
+}
+
 // --- 1. 通常の関数 (ロジックの実体) ---
 
 /// sea-query のステートメントをビルドして実行します。
