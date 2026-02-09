@@ -55,18 +55,20 @@ Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 
 - [x] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals.
 - [x] **Projection**: Value extraction via `type:`.
-- [x] **Backend Optimization (Schema Phase E)**:
+- [x] **Backend Optimization**:
     - **Separate `label` column into stored typed columns**:
         - `label_str` (VARCHAR), `label_int` (BIGINT), `label_double` (DOUBLE), `label_bool` (BOOLEAN).
     - Remove privileged physical columns (`size`, `mtime`, `rank`) and map them to `label_int`.
     - **Tag Schema Table**: Dedicated table to map Tag Keys to Data Types (e.g., `size` -> `Int`).
     - **Identity Verification**: Multi-layer identity matching.
+- [x] **Query Module Decoupling**: Split `src/query.rs` into a dedicated `query/` module (AST, Parser, SQL gen).
 - [x] **Aggregation**: Statistical calculations such as `sum(size:)`, `count(ext:jpg)`.
 - [x] **Comparison Operators**: Scalar, Label, and Stuck comparisons (e.g., `size > 100MB`).
 - [x] **Calculation**: Arithmetic operations within queries, including parentheses support.
 - [ ] **Nested Comparison**:
     - Group-based scalar comparisons (e.g., `parentdir:&( sum(size:) > 1GB )`).
     - Filter results based on aggregated values within a group (Grouping Comparison).
+- [ ] **Refactoring of Query module**
 
 ---
 
@@ -76,9 +78,7 @@ Modularizing the core for tag-centricity and extensibility.
 - [ ] **Tag-Centric Management**: Centralize `IndexingFunction`, `QueryFunction`, display/extraction rules within `TagType` modules.
 - [ ] **Modular Plugins**: Enable adding/overriding functionality on a per-`TagType` basis via plugins.
 - [ ] **Component Decoupling**:
-    - Split `src/query.rs` into a dedicated `query/` module (AST, Parser, SQL gen).
     - Decompose `FileManager` in `lib.rs` (extract indexing and plugin management).
-    - Finalize consolidation of redundant SQL generation patterns.
 
 ---
 
