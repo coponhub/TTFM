@@ -564,12 +564,33 @@ fn build_aggregation_parts(
                 } // Fallback
             };
 
+            // RowTag の label_str (VARCHAR) に対する SUM/AVG は TRY_CAST が必要
+            // label_int や label_double は既に数値型なので不要
+            let needs_cast = matches!(op, Sum | Avg)
+                && matches!(
+                    storage,
+                    Some(StorageMapping::RowTag { column: Col::LabelStr, .. })
+                );
+
             let expr: SimpleExpr = if let Some(operand) = operand {
                 // オペランド（算術式等）から直接 SQL 式を構築
                 let inner_expr = build_resolved_operand_expr(operand);
-                apply_arithmetic_agg(op, inner_expr)
+                let casted_expr = if needs_cast {
+                    Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [inner_expr])
+                } else {
+                    inner_expr
+                };
+                apply_arithmetic_agg(op, casted_expr)
             } else {
-                apply_arithmetic_agg(op, Expr::col(col).into())
+                let col_expr: SimpleExpr = if needs_cast {
+                    Expr::cust_with_exprs(
+                        "TRY_CAST($1 AS DOUBLE)",
+                        [Expr::col(col).into()],
+                    )
+                } else {
+                    Expr::col(col).into()
+                };
+                apply_arithmetic_agg(op, col_expr)
             };
             (expr, cond, tag_key)
         }
