@@ -143,6 +143,7 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **UI/UX Improvements**:
     - Tab completion (CLI) and Search Suggestions (GUI).
     - Enhanced Help: Syntax examples in `--help` and detailed Query syntax guide.
+- [ ] **Query Strictness**: Investigate implementing tag existence verification in `lens_resolver` to improve query strictness and detect typos.
 
 ### System & Maintenance
 - [ ] **Plugin System Optimization**:

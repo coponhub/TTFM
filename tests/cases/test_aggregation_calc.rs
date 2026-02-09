@@ -47,3 +47,64 @@ fn test_aggregation_with_calculation() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// 存在しないタグに対する算術演算のテスト
+/// TRY_CAST による VARCHAR -> DOUBLE 変換が正しく適用されることを確認
+#[test]
+fn test_aggregation_with_unknown_tag_arithmetic() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let data_dir = root.join("data");
+    std::fs::create_dir(&data_dir)?;
+    std::fs::write(data_dir.join("test.txt"), "content")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+
+    // 存在しないタグに対する算術演算: sum(unknown_tag: + 1)
+    // unknown_tag は存在しないため label_str は NULL となり、
+    // TRY_CAST(NULL AS DOUBLE) + 1 = NULL となるはず
+    let query = "sum(unknown_tag: + 1)";
+    let res = fm.search(query, Default::default())?;
+    
+    // 結果は NULL (name = "NULL")
+    assert_eq!(res.results[0].name, "NULL", "sum of unknown tag + 1 should be NULL");
+    
+    // type タグが numeric であることを確認
+    let type_tag = res.results[0]
+        .tags
+        .entries
+        .iter()
+        .find(|t| t.label.tag_type().as_str() == "type")
+        .map(|t| t.label.as_str());
+    assert_eq!(type_tag.as_deref(), Some("numeric"), "type should be 'numeric' for NULL aggregation result");
+
+    Ok(())
+}
+
+/// ラベル比較や集合演算を含む複雑な集計式のテスト
+#[test]
+fn test_aggregation_with_complex_expression() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let data_dir = root.join("data");
+    std::fs::create_dir(&data_dir)?;
+    std::fs::write(data_dir.join("test.txt"), "content")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+
+    // 複雑な集計式: sum((non_existant_tag: :> size:) & size:)
+    // non_existant_tag は存在しないため NULL となり、比較や演算の結果も NULL となるはず
+    let query = "sum((non_existant_tag: :> size:) & size:)";
+    let res = fm.search(query, Default::default())?;
+    
+    // 結果は NULL
+    assert_eq!(res.results[0].name, "NULL", "complex sum expression should be NULL");
+
+    Ok(())
+}

@@ -564,32 +564,14 @@ fn build_aggregation_parts(
                 } // Fallback
             };
 
-            // RowTag の label_str (VARCHAR) に対する SUM/AVG は TRY_CAST が必要
-            // label_int や label_double は既に数値型なので不要
-            let needs_cast = matches!(op, Sum | Avg)
-                && matches!(
-                    storage,
-                    Some(StorageMapping::RowTag { column: Col::LabelStr, .. })
-                );
-
+            // TRY_CAST は build_storage_column_expr 内で適用されるため、
+            // ここでは単純に式を構築するだけ
             let expr: SimpleExpr = if let Some(operand) = operand {
                 // オペランド（算術式等）から直接 SQL 式を構築
                 let inner_expr = build_resolved_operand_expr(operand);
-                let casted_expr = if needs_cast {
-                    Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [inner_expr])
-                } else {
-                    inner_expr
-                };
-                apply_arithmetic_agg(op, casted_expr)
+                apply_arithmetic_agg(op, inner_expr)
             } else {
-                let col_expr: SimpleExpr = if needs_cast {
-                    Expr::cust_with_exprs(
-                        "TRY_CAST($1 AS DOUBLE)",
-                        [Expr::col(col).into()],
-                    )
-                } else {
-                    Expr::col(col).into()
-                };
+                let col_expr: SimpleExpr = Expr::col(col).into();
                 apply_arithmetic_agg(op, col_expr)
             };
             (expr, cond, tag_key)
@@ -608,13 +590,23 @@ fn apply_arithmetic_agg(op: &ArithmeticAggOp, expr: SimpleExpr) -> SimpleExpr {
 }
 
 /// StorageMappingから適切なSQL列式を生成します。
+/// `sql_type` が `Numeric` の場合、`RowTag` の `LabelStr` (VARCHAR) には
+/// `TRY_CAST` を適用して算術演算を可能にします。
 fn build_storage_column_expr(
     storage: &StorageMapping,
-    _sql_type: crate::db::SqlType,
+    sql_type: crate::db::SqlType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Column(col) => Expr::col(*col).into(),
-        StorageMapping::RowTag { column, .. } => Expr::col(*column).into(),
+        StorageMapping::RowTag { column, .. } => {
+            let col_expr = Expr::col(*column);
+            // RowTag の label_str (VARCHAR) に対して数値演算が必要な場合は TRY_CAST を適用
+            if *column == Col::LabelStr && matches!(sql_type, crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE) {
+                Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [col_expr.into()])
+            } else {
+                col_expr.into()
+            }
+        }
         StorageMapping::Virtual => {
             // Virtualタグは論理タグのため、直接的な物理カラムは存在しない
             // Phase 3で適切に実装予定
@@ -684,9 +676,34 @@ fn build_aggregation_expr(
 fn build_calculation_expr(
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
 ) -> SimpleExpr {
-    let left_expr = build_resolved_operand_expr(&calc.left);
-    let right_expr = build_resolved_operand_expr(&calc.right);
+    let left_expr = build_resolved_operand_expr_for_arithmetic(&calc.left);
+    let right_expr = build_resolved_operand_expr_for_arithmetic(&calc.right);
     apply_arithmetic_op(&calc.op, left_expr, right_expr)
+}
+
+/// 算術演算用のオペランドをSQL式に変換します。
+/// RowTag の LabelStr (VARCHAR) は TRY_CAST で DOUBLE に変換されます。
+fn build_resolved_operand_expr_for_arithmetic(
+    operand: &crate::query::lens_resolver::ResolvedOperand,
+) -> SimpleExpr {
+    use crate::query::lens_resolver::ResolvedOperand;
+
+    match operand {
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
+        ResolvedOperand::TagRef { storage, .. } => {
+            // 算術演算コンテキストでは、RowTag の LabelStr に TRY_CAST を適用
+            match storage {
+                StorageMapping::RowTag { column, .. } if *column == Col::LabelStr => {
+                    Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [Expr::col(*column).into()])
+                }
+                StorageMapping::RowTag { column, .. } => Expr::col(*column).into(),
+                StorageMapping::Column(col) => Expr::col(*col).into(),
+                StorageMapping::Virtual => Expr::col(Col::LabelStr).into(),
+            }
+        }
+        ResolvedOperand::Calculation(calc) => build_calculation_expr(calc),
+        ResolvedOperand::Aggregation(agg) => build_aggregation_expr(agg),
+    }
 }
 
 /// 算術演算子を適用します。
