@@ -74,7 +74,8 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
     println!("Actual error: {}", err_msg);
     assert!(
         err_msg.contains("Parse error")
-            || err_msg.contains("Unsupported comparison pattern"),
+            || err_msg.contains("Unsupported comparison pattern")
+            || err_msg.contains("-->"),
         "Expected Parse error or Unsupported comparison pattern, got: {}",
         err_msg
     );
@@ -138,6 +139,14 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
         res2.is_ok(),
         "Expected '(size: / 1024) :> 100' to succeed as label comparison, got: {:?}",
         res2.err()
+    );
+
+    // Bare arithmetic with aggregation
+    let res3 = fm.search("count(extension:rs) + count(extension:c)", Default::default());
+    assert!(
+        res3.is_ok(),
+        "Expected 'count(extension:rs) + count(extension:c)' to succeed, got: {:?}",
+        res3.err()
     );
 
     Ok(())

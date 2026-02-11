@@ -24,9 +24,7 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Arithmetic operations are only possible for numeric types"
-        ),
+        err_msg.contains("not allowed"),
         "Error message should indicate invalid arithmetic: {}",
         err_msg
     );
@@ -53,9 +51,7 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Arithmetic operations are only possible for numeric types"
-        ),
+        err_msg.contains("not allowed"),
         "Error message should indicate invalid arithmetic: {}",
         err_msg
     );

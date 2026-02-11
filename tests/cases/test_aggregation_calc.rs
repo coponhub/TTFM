@@ -68,10 +68,13 @@ fn test_aggregation_with_unknown_tag_arithmetic() -> anyhow::Result<()> {
     // TRY_CAST(NULL AS DOUBLE) + 1 = NULL となるはず
     let query = "sum(unknown_tag: + 1)";
     let res = fm.search(query, Default::default())?;
-    
+
     // 結果は NULL (name = "NULL")
-    assert_eq!(res.results[0].name, "NULL", "sum of unknown tag + 1 should be NULL");
-    
+    assert_eq!(
+        res.results[0].name, "NULL",
+        "sum of unknown tag + 1 should be NULL"
+    );
+
     // type タグが numeric であることを確認
     let type_tag = res.results[0]
         .tags
@@ -79,7 +82,11 @@ fn test_aggregation_with_unknown_tag_arithmetic() -> anyhow::Result<()> {
         .iter()
         .find(|t| t.label.tag_type().as_str() == "type")
         .map(|t| t.label.as_str());
-    assert_eq!(type_tag.as_deref(), Some("numeric"), "type should be 'numeric' for NULL aggregation result");
+    assert_eq!(
+        type_tag.as_deref(),
+        Some("numeric"),
+        "type should be 'numeric' for NULL aggregation result"
+    );
 
     Ok(())
 }
@@ -102,9 +109,12 @@ fn test_aggregation_with_complex_expression() -> anyhow::Result<()> {
     // non_existant_tag は存在しないため NULL となり、比較や演算の結果も NULL となるはず
     let query = "sum((non_existant_tag: :> size:) & size:)";
     let res = fm.search(query, Default::default())?;
-    
+
     // 結果は NULL
-    assert_eq!(res.results[0].name, "NULL", "complex sum expression should be NULL");
+    assert_eq!(
+        res.results[0].name, "NULL",
+        "complex sum expression should be NULL"
+    );
 
     Ok(())
 }

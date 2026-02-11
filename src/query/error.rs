@@ -497,6 +497,32 @@ pub const PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION: &str =
 pub const PARENTHESIZED_EXPR_IN_COMPARISON_MUST_RETURN_PROJECTION: &str =
     "Parenthesized expression '(...)' in comparison or arithmetic context must return a Projection";
 
+// =========================================================================
+// Lens Resolver Errors
+// =========================================================================
+
+pub const ARITHMETIC_STRING_UNSUPPORTED: &str =
+    "Unsupported arithmetic operation for String (only '+' and '*' are allowed)";
+pub const ARITHMETIC_MIXED_TYPES: &str =
+    "Arithmetic between String and non-String is not allowed";
+pub const AGGREGATION_STRING_UNSUPPORTED: &str =
+    "Unsupported aggregation for String type";
+
+pub fn unsupported_string_arithmetic(op: &str) -> anyhow::Error {
+    anyhow::anyhow!("{}: '{}'", ARITHMETIC_STRING_UNSUPPORTED, op)
+}
+
+pub fn unsupported_mixed_type_arithmetic(
+    left: &str,
+    right: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!("{}: {} and {}", ARITHMETIC_MIXED_TYPES, left, right)
+}
+
+pub fn unsupported_string_aggregation(op: &str) -> anyhow::Error {
+    anyhow::anyhow!("{}: '{}'", AGGREGATION_STRING_UNSUPPORTED, op)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

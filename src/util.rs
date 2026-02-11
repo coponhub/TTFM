@@ -24,7 +24,10 @@ pub fn get_db_coltype(s: &str) -> &'static str {
         || s.contains("time")
     {
         "numeric"
-    } else if s.contains("varchar") || s.contains("text") || s.contains("string") {
+    } else if s.contains("varchar")
+        || s.contains("text")
+        || s.contains("string")
+    {
         "string"
     } else {
         "numeric"

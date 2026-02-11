@@ -162,7 +162,11 @@ impl<'a> Fetcher<'a> {
             None => LabelValue::Null,
         };
 
-        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, label_val.as_display_name());
+        let mut res = SearchResult::new_empty(
+            id,
+            ItemKind::Volatile,
+            label_val.as_display_name(),
+        );
 
         // 正確な型情報を型付きタグとして注入する
         use crate::types::{Label, LabelValue, TagType};

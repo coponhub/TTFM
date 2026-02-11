@@ -21,10 +21,14 @@ fn test_volatile_item_typed_tags_integer() -> anyhow::Result<()> {
     assert_eq!(res.results[0].name, "123");
 
     // "type" タグが "integer" であることを確認
-    assert!(res.results[0].get_all_values("type").contains(&"integer".to_string()));
+    assert!(res.results[0]
+        .get_all_values("type")
+        .contains(&"integer".to_string()));
     // "value" タグが "123" であることを確認
-    assert!(res.results[0].get_all_values("value").contains(&"123".to_string()));
-    
+    assert!(res.results[0]
+        .get_all_values("value")
+        .contains(&"123".to_string()));
+
     Ok(())
 }
 
@@ -43,16 +47,22 @@ fn test_volatile_item_typed_tags_double() -> anyhow::Result<()> {
     fm.index_directory(&src_dir, None::<&fn(usize)>, false)?;
 
     // avg((name:a.txt | name:b.txt) & size:) -> 150.0
-    let res = fm.search("avg((name:a.txt | name:b.txt) & size:)", Default::default())?;
+    let res = fm
+        .search("avg((name:a.txt | name:b.txt) & size:)", Default::default())?;
 
     assert_eq!(res.results.len(), 1);
     assert!(res.results[0].name.contains("150"));
 
     // "type" タグが "double" であることを確認
-    assert!(res.results[0].get_all_values("type").contains(&"double".to_string()));
+    assert!(res.results[0]
+        .get_all_values("type")
+        .contains(&"double".to_string()));
     // "value" タグが "150" を含むことを確認
-    assert!(res.results[0].get_all_values("value").iter().any(|v| v.contains("150")));
-    
+    assert!(res.results[0]
+        .get_all_values("value")
+        .iter()
+        .any(|v| v.contains("150")));
+
     Ok(())
 }
 
@@ -70,13 +80,16 @@ fn test_volatile_item_typed_tags_boolean() -> anyhow::Result<()> {
     fm.index_directory(&src_dir, None::<&fn(usize)>, false)?;
 
     // sum(name:a.txt & size:) == 100 -> TRUE
-    let res = fm.search("sum(name:a.txt & size:) == 100", Default::default())?;
+    let res =
+        fm.search("sum(name:a.txt & size:) == 100", Default::default())?;
 
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].name, "TRUE");
 
     // "type" タグが "boolean" であることを確認
-    assert!(res.results[0].get_all_values("type").contains(&"boolean".to_string()));
+    assert!(res.results[0]
+        .get_all_values("type")
+        .contains(&"boolean".to_string()));
     // "value" タグが "true" (または TRUE) であることを確認
     let vals = res.results[0].get_all_values("value");
     assert!(vals.iter().any(|v| v.to_lowercase() == "true"));

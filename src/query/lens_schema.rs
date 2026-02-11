@@ -44,7 +44,10 @@ impl StorageMapping {
 
 pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_type.contains('*') || tag_type.contains('?') || tag_type.contains('[') {
+    if tag_type.contains('*')
+        || tag_type.contains('?')
+        || tag_type.contains('[')
+    {
         tag_op = BinOper::Custom("GLOB");
     }
     Expr::col(crate::db::Col::Type).binary(tag_op, tag_type)
@@ -76,9 +79,10 @@ pub(crate) fn build_column_condition(
             sql_type,
             is_generic_row_col,
         ),
-        crate::types::LabelValue::Double(bits) => {
-            Condition::any().add(Expr::col(Col::LabelDouble).binary(bin_op, Expr::val(f64::from_bits(bits))))
-        }
+        crate::types::LabelValue::Double(bits) => Condition::any().add(
+            Expr::col(Col::LabelDouble)
+                .binary(bin_op, Expr::val(f64::from_bits(bits))),
+        ),
         crate::types::LabelValue::Null => {
             Condition::any().add(Expr::col(Col::LabelStr).is_null())
         }

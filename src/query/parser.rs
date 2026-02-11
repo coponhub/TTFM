@@ -48,6 +48,11 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
     match pair.as_rule() {
+        Rule::bare_calculation_query => {
+            let inner = pair.into_inner().next().unwrap();
+            let calc = build_calculation(inner)?;
+            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+        }
         Rule::comparison => build_comparison(pair),
         Rule::typed_tag => build_typed_tag(pair),
         Rule::projection => build_projection(pair),

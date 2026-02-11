@@ -17,8 +17,8 @@
 //! ```
 
 use crate::query::ast::{
-    AggregationNode, CalculationNode, ComparisonNode, ComparisonOp, Operand,
-    QueryNode,
+    AggregationNode, ArithmeticOp, CalculationNode, ComparisonNode,
+    ComparisonOp, Operand, QueryNode,
 };
 use crate::query::error;
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
@@ -213,13 +213,40 @@ pub fn validate_calculation(
     let left_type = infer_type(&calc.left, schema)?;
     let right_type = infer_type(&calc.right, schema)?;
 
-    // Any 型はカスタムタグ（width:, height: など）を許容するために数値として扱う
-    // 実際の型チェックはデータベース実行時に行われる
-    let left_ok = left_type.is_numeric() || left_type == LogicalType::Any;
-    let right_ok = right_type.is_numeric() || right_type == LogicalType::Any;
+    let left_is_str = left_type == LogicalType::String;
+    let right_is_str = right_type == LogicalType::String;
 
-    if !left_ok || !right_ok {
-        bail!(error::ARITHMETIC_ONLY_NUMERIC);
+    // String と non-String の混合演算はエラー
+    if left_is_str != right_is_str {
+        return Err(error::unsupported_mixed_type_arithmetic(
+            if left_is_str { "String" } else { "non-String" },
+            if right_is_str { "String" } else { "non-String" },
+        )
+        .into());
+    }
+
+    if left_is_str && right_is_str {
+        // String 同士の場合、+ と * のみ許可
+        if !matches!(
+            calc.op,
+            crate::query::ast::ArithmeticOp::Add
+                | crate::query::ast::ArithmeticOp::Mul
+        ) {
+            return Err(error::unsupported_string_arithmetic(&format!(
+                "{:?}",
+                calc.op
+            ))
+            .into());
+        }
+    } else {
+        // 数値演算の場合
+        let left_ok = left_type.is_numeric() || left_type == LogicalType::Any;
+        let right_ok =
+            right_type.is_numeric() || right_type == LogicalType::Any;
+
+        if !left_ok || !right_ok {
+            bail!(error::ARITHMETIC_ONLY_NUMERIC);
+        }
     }
     Ok(())
 }
@@ -367,6 +394,19 @@ fn try_rewrite_filtered_calculation(
 ///
 /// 注: Comparison, TypedTag, ColumnMatch は意味的にアイテム集合を返すため、
 /// 集合演算と組み合わせた場合の動作は TypedTag と同様に扱う。
+/// クエリノードから再帰的にプロジェクションのオペランドを探します
+fn find_projection_operand(node: &QueryNode) -> Option<&Operand> {
+    match node {
+        QueryNode::Projection(op) => Some(op),
+        QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+            nodes.iter().find_map(find_projection_operand)
+        }
+        QueryNode::Difference(l, _) => find_projection_operand(l),
+        QueryNode::Complement(c) => find_projection_operand(c),
+        _ => None,
+    }
+}
+
 fn returns_projection(node: &QueryNode) -> bool {
     match node {
         QueryNode::Projection(_) => true,
@@ -402,6 +442,9 @@ fn expand_operand(
                 Ok(Operand::Literal(crate::types::Label::from(true)))
             } else if s == "false" {
                 Ok(Operand::Literal(crate::types::Label::from(false)))
+            } else if let Some(bytes) = crate::util::parse_size(&s) {
+                // サイズ単位付きリテラル ("1M", "10TB" 等) を数値に正規化
+                Ok(Operand::Literal(crate::types::Label::from(bytes)))
             } else {
                 Ok(Operand::Literal(label))
             }
@@ -409,7 +452,7 @@ fn expand_operand(
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
         Operand::Calculation(calc) => {
             let expanded = expand_calculation(schema, *calc)?;
-            Ok(Operand::Calculation(Box::new(expanded)))
+            Ok(try_fold_calculation(expanded))
         }
         Operand::Aggregation(agg) => {
             let expanded = expand_aggregation(schema, *agg)?;
@@ -430,6 +473,7 @@ fn expand_operand(
 }
 
 /// 算術演算ノードを論理展開します。
+/// 両辺がリテラルの場合は定数畳み込みを行い、結果のリテラルを返します。
 fn expand_calculation(
     schema: &impl LogicalSchema,
     calc: CalculationNode,
@@ -441,6 +485,132 @@ fn expand_calculation(
         op: calc.op,
         right,
     })
+}
+
+/// 両辺がリテラルの場合、算術演算を定数畳み込みして結果の Operand::Literal を返します。
+/// TagRef や Aggregation を含む場合は Operand::Calculation のまま返します。
+fn try_fold_calculation(calc: CalculationNode) -> Operand {
+    if let (Operand::Literal(left), Operand::Literal(right)) =
+        (&calc.left, &calc.right)
+    {
+        if let Some(result) = fold_literal_arithmetic(left, calc.op, right) {
+            return Operand::Literal(result);
+        }
+    }
+    Operand::Calculation(Box::new(calc))
+}
+
+/// リテラル同士の算術演算を計算します。
+fn fold_literal_arithmetic(
+    left: &crate::types::Label,
+    op: ArithmeticOp,
+    right: &crate::types::Label,
+) -> Option<crate::types::Label> {
+    use crate::types::LabelValue;
+
+    let lv = left.value();
+    let rv = right.value();
+
+    match (lv, rv) {
+        (LabelValue::Integer(l), LabelValue::Integer(r)) => {
+            let result = match op {
+                ArithmeticOp::Add => l.checked_add(r)?,
+                ArithmeticOp::Sub => l.checked_sub(r)?,
+                ArithmeticOp::Mul => l.checked_mul(r)?,
+                ArithmeticOp::Div => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_div(r)?
+                }
+                ArithmeticOp::Mod => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.checked_rem(r)?
+                }
+            };
+            Some(crate::types::Label::from(result))
+        }
+        (LabelValue::Double(l_bits), LabelValue::Double(r_bits)) => {
+            let l = f64::from_bits(l_bits);
+            let r = f64::from_bits(r_bits);
+            let result = match op {
+                ArithmeticOp::Add => l + r,
+                ArithmeticOp::Sub => l - r,
+                ArithmeticOp::Mul => l * r,
+                ArithmeticOp::Div => l / r,
+                ArithmeticOp::Mod => l % r,
+            };
+            Some(double_label(result))
+        }
+        (LabelValue::Integer(l), LabelValue::Double(r_bits)) => {
+            let r = f64::from_bits(r_bits);
+            let result = match op {
+                ArithmeticOp::Add => (l as f64) + r,
+                ArithmeticOp::Sub => (l as f64) - r,
+                ArithmeticOp::Mul => (l as f64) * r,
+                ArithmeticOp::Div => (l as f64) / r,
+                ArithmeticOp::Mod => (l as f64) % r,
+            };
+            Some(double_label(result))
+        }
+        (LabelValue::Double(l_bits), LabelValue::Integer(r)) => {
+            let l = f64::from_bits(l_bits);
+            let result = match op {
+                ArithmeticOp::Add => l + (r as f64),
+                ArithmeticOp::Sub => l - (r as f64),
+                ArithmeticOp::Mul => l * (r as f64),
+                ArithmeticOp::Div => l / (r as f64),
+                ArithmeticOp::Mod => l % (r as f64),
+            };
+            Some(double_label(result))
+        }
+        (LabelValue::Boolean(l), LabelValue::Boolean(r)) => {
+            // Boolean は FALSE=0, TRUE=1 として計算、結果は Integer
+            let li = if l { 1i64 } else { 0 };
+            let ri = if r { 1i64 } else { 0 };
+            let result = match op {
+                ArithmeticOp::Add => li + ri,
+                ArithmeticOp::Sub => li - ri,
+                ArithmeticOp::Mul => li * ri,
+                ArithmeticOp::Div => {
+                    if ri == 0 {
+                        return None;
+                    }
+                    li / ri
+                }
+                ArithmeticOp::Mod => {
+                    if ri == 0 {
+                        return None;
+                    }
+                    li % ri
+                }
+            };
+            Some(crate::types::Label::from(result))
+        }
+        (LabelValue::String(l), LabelValue::String(r))
+        | (LabelValue::Literal(l), LabelValue::Literal(r))
+        | (LabelValue::String(l), LabelValue::Literal(r))
+        | (LabelValue::Literal(l), LabelValue::String(r)) => match op {
+            ArithmeticOp::Add => {
+                Some(crate::types::Label::from(format!("{}, {}", l, r)))
+            }
+            ArithmeticOp::Mul => {
+                Some(crate::types::Label::from(format!("{}{}", l, r)))
+            }
+            _ => None, // -, / はバリデーションで弾かれているはず
+        },
+        _ => None,
+    }
+}
+
+/// f64 値を Label に変換するヘルパー
+fn double_label(v: f64) -> crate::types::Label {
+    Label::Other(
+        TagType::Custom(String::new()),
+        LabelValue::Double(v.to_bits()),
+    )
 }
 
 /// 集約ノードを論理展開します。
@@ -473,9 +643,26 @@ fn infer_type(
         Operand::TypeRef(tag_type) => Ok(schema.get_logical_type(tag_type)),
         Operand::Calculation(calc) => {
             validate_calculation(calc, schema)?;
-            Ok(LogicalType::Integer) // 暫定：演算結果は一旦数値
+            let left_type = infer_type(&calc.left, schema)?;
+            let right_type = infer_type(&calc.right, schema)?;
+            if left_type == LogicalType::String && right_type == LogicalType::String {
+                Ok(LogicalType::String)
+            } else {
+                Ok(LogicalType::Integer) // 暫定：数値演算結果は一旦整数扱い
+            }
         }
-        Operand::Aggregation(_) => Ok(LogicalType::Integer),
+        Operand::Aggregation(agg) => match &**agg {
+            AggregationNode::Count(_) => Ok(LogicalType::Integer),
+            AggregationNode::Arithmetic { inner, .. } => {
+                // inner の中からプロジェクションを探して型を推論
+                if let Some(op) = find_projection_operand(inner) {
+                    infer_type(op, schema)
+                } else {
+                    // プロジェクションがない場合は数値扱い（通常は集計エラーだが型推論としては Integer）
+                    Ok(LogicalType::Integer)
+                }
+            }
+        },
         Operand::Query(node) => {
             // 括弧で囲まれた式の型を推論
             // Projection を返す必要がある (returns_projection でチェック済み)
@@ -570,7 +757,7 @@ mod tests {
         let result = expand_query_node(&lens, node);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains(
-            "Arithmetic operations are only possible for numeric types"
+            "not allowed"
         ));
     }
 
@@ -585,13 +772,23 @@ mod tests {
         };
         assert!(validate_calculation(&calc_ok, &lens).is_ok());
 
-        // path + 100 (String + Integer) -> Err
+        // path + "abc" (String + String) -> OK (Phase 3)
+        let calc_str = CalculationNode {
+            left: Operand::TypeRef(TagType::from("path")),
+            op: crate::query::ast::ArithmeticOp::Add,
+            right: Operand::Literal(crate::types::Label::from("abc")),
+        };
+        assert!(validate_calculation(&calc_str, &lens).is_ok());
+
+        // path + 100 (String + Integer) -> Err (Mixed)
         let calc_err = CalculationNode {
             left: Operand::TypeRef(TagType::from("path")),
             op: crate::query::ast::ArithmeticOp::Add,
             right: Operand::Literal(crate::types::Label::from(100i64)),
         };
-        assert!(validate_calculation(&calc_err, &lens).is_err());
+        let res = validate_calculation(&calc_err, &lens);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("not allowed"));
 
         // is_dir + 1 (Boolean + Integer) -> OK
         let calc_bool = CalculationNode {
@@ -644,5 +841,50 @@ mod tests {
                 expanded
             );
         }
+    }
+
+    #[test]
+    fn test_fold_pure_literal_calculation() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::Label;
+
+        let lens = Lens::base_standard();
+
+        // (1 + 2) → Literal(3)
+        let calc = CalculationNode {
+            left: Operand::Literal(Label::from(3i64)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(2i64)),
+        };
+        let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
+        let expanded = expand_query_node(&lens, node).unwrap();
+        // 畳み込みにより Projection(Literal(5)) になるはず
+        match expanded {
+            QueryNode::Projection(Operand::Literal(l)) => {
+                assert_eq!(l.as_i64(), 5);
+            }
+            _ => panic!("Expected Projection(Literal), got {:?}", expanded),
+        }
+    }
+
+    #[test]
+    fn test_fold_literal_calculation_preserves_tag_ref() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::{Label, TagType};
+
+        let lens = Lens::base_standard();
+
+        // (size: + 1) → Calculation は残る (TagRef を含むので畳み込めない)
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::from("size")),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(Label::from(1i64)),
+        };
+        let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
+        let expanded = expand_query_node(&lens, node).unwrap();
+        assert!(matches!(
+            expanded,
+            QueryNode::Projection(Operand::Calculation(_))
+        ));
     }
 }

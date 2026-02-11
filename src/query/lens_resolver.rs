@@ -21,7 +21,7 @@
 use crate::db::{Col, SqlType};
 use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{Label, SType, TagType};
+use crate::types::{Label, LabelValue, SType, TagType};
 use anyhow::{bail, Result};
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
 
@@ -95,8 +95,13 @@ pub enum ResolvedNode {
         right_storage: StorageMapping,
         right_sql_type: SqlType,
     },
+    /// リテラル同士のスカラー比較 (例: 10 > 2)
+    ScalarMatch {
+        left: Label,
+        op: ComparisonOp,
+        right: Label,
+    },
 }
-
 #[derive(Debug, PartialEq, Clone)]
 pub enum ResolvedAggregationNode {
     Count(Box<ResolvedNode>),
@@ -104,6 +109,18 @@ pub enum ResolvedAggregationNode {
         op: crate::query::ast::ArithmeticAggOp,
         inner: Box<ResolvedNode>,
     },
+}
+
+impl ResolvedAggregationNode {
+    pub fn is_string_type(&self) -> bool {
+        match self {
+            ResolvedAggregationNode::Count(_) => false,
+            ResolvedAggregationNode::Arithmetic { inner, .. } => {
+                let (_, _, operand) = inner.extract_agg_parts();
+                operand.map(|op| op.is_string_type()).unwrap_or(false)
+            }
+        }
+    }
 }
 
 /// 算術演算のオペランド（解決済み）
@@ -150,6 +167,41 @@ impl ResolvedOperand {
             }
             ResolvedOperand::Calculation(calc) => calc.contains_row_tag(),
             _ => false,
+        }
+    }
+
+    /// タグ参照を含まない純粋なスカラー式かどうかを判定します。
+    /// リテラルと集約関数のみで構成される場合に true を返します。
+    pub fn is_pure_scalar(&self) -> bool {
+        match self {
+            ResolvedOperand::Literal(_) | ResolvedOperand::Aggregation(_) => {
+                true
+            }
+            ResolvedOperand::Calculation(calc) => {
+                calc.left.is_pure_scalar() && calc.right.is_pure_scalar()
+            }
+            ResolvedOperand::TagRef { .. } => false,
+        }
+    }
+
+    /// 文字列型かどうかを判定します。
+    pub fn is_string_type(&self) -> bool {
+        match self {
+            ResolvedOperand::Literal(label) => matches!(
+                label.value(),
+                LabelValue::String(_) | LabelValue::Literal(_)
+            ),
+            ResolvedOperand::TagRef {
+                tag_type, sql_type, ..
+            } => {
+                // 標準タグ (Base) の VARCHAR は確実に文字列として扱う。
+                // カスタムタグ (Custom) は、暗黙の数値演算を許容するため、ここでの文字列判定からは除外する。
+                !matches!(tag_type, TagType::Custom(_)) && matches!(sql_type, SqlType::VARCHAR)
+            }
+            ResolvedOperand::Calculation(calc) => {
+                calc.left.is_string_type() && calc.right.is_string_type()
+            }
+            ResolvedOperand::Aggregation(agg) => agg.is_string_type(),
         }
     }
 }
@@ -214,7 +266,8 @@ impl ResolvedNode {
             | ResolvedNode::AggregationCalculationMatch { .. }
             | ResolvedNode::AggregationAggregationMatch { .. }
             | ResolvedNode::AggregationTagMatch { .. }
-            | ResolvedNode::TagTagMatch { .. } => {
+            | ResolvedNode::TagTagMatch { .. }
+            | ResolvedNode::ScalarMatch { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
                 // 連結用には Condition::any() を返しておく。
@@ -226,17 +279,34 @@ impl ResolvedNode {
     /// このノードが投影（Projection）を目的としている場合、その対象の型を返します。
     pub fn get_projection(&self) -> Option<TagType> {
         match self {
-            ResolvedNode::Projection(op) => match op {
-                ResolvedOperand::TagRef { tag_type, .. } => {
-                    Some(tag_type.clone())
-                }
-                _ => None,
-            },
+            ResolvedNode::Projection(op) => extract_tag_type_from_operand(op),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
             }
             ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
                 l.get_projection()
+            }
+            _ => None,
+        }
+    }
+
+    /// Projection が Calculation を含むかどうか（ラベルグループ取得時に使用）
+    pub fn get_projection_operand(&self) -> Option<&ResolvedOperand> {
+        match self {
+            ResolvedNode::Projection(op) => Some(op),
+            _ => None,
+        }
+    }
+
+    /// ネストされた Projection を再帰的に探索して返します。
+    pub fn get_nested_projection(&self) -> Option<&ResolvedOperand> {
+        match self {
+            ResolvedNode::Projection(op) => Some(op),
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                nodes.iter().find_map(|n| n.get_nested_projection())
+            }
+            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+                l.get_nested_projection()
             }
             _ => None,
         }
@@ -250,45 +320,45 @@ impl ResolvedNode {
         Option<ResolvedNode>,
         Option<&ResolvedOperand>,
     ) {
-        match self {
-            ResolvedNode::Projection(op) => {
-                let storage = extract_storage_from_operand(op);
-                (storage, None, Some(op))
+        if let Some(op) = self.get_nested_projection() {
+            let storage = extract_storage_from_operand(op);
+
+            // 1. 自身が Projection の場合はフィルタなし
+            if matches!(self, ResolvedNode::Projection(_)) {
+                return (storage, None, Some(op));
             }
-            ResolvedNode::And(nodes) => self.extract_agg_parts_from_and(nodes),
-            other => (None, Some(other.clone()), None),
-        }
-    }
 
-    fn extract_agg_parts_from_and<'a>(
-        &self,
-        nodes: &'a [ResolvedNode],
-    ) -> (
-        Option<&'a StorageMapping>,
-        Option<ResolvedNode>,
-        Option<&'a ResolvedOperand>,
-    ) {
-        let mut storage = None;
-        let mut filter_nodes = Vec::with_capacity(nodes.len());
-        let mut operand = None;
+            // 2. And ノードの場合は、プロジェクションを含むノードを除外または部分的に除外
+            if let ResolvedNode::And(nodes) = self {
+                let mut filter_nodes = Vec::with_capacity(nodes.len());
+                let mut extracted = false;
 
-        for n in nodes {
-            match n {
-                ResolvedNode::Projection(op) if storage.is_none() => {
-                    storage = extract_storage_from_operand(op);
-                    operand = Some(op);
+                for n in nodes {
+                    if !extracted && n.get_nested_projection().is_some() {
+                        // このノード内にプロジェクションがある
+                        let (_, inner_filter, _) = n.extract_agg_parts();
+                        if let Some(f) = inner_filter {
+                            filter_nodes.push(f);
+                        }
+                        extracted = true;
+                    } else {
+                        filter_nodes.push(n.clone());
+                    }
                 }
-                _ => filter_nodes.push(n.clone()),
+
+                let final_filter = match filter_nodes.len() {
+                    0 => None,
+                    1 => Some(filter_nodes[0].clone()),
+                    _ => Some(ResolvedNode::And(filter_nodes)),
+                };
+                return (storage, final_filter, Some(op));
             }
+
+            // 3. その他（通常はここには来ないが、Or など）は自身をフィルタとして返す
+            (storage, Some(self.clone()), Some(op))
+        } else {
+            (None, Some(self.clone()), None)
         }
-
-        let filter = match filter_nodes.len() {
-            0 => None,
-            1 => Some(filter_nodes[0].clone()),
-            _ => Some(ResolvedNode::And(filter_nodes)),
-        };
-
-        (storage, filter, operand)
     }
 
     /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
@@ -297,7 +367,8 @@ impl ResolvedNode {
             ResolvedNode::AggregationMatch { .. }
             | ResolvedNode::AggregationCalculationMatch { .. }
             | ResolvedNode::AggregationAggregationMatch { .. }
-            | ResolvedNode::AggregationTagMatch { .. } => true,
+            | ResolvedNode::AggregationTagMatch { .. }
+            | ResolvedNode::ScalarMatch { .. } => true,
             ResolvedNode::TagCalculationMatch { calc, .. }
             | ResolvedNode::CalculationMatch { calc, .. } => {
                 calc.contains_aggregation()
@@ -311,6 +382,18 @@ impl ResolvedNode {
             ResolvedNode::Complement(c) => c.is_boolean_result(),
             _ => false,
         }
+    }
+}
+
+/// ResolvedOperand から再帰的に最初の TagRef の TagType を抽出するヘルパー
+fn extract_tag_type_from_operand(op: &ResolvedOperand) -> Option<TagType> {
+    match op {
+        ResolvedOperand::TagRef { tag_type, .. } => Some(tag_type.clone()),
+        ResolvedOperand::Calculation(calc) => {
+            extract_tag_type_from_operand(&calc.left)
+                .or_else(|| extract_tag_type_from_operand(&calc.right))
+        }
+        _ => None,
     }
 }
 
@@ -363,7 +446,9 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
     let val = match label.value() {
         crate::types::LabelValue::Integer(i) => Expr::val(i),
         crate::types::LabelValue::Boolean(b) => Expr::val(b),
-        crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)),
+        crate::types::LabelValue::Double(bits) => {
+            Expr::val(f64::from_bits(bits))
+        }
         crate::types::LabelValue::Null => Expr::val(None::<i32>),
         crate::types::LabelValue::String(s)
         | crate::types::LabelValue::Literal(s) => Expr::val(s),
@@ -374,7 +459,10 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
 
 fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_type.contains('*') || tag_type.contains('?') || tag_type.contains('[') {
+    if tag_type.contains('*')
+        || tag_type.contains('?')
+        || tag_type.contains('[')
+    {
         tag_op = BinOper::Custom("GLOB");
     }
     Expr::col(Col::Type).binary(tag_op, tag_type)
@@ -432,11 +520,43 @@ fn resolve_calculation_node(
     lens: &Lens,
     calc: &crate::query::ast::CalculationNode,
 ) -> Result<ResolvedCalculationNode> {
+    let left = resolve_operand(lens, &calc.left)?;
+    let right = resolve_operand(lens, &calc.right)?;
+    validate_calculation_types(&left, &right, calc.op)?;
     Ok(ResolvedCalculationNode {
-        left: resolve_operand(lens, &calc.left)?,
+        left,
         op: calc.op,
-        right: resolve_operand(lens, &calc.right)?,
+        right,
     })
+}
+
+/// 算術演算の型バリデーション（共通関数）
+fn validate_calculation_types(
+    left: &ResolvedOperand,
+    right: &ResolvedOperand,
+    op: crate::query::ast::ArithmeticOp,
+) -> Result<()> {
+    use crate::query::ast::ArithmeticOp;
+
+    let left_is_str = left.is_string_type();
+    let right_is_str = right.is_string_type();
+
+    // String と non-String の混合演算はエラー
+    if left_is_str != right_is_str {
+        return Err(crate::query::error::unsupported_mixed_type_arithmetic(
+            if left_is_str { "String" } else { "non-String" },
+            if right_is_str { "String" } else { "non-String" },
+        ));
+    }
+
+    // String 同士の場合、+ と * のみ許可
+    if left_is_str && right_is_str && !matches!(op, ArithmeticOp::Add | ArithmeticOp::Mul) {
+        return Err(crate::query::error::unsupported_string_arithmetic(
+            &format!("{:?}", op),
+        ));
+    }
+
+    Ok(())
 }
 
 fn resolve_aggregation_node(
@@ -556,7 +676,7 @@ pub(crate) fn resolve_calculation(
 ) -> Result<ResolvedCalculationNode> {
     let left = resolve_operand_for_calc(lens, calc.left)?;
     let right = resolve_operand_for_calc(lens, calc.right)?;
-
+    validate_calculation_types(&left, &right, calc.op)?;
     Ok(ResolvedCalculationNode {
         left,
         op: calc.op,
@@ -761,6 +881,10 @@ fn resolve_single_match(
                 right_sql_type: tr,
             })
         }
+        // 10 > 2 (リテラル同士のスカラー比較)
+        (Operand::Literal(left), Operand::Literal(right)) => {
+            Ok(ResolvedNode::ScalarMatch { left, op, right })
+        }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
     }
 }
@@ -883,7 +1007,7 @@ impl Resolver {
                 Some(ResolvedOperand::Aggregation(agg.clone()))
             }
             ResolvedNode::Projection(op) => {
-                if op.contains_aggregation() {
+                if op.contains_aggregation() || op.is_pure_scalar() {
                     Some(op.clone())
                 } else {
                     None
@@ -1275,5 +1399,80 @@ mod tests {
         assert!(filter.is_none());
         assert!(res_op.is_some());
         assert_eq!(res_op.unwrap(), &operand);
+    }
+
+    #[test]
+    fn test_validate_calculation_types_string_sub_rejected() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::Label;
+
+        let left = ResolvedOperand::Literal(Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("a".into()),
+        ));
+        let right = ResolvedOperand::Literal(Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("b".into()),
+        ));
+
+        let result =
+            validate_calculation_types(&left, &right, ArithmeticOp::Sub);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported arithmetic"));
+    }
+
+    #[test]
+    fn test_validate_calculation_types_mixed_type_rejected() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::Label;
+
+        let left = ResolvedOperand::Literal(Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("a".into()),
+        ));
+        let right = ResolvedOperand::Literal(Label::from(1i64));
+
+        let result =
+            validate_calculation_types(&left, &right, ArithmeticOp::Add);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("String and non-String"));
+    }
+
+    #[test]
+    fn test_validate_calculation_types_string_add_allowed() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::Label;
+
+        let left = ResolvedOperand::Literal(Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("a".into()),
+        ));
+        let right = ResolvedOperand::Literal(Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("b".into()),
+        ));
+
+        let result =
+            validate_calculation_types(&left, &right, ArithmeticOp::Add);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_calculation_types_int_sub_allowed() {
+        use crate::query::ast::ArithmeticOp;
+        use crate::types::Label;
+
+        let left = ResolvedOperand::Literal(Label::from(10i64));
+        let right = ResolvedOperand::Literal(Label::from(5i64));
+
+        let result =
+            validate_calculation_types(&left, &right, ArithmeticOp::Sub);
+        assert!(result.is_ok());
     }
 }

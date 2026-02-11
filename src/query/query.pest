@@ -2,7 +2,12 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 // --- Main entry point ---
-query = { SOI ~ expr ~ EOI }
+// Try expr (set operations) first to handle ambiguities like "(set) - (set)" correctly.
+// bare_calculation_query is fallback for top-level arithmetic like "1 + 2".
+// IMPORTANT: EOI must be inside the choice to force backtracking if expr matches but doesn't consume all input (e.g. "1 + 2").
+query = { SOI ~ ( (expr ~ EOI) | (bare_calculation_query ~ EOI) ) }
+
+bare_calculation_query = { calculation_inner }
 
 // --- Set operations (Pratt Parser) ---
 // DESIGN.md: Spaces are REQUIRED around set operators
@@ -51,8 +56,8 @@ label_comparison = ${
 
 // Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
 // DESIGN.md:71 - Label equality uses single "=" not "=="
-label_op = ${ colon ~ label_basic_op ~ WHITESPACE* ~ operand }
-label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE* ~ (type_ref | calculation) }
+label_op = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ operand }
+label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ (type_ref | calculation) }
 
 // Stuck operator: ^, ^=, >, >=, <, <= (NO equality operator)
 // DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
@@ -71,14 +76,14 @@ stuck_basic_op = @{ "<=" | ">=" | "^" | ">" | "<" }
 // Scalar comparison: scalar-only operand followed by scalar-style operator
 // Note: projection (type_ref) is NOT allowed in scalar_operand.
 // Calculations containing projections must use label comparison.
-scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE* ~ scalar_operand)+ }
+scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE+ ~ scalar_operand)+ }
 
 scalar_operand = { aggregation | scalar_calculation | label }
 
 // Scalar-only calculation: does NOT allow type_ref (projections)
 // This ensures "(1 + 2) > 3" is valid but "(size: + 1) > 3" is rejected
 scalar_calculation = { "(" ~ scalar_calculation_inner ~ ")" }
-scalar_calculation_inner = { scalar_operand_calc ~ (arith_op ~ scalar_operand_calc)+ }
+scalar_calculation_inner = ${ scalar_operand_calc ~ (arith_op ~ scalar_operand_calc)+ }
 scalar_operand_calc = { aggregation | label | scalar_calculation }
 
 // Scalar comparison operators: == for equality
@@ -128,7 +133,7 @@ unquoted_tag_string = @{
 bare_calculation = { calculation_inner ~ &")" }
 
 calculation = { "(" ~ calculation_inner ~ ")" }
-calculation_inner = { operand_calc ~ (arith_op ~ operand_calc)+ }
+calculation_inner = ${ operand_calc ~ (arith_op ~ operand_calc)+ }
 arith_op = @{ WHITESPACE+ ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)

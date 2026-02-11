@@ -16,14 +16,14 @@
         - `&`: 積集合 (Intersection)
         - `|`: 和集合 (Union)
         - `-`: 差集合 (Difference)
-        - 例: `type:file & project:ttfm`
+        - 例: `extension:rs & project:ttfm`
     - **演算対象 (Operand)**:
         - TypedTag
         - Projection:
     - **演算子の優先順位**: 
         - `&` > `|` = `-`
     - **ルール**
-    - 演算子とオペランドの間にはスペースを入れなければならない。　`type:file&project:ttfm` のような記載は集合演算と見なされない
+    - 演算子とオペランドの間にはスペースを入れなければならない。　`extension:rs&project:ttfm` のような記載は集合演算と見なされない
     - `Projection:` 同士の差集合については `-:` と記載する(算術演算と区別するため)
 - **集約 (Aggregation)**:
     - 形式: `[aggregator]([query])`
@@ -100,11 +100,12 @@
     - **ルール**:
         - projectionの演算では各アイテムのタグのプロジェクション同士の演算となる
         - 算術演算は括弧で囲まなければならない。
-            - ただし、同じレベルの`()`内に算術演算子以外の演算子が無い場合は括弧を省略できる
+            - ただし、同じレベルの`()`内(一番外側の場合も含む)に算術演算子以外の演算子が無い場合は括弧を省略できる
             - 例: 
                 - `(1 - 2) :> size:` OK
                 - `1 - 2 :> size:` NG
                 - `size: - 2 & project:A` NG
+                - `1 - 2` OK
                 - `sum(size: - 2B)` OK
                 - `sum(size: - 10TB :> 10TB)` NG
                 - `sum((size: - 10TB) :> 10TB)` OK

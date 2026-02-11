@@ -317,11 +317,21 @@ pub enum Label {
 }
 
 /// Label が保持する生の値の種類。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, strum::Display, strum::IntoStaticStr)]
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Clone,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum LabelValue {
     String(String),
-    Integer(i64), // -> "integer"
+    Integer(i64),  // -> "integer"
     Boolean(bool), // -> "boolean"
     Double(u64),   // -> "double" (f64::to_bits() で保持)
     Null,          // -> "null"
@@ -496,10 +506,7 @@ impl From<&str> for Label {
 
 impl From<bool> for Label {
     fn from(b: bool) -> Self {
-        Label::Other(
-            TagType::Custom(String::new()),
-            LabelValue::Boolean(b),
-        )
+        Label::Other(TagType::Custom(String::new()), LabelValue::Boolean(b))
     }
 }
 

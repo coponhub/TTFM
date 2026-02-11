@@ -1,6 +1,4 @@
 use crate::db::{Col, Tbl};
-use crate::query::ast::ArithmeticAggOp::*;
-use crate::query::ast::ArithmeticOp::*;
 use crate::query::ast::{
     ArithmeticAggOp, ArithmeticOp, ComparisonNode, ComparisonOp, Operand,
     QueryNode,
@@ -238,6 +236,20 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             stmt
         }
+        ResolvedNode::ScalarMatch { left, op, right } => {
+            // リテラル同士のスカラー比較: is_boolean_result() 経由で
+            // build_boolean_sql が使われるため通常ここには到達しないが、
+            // wrap_boolean_collider 等から呼ばれる場合に備える。
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.column(Col::ItemId);
+            let bin_op = to_bin_op(*op);
+            let cond = Expr::expr(label_to_unit_aware_expr(left))
+                .binary(bin_op, label_to_unit_aware_expr(right));
+            stmt.cond_where(cond);
+            stmt.limit(1);
+            stmt
+        }
     }
 }
 
@@ -260,10 +272,12 @@ pub fn build_resolved_aggregation_sql(
             stmt.from(Alias::new(view));
             let (storage, cond, _) = inner.extract_agg_parts();
             let mut final_cond = Condition::all();
-            
+
             // tag_type を抽出（Count の場合も必要）
             let tag_type = match storage {
-                Some(StorageMapping::RowTag { tag_type: key, .. }) => Some(key.clone()),
+                Some(StorageMapping::RowTag { tag_type: key, .. }) => {
+                    Some(key.clone())
+                }
                 _ => None,
             };
 
@@ -275,7 +289,8 @@ pub fn build_resolved_aggregation_sql(
                 let mut sub = Query::select();
                 sub.column(Col::ItemId)
                     .from_subquery(pick_sql, Alias::new("sub"));
-                final_cond = final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
+                final_cond =
+                    final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
             }
 
             // 式の構築（Count 用）
@@ -284,10 +299,16 @@ pub fn build_resolved_aggregation_sql(
                 Some(StorageMapping::RowTag { column, .. }) => *column,
                 _ => Col::ItemId,
             };
-            stmt.expr_as(Expr::col(col).count_distinct(), Alias::new("scalar_value"));
+            stmt.expr_as(
+                Expr::col(col).count_distinct(),
+                Alias::new("scalar_value"),
+            );
             stmt.cond_where(final_cond);
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
+            let (_, _, operand) = inner.extract_agg_parts();
+            let is_string = operand.map(|o| o.is_string_type()).unwrap_or(false);
+
             // 重要: 同一アイテムに対して複数行がマッチする場合、単純な SUM だと重複加算される。
             let sub = build_deduplicated_agg_subquery(inner, view);
             let sub_alias = Alias::new("deduped_items");
@@ -296,6 +317,7 @@ pub fn build_resolved_aggregation_sql(
                 apply_arithmetic_agg(
                     op,
                     Expr::col(Alias::new("val")).into(),
+                    is_string,
                 ),
                 Alias::new("scalar_value"),
             );
@@ -349,7 +371,8 @@ fn build_deduplicated_agg_subquery(
     if let Some(filter_node) = cond {
         let pick_sql = build_pick_sql(&filter_node, view);
         let mut pick_sub = Query::select();
-        pick_sub.column(Col::ItemId)
+        pick_sub
+            .column(Col::ItemId)
             .from_subquery(pick_sql, Alias::new("psub"));
         sub_cond = sub_cond.add(Expr::col(Col::ItemId).in_subquery(pick_sub));
     }
@@ -409,7 +432,8 @@ pub(crate) fn build_resolved_aggregation_match_sql(
     if let Some(key) = tag_type {
         // RowTag の場合は実際の tag_type でフィルタする
         // エイリアス名 "type" との競合を避けるためテーブル名を明示
-        final_cond = final_cond.add(Expr::col((Alias::new(view), Col::Type)).eq(key));
+        final_cond =
+            final_cond.add(Expr::col((Alias::new(view), Col::Type)).eq(key));
     } else if let Some(_target_type) = _target_type {
         // 念のため: tag_type がなく target_type がある場合は何もしない
         // （物理カラムの場合は type フィルタ不要）
@@ -528,7 +552,8 @@ fn build_calculation_eav_expr(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_eav_expr(&calc.left);
     let right_expr = build_resolved_operand_eav_expr(&calc.right);
-    apply_arithmetic_op(&calc.op, left_expr, right_expr)
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
 }
 
 /// EAV 構造用のオペランドを集約式として構築します。
@@ -565,7 +590,9 @@ fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
                 Expr::val(s.clone()).into()
             }
             crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
-            crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+            crate::types::LabelValue::Double(bits) => {
+                Expr::val(f64::from_bits(bits)).into()
+            }
             crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
         }
     }
@@ -630,11 +657,27 @@ fn build_aggregation_parts(
             // ここでは単純に式を構築するだけ
             let expr: SimpleExpr = if let Some(operand) = operand {
                 // オペランド（算術式等）から直接 SQL 式を構築
+                let is_string = operand.is_string_type();
                 let inner_expr = build_resolved_operand_expr(operand);
-                apply_arithmetic_agg(op, inner_expr)
+                apply_arithmetic_agg(op, inner_expr, is_string)
             } else {
+                // 直接のタグ参照の場合、その型を判定
+                // RowTag の場合は数値演算が必要ならキャストされるが、
+                // ここでは集約演算子適用前の生のカラム式
                 let col_expr: SimpleExpr = Expr::col(col).into();
-                apply_arithmetic_agg(op, col_expr)
+                // 投影対象の型が確定していれば String か判定
+                let is_string = tag_type
+                    .as_ref()
+                    .map(|_t| {
+                        // Lens から型情報を取得するのは build_aggregation_parts 内では
+                        // Resolver/Lens が無いため困難。
+                        // ただし Arithmetic 集約かつ TagRef ならば、通常 operand があるはず。
+                        // operand が無い場合は直接の count 等だが、Arithmetic の場合は operand がある。
+                        // 一旦 false とする（既存の数値集約の挙動を維持）。
+                        false
+                    })
+                    .unwrap_or(false);
+                apply_arithmetic_agg(op, col_expr, is_string)
             };
             (expr, cond, tag_type)
         }
@@ -642,9 +685,23 @@ fn build_aggregation_parts(
 }
 
 /// 集約関数を式に適用します。
-fn apply_arithmetic_agg(op: &ArithmeticAggOp, expr: SimpleExpr) -> SimpleExpr {
+fn apply_arithmetic_agg(
+    op: &ArithmeticAggOp,
+    expr: SimpleExpr,
+    is_string: bool,
+) -> SimpleExpr {
+    use ArithmeticAggOp::*;
     match op {
-        Sum => Func::sum(expr).into(),
+        Sum => {
+            if is_string {
+                // 文字列の合計はカンマ区切り結合 (DuckDB: string_agg)
+                Func::cust(Alias::new("string_agg"))
+                    .args([expr, Expr::val(", ").into()])
+                    .into()
+            } else {
+                Func::sum(expr).into()
+            }
+        }
         Avg => Func::avg(expr).into(),
         Max => Func::max(expr).into(),
         Min => Func::min(expr).into(),
@@ -663,8 +720,16 @@ fn build_storage_column_expr(
         StorageMapping::RowTag { column, .. } => {
             let col_expr = Expr::col(*column);
             // RowTag の label_str (VARCHAR) に対して数値演算が必要な場合は TRY_CAST を適用
-            if *column == Col::LabelStr && matches!(sql_type, crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE) {
-                Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [col_expr.into()])
+            if *column == Col::LabelStr
+                && matches!(
+                    sql_type,
+                    crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE
+                )
+            {
+                Expr::cust_with_exprs(
+                    "TRY_CAST($1 AS DOUBLE)",
+                    [col_expr.into()],
+                )
             } else {
                 col_expr.into()
             }
@@ -717,16 +782,21 @@ fn build_aggregation_expr(
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let (_storage, _cond, operand) = inner.extract_agg_parts();
-            
+
+            let is_string = operand.map(|o| o.is_string_type()).unwrap_or(false);
+
             let inner_expr = if let Some(operand) = operand {
                 // 算術演算用のキャストロジックを共通利用
                 build_resolved_operand_expr_for_arithmetic(operand)
+            } else if is_string {
+                // 文字列集計が期待されるがソースが見つからない場合は空文字
+                Expr::val("").into()
             } else {
-                // フォールバック
+                // 数値集計の場合は 0
                 Expr::val(0).into()
             };
 
-            apply_arithmetic_agg(op, inner_expr)
+            apply_arithmetic_agg(op, inner_expr, is_string)
         }
     }
 }
@@ -737,7 +807,8 @@ fn build_calculation_expr(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_expr_for_arithmetic(&calc.left);
     let right_expr = build_resolved_operand_expr_for_arithmetic(&calc.right);
-    apply_arithmetic_op(&calc.op, left_expr, right_expr)
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
 }
 
 /// 算術演算用のオペランドをSQL式に変換します。
@@ -746,6 +817,11 @@ fn build_resolved_operand_expr_for_arithmetic(
     operand: &crate::query::lens_resolver::ResolvedOperand,
 ) -> SimpleExpr {
     use crate::query::lens_resolver::ResolvedOperand;
+
+    // 文字列型の場合は数値キャストを行わず、通常の式構築を行う
+    if operand.is_string_type() {
+        return build_resolved_operand_expr(operand);
+    }
 
     match operand {
         ResolvedOperand::Literal(lab) => {
@@ -757,7 +833,9 @@ fn build_resolved_operand_expr_for_arithmetic(
                 expr
             }
         }
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+        ResolvedOperand::TagRef {
+            storage, sql_type, ..
+        } => {
             if *sql_type == crate::db::SqlType::BOOLEAN {
                 let col_expr = build_storage_column_expr(storage, *sql_type);
                 return col_expr.cast_as(crate::db::SqlType::BIGINT).into();
@@ -765,10 +843,17 @@ fn build_resolved_operand_expr_for_arithmetic(
 
             // 算術演算コンテキストでは、RowTag の LabelStr に TRY_CAST を適用
             match storage {
-                StorageMapping::RowTag { column, .. } if *column == Col::LabelStr => {
-                    Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [Expr::col(*column).into()])
+                StorageMapping::RowTag { column, .. }
+                    if *column == Col::LabelStr =>
+                {
+                    Expr::cust_with_exprs(
+                        "TRY_CAST($1 AS DOUBLE)",
+                        [Expr::col(*column).into()],
+                    )
                 }
-                StorageMapping::RowTag { column, .. } => Expr::col(*column).into(),
+                StorageMapping::RowTag { column, .. } => {
+                    Expr::col(*column).into()
+                }
                 StorageMapping::Column(col) => Expr::col(*col).into(),
                 StorageMapping::Virtual => Expr::col(Col::LabelStr).into(),
             }
@@ -783,7 +868,28 @@ fn apply_arithmetic_op(
     op: &ArithmeticOp,
     left: SimpleExpr,
     right: SimpleExpr,
+    is_string: bool,
 ) -> SimpleExpr {
+    use ArithmeticOp::*;
+    if is_string {
+        return match op {
+            Add => {
+                // 文字列の + はカンマ区切り結合
+                Expr::expr(left)
+                    .binary(BinOper::Custom("||"), Expr::val(", "))
+                    .binary(BinOper::Custom("||"), right)
+            }
+            Mul => {
+                // 文字列の * は単純結合
+                Expr::expr(left).binary(BinOper::Custom("||"), right)
+            }
+            _ => {
+                // 解決フェーズで弾かれているはずだが安全のため
+                Expr::expr(left).binary(BinOper::Custom("||"), right)
+            }
+        };
+    }
+
     let bin_op = match op {
         Add => BinOper::Add,
         Sub => BinOper::Sub,
@@ -801,7 +907,8 @@ fn build_calculation_subquery(
 ) -> SimpleExpr {
     let left_expr = build_resolved_operand_subquery(&calc.left, view);
     let right_expr = build_resolved_operand_subquery(&calc.right, view);
-    apply_arithmetic_op(&calc.op, left_expr, right_expr)
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
 }
 
 /// オペランドをサブクエリ形式で構築します。
@@ -826,8 +933,12 @@ fn build_resolved_operand_subquery(
                         Expr::val(s.clone()).into()
                     }
                     crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
-                    crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-                    crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
+                    crate::types::LabelValue::Double(bits) => {
+                        Expr::val(f64::from_bits(bits)).into()
+                    }
+                    crate::types::LabelValue::Null => {
+                        Expr::val(None::<i32>).into()
+                    }
                 }
             }
         }
@@ -895,6 +1006,14 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             // （将来的に改善の余地があるが、一旦現状維持）
             let pick_sql = build_pick_sql(node, view);
             wrap_boolean_collider(pick_sql)
+        }
+        ResolvedNode::ScalarMatch { left, op, right } => {
+            build_direct_boolean_select(
+                label_to_unit_aware_expr(left),
+                *op,
+                label_to_unit_aware_expr(right),
+                view,
+            )
         }
         _ => {
             // その他のノード（TagMatch等）は従来のWHERE方式
@@ -1076,7 +1195,7 @@ pub fn build_fetch_label_groups_sql(
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
-    use sea_query::{CommonTableExpression, WithClause};
+    use sea_query::{CommonTableExpression, Iden, WithClause};
 
     let pick_sql = build_pick_sql(&resolver.resolved_query, view);
 
@@ -1101,15 +1220,65 @@ pub fn build_fetch_label_groups_sql(
         .to_owned();
     with_clause.cte(picked_ids_cte);
 
+    // Calculation 投影の検出: Projection(Calculation(...)) の場合は
+    // 算術式を事前計算する computed CTE を挿入する
+    let proj_operand = resolver.resolved_query.get_projection_operand();
+    let calc_node = match proj_operand {
+        Some(crate::query::lens_resolver::ResolvedOperand::Calculation(c)) => {
+            Some(c)
+        }
+        _ => None,
+    };
+
+    // label_col_name: CTE チェーン全体で使用するラベルカラム名
+    // all_hits_source: all_hits CTE のデータソーステーブル
+    // need_extra_filter: computed CTE で処理済みでなければ NULL/type フィルタが必要
+    let (label_col_name, all_hits_source, need_extra_filter) =
+        if let Some(calc) = calc_node {
+            // CTE 1.5: computed — 算術式を事前計算してエイリアスを付与
+            let calc_expr = build_calculation_expr(&calc);
+            let mut computed_q = Query::select();
+            computed_q
+                .column(Col::ItemId)
+                .expr_as(calc_expr, Alias::new("calc_value"))
+                .column(Col::Rank)
+                .distinct()
+                .from(Alias::new(view))
+                .and_where(
+                    Expr::col(Col::ItemId).in_subquery(
+                        Query::select()
+                            .column(Col::ItemId)
+                            .from(Tbl::PickedIds)
+                            .to_owned(),
+                    ),
+                )
+                .and_where(Expr::col(col_iden).is_not_null());
+            if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
+                computed_q
+                    .and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            }
+            let computed_cte = CommonTableExpression::new()
+                .query(computed_q)
+                .table_name(Alias::new("computed"))
+                .to_owned();
+            with_clause.cte(computed_cte);
+
+            ("calc_value".to_string(), "computed".to_string(), false)
+        } else {
+            (Iden::to_string(&col_iden), view.to_string(), true)
+        };
+
+    let label_col = Alias::new(&label_col_name);
+
     // CTE 2: all_hits (Window関数を含む全ヒットアイテム)
     let mut all_hits_q = Query::select();
     all_hits_q
         .column(Col::ItemId)
-        .column(col_iden)
+        .column(label_col.clone())
         .column(Col::Rank)
         .expr_as(
             CustomFunc::row_number_over(
-                col_iden,
+                label_col.clone(),
                 vec![
                     (Col::Rank, sea_query::Order::Desc),
                     (Col::ItemId, sea_query::Order::Desc),
@@ -1117,9 +1286,12 @@ pub fn build_fetch_label_groups_sql(
             ),
             Tbl::Rn,
         )
-        .expr_as(CustomFunc::count_over(col_iden), Tbl::GroupTotal)
+        .expr_as(
+            CustomFunc::count_over(label_col.clone()),
+            Tbl::GroupTotal,
+        )
         .distinct()
-        .from(Alias::new(view))
+        .from(Alias::new(&all_hits_source))
         .and_where(
             Expr::col(Col::ItemId).in_subquery(
                 Query::select()
@@ -1129,11 +1301,13 @@ pub fn build_fetch_label_groups_sql(
             ),
         );
 
-    // Locationsテーブル由来のNULL（例: extensionなし）を除外
-    all_hits_q.and_where(Expr::col(col_iden).is_not_null());
-
-    if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
-        all_hits_q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+    if need_extra_filter {
+        // 通常パス: Locationsテーブル由来のNULL除外 + RowTag type フィルタ
+        all_hits_q.and_where(Expr::col(label_col.clone()).is_not_null());
+        if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
+            all_hits_q
+                .and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+        }
     }
 
     let all_hits_cte = CommonTableExpression::new()
@@ -1145,7 +1319,7 @@ pub fn build_fetch_label_groups_sql(
     // CTE 3: top_items (表示対象の上位IDのみ、rankも含める)
     let mut top_items_q = Query::select();
     top_items_q
-        .column(col_iden)
+        .column(label_col.clone())
         .column(Col::ItemId)
         .column(Col::Rank)
         .column(Tbl::GroupTotal)
@@ -1161,7 +1335,6 @@ pub fn build_fetch_label_groups_sql(
     // --- CTE 定義終了 ---
 
     // 4. 最終SELECT: シンプルな文字列連結で item:name#id 形式のリストを生成
-    use sea_query::Iden;
     let mut q = Query::select();
 
     // nameを取得するサブクエリを文字列で構築
@@ -1196,7 +1369,7 @@ pub fn build_fetch_label_groups_sql(
 
     q.with_cte(with_clause)
         .expr_as(
-            Expr::col((Tbl::TopItems, col_iden)),
+            Expr::col((Tbl::TopItems, label_col.clone())),
             Alias::new("label_value"),
         )
         .expr_as(
@@ -1205,9 +1378,9 @@ pub fn build_fetch_label_groups_sql(
         )
         .expr_as(list_expr, Alias::new("item_refs"))
         .from(Tbl::TopItems)
-        .group_by_col((Tbl::TopItems, col_iden))
+        .group_by_col((Tbl::TopItems, label_col.clone()))
         .group_by_col((Tbl::TopItems, Tbl::GroupTotal))
-        .order_by((Tbl::TopItems, col_iden), sea_query::Order::Asc);
+        .order_by((Tbl::TopItems, label_col), sea_query::Order::Asc);
 
     if limit > 0 {
         q.limit((limit + 1) as u64);
@@ -1450,7 +1623,9 @@ fn label_to_unit_aware_expr(label: &crate::types::Label) -> SimpleExpr {
             }
         }
         crate::types::LabelValue::Boolean(b) => Expr::val(b).into(),
-        crate::types::LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+        crate::types::LabelValue::Double(bits) => {
+            Expr::val(f64::from_bits(bits)).into()
+        }
         crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
     }
 }
@@ -1861,7 +2036,8 @@ fn build_typed_tag_sql(
             cond = cond.add(Expr::col(Col::LabelBool).eq(b));
         }
         crate::types::LabelValue::Double(bits) => {
-            cond = cond.add(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+            cond =
+                cond.add(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
         }
         crate::types::LabelValue::Null => {
             cond = cond.add(Expr::col(Col::LabelStr).is_null());
@@ -2051,7 +2227,9 @@ pub fn build_label_expansion_sql(
                     q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
                 crate::types::LabelValue::Double(bits) => {
-                    q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+                    q.and_where(
+                        Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
+                    );
                 }
                 crate::types::LabelValue::Null => {
                     q.and_where(Expr::col(Col::LabelStr).is_null());
@@ -2073,7 +2251,9 @@ pub fn build_label_expansion_sql(
                     q.and_where(Expr::col(Col::LabelBool).eq(b));
                 }
                 crate::types::LabelValue::Double(bits) => {
-                    q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+                    q.and_where(
+                        Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
+                    );
                 }
                 crate::types::LabelValue::Null => {
                     q.and_where(Expr::col(Col::LabelStr).is_null());
@@ -2090,7 +2270,9 @@ fn collect_tag_types(
     operand: &crate::query::lens_resolver::ResolvedOperand,
     keys: &mut Vec<String>,
 ) {
-    use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedOperand};
+    use crate::query::lens_resolver::{
+        ResolvedAggregationNode, ResolvedOperand,
+    };
     match operand {
         ResolvedOperand::TagRef {
             storage: StorageMapping::RowTag { tag_type, .. },
@@ -2122,7 +2304,6 @@ fn collect_tag_types(
         _ => {}
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2223,7 +2404,6 @@ mod tests {
         assert!(result.contains("'size'"));
     }
 
-
     #[test]
     fn test_build_and_sql_structure() {
         let node1 = QueryNode::TypedTag(TypedTag::new("name", "foo"));
@@ -2305,9 +2485,8 @@ mod tests {
         // アイテム数を数えるので COUNT(DISTINCT "item_id")
         assert!(sql_str.contains("COUNT(DISTINCT \"item_id\")"));
         // フィルタ条件
-        assert!(sql_str.contains(
-            "WHERE \"item_id\" IN (SELECT \"item_id\" FROM (SELECT"
-        ));
+        assert!(sql_str
+            .contains("WHERE \"item_id\" IN (SELECT \"item_id\" FROM (SELECT"));
         assert!(sql_str.contains(
             "WHERE \"type\" = 'extension' AND \"label_str\" = 'txt'"
         ));
@@ -2395,7 +2574,8 @@ mod tests {
         assert!(sql_str.contains("MAX(\"size\") AS \"val\""));
 
         // project フィルタ
-        assert!(sql_str.contains("WHERE \"type\" = 'project' AND \"label_str\" = 'ttfm'"));
+        assert!(sql_str
+            .contains("WHERE \"type\" = 'project' AND \"label_str\" = 'ttfm'"));
         assert!(sql_str.contains("GROUP BY \"item_id\""));
     }
 
@@ -2545,29 +2725,51 @@ mod tests {
 
     #[test]
     fn test_build_resolved_operand_expr_for_arithmetic_boolean_cast() {
+        use crate::db::SqlType;
         use crate::query::lens_resolver::ResolvedOperand;
         use crate::types::TagType;
-        use crate::db::SqlType;
 
         // 1. Boolean Literal -> CAST(... AS BIGINT)
         let lit_bool = ResolvedOperand::Literal(crate::types::Label::resolve(
             TagType::from("is_dir"),
-            crate::types::LabelValue::Boolean(true)
+            crate::types::LabelValue::Boolean(true),
         ));
         let expr_lit = build_resolved_operand_expr_for_arithmetic(&lit_bool);
-        let sql_lit = sea_query::Query::select().expr(expr_lit).to_string(sea_query::PostgresQueryBuilder);
-        assert!(sql_lit.contains("CAST"), "Boolean literal should be cast: {}", sql_lit);
-        assert!(sql_lit.contains("BIGINT"), "Boolean literal should be cast to BIGINT: {}", sql_lit);
+        let sql_lit = sea_query::Query::select()
+            .expr(expr_lit)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql_lit.contains("CAST"),
+            "Boolean literal should be cast: {}",
+            sql_lit
+        );
+        assert!(
+            sql_lit.contains("BIGINT"),
+            "Boolean literal should be cast to BIGINT: {}",
+            sql_lit
+        );
 
         // 2. Boolean TagRef -> CAST(... AS BIGINT)
         let tag_bool = ResolvedOperand::TagRef {
             tag_type: TagType::from("is_dir"),
-            storage: crate::query::lens_schema::StorageMapping::Column(crate::db::Col::LabelBool),
+            storage: crate::query::lens_schema::StorageMapping::Column(
+                crate::db::Col::LabelBool,
+            ),
             sql_type: SqlType::BOOLEAN,
         };
         let expr_tag = build_resolved_operand_expr_for_arithmetic(&tag_bool);
-        let sql_tag = sea_query::Query::select().expr(expr_tag).to_string(sea_query::PostgresQueryBuilder);
-        assert!(sql_tag.contains("CAST"), "Boolean column should be cast: {}", sql_tag);
-        assert!(sql_tag.contains("BIGINT"), "Boolean column should be cast to BIGINT: {}", sql_tag);
+        let sql_tag = sea_query::Query::select()
+            .expr(expr_tag)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql_tag.contains("CAST"),
+            "Boolean column should be cast: {}",
+            sql_tag
+        );
+        assert!(
+            sql_tag.contains("BIGINT"),
+            "Boolean column should be cast to BIGINT: {}",
+            sql_tag
+        );
     }
 }

@@ -404,21 +404,25 @@ fn test_max_on_empty() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
-    
+
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
-    
+
     // MAX on nonexistent tag -> Should be NULL and numeric/consistent
     let res = fm.search("max(nonexistent_tag:)", Default::default())?;
-    
+
     if let Some(r) = res.results.first() {
         let types = r.get_all_values("type");
         // User requires type:numeric for NULL aggregation results
-        assert!(types.contains(&"numeric".to_string()), "Expected type:numeric, got {:?}", types);
+        assert!(
+            types.contains(&"numeric".to_string()),
+            "Expected type:numeric, got {:?}",
+            types
+        );
     } else {
         panic!("Expected a result for MAX aggregation");
     }
-    
+
     Ok(())
 }
 
@@ -440,6 +444,85 @@ fn test_agg_agg_comparison_equal_reflexive() -> anyhow::Result<()> {
     assert!(!res.results.is_empty(), "Result should not be empty");
     assert_eq!(res.results[0].name, "TRUE");
     assert!(res.results[0].id.is_volatile());
-    
+
+    Ok(())
+}
+
+#[test]
+fn test_string_agg_extension() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("a.txt"), "")?;
+    std::fs::write(root.join("b.rs"), "")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // extension: は通常 String 扱いになるため、sum は string_agg になるはず
+    let res = fm.search("sum(extension:)", Default::default())?;
+    assert!(!res.results.is_empty());
+    let val = &res.results[0].name;
+    // DuckDB の string_agg は順序が保証されないが、txt と rs が含まれているはず
+    assert!(
+        val.contains("txt") && val.contains("rs") && val.contains(", "),
+        "Unexpected sum(extension:): {}",
+        val
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_string_agg_with_filter() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 複数のファイルを作成
+    std::fs::write(root.join("a.rs"), "")?;
+    std::fs::write(root.join("b.rs"), "")?;
+    std::fs::write(root.join("c.txt"), "")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 条件付き文字列集計: extension:rs に一致するアイテムの extension: を結合
+    let res = fm.search("sum(extension:rs & extension:)", Default::default())?;
+
+    assert!(!res.results.is_empty(), "Result should not be empty");
+    let name = &res.results[0].name;
+    // 期待値は "rs, rs"
+    assert!(name.contains("rs"), "Result should contain 'rs', but got: {}", name);
+    assert!(name.contains(","), "Result should be a joined string, but got: {}", name);
+
+    Ok(())
+}
+
+#[test]
+fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // ファイル作成
+    std::fs::write(root.join("a.rs"), "")?;
+    std::fs::write(root.join("b.txt"), "")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 文字列集計結果同士の結合
+    // sum(string) はカンマ区切り。+ も文字列なら結合。
+    let res = fm.search("sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)", Default::default())?;
+
+    assert!(!res.results.is_empty(), "Result should not be empty");
+    let name = &res.results[0].name;
+    // 期待値: "rs - txt"
+    assert!(name.contains("rs"), "Result should contain 'rs', but got: {}", name);
+    assert!(name.contains("txt"), "Result should contain 'txt', but got: {}", name);
+    assert!(name.contains(" - "), "Result should contain separator ' - ', but got: {}", name);
+
     Ok(())
 }
