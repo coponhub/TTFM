@@ -421,3 +421,25 @@ fn test_max_on_empty() -> anyhow::Result<()> {
     
     Ok(())
 }
+
+#[test]
+fn test_agg_agg_comparison_equal_reflexive() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 空のファイル（size=0）を作成
+    std::fs::write(root.join("empty.txt"), "")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(size:0) == sum(size:0) -> TRUE
+    let res = fm.search("sum(size:0) == sum(size:0)", Default::default())?;
+
+    assert!(!res.results.is_empty(), "Result should not be empty");
+    assert_eq!(res.results[0].name, "TRUE");
+    assert!(res.results[0].id.is_volatile());
+    
+    Ok(())
+}

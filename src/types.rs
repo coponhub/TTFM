@@ -494,6 +494,15 @@ impl From<&str> for Label {
     }
 }
 
+impl From<bool> for Label {
+    fn from(b: bool) -> Self {
+        Label::Other(
+            TagType::Custom(String::new()),
+            LabelValue::Boolean(b),
+        )
+    }
+}
+
 impl From<i64> for Label {
     fn from(i: i64) -> Self {
         Label::Other(TagType::Custom(String::new()), LabelValue::Integer(i))

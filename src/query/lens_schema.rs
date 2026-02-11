@@ -15,7 +15,7 @@ pub enum StorageMapping {
     /// oneview の直接のカラム
     Column(Col),
     /// oneview の行ベースのタグ (特定のラベルカラム + タグ名)
-    RowTag { column: Col, tag_key: String },
+    RowTag { column: Col, tag_type: String },
     /// 他のタグに展開される論理タグ
     Virtual,
 }
@@ -32,8 +32,8 @@ impl StorageMapping {
             StorageMapping::Column(col) => {
                 build_column_condition(*col, op, label, sql_type, false)
             }
-            StorageMapping::RowTag { column, tag_key } => {
-                Condition::all().add(check_tag_match(tag_key)).add(
+            StorageMapping::RowTag { column, tag_type } => {
+                Condition::all().add(check_tag_match(tag_type)).add(
                     build_column_condition(*column, op, label, sql_type, true),
                 )
             }
@@ -42,12 +42,12 @@ impl StorageMapping {
     }
 }
 
-pub(crate) fn check_tag_match(tag_key: &str) -> SimpleExpr {
+pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_key.contains('*') || tag_key.contains('?') || tag_key.contains('[') {
+    if tag_type.contains('*') || tag_type.contains('?') || tag_type.contains('[') {
         tag_op = BinOper::Custom("GLOB");
     }
-    Expr::col(crate::db::Col::Type).binary(tag_op, tag_key)
+    Expr::col(crate::db::Col::Type).binary(tag_op, tag_type)
 }
 
 pub(crate) fn build_column_condition(
@@ -337,7 +337,7 @@ impl Lens {
             tag_type: tag.clone(),
             storage: StorageMapping::RowTag {
                 column: crate::db::Col::LabelStr,
-                tag_key: tag.as_str().to_string(),
+                tag_type: tag.as_str().to_string(),
             },
             logical_type: LogicalType::Any, // 未知のタグは Any として扱う
             logical_function: None,
@@ -374,9 +374,9 @@ impl Lens {
             StorageMapping::Column(col) => {
                 map.get(&col.name()).and_then(val_to_label_value)
             }
-            StorageMapping::RowTag { column, tag_key } => {
+            StorageMapping::RowTag { column, tag_type } => {
                 let type_val = map.get(&SType::Type.name())?;
-                if type_val.as_str() == Some(tag_key) {
+                if type_val.as_str() == Some(tag_type) {
                     map.get(&column.name()).and_then(val_to_label_value)
                 } else {
                     None
@@ -504,7 +504,7 @@ fn row_tag_descriptors() -> Vec<TagDescriptor> {
                 tag_type: TagType::Base(stype),
                 storage: StorageMapping::RowTag {
                     column: col,
-                    tag_key: key.to_string(),
+                    tag_type: key.to_string(),
                 },
                 logical_type: sql_to_logical(col.sql_type()),
                 logical_function: None,
@@ -514,7 +514,7 @@ fn row_tag_descriptors() -> Vec<TagDescriptor> {
             tag_type: TagType::Base(SType::Filename),
             storage: StorageMapping::RowTag {
                 column: Col::LabelStr,
-                tag_key: "name".to_string(),
+                tag_type: "name".to_string(),
             },
             logical_type: LogicalType::String,
             logical_function: Some(Arc::new(FilenameQuery)),
@@ -586,9 +586,9 @@ mod tests {
     fn test_lens_with_standard_includes_size() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Size)).unwrap();
-        if let StorageMapping::RowTag { column, tag_key } = &found.storage {
+        if let StorageMapping::RowTag { column, tag_type } = &found.storage {
             assert_eq!(*column, Col::LabelInt);
-            assert_eq!(tag_key, "size");
+            assert_eq!(tag_type, "size");
         } else {
             panic!("Expected RowTag mapping for size, got {:?}", found.storage);
         }
@@ -620,8 +620,8 @@ mod tests {
         // RowTag 登録時: storage=RowTag
         // Virtual 登録時: storage=Virtual なので existing.storage は更新されない。
         // 結果、物理情報（RowTag）を保持しつつ論理関数を持つ。
-        if let StorageMapping::RowTag { tag_key, .. } = &found.storage {
-            assert_eq!(tag_key, "name");
+        if let StorageMapping::RowTag { tag_type, .. } = &found.storage {
+            assert_eq!(tag_type, "name");
         } else {
             panic!("Expected RowTag for filename, got {:?}", found.storage);
         }

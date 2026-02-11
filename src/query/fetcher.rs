@@ -446,8 +446,8 @@ mod tests {
         } = resolved
         {
             match storage {
-                StorageMapping::RowTag { tag_key, .. } => {
-                    assert_eq!(tag_key, "size")
+                StorageMapping::RowTag { tag_type, .. } => {
+                    assert_eq!(tag_type, "size")
                 }
                 _ => panic!("Expected RowTag mapping for size"),
             }

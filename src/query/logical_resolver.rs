@@ -40,7 +40,7 @@ pub enum LogicalType {
 impl LogicalType {
     /// 数値計算が可能な型かどうかを返します。
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Self::Integer | Self::Float)
+        matches!(self, Self::Integer | Self::Float | Self::Boolean)
     }
 }
 
@@ -395,7 +395,17 @@ fn expand_operand(
     operand: Operand,
 ) -> Result<Operand> {
     match operand {
-        Operand::Literal(label) => Ok(Operand::Literal(label)),
+        Operand::Literal(label) => {
+            // 文字列 "true", "false" を Boolean 型に正規化
+            let s = label.as_str();
+            if s == "true" {
+                Ok(Operand::Literal(crate::types::Label::from(true)))
+            } else if s == "false" {
+                Ok(Operand::Literal(crate::types::Label::from(false)))
+            } else {
+                Ok(Operand::Literal(label))
+            }
+        }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
         Operand::Calculation(calc) => {
             let expanded = expand_calculation(schema, *calc)?;
@@ -582,6 +592,14 @@ mod tests {
             right: Operand::Literal(crate::types::Label::from(100i64)),
         };
         assert!(validate_calculation(&calc_err, &lens).is_err());
+
+        // is_dir + 1 (Boolean + Integer) -> OK
+        let calc_bool = CalculationNode {
+            left: Operand::TypeRef(TagType::from("is_dir")),
+            op: crate::query::ast::ArithmeticOp::Add,
+            right: Operand::Literal(crate::types::Label::from(1i64)),
+        };
+        assert!(validate_calculation(&calc_bool, &lens).is_ok());
     }
 
     #[test]
@@ -589,7 +607,7 @@ mod tests {
         assert!(LogicalType::Integer.is_numeric());
         assert!(LogicalType::Float.is_numeric());
         assert!(!LogicalType::String.is_numeric());
-        assert!(!LogicalType::Boolean.is_numeric());
+        assert!(LogicalType::Boolean.is_numeric()); // Should be True
         assert!(!LogicalType::Any.is_numeric());
     }
 

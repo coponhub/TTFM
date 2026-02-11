@@ -350,8 +350,8 @@ fn cond_projection(storage: &StorageMapping) -> Condition {
         StorageMapping::Column(col) => {
             Condition::all().add(Expr::col(*col).is_not_null())
         }
-        StorageMapping::RowTag { tag_key, .. } => {
-            Condition::all().add(check_tag_match(tag_key))
+        StorageMapping::RowTag { tag_type, .. } => {
+            Condition::all().add(check_tag_match(tag_type))
         }
         StorageMapping::Virtual => Condition::any(),
     }
@@ -372,12 +372,12 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
     Condition::all().add(Expr::col(col).eq(val))
 }
 
-fn check_tag_match(tag_key: &str) -> SimpleExpr {
+fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_key.contains('*') || tag_key.contains('?') || tag_key.contains('[') {
+    if tag_type.contains('*') || tag_type.contains('?') || tag_type.contains('[') {
         tag_op = BinOper::Custom("GLOB");
     }
-    Expr::col(Col::Type).binary(tag_op, tag_key)
+    Expr::col(Col::Type).binary(tag_op, tag_type)
 }
 
 // ========== 物理解決関数群 ==========
@@ -416,7 +416,7 @@ fn resolve_type_ref_operand(
         None => (
             StorageMapping::RowTag {
                 column: Col::LabelStr,
-                tag_key: tt.as_str().to_string(),
+                tag_type: tt.as_str().to_string(),
             },
             SqlType::VARCHAR,
         ),
@@ -473,7 +473,7 @@ pub(crate) fn resolve_query_node(
                 None => (
                     StorageMapping::RowTag {
                         column: Col::LabelStr,
-                        tag_key: tag_type.as_str().to_string(),
+                        tag_type: tag_type.as_str().to_string(),
                     },
                     SqlType::VARCHAR,
                 ),
@@ -774,7 +774,7 @@ fn get_storage_and_type(
         None => (
             StorageMapping::RowTag {
                 column: Col::LabelStr,
-                tag_key: tt.as_str().to_string(),
+                tag_type: tt.as_str().to_string(),
             },
             SqlType::VARCHAR,
         ),

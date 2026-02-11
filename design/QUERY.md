@@ -132,7 +132,12 @@
 - TTFMのクエリでは、文字列、単位付きの数字、小数などを受け付けるが、論理解決層では以下の型を使用できる
     - String
     - Integer
-    - Float
+    - Double
     - Boolean
     - Date (lens_resolverにはIntegerとして渡される)
-- 異なる型同士の比較・演算はエラーとなる。
+- StringとString以外の型の比較・算術演算はエラーとなる
+- Boolean同士の比較・算術演算については、FALSE=0 TRUE=1として行う。Booleanに対して算術演算を行った結果は、数値(IntegerまたはDouble)となる。これによりBoolean値のsumも可能となる
+- String同士は比較は可能。String同士の算術演算は以下の通り
+    - `+` ","区切りでの文字列結合
+    - `*` 文字列結合(区切り文字無し)
+    - `/`, `-` についてはエラーとなる
