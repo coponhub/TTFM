@@ -25,6 +25,7 @@
     - **ルール**
     - 演算子とオペランドの間にはスペースを入れなければならない。　`extension:rs&project:ttfm` のような記載は集合演算と見なされない
     - `Projection:` 同士の差集合については `-:` と記載する(算術演算と区別するため)
+    - `Projection:` 同士の積集合`&`では、Warningを表示して`:&`で分割ラベル(組み合わせキー)が可能となる事を知らせる
 - **集約 (Aggregation)**:
     - 形式: `[aggregator]([query])`
     - aggregator: `count`, `sum`, `avg`, `max`, `min`
@@ -41,18 +42,22 @@
     - 返り値: 真偽値を返す
      - **ルール**
         - 演算子とオペランドの間にはスペースを入れなければならない。　`1>1` のような記載はスペースが無いためスカラー比較と見做されない
-- **分割比較(Nested comparison)**:
-    - 形式: `[gkey]:&([nested scalar comparison])`
+- **分割(Nested Aggregatin & comparison)**:
+    - 形式: `[gkey]:&([aggregation][nested scalar comparison])`
     - gkey: グルーピングのキーとなるtype。
+    - aggregationが必ず含まれる
+    - 分割は他の要素と演算する事は出来ないため、クエリ全体を囲む必要がある
+    - 結果は(gkey:label, 集約値)の集合となる
     - nested scalar comparison:
         - gkeyによってグルーピングされた各要素に対するスカラー比較。
-        - trueの場合のみ結果リストに含まれる
+        - trueの場合のみ結果に含まれる
+    - `gkey`を複数繋いで `gkey1:&gkey2:&gkey3:&(...)` のように複数の`gkey`を組み合わせる事も可能
     - **例**
         - `parentdir:&( sum(size:) > 1GB )` (フォルダ毎の合計サイズが1GB超のアイテムを検索)
         - `parentdir:&( count(extension:jpg) > 10 )` (JPGファイルを10個以上含むフォルダを検索)
         - `parentdir:&( sum(mtime:>"7d ago" & size: ) < 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムを検索)
     - **ルール**
-        - 演算子とオペランドの間にはスペースを入れなければならない。　`sum(size:)>1GB` のような記載は分割比較と見做されない
+        - 演算子とオペランドの間にはスペースを入れなければならない。　`parentdir:&(sum(size:)>1GB)` のような記載は分割比較と見做されない
 - **ラベル取得 / Projection: (Label Retrieval / Projection)**:
     - `Type:`形式。
     - **意味**: `Type:`が含まれるTypedTagのLabelを取り出す
@@ -62,6 +67,16 @@
         - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
         - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
         - `path:` (各アイテムのパスを取得)
+- **分割ラベル (Nested Projection)**:
+    - `[Projection] :& [Projection]` 形式
+    - `:&` を分割ラベル演算子(Nested Projection Operator) と呼ぶ 
+    - 複数のプロジェクションを組み合わせたもの。Group By の複数キーに相当する
+    - 出力表示としては、ラベルの表示が複数&を通して並べられている事以外はラベル取得と同様とする
+    - 3つ以上つなげる事も可能
+    - 例: `Project: :& extension:`で以下のようなProjectionの結果を取得できる(`...`は省略)
+        - `:rs & :ProjectA" ... item1, item2, ...`
+        - `:rs & :ProjectB" ... item3, item4, ...,`
+        - `:txt & :ProjectA" ... item4, item6, ...,`
 - **汎用ラベル比較 (Label Comparison)**:
     - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。取得した各ラベルを比較する。
     - **演算対象 (Operand)**:
