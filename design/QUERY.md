@@ -35,6 +35,7 @@
         - `sum(project:A & size:>1GB & size:)`
         - `count(filename:)` ファイル名の種類をカウント
     - count()でプロジェクションを数える場合projection(ラベルの種類)をカウントする
+    - countを引数無しで記載`count()`すると`count(*:*)`と同じ意味となる
     - 関数としてはスカラー値を返すため、演算のオペランドとしてはスカラー値として扱われる
 - **スカラー比較(Scalar Comparison)**:
     - 形式: `[Scalar] [Operator] [Scalar]`
@@ -42,22 +43,6 @@
     - 返り値: 真偽値を返す
      - **ルール**
         - 演算子とオペランドの間にはスペースを入れなければならない。　`1>1` のような記載はスペースが無いためスカラー比較と見做されない
-- **分割(Nested Aggregatin & comparison)**:
-    - 形式: `[gkey]:&([aggregation][nested scalar comparison])`
-    - gkey: グルーピングのキーとなるtype。
-    - aggregationが必ず含まれる
-    - 分割は他の要素と演算する事は出来ないため、クエリ全体を囲む必要がある
-    - 結果は(gkey:label, 集約値)の集合となる
-    - nested scalar comparison:
-        - gkeyによってグルーピングされた各要素に対するスカラー比較。
-        - trueの場合のみ結果に含まれる
-    - `gkey`を複数繋いで `gkey1:&gkey2:&gkey3:&(...)` のように複数の`gkey`を組み合わせる事も可能
-    - **例**
-        - `parentdir:&( sum(size:) > 1GB )` (フォルダ毎の合計サイズが1GB超のアイテムを検索)
-        - `parentdir:&( count(extension:jpg) > 10 )` (JPGファイルを10個以上含むフォルダを検索)
-        - `parentdir:&( sum(mtime:>"7d ago" & size: ) < 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムを検索)
-    - **ルール**
-        - 演算子とオペランドの間にはスペースを入れなければならない。　`parentdir:&(sum(size:)>1GB)` のような記載は分割比較と見做されない
 - **ラベル取得 / Projection: (Label Retrieval / Projection)**:
     - `Type:`形式。
     - **意味**: `Type:`が含まれるTypedTagのLabelを取り出す
@@ -67,16 +52,40 @@
         - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
         - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
         - `path:` (各アイテムのパスを取得)
-- **分割ラベル (Nested Projection)**:
-    - `[Projection] :& [Projection]` 形式
-    - `:&` を分割ラベル演算子(Nested Projection Operator) と呼ぶ 
-    - 複数のプロジェクションを組み合わせたもの。Group By の複数キーに相当する
-    - 出力表示としては、ラベルの表示が複数&を通して並べられている事以外はラベル取得と同様とする
-    - 3つ以上つなげる事も可能
-    - 例: `Project: :& extension:`で以下のようなProjectionの結果を取得できる(`...`は省略)
-        - `:rs & :ProjectA" ... item1, item2, ...`
-        - `:rs & :ProjectB" ... item3, item4, ...,`
-        - `:txt & :ProjectA" ... item4, item6, ...,`
+- **ネスト (Nest)**:
+    - `[Projection] &: [Projection|Scalar|(Scalar comparison)]` 形式
+    - 右辺にはスカラー比較式や算術演算（Scalar）を記述可能。
+        - スカラー比較式は括弧で囲む必要がある
+        - スカラー比較式内は左辺をコンテキスト(グループ)として、そのコンテキスト(グループ)内に対して集計・比較される
+        - 例: `parentdir: &: (count(extension:jpg) > 10)`
+    - `&:` をネスト演算子(Nest Operator) と呼ぶ 
+    - 右辺がProjectionの場合、ProjectionがGroup Byのキーのように両辺のProjectionの組み合わせとなる。
+    - 演算では最も右側のprojectionを使用して演算する。そのため他の演算ではネストはProjectionと見なす事が可能。
+    - 右辺にScalar値が来た場合、そのScalar値をNestグループの各アイテムに分配(コピー)する
+    - Nested Projection同士の結合も可能。
+        - (A: &: B:) &: (C: &: D:) = (A: &: B: &: C: &: D:)
+    - 出力表示としては、ラベルの表示が複数&を挟んで並べられている事以外はラベル取得と同様とする
+    - ネストに対する演算はネストが返る。ただし、集約の場合は最後のProjectionが集約値のスカラーに置き換わる
+        例: `extension:rs &: ProjectA:` = `rs := (extension: &: :ProjectA)`
+    - 例: 
+        - `Project: &: extension:`で以下のようなProjectionの結果を取得できる(`...`は省略)
+            `:rs &: :ProjectA" ... item1, item2, ...`
+            `:rs &: :ProjectB" ... item3, item4, ...,`
+            `:txt &: :ProjectA" ... item4, item6, ...,`
+        - `(extension: &: count(*:*)) := (parentdir: &: count(*:*))`「そのフォルダ内にあるファイルが、すべて特定の拡張子（例えば .jpg）で統一されている」状態のアイテムを取得する
+- **集約による平坦化 (Flatten by aggreagate)**
+    - `aggreagator([nest])`
+    - ネストに対する集約ではネストの最後のProjectionが集約値のスカラーに置き換わる。つまり最後のネスト1段分が集約される。
+        - 例: parentdir &: extension:jpgがparentdirが3つあり、dirAにjpgが3, dirBとdirCにjpgが6あった場合
+            `sum(count(parentdir &: extension:jpg) :> 5)` =
+            `sum({item(paretdir:dirA, value:3), item(paretdir:dirB, value:6), item(paretdir:dirC, value:6)} :> 5)` =
+            `sum(parentdir: &: value: :> 5)` = 
+            `sum([6, 6])` =
+            `12`
+    - 例:
+        - `sum(sum(parentdir &: size:) :> 1GB)` (フォルダ毎の合計サイズが1GB超のアイテムのサイズの合計)
+        - `sum(count(parentdir: &: extension:jpg) :> 10)` (JPGファイルを10個以上含むフォルダを検索)
+        - `sum( (parentdir &: mtime: :> "7d ago") &: size: < 10GB))` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムを検索)
 - **汎用ラベル比較 (Label Comparison)**:
     - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。取得した各ラベルを比較する。
     - **演算対象 (Operand)**:
