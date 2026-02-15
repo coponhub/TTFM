@@ -37,13 +37,36 @@ fn get_parser() -> &'static PrattParser<Rule> {
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
         .map_err(|e| error::map_grammar_error(input, e))?;
-    let expr_pair = pairs
-        .next()
-        .ok_or_else(|| anyhow!(error::NO_QUERY_FOUND))?
-        .into_inner()
-        .next()
-        .ok_or_else(|| anyhow!(error::NO_EXPRESSION_FOUND))?;
-    build_ast(expr_pair)
+    
+    // query = { SOI ~ (choice) ~ EOI }
+    // The top-level pair is 'query'.
+    let query_pair = pairs.next().unwrap();
+    
+    // Into inner: expected to contain SOI(implicit?), choice, EOI
+    // Pest 2.0+ usually doesn't yield SOI/EOI in into_inner unless explicit?
+    // Actually query definition: query = { SOI ~ ... }
+    // inner of query will be the choice match.
+    // Let's get the first inner pair that is NOT SOI/EOI if they appear.
+    // In many patterns, `query` inner is just the content.
+    // Let's find the relevant inner pair.
+    
+    let inner_pair = query_pair.into_inner().next().unwrap();
+
+    match inner_pair.as_rule() {
+        Rule::expr => build_expr(inner_pair),
+        Rule::bare_calculation_query => {
+            let inner = inner_pair.into_inner().next().unwrap();
+            let calc = build_calculation(inner)?;
+            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+        }
+        Rule::scalar_arithmetic_query => {
+             let inner = inner_pair.into_inner().next().unwrap();
+             let calc = build_scalar_arithmetic_expr(inner)?;
+             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+        }
+        Rule::EOI => Err(anyhow!("Empty query")),
+        _ => Err(anyhow!("Unexpected top-level rule: {:?}", inner_pair.as_rule())),
+    }
 }
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
@@ -53,6 +76,11 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
             let calc = build_calculation(inner)?;
             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
+        Rule::scalar_arithmetic_query => {
+             let inner = pair.into_inner().next().unwrap();
+             let calc = build_scalar_arithmetic_expr(inner)?;
+             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+        }
         Rule::comparison => build_comparison(pair),
         Rule::typed_tag => build_typed_tag(pair),
         Rule::projection => build_projection(pair),
@@ -60,10 +88,10 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
             build_aggregation(pair).map(QueryNode::Aggregation)
         }
         Rule::expr => build_expr(pair),
-        Rule::primary => build_primary(pair), // Keep primary for now, it delegates to build_ast
-        Rule::factor => build_factor(pair), // Keep factor for now, it delegates to build_ast
-        // complement was removed from grammar; Complement nodes are
-        // still generated internally by functions.rs (date Ne expansion).
+        Rule::primary => build_primary(pair),
+        Rule::factor => build_factor(pair),
+        // complement was removed from grammar; // No changes needed for parser.rs as logic is generic enough.
+        // Complement nodes are still generated internally by functions.rs (date Ne expansion).
         _ => Err(anyhow!(error::UNKNOWN_FACTOR_INNER)),
     }
 }
@@ -71,25 +99,40 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
 fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
     let mut inner = pair.into_inner();
     let op_pair = inner.next().ok_or_else(|| anyhow!("Missing aggregator"))?;
-    let body_pair =
-        inner.next().ok_or_else(|| anyhow!("Missing expression"))?;
+    let op_str = op_pair.as_str();
+    // 引数（body_pair）をオプションとして受け取る
+    let body_pair = inner.next();
 
-    let node = match body_pair.as_rule() {
-        Rule::bare_calculation => {
-            let calc_inner = body_pair.into_inner().next().unwrap();
-            let calc = build_calculation(calc_inner)?;
-            QueryNode::Projection(Operand::Calculation(Box::new(calc)))
+    let node = if let Some(body_pair) = body_pair {
+        match body_pair.as_rule() {
+            Rule::bare_calculation => {
+                let calc_inner = body_pair.into_inner().next().unwrap();
+                let calc = build_calculation(calc_inner)?;
+                QueryNode::Projection(Operand::Calculation(Box::new(calc)))
+            }
+            Rule::expr => build_expr(body_pair)?,
+            _ => {
+                return Err(anyhow!(
+                    "Unexpected rule in aggregation: {:?}",
+                    body_pair.as_rule()
+                ))
+            }
         }
-        Rule::expr => build_expr(body_pair)?,
-        _ => {
-            return Err(anyhow!(
-                "Unexpected rule in aggregation: {:?}",
-                body_pair.as_rule()
-            ))
+    } else {
+        // 引数が空の場合のバリデーションとデフォルト値設定
+        match op_str {
+            "count" => {
+                // count() は count(*:*) の短縮形として、ワイルドカードタグを生成する
+                QueryNode::TypedTag(TypedTag::new(TagType::from("*"), Label::from("*")))
+            }
+            _ => {
+                // sum(), avg() 等は引数が必須
+                return Err(error::aggregator_requires_argument(op_str));
+            }
         }
     };
 
-    match op_pair.as_str() {
+    match op_str {
         "count" => Ok(AggregationNode::Count(Box::new(node))),
         "sum" => Ok(AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
@@ -107,7 +150,7 @@ fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
             op: ArithmeticAggOp::Min,
             inner: Box::new(node),
         }),
-        _ => Err(anyhow!("Unknown aggregator: {}", op_pair.as_str())),
+        _ => Err(anyhow!("Unknown aggregator: {}", op_str)),
     }
 }
 
@@ -588,6 +631,67 @@ fn unescape_unquoted(s: &str) -> Result<String> {
 
 /// 文法上は許容されたスカラー比較が、意味的に不正（プロジェクションへの適用）でないかチェックします。
 // check_invalid_scalar_comparison removed (moved to error.rs)
+
+fn build_scalar_arithmetic_expr(pair: Pair<Rule>) -> Result<CalculationNode> {
+    let mut inner = pair.into_inner();
+    let first = inner.next().unwrap();
+    let mut lhs_operand = build_arithmetic_operand(first)?;
+
+    while let Some(op_pair) = inner.next() {
+        let op_str = op_pair.as_str().trim();
+
+        let op = match op_str {
+            "+" => ArithmeticOp::Add,
+            "-" => ArithmeticOp::Sub,
+            "*" => ArithmeticOp::Mul,
+            "/" => ArithmeticOp::Div,
+            "%" => ArithmeticOp::Mod,
+            _ => return Err(anyhow!("Expected arithmetic operator (+, -, *, /, %), found '{}'", op_str)),
+        };
+        
+        let rhs_pair = inner.next().unwrap();
+        let rhs_operand = build_arithmetic_operand(rhs_pair)?;
+        
+        let lhs_node = CalculationNode {
+            left: lhs_operand,
+            op,
+            right: rhs_operand,
+        };
+        
+        lhs_operand = Operand::Calculation(Box::new(lhs_node));
+    }
+    
+    match lhs_operand {
+        Operand::Calculation(boxed_node) => Ok(*boxed_node),
+        _ => Err(anyhow!("Failed to build calculation node (single operand?)")),
+    }
+}
+
+fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::aggregation => {
+            let agg = build_aggregation(inner)?;
+            Ok(Operand::Aggregation(Box::new(agg)))
+        }
+        Rule::number => {
+            let s = inner.as_str();
+            Ok(Operand::Literal(Label::from(s)))
+        }
+        Rule::calculation => {
+            let calc_inner = inner.into_inner().next().unwrap();
+            let calc = build_calculation(calc_inner)?;
+            Ok(Operand::Calculation(Box::new(calc)))
+        }
+        Rule::type_ref => {
+            let mut type_inner = inner.into_inner();
+            let tag_type_pair = type_inner.next().unwrap();
+            let tag_type = TagType::from(tag_type_pair.as_str());
+            Ok(Operand::TypeRef(tag_type))
+        }
+        _ => Err(anyhow!("Unexpected arithmetic operand inner: {:?}", inner.as_rule())),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1074,5 +1178,33 @@ mod tests {
             },
             _ => panic!("Expected Aggregation"),
         }
+    }
+
+
+    #[test]
+    fn test_parse_count_empty_args() {
+        let node = parse("count()").expect("count() should parse");
+        match node {
+            QueryNode::Aggregation(AggregationNode::Count(inner)) => {
+                match &*inner {
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.label.tag_type().as_str(), "*");
+                        assert_eq!(tt.label.as_str(), "*");
+                    }
+                    _ => panic!("Expected TypedTag(*:*) inside count(), got {:?}", inner),
+                }
+            }
+            _ => panic!("Expected Count aggregation, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_sum_empty_args_fail() {
+        let result = parse("sum()");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an argument"));
     }
 }

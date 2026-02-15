@@ -254,12 +254,41 @@ fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
         "Error message should indicate scalar-to-scalar set operation: {}",
         err_msg
     );
-    // スカラー同士の場合は提案が含まれないことを確認
     assert!(
         !err_msg.contains("Did you mean?"),
         "Error message should not include suggestion for scalar-to-scalar: {}",
         err_msg
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(), avg(), max(), min() は引数が必要
+    let queries = vec!["sum()", "avg()", "max()", "min()"];
+
+    for q in queries {
+        let result = fm.search(q, Default::default());
+        assert!(
+            result.is_err(),
+            "Aggregator '{}' without arguments should fail",
+            q
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("requires an argument"),
+            "Error message should indicate missing argument: {}",
+            err_msg
+        );
+    }
 
     Ok(())
 }

@@ -142,7 +142,10 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     );
 
     // Bare arithmetic with aggregation
-    let res3 = fm.search("count(extension:rs) + count(extension:c)", Default::default());
+    let res3 = fm.search(
+        "count(extension:rs) + count(extension:c)",
+        Default::default(),
+    );
     assert!(
         res3.is_ok(),
         "Expected 'count(extension:rs) + count(extension:c)' to succeed, got: {:?}",

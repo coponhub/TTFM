@@ -196,7 +196,8 @@ impl ResolvedOperand {
             } => {
                 // 標準タグ (Base) の VARCHAR は確実に文字列として扱う。
                 // カスタムタグ (Custom) は、暗黙の数値演算を許容するため、ここでの文字列判定からは除外する。
-                !matches!(tag_type, TagType::Custom(_)) && matches!(sql_type, SqlType::VARCHAR)
+                !matches!(tag_type, TagType::Custom(_))
+                    && matches!(sql_type, SqlType::VARCHAR)
             }
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_string_type() && calc.right.is_string_type()
@@ -550,7 +551,10 @@ fn validate_calculation_types(
     }
 
     // String 同士の場合、+ と * のみ許可
-    if left_is_str && right_is_str && !matches!(op, ArithmeticOp::Add | ArithmeticOp::Mul) {
+    if left_is_str
+        && right_is_str
+        && !matches!(op, ArithmeticOp::Add | ArithmeticOp::Mul)
+    {
         return Err(crate::query::error::unsupported_string_arithmetic(
             &format!("{:?}", op),
         ));

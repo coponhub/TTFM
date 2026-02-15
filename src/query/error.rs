@@ -22,6 +22,10 @@ pub const CALC_REQUIRES_OP: &str =
 pub const UNKNOWN_OPERAND_CALC_RULE: &str = "Unknown operand_calc rule";
 pub const UNKNOWN_LABEL_RULE: &str = "Unknown label rule";
 
+pub fn aggregator_requires_argument(agg: &str) -> anyhow::Error {
+    anyhow::anyhow!("Aggregator '{}' requires an argument", agg)
+}
+
 // Helper functions for dynamic error messages (Parser)
 
 pub fn invalid_scalar_comparison_msg(
@@ -554,5 +558,11 @@ mod tests {
         let msg =
             check_scalar_op_target_proj_start(prefix, line_str, col).unwrap();
         assert!(msg.contains("width: :> height:"));
+    }
+
+    #[test]
+    fn test_aggregator_requires_argument_msg() {
+        let err = aggregator_requires_argument("sum");
+        assert_eq!(err.to_string(), "Aggregator 'sum' requires an argument");
     }
 }

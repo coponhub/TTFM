@@ -22,6 +22,7 @@ pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
 pub mod test_validation;
+pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;
 pub mod verify_search;
 pub mod verify_search_all;

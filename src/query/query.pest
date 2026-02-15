@@ -2,12 +2,33 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 // --- Main entry point ---
-// Try expr (set operations) first to handle ambiguities like "(set) - (set)" correctly.
-// bare_calculation_query is fallback for top-level arithmetic like "1 + 2".
-// IMPORTANT: EOI must be inside the choice to force backtracking if expr matches but doesn't consume all input (e.g. "1 + 2").
-query = { SOI ~ ( (expr ~ EOI) | (bare_calculation_query ~ EOI) ) }
+// --- Main entry point ---
+// Try scalar_arithmetic_query first to handle top-level arithmetic like "count() - count()" or "size: * 2".
+// Then expr for set operations.
+// bare_calculation_query is fallback for other arithmetic like "1 + 2".
+query = { SOI ~ ( (scalar_arithmetic_query ~ EOI) | (expr ~ EOI) | (bare_calculation_query ~ EOI) ) }
 
 bare_calculation_query = { calculation_inner }
+
+// --- Top-level Arithmetic Priority Rule ---
+// Allows "count() - count()", "count() + 1", "size: * 2" without parentheses.
+// Strictly requires BOTH operands to be arithmetic-compatible (Scalar or Projection).
+scalar_arithmetic_query = { scalar_arithmetic_expr }
+
+scalar_arithmetic_expr = ${
+    arithmetic_operand ~ (arith_op ~ arithmetic_operand)+
+}
+
+// Operands valid for top-level arithmetic prioritization
+arithmetic_operand = {
+    aggregation
+    | number
+    | calculation
+    | type_ref
+}
+
+// Common arithmetic operator definition
+arithmetic_operator = { "+" | "-" | "*" | "/" | "%" }
 
 // --- Set operations (Pratt Parser) ---
 // DESIGN.md: Spaces are REQUIRED around set operators
@@ -103,7 +124,7 @@ operand = {
 // --- Aggregation Functions ---
 // sum(size:), count(extension:), avg(size:), max(size:), min(size:)
 // bare_calculation を優先で試行し、失敗時は expr へフォールバック
-aggregation = ${ aggregator ~ "(" ~ WHITESPACE* ~ (bare_calculation | expr) ~ ")" }
+aggregation = ${ aggregator ~ "(" ~ WHITESPACE* ~ (bare_calculation | expr)? ~ ")" }
 aggregator = @{ "sum" | "count" | "avg" | "max" | "min" }
 
 // ... existing rules ...
@@ -134,7 +155,7 @@ bare_calculation = { calculation_inner ~ &")" }
 
 calculation = { "(" ~ calculation_inner ~ ")" }
 calculation_inner = ${ operand_calc ~ (arith_op ~ operand_calc)+ }
-arith_op = @{ WHITESPACE+ ~ ("+" | "-" | "*" | "/" | "%") ~ WHITESPACE+ }
+arith_op = @{ WHITESPACE+ ~ arithmetic_operator ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)
 operand_calc = { aggregation | type_ref | label | calculation | parenthesized_expr }
