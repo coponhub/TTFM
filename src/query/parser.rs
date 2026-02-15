@@ -54,11 +54,6 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
     match inner_pair.as_rule() {
         Rule::expr => build_expr(inner_pair),
-        Rule::bare_calculation_query => {
-            let inner = inner_pair.into_inner().next().unwrap();
-            let calc = build_calculation(inner)?;
-            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
-        }
         Rule::scalar_arithmetic_query => {
              let inner = inner_pair.into_inner().next().unwrap();
              let calc = build_scalar_arithmetic_expr(inner)?;
@@ -71,11 +66,6 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
     match pair.as_rule() {
-        Rule::bare_calculation_query => {
-            let inner = pair.into_inner().next().unwrap();
-            let calc = build_calculation(inner)?;
-            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
-        }
         Rule::scalar_arithmetic_query => {
              let inner = pair.into_inner().next().unwrap();
              let calc = build_scalar_arithmetic_expr(inner)?;
@@ -688,6 +678,14 @@ fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
             let tag_type_pair = type_inner.next().unwrap();
             let tag_type = TagType::from(tag_type_pair.as_str());
             Ok(Operand::TypeRef(tag_type))
+        }
+        Rule::parenthesized_expr => {
+            let expr_pair = inner.into_inner().next().unwrap();
+            let node = build_expr(expr_pair)?;
+            Ok(Operand::Query(Box::new(node)))
+        }
+        Rule::label | Rule::quoted_string | Rule::unquoted_string => {
+            Ok(Operand::Literal(build_label(inner)?))
         }
         _ => Err(anyhow!("Unexpected arithmetic operand inner: {:?}", inner.as_rule())),
     }

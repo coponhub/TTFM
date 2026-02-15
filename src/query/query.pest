@@ -6,12 +6,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 // Try scalar_arithmetic_query first to handle top-level arithmetic like "count() - count()" or "size: * 2".
 // Then expr for set operations.
 // bare_calculation_query is fallback for other arithmetic like "1 + 2".
-query = { SOI ~ ( (scalar_arithmetic_query ~ EOI) | (expr ~ EOI) | (bare_calculation_query ~ EOI) ) }
-
-bare_calculation_query = { calculation_inner }
+query = { SOI ~ ( (scalar_arithmetic_query ~ EOI) | (expr ~ EOI) ) }
 
 // --- Top-level Arithmetic Priority Rule ---
-// Allows "count() - count()", "count() + 1", "size: * 2" without parentheses.
+// Allows "count() - count()", "count() + 1", "size: * 2", "1 + 2" without parentheses.
 // Strictly requires BOTH operands to be arithmetic-compatible (Scalar or Projection).
 scalar_arithmetic_query = { scalar_arithmetic_expr }
 
@@ -25,6 +23,8 @@ arithmetic_operand = {
     | number
     | calculation
     | type_ref
+    | parenthesized_expr
+    | label
 }
 
 // Common arithmetic operator definition
