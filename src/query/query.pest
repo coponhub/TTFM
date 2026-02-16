@@ -36,11 +36,12 @@ arithmetic_operator = { "+" | "-" | "*" | "/" | "%" }
 // "a:1 & b:2" -> Set AND operation
 expr = ${ WHITESPACE* ~ primary ~ (WHITESPACE+ ~ infix ~ WHITESPACE+ ~ primary)* ~ WHITESPACE* }
 
-infix = _{ ampersand | pipe | minus_colon | minus }
-    ampersand   = { "&" }
-    pipe        = { "|" }
-    minus_colon = { "-:" }
-    minus       = { "-" }
+infix = _{ ampersand_colon | ampersand | pipe | minus_colon | minus }
+    ampersand_colon = { "&:" }
+    ampersand       = { "&" }
+    pipe            = { "|" }
+    minus_colon     = { "-:" }
+    minus           = { "-" }
 
 // --- Primary elements ---
 primary = { factor }

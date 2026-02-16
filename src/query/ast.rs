@@ -93,6 +93,15 @@ pub struct ComparisonNode {
 // したがって、expand は struct impl から削除し、外部関数として定義するか、
 // functions.rs に置く。
 
+/// ネスト演算ノード (`Projection &: Projection` 等)
+#[derive(Debug, PartialEq, Clone)]
+pub struct NestNode {
+    /// 左辺: Projection または Nest
+    pub left: Box<QueryNode>,
+    /// 右辺: Projection, Scalar, Comparison, Aggregation, Nest
+    pub right: Box<QueryNode>,
+}
+
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
@@ -115,6 +124,8 @@ pub enum QueryNode {
     Projection(Operand),
     /// 集約演算 (count(query), sum(size:) など)
     Aggregation(AggregationNode),
+    /// ネスト演算 (`Projection &: Projection` 等)
+    Nest(NestNode),
 }
 
 impl QueryNode {
@@ -170,6 +181,10 @@ impl QueryNode {
             QueryNode::Aggregation(agg) => {
                 agg.collect_types(types);
             }
+            QueryNode::Nest(nest) => {
+                nest.left.collect_types(types);
+                nest.right.collect_types(types);
+            }
         }
     }
 
@@ -191,6 +206,10 @@ impl QueryNode {
             }
             QueryNode::Aggregation(agg) => {
                 agg.collect_projections(projections);
+            }
+            QueryNode::Nest(nest) => {
+                nest.left.collect_projections(projections);
+                nest.right.collect_projections(projections);
             }
             _ => {}
         }

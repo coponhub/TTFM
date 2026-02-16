@@ -27,6 +27,11 @@ pub fn to_sql(node: &QueryNode, view_name: &str) -> SelectStatement {
         }
         QueryNode::Projection(op) => build_projection_sql(op, view_name),
         QueryNode::Aggregation(agg) => build_aggregation_sql(agg, view_name),
+        QueryNode::Nest(_) => {
+            // Nest は logical_resolver/lens_resolver で解決済みのはず
+            // ここには到達しない
+            unreachable!("Nest node should be resolved before SQL generation")
+        }
     };
     stmt
 }
@@ -307,7 +312,8 @@ pub fn build_resolved_aggregation_sql(
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let (_, _, operand) = inner.extract_agg_parts();
-            let is_string = operand.map(|o| o.is_string_type()).unwrap_or(false);
+            let is_string =
+                operand.map(|o| o.is_string_type()).unwrap_or(false);
 
             // 重要: 同一アイテムに対して複数行がマッチする場合、単純な SUM だと重複加算される。
             let sub = build_deduplicated_agg_subquery(inner, view);
@@ -783,7 +789,8 @@ fn build_aggregation_expr(
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let (_storage, _cond, operand) = inner.extract_agg_parts();
 
-            let is_string = operand.map(|o| o.is_string_type()).unwrap_or(false);
+            let is_string =
+                operand.map(|o| o.is_string_type()).unwrap_or(false);
 
             let inner_expr = if let Some(operand) = operand {
                 // 算術演算用のキャストロジックを共通利用
@@ -1286,10 +1293,7 @@ pub fn build_fetch_label_groups_sql(
             ),
             Tbl::Rn,
         )
-        .expr_as(
-            CustomFunc::count_over(label_col.clone()),
-            Tbl::GroupTotal,
-        )
+        .expr_as(CustomFunc::count_over(label_col.clone()), Tbl::GroupTotal)
         .distinct()
         .from(Alias::new(&all_hits_source))
         .and_where(
@@ -1305,8 +1309,7 @@ pub fn build_fetch_label_groups_sql(
         // 通常パス: Locationsテーブル由来のNULL除外 + RowTag type フィルタ
         all_hits_q.and_where(Expr::col(label_col.clone()).is_not_null());
         if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
-            all_hits_q
-                .and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            all_hits_q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
         }
     }
 

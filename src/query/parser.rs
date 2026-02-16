@@ -1,6 +1,6 @@
 use crate::query::ast::{
     AggregationNode, ArithmeticAggOp, ArithmeticOp, BasicOp, CalculationNode,
-    ComparisonNode, ComparisonOp, Operand, QueryNode,
+    ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
 use crate::types::{Label, TagType, TypedTag};
@@ -30,6 +30,7 @@ fn get_parser() -> &'static PrattParser<Rule> {
                 | Op::infix(Rule::minus_colon, Assoc::Left)
                 | Op::infix(Rule::minus, Assoc::Left))
             .op(Op::infix(Rule::ampersand, Assoc::Left))
+            .op(Op::infix(Rule::ampersand_colon, Assoc::Left))
     })
 }
 
@@ -37,11 +38,11 @@ fn get_parser() -> &'static PrattParser<Rule> {
 pub fn parse(input: &str) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
         .map_err(|e| error::map_grammar_error(input, e))?;
-    
+
     // query = { SOI ~ (choice) ~ EOI }
     // The top-level pair is 'query'.
     let query_pair = pairs.next().unwrap();
-    
+
     // Into inner: expected to contain SOI(implicit?), choice, EOI
     // Pest 2.0+ usually doesn't yield SOI/EOI in into_inner unless explicit?
     // Actually query definition: query = { SOI ~ ... }
@@ -49,27 +50,30 @@ pub fn parse(input: &str) -> Result<QueryNode> {
     // Let's get the first inner pair that is NOT SOI/EOI if they appear.
     // In many patterns, `query` inner is just the content.
     // Let's find the relevant inner pair.
-    
+
     let inner_pair = query_pair.into_inner().next().unwrap();
 
     match inner_pair.as_rule() {
         Rule::expr => build_expr(inner_pair),
         Rule::scalar_arithmetic_query => {
-             let inner = inner_pair.into_inner().next().unwrap();
-             let calc = build_scalar_arithmetic_expr(inner)?;
-             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+            let inner = inner_pair.into_inner().next().unwrap();
+            let calc = build_scalar_arithmetic_expr(inner)?;
+            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
         Rule::EOI => Err(anyhow!("Empty query")),
-        _ => Err(anyhow!("Unexpected top-level rule: {:?}", inner_pair.as_rule())),
+        _ => Err(anyhow!(
+            "Unexpected top-level rule: {:?}",
+            inner_pair.as_rule()
+        )),
     }
 }
 
 fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
     match pair.as_rule() {
         Rule::scalar_arithmetic_query => {
-             let inner = pair.into_inner().next().unwrap();
-             let calc = build_scalar_arithmetic_expr(inner)?;
-             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
+            let inner = pair.into_inner().next().unwrap();
+            let calc = build_scalar_arithmetic_expr(inner)?;
+            Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
         Rule::comparison => build_comparison(pair),
         Rule::typed_tag => build_typed_tag(pair),
@@ -113,7 +117,10 @@ fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
         match op_str {
             "count" => {
                 // count() は count(*:*) の短縮形として、ワイルドカードタグを生成する
-                QueryNode::TypedTag(TypedTag::new(TagType::from("*"), Label::from("*")))
+                QueryNode::TypedTag(TypedTag::new(
+                    TagType::from("*"),
+                    Label::from("*"),
+                ))
             }
             _ => {
                 // sum(), avg() 等は引数が必須
@@ -172,6 +179,10 @@ fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
                 Rule::minus | Rule::minus_colon => {
                     Ok(QueryNode::Difference(Box::new(lhs), Box::new(rhs)))
                 }
+                Rule::ampersand_colon => Ok(QueryNode::Nest(NestNode {
+                    left: Box::new(lhs),
+                    right: Box::new(rhs),
+                })),
                 _ => Err(anyhow!(
                     "{}: {:?}",
                     error::UNKNOWN_INFIX_RULE,
@@ -636,24 +647,31 @@ fn build_scalar_arithmetic_expr(pair: Pair<Rule>) -> Result<CalculationNode> {
             "*" => ArithmeticOp::Mul,
             "/" => ArithmeticOp::Div,
             "%" => ArithmeticOp::Mod,
-            _ => return Err(anyhow!("Expected arithmetic operator (+, -, *, /, %), found '{}'", op_str)),
+            _ => {
+                return Err(anyhow!(
+                    "Expected arithmetic operator (+, -, *, /, %), found '{}'",
+                    op_str
+                ))
+            }
         };
-        
+
         let rhs_pair = inner.next().unwrap();
         let rhs_operand = build_arithmetic_operand(rhs_pair)?;
-        
+
         let lhs_node = CalculationNode {
             left: lhs_operand,
             op,
             right: rhs_operand,
         };
-        
+
         lhs_operand = Operand::Calculation(Box::new(lhs_node));
     }
-    
+
     match lhs_operand {
         Operand::Calculation(boxed_node) => Ok(*boxed_node),
-        _ => Err(anyhow!("Failed to build calculation node (single operand?)")),
+        _ => Err(anyhow!(
+            "Failed to build calculation node (single operand?)"
+        )),
     }
 }
 
@@ -687,7 +705,10 @@ fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
         Rule::label | Rule::quoted_string | Rule::unquoted_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
-        _ => Err(anyhow!("Unexpected arithmetic operand inner: {:?}", inner.as_rule())),
+        _ => Err(anyhow!(
+            "Unexpected arithmetic operand inner: {:?}",
+            inner.as_rule()
+        )),
     }
 }
 
@@ -1178,7 +1199,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_count_empty_args() {
         let node = parse("count()").expect("count() should parse");
@@ -1189,7 +1209,10 @@ mod tests {
                         assert_eq!(tt.label.tag_type().as_str(), "*");
                         assert_eq!(tt.label.as_str(), "*");
                     }
-                    _ => panic!("Expected TypedTag(*:*) inside count(), got {:?}", inner),
+                    _ => panic!(
+                        "Expected TypedTag(*:*) inside count(), got {:?}",
+                        inner
+                    ),
                 }
             }
             _ => panic!("Expected Count aggregation, got {:?}", node),
@@ -1204,5 +1227,232 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("requires an argument"));
+    }
+
+    // ========== Nest (&:) パーサーテスト ==========
+
+    #[test]
+    fn test_parse_nest_basic() {
+        let node =
+            parse("project: &: extension:").expect("nest basic should parse");
+        match node {
+            QueryNode::Nest(nest) => {
+                match &*nest.left {
+                    QueryNode::Projection(Operand::TypeRef(tt)) => {
+                        assert_eq!(tt.as_str(), "project");
+                    }
+                    _ => panic!(
+                        "Expected Projection(project) as left, got {:?}",
+                        nest.left
+                    ),
+                }
+                match &*nest.right {
+                    QueryNode::Projection(Operand::TypeRef(tt)) => {
+                        assert_eq!(tt.as_str(), "extension");
+                    }
+                    _ => panic!(
+                        "Expected Projection(extension) as right, got {:?}",
+                        nest.right
+                    ),
+                }
+            }
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_with_agg() {
+        let node = parse("parentdir: &: count(extension:jpg)")
+            .expect("nest with agg should parse");
+        match node {
+            QueryNode::Nest(nest) => {
+                match &*nest.left {
+                    QueryNode::Projection(Operand::TypeRef(tt)) => {
+                        assert_eq!(tt.as_str(), "parentdir");
+                    }
+                    _ => panic!(
+                        "Expected Projection(parentdir), got {:?}",
+                        nest.left
+                    ),
+                }
+                match &*nest.right {
+                    QueryNode::Aggregation(AggregationNode::Count(_)) => {}
+                    _ => panic!(
+                        "Expected Aggregation(Count) as right, got {:?}",
+                        nest.right
+                    ),
+                }
+            }
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_with_comparison() {
+        let node = parse("project: &: (count(extension:jpg) > 10)")
+            .expect("nest with comparison should parse");
+        match node {
+            QueryNode::Nest(nest) => {
+                match &*nest.left {
+                    QueryNode::Projection(Operand::TypeRef(tt)) => {
+                        assert_eq!(tt.as_str(), "project");
+                    }
+                    _ => panic!(
+                        "Expected Projection(project), got {:?}",
+                        nest.left
+                    ),
+                }
+                match &*nest.right {
+                    QueryNode::Comparison(_) => {}
+                    _ => panic!(
+                        "Expected Comparison as right, got {:?}",
+                        nest.right
+                    ),
+                }
+            }
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_chain() {
+        // a: &: b: &: c: → Nest(Nest(a, b), c) due to left-associativity
+        let node = parse("a: &: b: &: c:").expect("nest chain should parse");
+        match node {
+            QueryNode::Nest(outer) => {
+                match &*outer.right {
+                    QueryNode::Projection(Operand::TypeRef(tt)) => {
+                        assert_eq!(tt.as_str(), "c");
+                    }
+                    _ => panic!(
+                        "Expected Projection(c) as outer right, got {:?}",
+                        outer.right
+                    ),
+                }
+                match &*outer.left {
+                    QueryNode::Nest(inner) => {
+                        match &*inner.left {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "a");
+                            }
+                            _ => panic!("Expected Projection(a) as inner left, got {:?}", inner.left),
+                        }
+                        match &*inner.right {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "b");
+                            }
+                            _ => panic!("Expected Projection(b) as inner right, got {:?}", inner.right),
+                        }
+                    }
+                    _ => panic!(
+                        "Expected Nest as outer left, got {:?}",
+                        outer.left
+                    ),
+                }
+            }
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_priority_over_and() {
+        // a: &: b: & c:d → And(Nest(a, b), TypedTag(c:d))
+        // &: has higher priority than &
+        let node = parse("a: &: b: & c:d").expect("nest priority should parse");
+        match node {
+            QueryNode::And(nodes) => {
+                assert_eq!(nodes.len(), 2);
+                match &nodes[0] {
+                    QueryNode::Nest(nest) => {
+                        match &*nest.left {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "a");
+                            }
+                            _ => panic!(
+                                "Expected Projection(a), got {:?}",
+                                nest.left
+                            ),
+                        }
+                        match &*nest.right {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "b");
+                            }
+                            _ => panic!(
+                                "Expected Projection(b), got {:?}",
+                                nest.right
+                            ),
+                        }
+                    }
+                    _ => panic!(
+                        "Expected Nest as first child, got {:?}",
+                        nodes[0]
+                    ),
+                }
+                match &nodes[1] {
+                    QueryNode::TypedTag(tt) => {
+                        assert_eq!(tt.label.tag_type().as_str(), "c");
+                        assert_eq!(tt.label.as_str(), "d");
+                    }
+                    _ => panic!("Expected TypedTag(c:d), got {:?}", nodes[1]),
+                }
+            }
+            _ => panic!("Expected And, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_nest_join() {
+        // (a: &: b:) &: (c: &: d:) → Nest(Nest(a, b), Nest(c, d))
+        let node = parse("(a: &: b:) &: (c: &: d:)")
+            .expect("nest-nest join should parse");
+        match node {
+            QueryNode::Nest(outer) => {
+                match &*outer.left {
+                    QueryNode::Nest(left) => {
+                        match &*left.left {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "a")
+                            }
+                            _ => panic!("Expected a"),
+                        }
+                        match &*left.right {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "b")
+                            }
+                            _ => panic!("Expected b"),
+                        }
+                    }
+                    _ => panic!("Expected Nest as left, got {:?}", outer.left),
+                }
+                match &*outer.right {
+                    QueryNode::Nest(right) => {
+                        match &*right.left {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "c")
+                            }
+                            _ => panic!("Expected c"),
+                        }
+                        match &*right.right {
+                            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                                assert_eq!(tt.as_str(), "d")
+                            }
+                            _ => panic!("Expected d"),
+                        }
+                    }
+                    _ => {
+                        panic!("Expected Nest as right, got {:?}", outer.right)
+                    }
+                }
+            }
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_collect_types() {
+        let node = parse("project: &: extension:").expect("should parse");
+        let types = node.get_all_types();
+        assert!(types.contains(&"project".to_string()));
+        assert!(types.contains(&"extension".to_string()));
     }
 }

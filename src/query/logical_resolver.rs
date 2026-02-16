@@ -18,7 +18,7 @@
 
 use crate::query::ast::{
     AggregationNode, ArithmeticOp, CalculationNode, ComparisonNode,
-    ComparisonOp, Operand, QueryNode,
+    ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
@@ -118,6 +118,32 @@ pub(crate) fn expand_query_node(
         }
         QueryNode::Aggregation(agg) => {
             Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+        }
+        QueryNode::Nest(nest) => {
+            let left = expand_query_node(schema, *nest.left)?;
+            let right = expand_query_node(schema, *nest.right)?;
+
+            // 左辺は Projection または Nest であること
+            match &left {
+                QueryNode::Projection(_) | QueryNode::Nest(_) => {}
+                _ => {
+                    bail!(
+                        "Nest operator '&:' requires a Projection or Nest on the left side, got: {:?}",
+                        left
+                    );
+                }
+            }
+
+            // 右辺が Comparison の場合、正規化:
+            // Nest(L, Cmp(a op b)) → Cmp(Nest(L, a) op Nest(L, b))
+            if let QueryNode::Comparison(cmp) = right {
+                return expand_nest_comparison(left, cmp);
+            }
+
+            Ok(QueryNode::Nest(NestNode {
+                left: Box::new(left),
+                right: Box::new(right),
+            }))
         }
         other => Ok(other),
     }
@@ -273,6 +299,9 @@ fn is_set_operation(node: &QueryNode) -> bool {
 
         // スカラーを返す
         QueryNode::Aggregation(_) => false,
+
+        // Nestは集合を返す
+        QueryNode::Nest(_) => true,
     }
 }
 
@@ -426,6 +455,7 @@ fn returns_projection(node: &QueryNode) -> bool {
         | QueryNode::ColumnMatch { .. }
         | QueryNode::Comparison(_)
         | QueryNode::Aggregation(_) => false,
+        QueryNode::Nest(nest) => returns_projection(&nest.left),
     }
 }
 
@@ -613,6 +643,57 @@ fn double_label(v: f64) -> crate::types::Label {
     )
 }
 
+/// Nest の右辺が Comparison の場合の正規化。
+///
+/// `Nest(L, Comparison(a op b))` → `Comparison(Nest(L, a) op Nest(L, b))`
+///
+/// 例: `parentdir: &: (avg(size:) == sum(size:))`
+///   → `(parentdir: &: avg(size:)) := (parentdir: &: sum(size:))`
+fn expand_nest_comparison(
+    left: QueryNode,
+    cmp: ComparisonNode,
+) -> Result<QueryNode> {
+    let first_query = operand_to_query_node(cmp.first);
+    let first_nest = QueryNode::Nest(NestNode {
+        left: Box::new(left.clone()),
+        right: Box::new(first_query),
+    });
+
+    let mut rest = Vec::new();
+    for (op, operand) in cmp.rest {
+        let right_query = operand_to_query_node(operand);
+        let right_nest = QueryNode::Nest(NestNode {
+            left: Box::new(left.clone()),
+            right: Box::new(right_query),
+        });
+        // スカラー比較をラベル比較に変換（Nest結果はProjectionなので）
+        let label_op = match op {
+            ComparisonOp::Scalar(basic) => ComparisonOp::Label(basic),
+            label @ ComparisonOp::Label(_) => label,
+        };
+        rest.push((label_op, Operand::Query(Box::new(right_nest))));
+    }
+
+    Ok(QueryNode::Comparison(ComparisonNode {
+        first: Operand::Query(Box::new(first_nest)),
+        rest,
+    }))
+}
+
+/// Operand を QueryNode に変換するヘルパー。
+/// Nest の右辺として使用可能な形に変換する。
+fn operand_to_query_node(operand: Operand) -> QueryNode {
+    match operand {
+        Operand::Aggregation(agg) => QueryNode::Aggregation(*agg),
+        Operand::TypeRef(tt) => QueryNode::Projection(Operand::TypeRef(tt)),
+        Operand::Calculation(calc) => {
+            QueryNode::Projection(Operand::Calculation(calc))
+        }
+        Operand::Query(node) => *node,
+        Operand::Literal(_) => QueryNode::Projection(operand),
+    }
+}
+
 /// 集約ノードを論理展開します。
 fn expand_aggregation(
     schema: &impl LogicalSchema,
@@ -645,7 +726,9 @@ fn infer_type(
             validate_calculation(calc, schema)?;
             let left_type = infer_type(&calc.left, schema)?;
             let right_type = infer_type(&calc.right, schema)?;
-            if left_type == LogicalType::String && right_type == LogicalType::String {
+            if left_type == LogicalType::String
+                && right_type == LogicalType::String
+            {
                 Ok(LogicalType::String)
             } else {
                 Ok(LogicalType::Integer) // 暫定：数値演算結果は一旦整数扱い
@@ -723,6 +806,17 @@ mod tests {
     use crate::query::lens_schema::Lens;
     use crate::types::{TagType, TypedTag};
 
+    /// Operand::Query(Nest(...)) から NestNode への参照を取り出す
+    fn expect_query_nest(op: &Operand) -> &NestNode {
+        match op {
+            Operand::Query(q) => match q.as_ref() {
+                QueryNode::Nest(n) => n,
+                other => panic!("Expected Nest, got {:?}", other),
+            },
+            other => panic!("Expected Query operand, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_expand_simple_and() {
         let lens = Lens::base_standard();
@@ -756,9 +850,7 @@ mod tests {
         let node = QueryNode::Comparison(cmp);
         let result = expand_query_node(&lens, node);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(
-            "not allowed"
-        ));
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
 
     #[test]
@@ -885,6 +977,143 @@ mod tests {
         assert!(matches!(
             expanded,
             QueryNode::Projection(Operand::Calculation(_))
+        ));
+    }
+
+    // ========== Nest (&:) テスト ==========
+
+    #[test]
+    fn test_expand_nest_basic() {
+        let lens = Lens::base_standard();
+        // custom: &: custom2: → 子ノードが正しく展開される
+        // (base_standard で特殊展開されないカスタムタグを使用)
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("project"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("category"),
+            ))),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+        match expanded {
+            QueryNode::Nest(nest) => {
+                assert!(
+                    matches!(*nest.left, QueryNode::Projection(_)),
+                    "left should be Projection, got: {:?}",
+                    nest.left
+                );
+                assert!(
+                    matches!(*nest.right, QueryNode::Projection(_)),
+                    "right should be Projection, got: {:?}",
+                    nest.right
+                );
+            }
+            _ => panic!("Expected Nest, got {:?}", expanded),
+        }
+    }
+
+    #[test]
+    fn test_nest_left_must_be_projection_or_nest() {
+        let lens = Lens::base_standard();
+        // TypedTag &: Projection → エラー（左辺が Projection/Nest でない）
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::TypedTag(TypedTag::new("size", "100"))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        });
+        let result = expand_query_node(&lens, node);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Nest operator"),
+            "Error should mention Nest operator"
+        );
+    }
+
+    #[test]
+    fn test_nest_is_set_operation() {
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("project"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        });
+        assert!(is_set_operation(&node));
+    }
+
+    #[test]
+    fn test_nest_comparison_rewrite() {
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, BasicOp, ComparisonOp,
+        };
+        let lens = Lens::base_standard();
+
+        // parentdir: &: (avg(size:) == sum(size:))
+        // → Comparison(
+        //     Query(Nest(parentdir, avg(size:))),
+        //     Label(Eq),
+        //     Query(Nest(parentdir, sum(size:)))
+        //   )
+        let avg_agg = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Avg,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+        let sum_agg = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+        let cmp = ComparisonNode {
+            first: Operand::Aggregation(Box::new(avg_agg)),
+            rest: vec![(
+                ComparisonOp::Scalar(BasicOp::Eq),
+                Operand::Aggregation(Box::new(sum_agg)),
+            )],
+        };
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(cmp)),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は Comparison であること
+        let cmp = match &expanded {
+            QueryNode::Comparison(c) => c,
+            _ => {
+                panic!("Expected Comparison after rewrite, got {:?}", expanded)
+            }
+        };
+
+        // first: Nest(parentdir, avg(size:))
+        let first_nest = expect_query_nest(&cmp.first);
+        assert!(matches!(*first_nest.left, QueryNode::Projection(_)));
+        assert!(matches!(
+            *first_nest.right,
+            QueryNode::Aggregation(AggregationNode::Arithmetic {
+                op: ArithmeticAggOp::Avg,
+                ..
+            })
+        ));
+
+        // rest[0]: Label(Eq), Nest(parentdir, sum(size:))
+        assert_eq!(cmp.rest.len(), 1);
+        assert_eq!(cmp.rest[0].0, ComparisonOp::Label(BasicOp::Eq));
+        let rest_nest = expect_query_nest(&cmp.rest[0].1);
+        assert!(matches!(
+            *rest_nest.right,
+            QueryNode::Aggregation(AggregationNode::Arithmetic {
+                op: ArithmeticAggOp::Sum,
+                ..
+            })
         ));
     }
 }

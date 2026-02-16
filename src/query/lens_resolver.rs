@@ -653,6 +653,10 @@ pub(crate) fn resolve_query_node(
             let res = resolve_aggregation(lens, agg)?;
             Ok(ResolvedNode::Aggregation(res))
         }
+        QueryNode::Nest(_nest) => {
+            // Phase 3-5 で実装予定
+            Err(anyhow::anyhow!("Nest node resolution not yet implemented"))
+        }
     }
 }
 

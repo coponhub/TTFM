@@ -53,7 +53,10 @@ fn test_count_unique_labels() -> anyhow::Result<()> {
     // count(extension:) -> 2 (txt, rs)
     // ノイズ（隠しファイル等）を避けるため、作成したファイルがあるディレクトリに限定
     let root_str = root.to_slash_lossy();
-    let res = fm.search(&format!("count(parentdir:\"{}\" & extension:)", root_str), Default::default())?;
+    let res = fm.search(
+        &format!("count(parentdir:\"{}\" & extension:)", root_str),
+        Default::default(),
+    )?;
     assert_eq!(res.results[0].name, "2");
 
     Ok(())
@@ -584,9 +587,10 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     // 式: count() - count(*:* - parentdir:"root")
     // 両オペランドがスカラー(Aggregation)のため、トップレベルでも括弧なしで算術演算として解釈される。
     let root_str = root.to_slash_lossy();
-    let query_indirect = format!("count() - count(*:* - parentdir:\"{}\")", root_str);
+    let query_indirect =
+        format!("count() - count(*:* - parentdir:\"{}\")", root_str);
     let res_indirect = fm.search(&query_indirect, Default::default())?;
-    
+
     assert_eq!(res_indirect.results[0].name, "5");
 
     Ok(())
@@ -612,7 +616,7 @@ fn test_count_empty_comparison() -> anyhow::Result<()> {
     // フィルタ済みの検証は、Nest実装待ちのため行わない
     let res = fm.search("count() > 2", Default::default())?;
     let res_wild = fm.search("count(*:*) > 2", Default::default())?;
-    
+
     // 全アイテム数は5なので TRUE
     assert_eq!(res.results[0].name, "TRUE");
     assert_eq!(res.results[0].name, res_wild.results[0].name);
@@ -639,7 +643,7 @@ fn test_count_empty_arithmetic() -> anyhow::Result<()> {
     // システムタグなどが含まれるため絶対値は不定だが、計算結果は一致するはず
     let res1 = fm.search("count() + 1", Default::default())?;
     let res1_wild = fm.search("count(*:*) + 1", Default::default())?;
-    
+
     // 結果が数値であることを確認（"6"決め打ちは避ける）
     assert!(res1.results[0].name.parse::<i64>().is_ok());
     assert_eq!(res1.results[0].name, res1_wild.results[0].name);
