@@ -54,6 +54,7 @@ factor = {
   | projection
   | aggregation
   | "(" ~ expr ~ ")"
+  | label
 }
 
 projection = { type_ref | calculation }

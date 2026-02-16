@@ -3,7 +3,9 @@ use crate::query::ast::{
     ArithmeticAggOp, ArithmeticOp, ComparisonNode, ComparisonOp, Operand,
     QueryNode,
 };
-use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode};
+use crate::query::lens_resolver::{
+    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
+};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
 use sea_query::{
@@ -77,7 +79,9 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
         ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        ResolvedNode::Projection(op) => build_resolved_projection_sql(op, view),
+        ResolvedNode::Projection { operand: op, .. } => {
+            build_resolved_projection_sql(op, view)
+        }
         ResolvedNode::ColumnMatch { tag, label } => {
             build_column_match_sql(*tag, label, view)
         }
@@ -1192,6 +1196,158 @@ pub fn build_flat_table_sql(
     q
 }
 
+/// nvalue集計用CTEを構築します。
+/// projection label ごとに nvalue（集約値）を計算するSQLを返します。
+fn build_nvalue_cte(
+    proj_col: Col,
+    proj_storage: &StorageMapping,
+    nvalue: &ResolvedOperand,
+    view: &str,
+) -> SelectStatement {
+    match nvalue {
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
+            let mut stmt = Query::select();
+            stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
+            stmt.expr_as(
+                Expr::col(Col::ItemId).count_distinct(),
+                Alias::new("nvalue"),
+            );
+            stmt.from(Alias::new(view));
+
+            // type filter for projection
+            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            }
+
+            // item_id IN picked_ids
+            stmt.and_where(
+                Expr::col(Col::ItemId).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from(Tbl::PickedIds)
+                        .to_owned(),
+                ),
+            );
+
+            // item_id IN (inner filter — 集計対象のアイテムを絞り込み)
+            let inner_pick = build_pick_sql(inner, view);
+            stmt.and_where(
+                Expr::col(Col::ItemId).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(inner_pick, Alias::new("nv_inner"))
+                        .to_owned(),
+                ),
+            );
+
+            stmt.group_by_col(proj_col);
+
+            stmt
+        }
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Arithmetic {
+            op,
+            inner,
+        }) => {
+            let (_, _, operand) = inner.extract_agg_parts();
+            let is_string =
+                operand.map(|o| o.is_string_type()).unwrap_or(false);
+
+            // Dedup subquery for values (item_id, val)
+            let deduped = build_deduplicated_agg_subquery(inner, view);
+
+            let mut stmt = Query::select();
+            stmt.expr_as(
+                Expr::col((Alias::new("proj"), proj_col)),
+                Alias::new("group_label"),
+            );
+            stmt.expr_as(
+                apply_arithmetic_agg(
+                    op,
+                    Expr::col((Alias::new("deduped"), Alias::new("val")))
+                        .into(),
+                    is_string,
+                ),
+                Alias::new("nvalue"),
+            );
+
+            // FROM oneview AS proj
+            stmt.from_as(Alias::new(view), Alias::new("proj"));
+
+            // JOIN deduped ON proj.item_id = deduped.item_id
+            stmt.join_subquery(
+                sea_query::JoinType::InnerJoin,
+                deduped,
+                Alias::new("deduped"),
+                Expr::col((Alias::new("proj"), Col::ItemId))
+                    .equals((Alias::new("deduped"), Col::ItemId)),
+            );
+
+            // WHERE proj.type = proj_tag_type
+            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
+                stmt.and_where(
+                    Expr::col((Alias::new("proj"), Col::Type))
+                        .eq(tag_type.as_str()),
+                );
+            }
+
+            // AND proj.item_id IN picked_ids
+            stmt.and_where(
+                Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from(Tbl::PickedIds)
+                        .to_owned(),
+                ),
+            );
+
+            stmt.group_by_col((Alias::new("proj"), proj_col));
+
+            stmt
+        }
+        ResolvedOperand::Literal(label) => {
+            // スカラー nvalue: 全ラベルに固定値を付与
+            let val = label_to_simple_expr(label);
+            let mut stmt = Query::select();
+            stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
+            stmt.expr_as(val, Alias::new("nvalue"));
+            stmt.from(Alias::new(view));
+
+            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            }
+
+            stmt.and_where(
+                Expr::col(Col::ItemId).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from(Tbl::PickedIds)
+                        .to_owned(),
+                ),
+            );
+
+            stmt.group_by_col(proj_col);
+
+            stmt
+        }
+        _ => {
+            // TODO: Calculation nvalue etc.
+            panic!("Unsupported nvalue type for CTE generation: {:?}", nvalue)
+        }
+    }
+}
+
+/// Label を sea_query の SimpleExpr に変換するヘルパー
+fn label_to_simple_expr(label: &Label) -> SimpleExpr {
+    use crate::types::LabelValue;
+    match label.value() {
+        LabelValue::Integer(i) => Expr::val(i).into(),
+        LabelValue::Boolean(b) => Expr::val(b).into(),
+        LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
+        LabelValue::Null => Expr::val(Option::<i32>::None).into(),
+        LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s).into(),
+    }
+}
+
 /// 指定された条件に合致するアイテムをラベル（型）ごとに集約し、
 /// 代表アイテムのリストと総数を 1 クエリで取得するための SQL を生成します。
 pub fn build_fetch_label_groups_sql(
@@ -1226,6 +1382,19 @@ pub fn build_fetch_label_groups_sql(
         .table_name(Tbl::PickedIds)
         .to_owned();
     with_clause.cte(picked_ids_cte);
+
+    // nvalue CTE: nvalue付きProjectionの場合、ラベルごとの集約値を計算
+    let has_nvalue = if let Some(nv) = resolver.get_nvalue() {
+        let nvalue_sql = build_nvalue_cte(col_iden, &desc.storage, nv, view);
+        let nvalue_cte = CommonTableExpression::new()
+            .query(nvalue_sql)
+            .table_name(Alias::new("nvalue_agg"))
+            .to_owned();
+        with_clause.cte(nvalue_cte);
+        true
+    } else {
+        false
+    };
 
     // Calculation 投影の検出: Projection(Calculation(...)) の場合は
     // 算術式を事前計算する computed CTE を挿入する
@@ -1313,6 +1482,8 @@ pub fn build_fetch_label_groups_sql(
         }
     }
 
+    // (nvalue フィルタは Phase 4 で対応予定)
+
     let all_hits_cte = CommonTableExpression::new()
         .query(all_hits_q)
         .table_name(Tbl::AllHits)
@@ -1379,8 +1550,19 @@ pub fn build_fetch_label_groups_sql(
             Expr::col((Tbl::TopItems, Tbl::GroupTotal)),
             Alias::new("group_total"),
         )
-        .expr_as(list_expr, Alias::new("item_refs"))
-        .from(Tbl::TopItems)
+        .expr_as(list_expr, Alias::new("item_refs"));
+
+    // nvalue カラムの追加（スカラーサブクエリで nvalue_agg CTE を参照）
+    if has_nvalue {
+        let nvalue_lookup = Expr::cust(format!(
+            "(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE \"group_label\" = {}.{})",
+            Iden::to_string(&Tbl::TopItems),
+            &label_col_name,
+        ));
+        q.expr_as(nvalue_lookup, Alias::new("nvalue"));
+    }
+
+    q.from(Tbl::TopItems)
         .group_by_col((Tbl::TopItems, label_col.clone()))
         .group_by_col((Tbl::TopItems, Tbl::GroupTotal))
         .order_by((Tbl::TopItems, label_col), sea_query::Order::Asc);
@@ -1562,7 +1744,11 @@ fn build_resolved_projection_sql(
                 .from(Alias::new(view));
 
             // ResolvedNode の Projection 用条件生成を利用
-            let cond = ResolvedNode::Projection(op.clone()).to_condition();
+            let cond = ResolvedNode::Projection {
+                operand: op.clone(),
+                nvalue: None,
+            }
+            .to_condition();
             q.cond_where(cond);
 
             // 特別なタグの追加条件
@@ -2500,8 +2686,8 @@ mod tests {
         use crate::query::ast::ArithmeticAggOp;
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(ResolvedNode::Projection(
-                ResolvedOperand::TagRef {
+            inner: Box::new(ResolvedNode::Projection {
+                operand: ResolvedOperand::TagRef {
                     tag_type: TagType::Base(SType::Size),
                     storage: StorageMapping::RowTag {
                         column: Col::LabelInt,
@@ -2509,7 +2695,8 @@ mod tests {
                     },
                     sql_type: crate::db::SqlType::BIGINT,
                 },
-            )),
+                nvalue: None,
+            }),
         };
 
         let sql = build_resolved_aggregation_sql(&agg, "oneview");
@@ -2549,11 +2736,14 @@ mod tests {
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::And(vec![
-                ResolvedNode::Projection(ResolvedOperand::TagRef {
-                    tag_type: TagType::Base(SType::Size),
-                    storage: StorageMapping::Column(Col::Size),
-                    sql_type: crate::db::SqlType::BIGINT,
-                }),
+                ResolvedNode::Projection {
+                    operand: ResolvedOperand::TagRef {
+                        tag_type: TagType::Base(SType::Size),
+                        storage: StorageMapping::Column(Col::Size),
+                        sql_type: crate::db::SqlType::BIGINT,
+                    },
+                    nvalue: None,
+                },
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),
                     storage: StorageMapping::RowTag {
@@ -2773,6 +2963,119 @@ mod tests {
             sql_tag.contains("BIGINT"),
             "Boolean column should be cast to BIGINT: {}",
             sql_tag
+        );
+    }
+
+    #[test]
+    fn test_nvalue_count_projection_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // parentdir: &: count(extension:jpg) → nvalue付きProjection
+        let resolver =
+            Resolver::new("parentdir: &: count(extension:jpg)").unwrap();
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        assert!(
+            resolver.get_nvalue().is_some(),
+            "Should have nvalue for nest query"
+        );
+
+        let sql = build_fetch_label_groups_sql(
+            &resolver, &proj_type, "oneview", 100, 0,
+        )
+        .unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // nvalue CTE と nvalue カラムが含まれているか
+        assert!(
+            sql_str.contains("nvalue_agg"),
+            "SQL should contain nvalue_agg CTE: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("nvalue"),
+            "SQL should contain nvalue column: {}",
+            sql_str
+        );
+        // 既存のカラムも含まれているか
+        assert!(
+            sql_str.contains("label_value"),
+            "SQL should contain label_value: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("group_total"),
+            "SQL should contain group_total: {}",
+            sql_str
+        );
+    }
+
+    #[test]
+    fn test_nvalue_sum_projection_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // parentdir: &: sum(size:) → nvalue付きProjection (Arithmetic)
+        let resolver = Resolver::new("parentdir: &: sum(size:)").unwrap();
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        assert!(
+            resolver.get_nvalue().is_some(),
+            "Should have nvalue for nest query"
+        );
+
+        let sql = build_fetch_label_groups_sql(
+            &resolver, &proj_type, "oneview", 100, 0,
+        )
+        .unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql_str.contains("nvalue_agg"),
+            "SQL should contain nvalue_agg CTE: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("nvalue"),
+            "SQL should contain nvalue column: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("SUM"),
+            "SQL should contain SUM for arithmetic nvalue: {}",
+            sql_str
+        );
+    }
+
+    #[test]
+    fn test_fetch_projection_no_nvalue_regression() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // 通常の projection — nvalue なし
+        let resolver = Resolver::new("extension:").unwrap();
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        assert!(
+            resolver.get_nvalue().is_none(),
+            "Normal projection should NOT have nvalue"
+        );
+
+        let sql = build_fetch_label_groups_sql(
+            &resolver, &proj_type, "oneview", 100, 0,
+        )
+        .unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // nvalue CTE が含まれていないこと
+        assert!(
+            !sql_str.contains("nvalue_agg"),
+            "Normal projection should NOT contain nvalue_agg: {}",
+            sql_str
         );
     }
 }

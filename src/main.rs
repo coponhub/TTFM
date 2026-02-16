@@ -469,12 +469,29 @@ fn print_compact_projections(
             .and_then(|l| l.as_str().parse::<usize>().ok())
             .unwrap_or(label_item.tags.entries.len());
 
-        // 1行目: ヘッダー (ラベル値 (X items))
-        safe_println!(
-            "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-            label_item.name,
-            total_count
-        );
+        // nvalue タグの取得
+        let nvalue_str = label_item
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
+            .map(|e| e.label.as_str().to_string());
+
+        // 1行目: ヘッダー (ラベル値 - nvalue (X items))
+        if let Some(nv) = &nvalue_str {
+            safe_println!(
+                "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
+                label_item.name,
+                nv,
+                total_count
+            );
+        } else {
+            safe_println!(
+                "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
+                label_item.name,
+                total_count
+            );
+        }
 
         // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
         let mut all_items_str = String::new();

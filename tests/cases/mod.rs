@@ -15,6 +15,7 @@ pub mod test_errors;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
 pub mod test_literal_ops;
+pub mod test_nest;
 pub mod test_null_propagation;
 pub mod test_projection;
 pub mod test_reverse_patterns;

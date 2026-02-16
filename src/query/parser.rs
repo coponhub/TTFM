@@ -208,6 +208,10 @@ fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::aggregation => {
             build_aggregation(inner).map(QueryNode::Aggregation)
         }
+        Rule::label => {
+            let label = build_label(inner)?;
+            Ok(QueryNode::Projection(Operand::Literal(label)))
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             error::UNKNOWN_FACTOR_INNER,
@@ -1454,5 +1458,16 @@ mod tests {
         let types = node.get_all_types();
         assert!(types.contains(&"project".to_string()));
         assert!(types.contains(&"extension".to_string()));
+    }
+
+    /// Nest 右辺の括弧内でラベル比較演算子 `:>` を使うとパースエラー。
+    /// 括弧内はスカラー式なので `>` を使うべき。
+    #[test]
+    fn test_parse_nest_right_label_op_in_scalar_context_is_error() {
+        let result = parse("parentdir: &: (count(extension:jpg) :> 1)");
+        assert!(
+            result.is_err(),
+            "Using label op :> inside Nest right scalar context should be a parse error"
+        );
     }
 }
