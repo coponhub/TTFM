@@ -634,17 +634,22 @@ fn test_nest_error_comparison_left() {
 }
 
 /// 右辺 Comparison: `parentdir: &: (count(ext:jpg) > 1)`
-/// logical_resolver で分配され、ラベル比較に変換される。
-/// Phase 4 で nvalue 付き Projection の比較を実装するため、
-/// 現段階ではエラーを返すことを確認。
+/// logical_resolver で分配され、nvalue 付き Projection として解決される。
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let result = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
         "parentdir: &: (count(extension:jpg) > 1)",
-    );
+    )
+    .expect("Nest with comparison should resolve");
+
     assert!(
-        result.is_err(),
-        "Comparison on nvalue-bearing Projection should error until Phase 4"
+        resolver.get_projection().is_some(),
+        "Should return Projection"
+    );
+    assert!(resolver.get_nvalue().is_some(), "Should have nvalue");
+    assert!(
+        resolver.get_nvalue_condition().is_some(),
+        "Should have nvalue_condition"
     );
 }
 
@@ -699,9 +704,7 @@ fn test_nest_resolver_all_aggregations() {
 // ──────────────────────────────────────────────
 
 /// `parentdir: &: (count(extension:jpg) > 1)` — jpg が2件以上のグループのみ返す
-/// Phase 4 で nvalue 付き Projection への比較を実装後に有効化
 #[test]
-#[ignore = "Phase 4: comparison on nvalue-bearing Projection not yet implemented"]
 fn test_nest_comparison_count_gt_e2e() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
@@ -757,9 +760,7 @@ fn test_nest_comparison_count_gt_e2e() -> anyhow::Result<()> {
 }
 
 /// `extension: &: (sum(size:) > 100)` — サイズ合計が100超のグループのみ
-/// Phase 4 で nvalue 付き Projection への比較を実装後に有効化
 #[test]
-#[ignore = "Phase 4: comparison on nvalue-bearing Projection not yet implemented"]
 fn test_nest_comparison_sum_gt_e2e() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
@@ -815,6 +816,265 @@ fn test_nest_scalar_right_resolves() {
 /// 右辺 Comparison の解決パターン確認（各集約関数）
 /// Phase 4 まではエラーが期待値
 #[test]
+fn test_nest_agg_over_nvalue_sum_count_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 2件, docs/ に jpg 1件
+    let src_dir = root.join("src");
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(docs_dir.join("c.jpg"), "c")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(parentdir: &: count(extension:jpg)) → 2 + 1 = 3
+    let res = fm.search(
+        "sum(parentdir: &: count(extension:jpg))",
+        Default::default(),
+    )?;
+
+    // スカラー結果（Projectionではない）
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1, "Scalar should return 1 result");
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(val, 3.0, "sum of nvalues: 2 + 1 = 3");
+
+    Ok(())
+}
+
+/// `count(parentdir: &: count(extension:jpg))` — nvalue付きProjectionのラベル数を数える
+#[test]
+fn test_nest_agg_over_nvalue_count_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 2件, docs/ に jpg 1件
+    let src_dir = root.join("src");
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(docs_dir.join("c.jpg"), "c")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // count(parentdir: &: count(extension:jpg)) → 2グループ (src, docs)
+    let res = fm.search(
+        "count(parentdir: &: count(extension:jpg))",
+        Default::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1);
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(val, 2.0, "2 parentdir groups with jpg");
+
+    Ok(())
+}
+
+/// `count(parentdir: &: (count(extension:jpg) > 1))` — nvalue比較付きProjectionに対する外側集約
+/// src/ に jpg 3件 (count > 1 を満たす)、docs/ に jpg 1件 (満たさない) → 条件を満たすグループは1つ
+#[test]
+fn test_nest_agg_over_nvalue_with_comparison_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 3件 → count(ext:jpg) = 3 > 1 ✓
+    let src_dir = root.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(src_dir.join("c.jpg"), "c")?;
+
+    // docs/ に jpg 1件 → count(ext:jpg) = 1, > 1 を満たさない ✗
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(docs_dir.join("d.jpg"), "d")?;
+    std::fs::write(docs_dir.join("e.txt"), "e")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // count(parentdir: &: (count(extension:jpg) > 1)) → 1 (src のみ)
+    let res = fm.search(
+        "count(parentdir: &: (count(extension:jpg) > 1))",
+        Default::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1, "Scalar should return 1 result");
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(
+        val, 1.0,
+        "Only src (count=3 > 1) should pass filter, so count = 1"
+    );
+
+    Ok(())
+}
+
+/// `sum(parentdir: &: (count(extension:jpg) > 1))` — nvalue比較付きProjectionのnvalueを合算
+/// src/ に jpg 3件 (count > 1 ✓, nvalue=3)、docs/ に jpg 1件 (✗) → sum = 3
+#[test]
+fn test_nest_agg_over_nvalue_sum_with_comparison_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 3件 → count(ext:jpg) = 3 > 1 ✓
+    let src_dir = root.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(src_dir.join("c.jpg"), "c")?;
+
+    // docs/ に jpg 1件 → count(ext:jpg) = 1, > 1 を満たさない ✗
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(docs_dir.join("d.jpg"), "d")?;
+    std::fs::write(docs_dir.join("e.txt"), "e")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(parentdir: &: (count(extension:jpg) > 1)) → 3 (src のみ, nvalue=3)
+    let res = fm.search(
+        "sum(parentdir: &: (count(extension:jpg) > 1))",
+        Default::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1);
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(
+        val, 3.0,
+        "Only src (count=3 > 1) passes, so sum of nvalues = 3"
+    );
+
+    Ok(())
+}
+
+/// Calculation が nvalue 条件付き集約をラップするケース。
+/// ProjectionMatch が inner に埋め込まれた条件を正しく伝播するかを検証。
+/// 例: `100 - count(parentdir: &: (count(extension:jpg) > 1))`
+#[test]
+fn test_nest_agg_calc_wrap_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 3件 → count(ext:jpg) = 3 > 1 ✓
+    let src_dir = root.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(src_dir.join("c.jpg"), "c")?;
+
+    // docs/ に jpg 1件 → count(ext:jpg) = 1, > 1 を満たさない ✗
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(docs_dir.join("d.jpg"), "d")?;
+    std::fs::write(docs_dir.join("e.txt"), "e")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // count(parentdir: &: (count(extension:jpg) > 1)) → 1 (src のみ)
+    // 100 - 1 = 99
+    let res = fm.search(
+        "100 - count(parentdir: &: (count(extension:jpg) > 1))",
+        Default::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1);
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(
+        val, 99.0,
+        "100 - count(matching dirs) = 100 - 1 = 99"
+    );
+
+    Ok(())
+}
+
+/// sum() で nvalue 付き ProjectionMatch をラップし、
+/// さらに算術演算を行うケース。
+/// 例: `sum(parentdir: &: (count(extension:jpg) > 1)) * 2`
+#[test]
+fn test_nest_agg_sum_calc_wrap_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // src/ に jpg 3件 → count(ext:jpg) = 3 > 1 ✓ → nvalue = 3
+    let src_dir = root.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    std::fs::write(src_dir.join("a.jpg"), "a")?;
+    std::fs::write(src_dir.join("b.jpg"), "b")?;
+    std::fs::write(src_dir.join("c.jpg"), "c")?;
+
+    // docs/ に jpg 1件 → count(ext:jpg) = 1, > 1 を満たさない ✗
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&docs_dir)?;
+    std::fs::write(docs_dir.join("d.jpg"), "d")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // sum(parentdir: &: (count(extension:jpg) > 1)) → 3 (src のみ)
+    // 3 * 2 = 6
+    let res = fm.search(
+        "sum(parentdir: &: (count(extension:jpg) > 1)) * 2",
+        Default::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should be scalar, not projection"
+    );
+    assert_eq!(res.results.len(), 1);
+
+    let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+    assert_eq!(
+        val, 6.0,
+        "sum(nvalues of matching dirs) * 2 = 3 * 2 = 6"
+    );
+
+    Ok(())
+}
+
+/// 右辺 Comparison の解決パターン確認（各集約関数）
+/// Phase 4 まではエラーが期待値
+#[test]
 fn test_nest_comparison_resolver_patterns() {
     let queries = [
         "parentdir: &: (count(extension:rs) > 1)",
@@ -828,9 +1088,203 @@ fn test_nest_comparison_resolver_patterns() {
     for query in &queries {
         let result = ttfm::query::lens_resolver::Resolver::new(query);
         assert!(
-            result.is_err(),
-            "Query '{}' should error until Phase 4 (comparison on nvalue-bearing Projection)",
+            result.is_ok(),
+            "Query '{}' should resolve, got: {}",
+            query,
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+
+        let resolver = result.unwrap();
+        assert!(
+            resolver.get_projection().is_some(),
+            "Query '{}' should have projection",
+            query
+        );
+        assert!(
+            resolver.get_nvalue().is_some(),
+            "Query '{}' should have nvalue",
+            query
+        );
+        assert!(
+            resolver.get_nvalue_condition().is_some(),
+            "Query '{}' should have nvalue_condition",
             query
         );
     }
+}
+
+#[test]
+fn test_nest_context_propagation_repro() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // item 1: name:a, ext:html, size: 100
+    std::fs::write(root.join("a.html"), vec![0u8; 100])?;
+    // item 2: name:b, ext:html, size: 200
+    std::fs::write(root.join("b.html"), vec![0u8; 200])?;
+    // item 3: name:c, ext:txt, size: 50
+    std::fs::write(root.join("c.txt"), vec![0u8; 50])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: stem:a & extension: &: sum(size:)
+    // stem:a でフィルタされるため、item 1 のみが残り、結果は html(100) になるはず
+    let res = fm.search("stem:a & extension: &: sum(size:)", Default::default())?;
+
+    println!("Results: {:?}", res.results.iter().map(|r| (&r.name, &r.tags)).collect::<Vec<_>>());
+
+    let html = res.results.iter().find(|r| r.name == "html");
+    assert!(html.is_some(), "Should have 'html' group");
+    
+    let nv = html.unwrap().tags.entries.iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    
+    assert_eq!(nv.as_deref(), Some("100"), "nvalue should be 100 (filtered by name:a), NOT 300");
+    
+    // txt グループはフィルタされているはず
+    let txt = res.results.iter().find(|r| r.name == "txt");
+    assert!(txt.is_none(), "txt group should be filtered out by name:a");
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_pick_filter_repro() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: 2 jpg files
+    let dir_a = root.join("dirA");
+    std::fs::create_dir(&dir_a)?;
+    std::fs::write(dir_a.join("f1.jpg"), "1")?;
+    std::fs::write(dir_a.join("f2.jpg"), "2")?;
+
+    // dirB: 11 jpg files
+    let dir_b = root.join("dirB");
+    std::fs::create_dir(&dir_b)?;
+    for i in 0..11 {
+        std::fs::write(dir_b.join(format!("g{}.jpg", i)), "content")?;
+    }
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: parentdir: &: (count(extension:jpg) > 10)
+    // dirB のアイテムのみが返るはず (dirA は 2 < 10 なので除外)
+    let res = fm.search("parentdir: &: (count(extension:jpg) > 10)", Default::default())?;
+
+    let item_names: Vec<String> = res.results.iter().map(|r| r.name.clone()).collect();
+    println!("Item names: {:?}", item_names);
+
+    // dirA のアイテムが含まれていないことを確認
+    for name in &item_names {
+        assert!(!name.contains("dirA"), "Item from dirA ({}) should be filtered out", name);
+        assert!(name.contains("dirB"), "Item should be from dirB, got {}", name);
+    }
+    
+    assert!(!item_names.is_empty(), "Should have items from dirB");
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_scenario_a_context_propagation() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: html と jpg が両方ある -> 条件を満たす
+    let dira = root.join("dirA");
+    std::fs::create_dir(&dira)?;
+    std::fs::write(dira.join("f1.html"), "html")?;
+    std::fs::write(dira.join("f2.jpg"), "jpg")?;
+
+    // dirB: html のみある -> jpg がないので条件(count > 0)を満たさない
+    let dirb = root.join("dirB");
+    std::fs::create_dir(&dirb)?;
+    std::fs::write(dirb.join("f3.html"), "html")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: extension:html & parentdir: &: count(extension:html) > 0
+    // extension:html フィルタにより、html ファイルを持つアイテムのみが集計・表示対象になる。
+    let res = fm.search("extension:html & parentdir: &: count(extension:html) > 0", Default::default())?;
+
+    let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
+    assert!(item_names.iter().any(|n| n.contains("dirB")), "Results should contain dirB, got: {:?}", item_names);
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_scenario_b_query_vs_query() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: 1ファイルのみ -> avg == sum
+    let dira = root.join("dirA");
+    std::fs::create_dir(&dira)?;
+    std::fs::write(dira.join("f1.txt"), vec![0u8; 100])?;
+
+    // dirB: 2ファイル -> avg != sum (150 != 300)
+    let dirb = root.join("dirB");
+    std::fs::create_dir(&dirb)?;
+    std::fs::write(dirb.join("f2.txt"), vec![0u8; 100])?;
+    std::fs::write(dirb.join("f3.txt"), vec![0u8; 200])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: parentdir: &: (avg(size:) == sum(size:))
+    // avg == sum となるのは count=1 の場合のみ。
+    let res = fm.search("parentdir: &: (avg(size:) == sum(size:))", Default::default())?;
+
+    let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
+    assert!(!item_names.iter().any(|n| n.contains("dirB")), "Results should NOT contain dirB, got: {:?}", item_names);
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_scenario_stem_wildcard_context() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: html かつ stem に 'a' を含むものが2つ -> 条件一致
+    let dira = root.join("dirA");
+    std::fs::create_dir(&dira)?;
+    std::fs::write(dira.join("apple.html"), "h")?;  // html, stem:"apple" has 'a'
+    std::fs::write(dira.join("banana.html"), "h")?; // html, stem:"banana" has 'a'
+    std::fs::write(dira.join("cherry.jpg"), "j")?;  // has 'a', but NOT html (context ensures it's excluded)
+
+    // dirB: html かつ stem に 'a' を含むものが1つのみ
+    let dirb = root.join("dirB");
+    std::fs::create_dir(&dirb)?;
+    std::fs::write(dirb.join("apple.html"), "h")?;  // html, has 'a'
+    std::fs::write(dirb.join("grape.txt"), "t")?;    // has 'a', but NOT html
+    std::fs::write(dirb.join("berry.html"), "h")?;   // html, but NO 'a' ("berry")
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: extension:html & parentdir: &: count(stem:*a*) == 2
+    // コンテキスト伝播により、count(stem:*a*) は実質的に count(extension:html & stem:*a*) として機能するはず。
+    let res = fm.search("extension:html & parentdir: &: count(stem:*a*) == 2", Default::default())?;
+
+    let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    // dirA は (apple.html, banana.html) の2つが条件に合うため含まれる。
+    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
+    // dirB は apple.html の1つのみが条件に合うため含まれない。
+    assert!(!item_names.iter().any(|n| n.contains("dirB")), "Results should NOT contain dirB, got: {:?}", item_names);
+
+    Ok(())
 }

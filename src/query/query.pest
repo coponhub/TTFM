@@ -101,7 +101,7 @@ stuck_basic_op = @{ "<=" | ">=" | "^" | ">" | "<" }
 // Calculations containing projections must use label comparison.
 scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE+ ~ scalar_operand)+ }
 
-scalar_operand = { aggregation | scalar_calculation | label }
+scalar_operand = { aggregation | scalar_calculation | parenthesized_expr | label }
 
 // Scalar-only calculation: does NOT allow type_ref (projections)
 // This ensures "(1 + 2) > 3" is valid but "(size: + 1) > 3" is rejected

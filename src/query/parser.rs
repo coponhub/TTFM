@@ -418,6 +418,11 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         Rule::aggregation => {
             Ok(Operand::Aggregation(Box::new(build_aggregation(inner)?)))
         }
+        Rule::parenthesized_expr => {
+            let expr_pair = inner.into_inner().next().unwrap();
+            let node = build_expr(expr_pair)?;
+            Ok(Operand::Query(Box::new(node)))
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             error::UNKNOWN_OPERAND_RULE,

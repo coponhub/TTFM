@@ -245,6 +245,95 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             stmt
         }
+        ResolvedNode::ProjectionMatch {
+            operand: op,
+            nvalue,
+            op: comparison_op,
+            label,
+            context,
+        } => {
+            let mut stmt = build_resolved_projection_sql(op, view);
+            let mut sub = build_nvalue_standalone_subquery(
+                op,
+                nvalue,
+                context.as_deref(),
+                view,
+            );
+
+            let bin_op = to_bin_op(*comparison_op);
+            let label_expr = label_to_unit_aware_expr(label);
+            sub.and_having(
+                Expr::col(Alias::new("nvalue")).binary(bin_op, label_expr),
+            );
+
+            // プロジェクションカラム
+            let proj_col = match op.get_storage() {
+                Some(StorageMapping::RowTag { column, .. }) => *column,
+                Some(StorageMapping::Column(col)) => *col,
+                _ => return SelectStatement::default(),
+            };
+
+            stmt.and_where(Expr::col(proj_col).in_subquery(
+                Query::select()
+                    .column(Alias::new("group_label"))
+                    .from_subquery(sub, Alias::new("nfilter"))
+                    .to_owned(),
+            ));
+            stmt
+        }
+        ResolvedNode::ProjectionProjectionMatch {
+            left_operand,
+            left_nvalue,
+            left_context,
+            op,
+            right_operand,
+            right_nvalue,
+            right_context,
+        } => {
+            // プロジェクション同士の比較：左辺ベースの SQL を作成
+            let mut stmt = build_resolved_projection_sql(left_operand, view);
+
+            // 左辺と右辺の nvalue サブクエリを生成（コンテキスト反映）
+            let sub_l = build_nvalue_standalone_subquery(
+                left_operand,
+                left_nvalue,
+                left_context.as_deref(),
+                view,
+            );
+            let sub_r = build_nvalue_standalone_subquery(
+                right_operand,
+                right_nvalue,
+                right_context.as_deref(),
+                view,
+            );
+
+            // JOIN して比較
+            let bin_op = to_bin_op(*op);
+            let join_sql = Query::select()
+                .column((Alias::new("L"), Alias::new("group_label")))
+                .from_subquery(sub_l, Alias::new("L"))
+                .join_subquery(
+                    sea_query::JoinType::InnerJoin,
+                    sub_r,
+                    Alias::new("R"),
+                    Expr::col((Alias::new("L"), Alias::new("group_label")))
+                        .eq(Expr::col((Alias::new("R"), Alias::new("group_label")))),
+                )
+                .and_where(
+                    Expr::col((Alias::new("L"), Alias::new("nvalue")))
+                        .binary(bin_op, Expr::col((Alias::new("R"), Alias::new("nvalue")))),
+                )
+                .to_owned();
+
+            let proj_col = match left_operand.get_storage() {
+                Some(StorageMapping::RowTag { column, .. }) => *column,
+                Some(StorageMapping::Column(col)) => *col,
+                _ => return SelectStatement::default(),
+            };
+
+            stmt.and_where(Expr::col(proj_col).in_subquery(join_sql));
+            stmt
+        }
         ResolvedNode::ScalarMatch { left, op, right } => {
             // リテラル同士のスカラー比較: is_boolean_result() 経由で
             // build_boolean_sql が使われるため通常ここには到達しないが、
@@ -270,27 +359,350 @@ pub fn build_aggregation_sql(
     Query::select().to_owned()
 }
 
+/// nvalue 付き Projection に対する集約 SQL を生成する。
+/// `sum(parentdir: &: count(ext:jpg))` のように、集約の inner が
+/// nvalue 付き Projection の場合、nvalue を集約対象にした SQL を返す。
+/// 該当しない場合は None を返す。
+fn build_agg_over_nvalue_projection(
+    agg: &ResolvedAggregationNode,
+    view: &str,
+) -> Option<SelectStatement> {
+    let (outer_is_count, outer_arith_op, inner) = match agg {
+        ResolvedAggregationNode::Count(inner) => (true, None, inner.as_ref()),
+        ResolvedAggregationNode::Arithmetic { op, inner } => {
+            (false, Some(op), inner.as_ref())
+        }
+    };
+
+    // inner が nvalue 付き Projection または ProjectionMatch かチェック
+    let (proj_operand, nvalue, nvalue_condition, context) = match inner {
+        ResolvedNode::Projection {
+            operand,
+            nvalue: Some(nv),
+            context,
+        } => (operand, nv, None, context.as_deref()),
+        ResolvedNode::ProjectionMatch {
+            operand,
+            nvalue,
+            op,
+            label,
+            context,
+        } => (operand, nvalue, Some((op, label)), context.as_deref()),
+        _ => return None,
+    };
+
+    // nvalue サブクエリを生成（picked_ids を使わないスタンドアロン版）
+    let mut nvalue_sub = build_nvalue_standalone_subquery(
+        proj_operand,
+        nvalue,
+        context,
+        view,
+    );
+
+    // nvalue_condition がある場合、HAVING 句を追加
+    if let Some((op, value)) = nvalue_condition {
+        let bin_op = to_bin_op(*op);
+        let val = label_to_simple_expr(value);
+        nvalue_sub
+            .and_having(Expr::col(Alias::new("nvalue")).binary(bin_op, val));
+    }
+
+    let mut stmt = Query::select();
+    if outer_is_count {
+        // count(Projection_with_nvalue) → ラベルグループ数
+        stmt.expr_as(Expr::cust("COUNT(*)"), Alias::new("scalar_value"));
+    } else {
+        // sum/avg/max/min(Projection_with_nvalue) → nvalue の集約
+        let op = outer_arith_op.unwrap();
+        let is_string = nvalue.is_string_type();
+        stmt.expr_as(
+            apply_arithmetic_agg(
+                op,
+                Expr::col(Alias::new("nvalue")).into(),
+                is_string,
+            ),
+            Alias::new("scalar_value"),
+        );
+    }
+    stmt.from_subquery(nvalue_sub, Alias::new("nvalue_agg"));
+
+    Some(stmt)
+}
+
+/// Count の引数ノードから、カウント対象のカラムと内部タグタイプを決定する。
+///
+/// count の基本セマンティクス:
+/// - Projection (`extension:`) → 種類数: `COUNT(DISTINCT label_col)` + タグタイプ
+/// - TypedTag (`extension:jpg`) → アイテム数: `COUNT(DISTINCT item_id)`
+///
+/// 戻り値: `(count_col, Option<inner_tag_type>)`
+///   - `inner_tag_type` が Some の場合、nvalue では JOIN の条件に使う
+fn resolve_count_target(inner: &ResolvedNode) -> (Col, Option<String>) {
+    inner
+        .get_nested_projection()
+        .and_then(|op| match op.get_storage() {
+            Some(StorageMapping::RowTag {
+                column, tag_type, ..
+            }) => Some((*column, Some(tag_type.clone()))),
+            Some(StorageMapping::Column(col)) => Some((*col, None)),
+            _ => None,
+        })
+        .unwrap_or((Col::ItemId, None))
+}
+
+/// Count 集約の nvalue SQL を生成する共通ヘルパー。
+///
+/// `build_nvalue_cte` と `build_nvalue_standalone_subquery` の両方から呼び出される。
+/// - `proj_col`: プロジェクション（左辺）の物理カラム
+/// - `proj_tag_type`: プロジェクションの tag_type（RowTag の場合）
+/// - `inner`: Count の引数ノード
+/// - `context`: Nest 左辺のコンテキストフィルタ
+/// - `item_scope`: アイテムのスコープを制限するサブクエリ（CTE版: picked_ids, standalone版: None）
+/// - `view`: ビュー名
+fn build_count_nvalue_sql(
+    proj_col: Col,
+    proj_tag_type: Option<&str>,
+    inner: &ResolvedNode,
+    context: Option<&ResolvedNode>,
+    item_scope: Option<SelectStatement>,
+    view: &str,
+) -> SelectStatement {
+    let (count_col, inner_tag_type) = resolve_count_target(inner);
+
+    let mut stmt = Query::select();
+
+    if let Some(tag_type) = inner_tag_type {
+        // ── Projection Count: 種類数を数える ──
+        // JOIN して inner タグのラベルカラムで COUNT DISTINCT
+        stmt.expr_as(
+            Expr::col((Alias::new("proj"), proj_col)),
+            Alias::new("group_label"),
+        );
+        stmt.expr_as(
+            Expr::col((Alias::new("inner_tags"), count_col)).count_distinct(),
+            Alias::new("nvalue"),
+        );
+        stmt.from_as(Alias::new(view), Alias::new("proj"));
+        stmt.join_as(
+            sea_query::JoinType::InnerJoin,
+            Alias::new(view),
+            Alias::new("inner_tags"),
+            Expr::col((Alias::new("proj"), Col::ItemId))
+                .equals((Alias::new("inner_tags"), Col::ItemId)),
+        );
+
+        if let Some(tag_type) = proj_tag_type {
+            stmt.and_where(
+                Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type),
+            );
+        }
+        stmt.and_where(
+            Expr::col((Alias::new("inner_tags"), Col::Type)).eq(tag_type),
+        );
+
+        // item_scope (picked_ids etc.)
+        if let Some(scope) = item_scope {
+            stmt.and_where(
+                Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(scope),
+            );
+        }
+
+        // inner にフィルタが含まれる場合
+        let (_storage, inner_filter, _operand) = inner.extract_agg_parts();
+        if let Some(filter_node) = inner_filter {
+            let filter_pick = build_pick_sql(&filter_node, view);
+            stmt.and_where(
+                Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(filter_pick, Alias::new("nv_filter"))
+                        .to_owned(),
+                ),
+            );
+        }
+
+        // context filter
+        if let Some(ctx) = context {
+            let context_pick = build_pick_sql(ctx, view);
+            stmt.and_where(
+                Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(context_pick, Alias::new("nv_context"))
+                        .to_owned(),
+                ),
+            );
+        }
+
+        stmt.group_by_col((Alias::new("proj"), proj_col));
+    } else {
+        // ── TypedTag Count: アイテム数を数える ──
+        stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
+        stmt.expr_as(
+            Expr::col(Col::ItemId).count_distinct(),
+            Alias::new("nvalue"),
+        );
+        stmt.from(Alias::new(view));
+
+        if let Some(tag_type) = proj_tag_type {
+            stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+        }
+
+        // item_scope (picked_ids etc.)
+        if let Some(scope) = item_scope {
+            stmt.and_where(Expr::col(Col::ItemId).in_subquery(scope));
+        }
+
+        // inner filter
+        let inner_pick = build_pick_sql(inner, view);
+        stmt.and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from_subquery(inner_pick, Alias::new("nv_inner"))
+                    .to_owned(),
+            ),
+        );
+
+        // context filter
+        if let Some(ctx) = context {
+            let context_pick = build_pick_sql(ctx, view);
+            stmt.and_where(
+                Expr::col(Col::ItemId).in_subquery(
+                    Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(context_pick, Alias::new("nv_context"))
+                        .to_owned(),
+                ),
+            );
+        }
+
+        stmt.group_by_col(proj_col);
+    }
+
+    stmt
+}
+
+/// nvalue サブクエリ（スタンドアロン版）。
+/// `build_nvalue_cte` と同じロジックだが、picked_ids CTE を参照せず
+/// 自己完結した SELECT を返す。
+fn build_nvalue_standalone_subquery(
+    proj_operand: &ResolvedOperand,
+    nvalue: &ResolvedOperand,
+    context: Option<&ResolvedNode>,
+    view: &str,
+) -> SelectStatement {
+    // 物理カラム情報の抽出
+    let (proj_col, proj_tag_type) = match proj_operand {
+        ResolvedOperand::TagRef { storage, .. } => match storage {
+            StorageMapping::RowTag { column, tag_type, .. } => (*column, Some(tag_type.as_str())),
+            StorageMapping::Column(col) => (*col, None),
+            _ => return SelectStatement::default(),
+        },
+        _ => return SelectStatement::default(),
+    };
+
+    match nvalue {
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
+            build_count_nvalue_sql(
+                proj_col,
+                proj_tag_type,
+                inner,
+                context,
+                None, // standalone: no item_scope
+                view,
+            )
+        }
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Arithmetic {
+            op,
+            inner,
+        }) => {
+            let (_, _, operand) = inner.extract_agg_parts();
+            let is_string =
+                operand.map(|o| o.is_string_type()).unwrap_or(false);
+
+            let deduped =
+                build_deduplicated_agg_subquery(inner, view, context);
+
+            let mut stmt = Query::select();
+            stmt.expr_as(
+                Expr::col((Alias::new("proj"), proj_col)),
+                Alias::new("group_label"),
+            );
+            stmt.expr_as(
+                apply_arithmetic_agg(
+                    op,
+                    Expr::col((Alias::new("deduped"), Alias::new("val")))
+                        .into(),
+                    is_string,
+                ),
+                Alias::new("nvalue"),
+            );
+
+            stmt.from_as(Alias::new(view), Alias::new("proj"));
+            stmt.join_subquery(
+                sea_query::JoinType::InnerJoin,
+                deduped,
+                Alias::new("deduped"),
+                Expr::col((Alias::new("proj"), Col::ItemId))
+                    .equals((Alias::new("deduped"), Col::ItemId)),
+            );
+
+            if let Some(tag_type) = proj_tag_type {
+                stmt.and_where(
+                    Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type),
+                );
+            }
+
+            stmt.group_by_col((Alias::new("proj"), proj_col));
+            stmt
+        }
+        ResolvedOperand::Literal(label) => {
+            let val = label_to_simple_expr(label);
+            let mut stmt = Query::select();
+            stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
+            stmt.expr_as(val, Alias::new("nvalue"));
+            stmt.from(Alias::new(view));
+
+            if let Some(tag_type) = proj_tag_type {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+            }
+
+            stmt.group_by_col(proj_col);
+            stmt
+        }
+        _ => {
+            panic!(
+                "Unsupported nvalue type for standalone subquery: {:?}",
+                nvalue
+            )
+        }
+    }
+}
+
 pub fn build_resolved_aggregation_sql(
     agg: &ResolvedAggregationNode,
     view: &str,
 ) -> SelectStatement {
+    // nvalue 付き Projection に対する集約の場合、nvalue を集約対象にする
+    if let Some(nvalue_agg_sql) =
+        build_agg_over_nvalue_projection(agg, view)
+    {
+        return nvalue_agg_sql;
+    }
+
     let mut stmt = Query::select();
 
     match agg {
         ResolvedAggregationNode::Count(inner) => {
             stmt.from(Alias::new(view));
-            let (storage, cond, _) = inner.extract_agg_parts();
+            let (_, cond, _) = inner.extract_agg_parts();
             let mut final_cond = Condition::all();
 
-            // tag_type を抽出（Count の場合も必要）
-            let tag_type = match storage {
-                Some(StorageMapping::RowTag { tag_type: key, .. }) => {
-                    Some(key.clone())
-                }
-                _ => None,
-            };
+            // resolve_count_target で count の対象カラムとタグタイプを決定
+            let (count_col, inner_tag_type) = resolve_count_target(inner);
 
-            if let Some(key) = tag_type {
+            if let Some(key) = inner_tag_type {
                 final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
             }
             if let Some(filter_node) = cond {
@@ -302,14 +714,8 @@ pub fn build_resolved_aggregation_sql(
                     final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
             }
 
-            // 式の構築（Count 用）
-            let col = match storage {
-                Some(StorageMapping::Column(c)) => *c,
-                Some(StorageMapping::RowTag { column, .. }) => *column,
-                _ => Col::ItemId,
-            };
             stmt.expr_as(
-                Expr::col(col).count_distinct(),
+                Expr::col(count_col).count_distinct(),
                 Alias::new("scalar_value"),
             );
             stmt.cond_where(final_cond);
@@ -320,7 +726,7 @@ pub fn build_resolved_aggregation_sql(
                 operand.map(|o| o.is_string_type()).unwrap_or(false);
 
             // 重要: 同一アイテムに対して複数行がマッチする場合、単純な SUM だと重複加算される。
-            let sub = build_deduplicated_agg_subquery(inner, view);
+            let sub = build_deduplicated_agg_subquery(inner, view, None);
             let sub_alias = Alias::new("deduped_items");
 
             stmt.expr_as(
@@ -350,6 +756,7 @@ pub fn build_resolved_aggregation_sql(
 fn build_deduplicated_agg_subquery(
     inner: &ResolvedNode,
     view: &str,
+    context: Option<&ResolvedNode>,
 ) -> SelectStatement {
     let (_storage, cond, operand) = inner.extract_agg_parts();
 
@@ -376,6 +783,16 @@ fn build_deduplicated_agg_subquery(
         if !keys.is_empty() {
             sub_cond = sub_cond.add(Expr::col(Col::Type).is_in(keys));
         }
+    }
+
+    // context filter
+    if let Some(ctx) = context {
+        let context_pick = build_pick_sql(ctx, view);
+        let mut context_sub = Query::select();
+        context_sub
+            .column(Col::ItemId)
+            .from_subquery(context_pick, Alias::new("ctx_sub"));
+        sub_cond = sub_cond.add(Expr::col(Col::ItemId).in_subquery(context_sub));
     }
 
     if let Some(filter_node) = cond {
@@ -1108,7 +1525,9 @@ pub fn build_fetch_items_sql(
     // oneview との結合を行わず、集約計算結果だけをそのまま返す。
     match node {
         ResolvedNode::Aggregation(_)
-        | ResolvedNode::AggregationMatch { .. } => {
+        | ResolvedNode::AggregationMatch { .. }
+        | ResolvedNode::ProjectionMatch { .. }
+        | ResolvedNode::ProjectionProjectionMatch { .. } => {
             return build_pick_sql(node, view);
         }
         _ => {}
@@ -1199,50 +1618,40 @@ pub fn build_flat_table_sql(
 /// nvalue集計用CTEを構築します。
 /// projection label ごとに nvalue（集約値）を計算するSQLを返します。
 fn build_nvalue_cte(
-    proj_col: Col,
-    proj_storage: &StorageMapping,
+    proj_operand: &ResolvedOperand,
     nvalue: &ResolvedOperand,
+    context: Option<&ResolvedNode>,
     view: &str,
 ) -> SelectStatement {
+    // 物理カラム情報の抽出
+    let (proj_col, proj_storage) = match proj_operand {
+        ResolvedOperand::TagRef { storage, .. } => match storage {
+            StorageMapping::RowTag { column, .. } => (*column, storage),
+            StorageMapping::Column(col) => (*col, storage),
+            _ => return SelectStatement::default(),
+        },
+        _ => return SelectStatement::default(),
+    };
+
     match nvalue {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
-            let mut stmt = Query::select();
-            stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
-            stmt.expr_as(
-                Expr::col(Col::ItemId).count_distinct(),
-                Alias::new("nvalue"),
-            );
-            stmt.from(Alias::new(view));
-
-            // type filter for projection
-            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
-                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
-            }
-
-            // item_id IN picked_ids
-            stmt.and_where(
-                Expr::col(Col::ItemId).in_subquery(
+            let proj_tag_type = match proj_storage {
+                StorageMapping::RowTag { tag_type, .. } => Some(tag_type.as_str()),
+                _ => None,
+            };
+            build_count_nvalue_sql(
+                proj_col,
+                proj_tag_type,
+                inner,
+                context,
+                Some(
                     Query::select()
                         .column(Col::ItemId)
                         .from(Tbl::PickedIds)
                         .to_owned(),
                 ),
-            );
-
-            // item_id IN (inner filter — 集計対象のアイテムを絞り込み)
-            let inner_pick = build_pick_sql(inner, view);
-            stmt.and_where(
-                Expr::col(Col::ItemId).in_subquery(
-                    Query::select()
-                        .column(Col::ItemId)
-                        .from_subquery(inner_pick, Alias::new("nv_inner"))
-                        .to_owned(),
-                ),
-            );
-
-            stmt.group_by_col(proj_col);
-
-            stmt
+                view,
+            )
         }
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Arithmetic {
             op,
@@ -1253,7 +1662,7 @@ fn build_nvalue_cte(
                 operand.map(|o| o.is_string_type()).unwrap_or(false);
 
             // Dedup subquery for values (item_id, val)
-            let deduped = build_deduplicated_agg_subquery(inner, view);
+            let deduped = build_deduplicated_agg_subquery(inner, view, context);
 
             let mut stmt = Query::select();
             stmt.expr_as(
@@ -1384,8 +1793,22 @@ pub fn build_fetch_label_groups_sql(
     with_clause.cte(picked_ids_cte);
 
     // nvalue CTE: nvalue付きProjectionの場合、ラベルごとの集約値を計算
+    let nvalue_condition = resolver.get_nvalue_condition();
     let has_nvalue = if let Some(nv) = resolver.get_nvalue() {
-        let nvalue_sql = build_nvalue_cte(col_iden, &desc.storage, nv, view);
+        let mut nvalue_sql = build_nvalue_cte(
+            resolver.resolved_query.get_projection_operand().unwrap(),
+            nv,
+            resolver.resolved_query.get_context(),
+            view,
+        );
+        // nvalue_condition がある場合、HAVING 句を追加
+        if let Some((op, value)) = nvalue_condition {
+            let bin_op = to_bin_op(*op);
+            let val = label_to_simple_expr(value);
+            nvalue_sql.and_having(
+                Expr::col(Alias::new("nvalue")).binary(bin_op, val),
+            );
+        }
         let nvalue_cte = CommonTableExpression::new()
             .query(nvalue_sql)
             .table_name(Alias::new("nvalue_agg"))
@@ -1395,6 +1818,7 @@ pub fn build_fetch_label_groups_sql(
     } else {
         false
     };
+    let has_nvalue_condition = nvalue_condition.is_some();
 
     // Calculation 投影の検出: Projection(Calculation(...)) の場合は
     // 算術式を事前計算する computed CTE を挿入する
@@ -1482,7 +1906,17 @@ pub fn build_fetch_label_groups_sql(
         }
     }
 
-    // (nvalue フィルタは Phase 4 で対応予定)
+    // nvalue_condition がある場合、HAVING で除外されたグループを結果から除外
+    if has_nvalue_condition {
+        all_hits_q.and_where(
+            Expr::col(label_col.clone()).in_subquery(
+                Query::select()
+                    .column(Alias::new("group_label"))
+                    .from(Alias::new("nvalue_agg"))
+                    .to_owned(),
+            ),
+        );
+    }
 
     let all_hits_cte = CommonTableExpression::new()
         .query(all_hits_q)
@@ -1747,6 +2181,7 @@ fn build_resolved_projection_sql(
             let cond = ResolvedNode::Projection {
                 operand: op.clone(),
                 nvalue: None,
+                context: None,
             }
             .to_condition();
             q.cond_where(cond);
@@ -2696,6 +3131,7 @@ mod tests {
                     sql_type: crate::db::SqlType::BIGINT,
                 },
                 nvalue: None,
+                context: None,
             }),
         };
 
@@ -2743,6 +3179,7 @@ mod tests {
                         sql_type: crate::db::SqlType::BIGINT,
                     },
                     nvalue: None,
+                    context: None,
                 },
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),
@@ -3075,6 +3512,39 @@ mod tests {
         assert!(
             !sql_str.contains("nvalue_agg"),
             "Normal projection should NOT contain nvalue_agg: {}",
+            sql_str
+        );
+    }
+
+    #[test]
+    fn test_nvalue_condition_having_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // parentdir: &: (count(extension:jpg) > 1) → nvalue CTE に HAVING 付き
+        let resolver =
+            Resolver::new("parentdir: &: (count(extension:jpg) > 1)").unwrap();
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        assert!(resolver.get_nvalue_condition().is_some());
+
+        let sql = build_fetch_label_groups_sql(
+            &resolver, &proj_type, "oneview", 100, 0,
+        )
+        .unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // nvalue CTE に HAVING が含まれている
+        assert!(
+            sql_str.contains("HAVING"),
+            "SQL should contain HAVING for nvalue condition: {}",
+            sql_str
+        );
+        // nvalue フィルタで all_hits がフィルタされている
+        assert!(
+            sql_str.contains("nvalue_agg"),
+            "SQL should use nvalue_agg for filtering: {}",
             sql_str
         );
     }

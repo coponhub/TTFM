@@ -28,3 +28,4 @@ pub mod test_volatile_typed_tags;
 pub mod verify_search;
 pub mod verify_search_all;
 pub mod wasm_plugin_test;
+pub mod test_discrepancy;
