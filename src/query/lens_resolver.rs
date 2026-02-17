@@ -298,7 +298,8 @@ impl ResolvedNode {
             } => {
                 if let Some(old) = ctx.take() {
                     // 既存のコンテキストがある場合は And で結合
-                    *ctx = Some(Box::new(ResolvedNode::And(vec![*old, context])));
+                    *ctx =
+                        Some(Box::new(ResolvedNode::And(vec![*old, context])));
                 } else {
                     *ctx = Some(Box::new(context));
                 }
@@ -319,9 +320,8 @@ impl ResolvedNode {
                 }
 
                 if let Some(old) = r_ctx.take() {
-                    *r_ctx = Some(Box::new(ResolvedNode::And(vec![
-                        *old, context,
-                    ])));
+                    *r_ctx =
+                        Some(Box::new(ResolvedNode::And(vec![*old, context])));
                 } else {
                     *r_ctx = Some(Box::new(context));
                 }
@@ -356,8 +356,16 @@ impl ResolvedNode {
                 // COMPLEMENT も同様
                 Condition::any()
             }
-            ResolvedNode::Projection { operand: op, context, .. }
-            | ResolvedNode::ProjectionMatch { operand: op, context, .. } => {
+            ResolvedNode::Projection {
+                operand: op,
+                context,
+                ..
+            }
+            | ResolvedNode::ProjectionMatch {
+                operand: op,
+                context,
+                ..
+            } => {
                 let mut cond = op.to_condition();
                 if let Some(ctx) = context {
                     cond = cond.add(ctx.to_condition());
@@ -401,7 +409,8 @@ impl ResolvedNode {
             ResolvedNode::Projection { operand: op, .. }
             | ResolvedNode::ProjectionMatch { operand: op, .. }
             | ResolvedNode::ProjectionProjectionMatch {
-                left_operand: op, ..
+                left_operand: op,
+                ..
             } => extract_tag_type_from_operand(op),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
@@ -436,7 +445,8 @@ impl ResolvedNode {
             ResolvedNode::Projection { operand: op, .. }
             | ResolvedNode::ProjectionMatch { operand: op, .. }
             | ResolvedNode::ProjectionProjectionMatch {
-                left_operand: op, ..
+                left_operand: op,
+                ..
             } => Some(op),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operand())
@@ -452,10 +462,12 @@ impl ResolvedNode {
     pub fn get_context(&self) -> Option<&ResolvedNode> {
         match self {
             ResolvedNode::Projection { context, .. }
-            | ResolvedNode::ProjectionMatch { context, .. } => context.as_deref(),
-            ResolvedNode::ProjectionProjectionMatch { left_context, .. } => {
-                left_context.as_deref()
+            | ResolvedNode::ProjectionMatch { context, .. } => {
+                context.as_deref()
             }
+            ResolvedNode::ProjectionProjectionMatch {
+                left_context, ..
+            } => left_context.as_deref(),
             _ => None,
         }
     }
@@ -2036,11 +2048,16 @@ mod tests {
     #[test]
     fn test_resolve_nest_comparison_agg_agg_distributed() {
         // 両辺が Query(Nest) の比較をサポート済み
-        let resolver = Resolver::new("parentdir: &: (avg(size:) == sum(size:))")
-            .expect("Query-vs-Query comparison (nested) should now resolve");
-        
+        let resolver = Resolver::new(
+            "parentdir: &: (avg(size:) == sum(size:))",
+        )
+        .expect("Query-vs-Query comparison (nested) should now resolve");
+
         // 解析結果が ProjectionProjectionMatch であることを確認
-        assert!(matches!(resolver.resolved_query, ResolvedNode::ProjectionProjectionMatch { .. }));
+        assert!(matches!(
+            resolver.resolved_query,
+            ResolvedNode::ProjectionProjectionMatch { .. }
+        ));
     }
 
     /// 右辺スカラー → nvalue: Some(Literal(100))
@@ -2093,7 +2110,11 @@ mod tests {
 
             if let ResolvedNode::Projection { context, .. } = proj {
                 assert!(context.is_some(), "Context should be injected");
-                assert_eq!(context.as_deref().unwrap(), filter, "Context should be the adjacent filter");
+                assert_eq!(
+                    context.as_deref().unwrap(),
+                    filter,
+                    "Context should be the adjacent filter"
+                );
             } else {
                 panic!("Expected Projection node at index 1, got {:?}", proj);
             }
@@ -2107,7 +2128,11 @@ mod tests {
         // クエリ: (parentdir: &: count(ext:jpg)) == (parentdir: &: count(ext:png))
         let query = "(parentdir: &: count(extension:jpg)) == (parentdir: &: count(extension:png))";
         // 現在は解決ロジックを実装済みなので、Ok(ProjectionProjectionMatch) が返るはず
-        let result = Resolver::new(query).expect("Should resolve Query vs Query comparison");
-        assert!(matches!(result.resolved_query, ResolvedNode::ProjectionProjectionMatch { .. }));
+        let result = Resolver::new(query)
+            .expect("Should resolve Query vs Query comparison");
+        assert!(matches!(
+            result.resolved_query,
+            ResolvedNode::ProjectionProjectionMatch { .. }
+        ));
     }
 }

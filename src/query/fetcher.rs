@@ -81,10 +81,7 @@ impl<'a> Fetcher<'a> {
             anyhow::anyhow!("Query is not a top-level scalar expression")
         })?;
 
-        let sql = crate::query::sql::build_resolved_scalar_sql(
-            &op,
-            "oneview",
-        );
+        let sql = crate::query::sql::build_resolved_scalar_sql(&op, "oneview");
 
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {

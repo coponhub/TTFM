@@ -30,10 +30,8 @@ fn test_nest_count_projection_counts_distinct_labels() -> Result<()> {
     // クエリ: parentdir: &: count(extension:)
     // count(extension:) は Projection → 拡張子の「種類数」を数える
     // dirA: 1種類 (txt), dirB: 3種類 (txt, html, rs)
-    let res = fm.search(
-        "parentdir: &: count(extension:)",
-        Default::default(),
-    )?;
+    let res =
+        fm.search("parentdir: &: count(extension:)", Default::default())?;
 
     for r in &res.results {
         println!("  {} -> {:?}", r.name, r.tags);
@@ -115,10 +113,8 @@ fn test_nest_count_typedtag_counts_items() -> Result<()> {
     // クエリ: parentdir: &: count(extension:txt)
     // count(extension:txt) は TypedTag → アイテム数を数える
     // dirA: 5, dirB: 2
-    let res = fm.search(
-        "parentdir: &: count(extension:txt)",
-        Default::default(),
-    )?;
+    let res =
+        fm.search("parentdir: &: count(extension:txt)", Default::default())?;
 
     for r in &res.results {
         println!("  {} -> {:?}", r.name, r.tags);

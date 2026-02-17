@@ -273,12 +273,14 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 _ => return SelectStatement::default(),
             };
 
-            stmt.and_where(Expr::col(proj_col).in_subquery(
-                Query::select()
-                    .column(Alias::new("group_label"))
-                    .from_subquery(sub, Alias::new("nfilter"))
-                    .to_owned(),
-            ));
+            stmt.and_where(
+                Expr::col(proj_col).in_subquery(
+                    Query::select()
+                        .column(Alias::new("group_label"))
+                        .from_subquery(sub, Alias::new("nfilter"))
+                        .to_owned(),
+                ),
+            );
             stmt
         }
         ResolvedNode::ProjectionProjectionMatch {
@@ -316,12 +318,15 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                     sea_query::JoinType::InnerJoin,
                     sub_r,
                     Alias::new("R"),
-                    Expr::col((Alias::new("L"), Alias::new("group_label")))
-                        .eq(Expr::col((Alias::new("R"), Alias::new("group_label")))),
+                    Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
+                        Expr::col((Alias::new("R"), Alias::new("group_label"))),
+                    ),
                 )
                 .and_where(
-                    Expr::col((Alias::new("L"), Alias::new("nvalue")))
-                        .binary(bin_op, Expr::col((Alias::new("R"), Alias::new("nvalue")))),
+                    Expr::col((Alias::new("L"), Alias::new("nvalue"))).binary(
+                        bin_op,
+                        Expr::col((Alias::new("R"), Alias::new("nvalue"))),
+                    ),
                 )
                 .to_owned();
 
@@ -392,12 +397,8 @@ fn build_agg_over_nvalue_projection(
     };
 
     // nvalue サブクエリを生成（picked_ids を使わないスタンドアロン版）
-    let mut nvalue_sub = build_nvalue_standalone_subquery(
-        proj_operand,
-        nvalue,
-        context,
-        view,
-    );
+    let mut nvalue_sub =
+        build_nvalue_standalone_subquery(proj_operand, nvalue, context, view);
 
     // nvalue_condition がある場合、HAVING 句を追加
     if let Some((op, value)) = nvalue_condition {
@@ -595,7 +596,9 @@ fn build_nvalue_standalone_subquery(
     // 物理カラム情報の抽出
     let (proj_col, proj_tag_type) = match proj_operand {
         ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::RowTag { column, tag_type, .. } => (*column, Some(tag_type.as_str())),
+            StorageMapping::RowTag {
+                column, tag_type, ..
+            } => (*column, Some(tag_type.as_str())),
             StorageMapping::Column(col) => (*col, None),
             _ => return SelectStatement::default(),
         },
@@ -621,8 +624,7 @@ fn build_nvalue_standalone_subquery(
             let is_string =
                 operand.map(|o| o.is_string_type()).unwrap_or(false);
 
-            let deduped =
-                build_deduplicated_agg_subquery(inner, view, context);
+            let deduped = build_deduplicated_agg_subquery(inner, view, context);
 
             let mut stmt = Query::select();
             stmt.expr_as(
@@ -685,9 +687,7 @@ pub fn build_resolved_aggregation_sql(
     view: &str,
 ) -> SelectStatement {
     // nvalue 付き Projection に対する集約の場合、nvalue を集約対象にする
-    if let Some(nvalue_agg_sql) =
-        build_agg_over_nvalue_projection(agg, view)
-    {
+    if let Some(nvalue_agg_sql) = build_agg_over_nvalue_projection(agg, view) {
         return nvalue_agg_sql;
     }
 
@@ -792,7 +792,8 @@ fn build_deduplicated_agg_subquery(
         context_sub
             .column(Col::ItemId)
             .from_subquery(context_pick, Alias::new("ctx_sub"));
-        sub_cond = sub_cond.add(Expr::col(Col::ItemId).in_subquery(context_sub));
+        sub_cond =
+            sub_cond.add(Expr::col(Col::ItemId).in_subquery(context_sub));
     }
 
     if let Some(filter_node) = cond {
@@ -1636,7 +1637,9 @@ fn build_nvalue_cte(
     match nvalue {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             let proj_tag_type = match proj_storage {
-                StorageMapping::RowTag { tag_type, .. } => Some(tag_type.as_str()),
+                StorageMapping::RowTag { tag_type, .. } => {
+                    Some(tag_type.as_str())
+                }
                 _ => None,
             };
             build_count_nvalue_sql(

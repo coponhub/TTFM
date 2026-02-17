@@ -1018,10 +1018,7 @@ fn test_nest_agg_calc_wrap_e2e() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 1);
 
     let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
-    assert_eq!(
-        val, 99.0,
-        "100 - count(matching dirs) = 100 - 1 = 99"
-    );
+    assert_eq!(val, 99.0, "100 - count(matching dirs) = 100 - 1 = 99");
 
     Ok(())
 }
@@ -1064,10 +1061,7 @@ fn test_nest_agg_sum_calc_wrap_e2e() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 1);
 
     let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
-    assert_eq!(
-        val, 6.0,
-        "sum(nvalues of matching dirs) * 2 = 3 * 2 = 6"
-    );
+    assert_eq!(val, 6.0, "sum(nvalues of matching dirs) * 2 = 3 * 2 = 6");
 
     Ok(())
 }
@@ -1131,19 +1125,34 @@ fn test_nest_context_propagation_repro() -> anyhow::Result<()> {
 
     // クエリ: stem:a & extension: &: sum(size:)
     // stem:a でフィルタされるため、item 1 のみが残り、結果は html(100) になるはず
-    let res = fm.search("stem:a & extension: &: sum(size:)", Default::default())?;
+    let res =
+        fm.search("stem:a & extension: &: sum(size:)", Default::default())?;
 
-    println!("Results: {:?}", res.results.iter().map(|r| (&r.name, &r.tags)).collect::<Vec<_>>());
+    println!(
+        "Results: {:?}",
+        res.results
+            .iter()
+            .map(|r| (&r.name, &r.tags))
+            .collect::<Vec<_>>()
+    );
 
     let html = res.results.iter().find(|r| r.name == "html");
     assert!(html.is_some(), "Should have 'html' group");
-    
-    let nv = html.unwrap().tags.entries.iter()
+
+    let nv = html
+        .unwrap()
+        .tags
+        .entries
+        .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    
-    assert_eq!(nv.as_deref(), Some("100"), "nvalue should be 100 (filtered by name:a), NOT 300");
-    
+
+    assert_eq!(
+        nv.as_deref(),
+        Some("100"),
+        "nvalue should be 100 (filtered by name:a), NOT 300"
+    );
+
     // txt グループはフィルタされているはず
     let txt = res.results.iter().find(|r| r.name == "txt");
     assert!(txt.is_none(), "txt group should be filtered out by name:a");
@@ -1175,17 +1184,29 @@ fn test_nest_pick_filter_repro() -> anyhow::Result<()> {
 
     // クエリ: parentdir: &: (count(extension:jpg) > 10)
     // dirB のアイテムのみが返るはず (dirA は 2 < 10 なので除外)
-    let res = fm.search("parentdir: &: (count(extension:jpg) > 10)", Default::default())?;
+    let res = fm.search(
+        "parentdir: &: (count(extension:jpg) > 10)",
+        Default::default(),
+    )?;
 
-    let item_names: Vec<String> = res.results.iter().map(|r| r.name.clone()).collect();
+    let item_names: Vec<String> =
+        res.results.iter().map(|r| r.name.clone()).collect();
     println!("Item names: {:?}", item_names);
 
     // dirA のアイテムが含まれていないことを確認
     for name in &item_names {
-        assert!(!name.contains("dirA"), "Item from dirA ({}) should be filtered out", name);
-        assert!(name.contains("dirB"), "Item should be from dirB, got {}", name);
+        assert!(
+            !name.contains("dirA"),
+            "Item from dirA ({}) should be filtered out",
+            name
+        );
+        assert!(
+            name.contains("dirB"),
+            "Item should be from dirB, got {}",
+            name
+        );
     }
-    
+
     assert!(!item_names.is_empty(), "Should have items from dirB");
 
     Ok(())
@@ -1213,11 +1234,22 @@ fn test_nest_scenario_a_context_propagation() -> anyhow::Result<()> {
 
     // クエリ: extension:html & parentdir: &: count(extension:html) > 0
     // extension:html フィルタにより、html ファイルを持つアイテムのみが集計・表示対象になる。
-    let res = fm.search("extension:html & parentdir: &: count(extension:html) > 0", Default::default())?;
+    let res = fm.search(
+        "extension:html & parentdir: &: count(extension:html) > 0",
+        Default::default(),
+    )?;
 
     let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
-    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
-    assert!(item_names.iter().any(|n| n.contains("dirB")), "Results should contain dirB, got: {:?}", item_names);
+    assert!(
+        item_names.iter().any(|n| n.contains("dirA")),
+        "Results should contain dirA, got: {:?}",
+        item_names
+    );
+    assert!(
+        item_names.iter().any(|n| n.contains("dirB")),
+        "Results should contain dirB, got: {:?}",
+        item_names
+    );
 
     Ok(())
 }
@@ -1244,11 +1276,22 @@ fn test_nest_scenario_b_query_vs_query() -> anyhow::Result<()> {
 
     // クエリ: parentdir: &: (avg(size:) == sum(size:))
     // avg == sum となるのは count=1 の場合のみ。
-    let res = fm.search("parentdir: &: (avg(size:) == sum(size:))", Default::default())?;
+    let res = fm.search(
+        "parentdir: &: (avg(size:) == sum(size:))",
+        Default::default(),
+    )?;
 
     let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
-    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
-    assert!(!item_names.iter().any(|n| n.contains("dirB")), "Results should NOT contain dirB, got: {:?}", item_names);
+    assert!(
+        item_names.iter().any(|n| n.contains("dirA")),
+        "Results should contain dirA, got: {:?}",
+        item_names
+    );
+    assert!(
+        !item_names.iter().any(|n| n.contains("dirB")),
+        "Results should NOT contain dirB, got: {:?}",
+        item_names
+    );
 
     Ok(())
 }
@@ -1262,29 +1305,107 @@ fn test_nest_scenario_stem_wildcard_context() -> anyhow::Result<()> {
     // dirA: html かつ stem に 'a' を含むものが2つ -> 条件一致
     let dira = root.join("dirA");
     std::fs::create_dir(&dira)?;
-    std::fs::write(dira.join("apple.html"), "h")?;  // html, stem:"apple" has 'a'
+    std::fs::write(dira.join("apple.html"), "h")?; // html, stem:"apple" has 'a'
     std::fs::write(dira.join("banana.html"), "h")?; // html, stem:"banana" has 'a'
-    std::fs::write(dira.join("cherry.jpg"), "j")?;  // has 'a', but NOT html (context ensures it's excluded)
+    std::fs::write(dira.join("cherry.jpg"), "j")?; // has 'a', but NOT html (context ensures it's excluded)
 
     // dirB: html かつ stem に 'a' を含むものが1つのみ
     let dirb = root.join("dirB");
     std::fs::create_dir(&dirb)?;
-    std::fs::write(dirb.join("apple.html"), "h")?;  // html, has 'a'
-    std::fs::write(dirb.join("grape.txt"), "t")?;    // has 'a', but NOT html
-    std::fs::write(dirb.join("berry.html"), "h")?;   // html, but NO 'a' ("berry")
+    std::fs::write(dirb.join("apple.html"), "h")?; // html, has 'a'
+    std::fs::write(dirb.join("grape.txt"), "t")?; // has 'a', but NOT html
+    std::fs::write(dirb.join("berry.html"), "h")?; // html, but NO 'a' ("berry")
 
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
     // クエリ: extension:html & parentdir: &: count(stem:*a*) == 2
     // コンテキスト伝播により、count(stem:*a*) は実質的に count(extension:html & stem:*a*) として機能するはず。
-    let res = fm.search("extension:html & parentdir: &: count(stem:*a*) == 2", Default::default())?;
+    let res = fm.search(
+        "extension:html & parentdir: &: count(stem:*a*) == 2",
+        Default::default(),
+    )?;
 
     let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
     // dirA は (apple.html, banana.html) の2つが条件に合うため含まれる。
-    assert!(item_names.iter().any(|n| n.contains("dirA")), "Results should contain dirA, got: {:?}", item_names);
+    assert!(
+        item_names.iter().any(|n| n.contains("dirA")),
+        "Results should contain dirA, got: {:?}",
+        item_names
+    );
     // dirB は apple.html の1つのみが条件に合うため含まれない。
-    assert!(!item_names.iter().any(|n| n.contains("dirB")), "Results should NOT contain dirB, got: {:?}", item_names);
+    assert!(
+        !item_names.iter().any(|n| n.contains("dirB")),
+        "Results should NOT contain dirB, got: {:?}",
+        item_names
+    );
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// 連鎖比較 (chained comparison) + Nest
+// ──────────────────────────────────────────────
+
+/// `parentdir: &: (200 > sum(size:) > 50)` — 範囲フィルタ
+/// 連鎖比較が And に展開された後も、各 Comparison に Nest コンテキストが分配されることを検証
+#[test]
+fn test_nest_chained_comparison_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: sum(size:) = 60 + 40 = 100 → 50 < 100 < 200 ✓
+    let dira = root.join("dirA");
+    std::fs::create_dir_all(&dira)?;
+    std::fs::write(dira.join("a.txt"), vec![0u8; 60])?;
+    std::fs::write(dira.join("b.txt"), vec![0u8; 40])?;
+
+    // dirB: sum(size:) = 150 + 200 = 350 → 350 > 200 ✗
+    let dirb = root.join("dirB");
+    std::fs::create_dir_all(&dirb)?;
+    std::fs::write(dirb.join("c.txt"), vec![0u8; 150])?;
+    std::fs::write(dirb.join("d.txt"), vec![0u8; 200])?;
+
+    // dirC: sum(size:) = 10 + 20 = 30 → 30 < 50 ✗
+    let dirc = root.join("dirC");
+    std::fs::create_dir_all(&dirc)?;
+    std::fs::write(dirc.join("e.txt"), vec![0u8; 10])?;
+    std::fs::write(dirc.join("f.txt"), vec![0u8; 20])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("parentdir: &: (200 > sum(size:) > 50)", Default::default())?;
+
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should be treated as projection"
+    );
+
+    let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+
+    // dirA (sum=100): 50 < 100 < 200 → 含まれる
+    assert!(
+        names.iter().any(|n| n.contains("dirA")),
+        "dirA (sum=100) should be included. Got: {:?}",
+        names
+    );
+
+    // dirB (sum=350): 350 > 200 → 含まれない
+    assert!(
+        !names.iter().any(|n| n.contains("dirB")),
+        "dirB (sum=350) should be excluded. Got: {:?}",
+        names
+    );
+
+    // dirC (sum=30): 30 < 50 → 含まれない
+    assert!(
+        !names.iter().any(|n| n.contains("dirC")),
+        "dirC (sum=30) should be excluded. Got: {:?}",
+        names
+    );
 
     Ok(())
 }

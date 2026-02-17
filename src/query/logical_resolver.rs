@@ -119,38 +119,7 @@ pub(crate) fn expand_query_node(
         QueryNode::Aggregation(agg) => {
             Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
         }
-        QueryNode::Nest(nest) => {
-            let left = expand_query_node(schema, *nest.left)?;
-            let right = expand_query_node(schema, *nest.right)?;
-
-            // 左辺から Projection を抽出。
-            // 展開後に And([filter..., Projection]) になるケースに対応:
-            //   extension: → And([is_dir:false, Projection(extension)])
-            //   → And([is_dir:false, Nest(Projection(extension), right)])
-            let (proj_left, filter_nodes) = extract_projection_from_left(left)?;
-
-            // 右辺が Comparison の場合、比較を Nest の外に分配する:
-            // Nest(L, Cmp(agg op lit)) → Cmp(Nest(L, agg) :op lit)
-            // Nest(L, Cmp(agg1 op agg2)) → Cmp(Nest(L, agg1) :op Nest(L, agg2))
-            let nest_node = match right {
-                QueryNode::Comparison(cmp) => {
-                    expand_nest_comparison(proj_left, cmp)?
-                }
-                _ => QueryNode::Nest(NestNode {
-                    left: Box::new(proj_left),
-                    right: Box::new(right),
-                }),
-            };
-
-            // フィルタがある場合は And で包む
-            if filter_nodes.is_empty() {
-                Ok(nest_node)
-            } else {
-                let mut nodes = filter_nodes;
-                nodes.push(nest_node);
-                Ok(QueryNode::And(nodes))
-            }
-        }
+        QueryNode::Nest(nest) => Ok(expand_nest(schema, nest)?),
         other => Ok(other),
     }
 }
@@ -686,15 +655,60 @@ fn double_label(v: f64) -> crate::types::Label {
     )
 }
 
-/// Nest の右辺 Comparison を Nest の外に分配する正規化。
+/// Nest ノードの論理展開。
 ///
-/// Aggregation/Projection 系オペランドは Nest で包み、
-/// Literal はそのまま残す。スカラー演算子はラベル演算子に変換。
-///
-/// 例1 (agg vs agg): `parentdir: &: (avg(size:) == sum(size:))`
-///   → `(parentdir: &: avg(size:)) := (parentdir: &: sum(size:))`
-/// 例2 (agg vs lit): `parentdir: &: (count(ext:jpg) > 10)`
-///   → `(parentdir: &: count(ext:jpg)) :> 10`
+/// 1. 左辺を展開し、Projection を抽出（フィルタがあれば分離）
+/// 2. 右辺を展開し、Comparison を Nest の外に分配
+/// 3. 連鎖比較（And([Cmp, Cmp, ...])）にも対応
+fn expand_nest(
+    schema: &impl LogicalSchema,
+    nest: NestNode,
+) -> Result<QueryNode> {
+    let left = expand_query_node(schema, *nest.left)?;
+    let right = expand_query_node(schema, *nest.right)?;
+
+    // 左辺から Projection を抽出。
+    // 展開後に And([filter..., Projection]) になるケースに対応:
+    //   extension: → And([is_dir:false, Projection(extension)])
+    //   → And([is_dir:false, Nest(Projection(extension), right)])
+    let (proj_left, filter_nodes) = extract_projection_from_left(left)?;
+
+    // 右辺が Comparison の場合、比較を Nest の外に分配する:
+    // Nest(L, Cmp(agg op lit)) → Cmp(Nest(L, agg) :op lit)
+    // Nest(L, Cmp(agg1 op agg2)) → Cmp(Nest(L, agg1) :op Nest(L, agg2))
+    let nest_node = match right {
+        QueryNode::Comparison(cmp) => expand_nest_comparison(proj_left, cmp)?,
+        QueryNode::And(nodes) => {
+            // 連鎖比較の展開結果 And([Cmp, Cmp, ...]) に対応。
+            // 各 Comparison に Nest コンテキストを分配する。
+            let mut distributed = Vec::new();
+            for node in nodes {
+                if let QueryNode::Comparison(c) = node {
+                    distributed
+                        .push(expand_nest_comparison(proj_left.clone(), c)?);
+                } else {
+                    distributed.push(node);
+                }
+            }
+            QueryNode::And(distributed)
+        }
+        _ => QueryNode::Nest(NestNode {
+            left: Box::new(proj_left),
+            right: Box::new(right),
+        }),
+    };
+
+    // フィルタがある場合は And で包む
+    if filter_nodes.is_empty() {
+        Ok(nest_node)
+    } else {
+        let mut nodes = filter_nodes;
+        nodes.push(nest_node);
+        Ok(QueryNode::And(nodes))
+    }
+}
+
+/// Nest の右辺にある単一 Comparison を分配するヘルパー。
 fn expand_nest_comparison(
     left: QueryNode,
     cmp: ComparisonNode,
@@ -1234,6 +1248,78 @@ mod tests {
             // extension: が展開されず Projection のままの場合は Nest 直接
             QueryNode::Nest(_) => {}
             _ => panic!("Expected And or Nest, got {:?}", expanded),
+        }
+    }
+
+    /// 連鎖比較 + Nest: And に展開された各 Comparison にコンテキストが分配されることを確認
+    /// `parentdir: &: (200 > sum(size:) > 50)` → And([Comparison, Comparison])
+    /// 各 Comparison のオペランドが Nest で包まれること
+    #[test]
+    fn test_nest_chained_comparison_expansion() {
+        use crate::query::ast::*;
+        let lens = Lens::base_standard();
+
+        // parentdir: &: (200 > sum(size:) > 50)
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(ComparisonNode {
+                first: Operand::Literal(Label::from(200)),
+                rest: vec![
+                    (
+                        ComparisonOp::Scalar(BasicOp::Gt),
+                        Operand::Aggregation(Box::new(
+                            AggregationNode::Arithmetic {
+                                op: ArithmeticAggOp::Sum,
+                                inner: Box::new(QueryNode::Projection(
+                                    Operand::TypeRef(TagType::from("size")),
+                                )),
+                            },
+                        )),
+                    ),
+                    (
+                        ComparisonOp::Scalar(BasicOp::Gt),
+                        Operand::Literal(Label::from(50)),
+                    ),
+                ],
+            })),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は And([Comparison, Comparison]) であるべき
+        match &expanded {
+            QueryNode::And(nodes) => {
+                // 各ノードが Comparison であること
+                let comparisons: Vec<_> = nodes
+                    .iter()
+                    .filter(|n| matches!(n, QueryNode::Comparison(_)))
+                    .collect();
+                assert_eq!(
+                    comparisons.len(),
+                    2,
+                    "Should have 2 comparisons, got: {:?}",
+                    nodes
+                );
+
+                // 各 Comparison のオペランドに Query(Nest) が含まれること
+                for cmp_node in &comparisons {
+                    if let QueryNode::Comparison(cmp) = cmp_node {
+                        let has_nest_operand =
+                            matches!(&cmp.first, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_)))
+                            || cmp.rest.iter().any(|(_, op)| {
+                                matches!(op, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_)))
+                            });
+                        assert!(
+                            has_nest_operand || matches!(&cmp.first, Operand::Literal(_)),
+                            "Each comparison should have a Nest operand or Literal: {:?}",
+                            cmp
+                        );
+                    }
+                }
+            }
+            _ => panic!("Expected And with comparisons, got: {:?}", expanded),
         }
     }
 }
