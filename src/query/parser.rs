@@ -1475,4 +1475,16 @@ mod tests {
             "Using label op :> inside Nest right scalar context should be a parse error"
         );
     }
+
+    #[test]
+    fn test_parse_nested_arithmetic_in_nest() {
+        // スペースなし
+        let query_no_inner_space = "parentdir: &: ((sum(size:) + count()) / 2)";
+        assert!(parse(query_no_inner_space).is_ok());
+
+        // スペースあり (以前は失敗していたケース)
+        let query_with_inner_space = "parentdir: &: ( (sum(size:) + count()) / 2 )";
+        let res = parse(query_with_inner_space);
+        assert!(res.is_ok(), "Should now parse with spaces: {:?}", res.err());
+    }
 }

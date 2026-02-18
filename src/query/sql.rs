@@ -673,6 +673,49 @@ fn build_nvalue_standalone_subquery(
             stmt.group_by_col(proj_col);
             stmt
         }
+        ResolvedOperand::Calculation(calc) => {
+            let sub_l = build_nvalue_standalone_subquery(
+                proj_operand,
+                &calc.left,
+                context,
+                view,
+            );
+            let sub_r = build_nvalue_standalone_subquery(
+                proj_operand,
+                &calc.right,
+                context,
+                view,
+            );
+
+            let is_string =
+                calc.left.is_string_type() && calc.right.is_string_type();
+
+            let mut stmt = Query::select();
+            stmt.expr_as(
+                Expr::col((Alias::new("L"), Alias::new("group_label"))),
+                Alias::new("group_label"),
+            );
+            stmt.expr_as(
+                apply_arithmetic_op(
+                    &calc.op,
+                    Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    is_string,
+                ),
+                Alias::new("nvalue"),
+            );
+
+            stmt.from_subquery(sub_l, Alias::new("L"));
+            stmt.join_subquery(
+                sea_query::JoinType::InnerJoin,
+                sub_r,
+                Alias::new("R"),
+                Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
+                    Expr::col((Alias::new("R"), Alias::new("group_label"))),
+                ),
+            );
+            stmt
+        }
         _ => {
             panic!(
                 "Unsupported nvalue type for standalone subquery: {:?}",
@@ -1739,6 +1782,41 @@ fn build_nvalue_cte(
 
             stmt.group_by_col(proj_col);
 
+            stmt
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let sub_l =
+                build_nvalue_cte(proj_operand, &calc.left, context, view);
+            let sub_r =
+                build_nvalue_cte(proj_operand, &calc.right, context, view);
+
+            let is_string =
+                calc.left.is_string_type() && calc.right.is_string_type();
+
+            let mut stmt = Query::select();
+            stmt.expr_as(
+                Expr::col((Alias::new("L"), Alias::new("group_label"))),
+                Alias::new("group_label"),
+            );
+            stmt.expr_as(
+                apply_arithmetic_op(
+                    &calc.op,
+                    Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    is_string,
+                ),
+                Alias::new("nvalue"),
+            );
+
+            stmt.from_subquery(sub_l, Alias::new("L"));
+            stmt.join_subquery(
+                sea_query::JoinType::InnerJoin,
+                sub_r,
+                Alias::new("R"),
+                Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
+                    Expr::col((Alias::new("R"), Alias::new("group_label"))),
+                ),
+            );
             stmt
         }
         _ => {
@@ -3550,5 +3628,164 @@ mod tests {
             "SQL should use nvalue_agg for filtering: {}",
             sql_str
         );
+    }
+
+    #[test]
+    fn test_build_nvalue_standalone_calculation_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        let operators = [
+            ("sum(size:) + count(size:)", "+"),
+            ("sum(size:) - count(size:)", "-"),
+            ("sum(size:) * count(size:)", "*"),
+            ("sum(size:) / count(size:)", "/"),
+            ("sum(size:) % count(size:)", "%"),
+        ];
+
+        for (query_str, expected_op) in operators {
+            let query = format!("parentdir: &: ({})", query_str);
+            let resolver = Resolver::new(&query).unwrap();
+            let proj_operand = resolver
+                .resolved_query
+                .get_projection_operand()
+                .expect("Should have projection");
+            let nvalue = resolver
+                .resolved_query
+                .get_nvalue()
+                .expect("Should have nvalue");
+
+            // 修正前はこの呼び出しで panic! するはず
+            let sql = build_nvalue_standalone_subquery(
+                proj_operand,
+                nvalue,
+                resolver.resolved_query.get_context(),
+                "oneview",
+            );
+            let sql_str = sql.to_string(PostgresQueryBuilder);
+
+            // JOIN と算術演算が含まれていることを確認
+            assert!(
+                sql_str.contains("JOIN"),
+                "SQL should contain JOIN for query: {}",
+                query
+            );
+            assert!(
+                sql_str.contains(expected_op),
+                "SQL should contain '{}' operator for query: {}",
+                expected_op,
+                query
+            );
+            assert!(
+                sql_str.contains("\"L\""),
+                "SQL should use alias L for query: {}",
+                query
+            );
+            assert!(
+                sql_str.contains("\"R\""),
+                "SQL should use alias R for query: {}",
+                query
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_fetch_label_groups_with_calculation_nvalue_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        let operators = [
+            ("sum(size:) + count(size:)", "+"),
+            ("sum(size:) - count(size:)", "-"),
+            ("sum(size:) * count(size:)", "*"),
+            ("sum(size:) / count(size:)", "/"),
+            ("sum(size:) % count(size:)", "%"),
+        ];
+
+        for (query_str, expected_op) in operators {
+            let query = format!("parentdir: &: ({})", query_str);
+            let resolver = Resolver::new(&query).unwrap();
+            let proj_type =
+                resolver.get_projection().expect("Should have projection");
+
+            let sql = build_fetch_label_groups_sql(
+                &resolver, &proj_type, "oneview", 100, 0,
+            )
+            .unwrap();
+            let sql_str = sql.to_string(PostgresQueryBuilder);
+
+            assert!(
+                sql_str.contains("nvalue_agg"),
+                "SQL should contain nvalue_agg CTE for query: {}",
+                query
+            );
+            assert!(
+                sql_str.contains("JOIN"),
+                "SQL should contain JOIN in nvalue_agg for query: {}",
+                query
+            );
+            assert!(
+                sql_str.contains(expected_op),
+                "SQL should contain '{}' operator for query: {}",
+                expected_op,
+                query
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_nvalue_diverse_arithmetic_sql() {
+        use crate::query::lens_resolver::Resolver;
+        use sea_query::PostgresQueryBuilder;
+
+        // 多様な集約、リテラル、入れ子式の組み合わせ
+        let test_cases = [
+            // avg + sum
+            ("avg(size:) + sum(size:)", vec!["AVG", "SUM", "+"]),
+            // max * literal
+            ("max(size:) * 2", vec!["MAX", "2", "*"]),
+            // literal / min
+            ("100 / min(size:)", vec!["100", "MIN", "/"]),
+            // nested: (sum + 10) * count
+            ("(sum(size:) + 10) * count(size:)", vec!["SUM", "10", "+", "COUNT", "*"]),
+        ];
+
+        for (query_body, expected_keywords) in test_cases {
+            let query = format!("parentdir: &: ({})", query_body);
+            let resolver = Resolver::new(&query).unwrap();
+            let proj_operand = resolver
+                .resolved_query
+                .get_projection_operand()
+                .expect("Should have projection");
+            let nvalue = resolver
+                .resolved_query
+                .get_nvalue()
+                .expect("Should have nvalue");
+
+            let sql = build_nvalue_standalone_subquery(
+                proj_operand,
+                nvalue,
+                resolver.resolved_query.get_context(),
+                "oneview",
+            );
+            let sql_str = sql.to_string(PostgresQueryBuilder);
+
+            for kw in expected_keywords {
+                assert!(
+                    sql_str.contains(kw),
+                    "SQL should contain '{}' for query: {}\nSQL: {}",
+                    kw,
+                    query,
+                    sql_str
+                );
+            }
+
+            // Calculation の場合は JOIN が含まれるはず (リテラル単体以外)
+            assert!(
+                sql_str.contains("JOIN"),
+                "SQL should contain JOIN for query: {}",
+                query
+            );
+        }
     }
 }

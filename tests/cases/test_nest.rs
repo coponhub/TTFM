@@ -1409,3 +1409,173 @@ fn test_nest_chained_comparison_e2e() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dir1: 2 files, 10 bytes and 20 bytes (sum=30, count=2 -> nvalue=60)
+    let dir1 = root.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("file1"), vec![0u8; 10])?;
+    std::fs::write(dir1.join("file2"), vec![0u8; 20])?;
+
+    // dir2: 1 file, 100 bytes (sum=100, count=1 -> nvalue=100)
+    let dir2 = root.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // クエリ: parentdir: &: (sum(size:) * count(size:))
+    let res = fm.search(
+        "parentdir: &: (sum(size:) * count(size:))",
+        Default::default(),
+    )?;
+
+    let d1_res = res.results.iter().find(|r| r.name.contains("dir1"));
+    assert!(d1_res.is_some(), "Should have 'dir1' group");
+    let nv1 = d1_res
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("60"), "dir1 (*) nvalue should be 60");
+
+    let d2_res = res.results.iter().find(|r| r.name.contains("dir2"));
+    assert!(d2_res.is_some(), "Should have 'dir2' group");
+    let nv2 = d2_res
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv2.as_deref(), Some("100"), "dir2 (*) nvalue should be 100");
+
+    // クエリ: parentdir: &: (sum(size:) + count(size:))
+    let res = fm.search(
+        "parentdir: &: (sum(size:) + count(size:))",
+        Default::default(),
+    )?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("32"), "dir1 (+) nvalue should be 32");
+
+    // クエリ: parentdir: &: (sum(size:) - count(size:))
+    let res = fm.search(
+        "parentdir: &: (sum(size:) - count(size:))",
+        Default::default(),
+    )?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("28"), "dir1 (-) nvalue should be 28");
+
+    // クエリ: parentdir: &: (sum(size:) / count(size:))
+    let res = fm.search(
+        "parentdir: &: (sum(size:) / count(size:))",
+        Default::default(),
+    )?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("15"), "dir1 (/) nvalue should be 15");
+
+    // --- 検証範囲拡大 (Phase 4) ---
+
+    // 1. 異なる集計の組み合わせ: avg(size:) + sum(size:)
+    // dir1: avg=15, sum=30 => 45
+    let res = fm.search(
+        "parentdir: &: (avg(size:) + sum(size:))",
+        Default::default(),
+    )?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("45"), "dir1 (avg+sum) nvalue should be 45");
+
+    // 2. 集計 vs リテラル: max(size:) * 2
+    // dir1: max=20 => 40
+    let res = fm.search("parentdir: &: (max(size:) * 2)", Default::default())?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("40"), "dir1 (max*2) nvalue should be 40");
+
+    // 3. リテラル vs 集計: 1000 / min(size:)
+    // dir1: min=10 => 100
+    let res = fm.search("parentdir: &: (1000 / min(size:))", Default::default())?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("100"), "dir1 (1000/min) nvalue should be 100");
+
+    // 4. 入れ子になった算術演算: (sum(size:) + 10) * count(size:)
+    // dir1: (30 + 10) * 2 = 80
+    let res = fm.search(
+        "parentdir: &: ((sum(size:) + 10) * count(size:))",
+        Default::default(),
+    )?;
+    let nv1 = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv1.as_deref(), Some("80"), "dir1 (nested) nvalue should be 80");
+
+    Ok(())
+}
