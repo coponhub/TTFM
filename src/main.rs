@@ -544,7 +544,60 @@ fn print_simple_results(response: &ttfm::SearchResponse) {
         }
     } else {
         for label_item in &response.results {
-            safe_println!("{}", label_item.name);
+            safe_println!("{}", format_short_result(label_item));
         }
+    }
+}
+
+/// --short 時のアイテム表示に必要な文字列を生成します。
+fn format_short_result(res: &ttfm::SearchResult) -> String {
+    let nvalue_str = res
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+
+    if let Some(nv) = nvalue_str {
+        format!("{} {}", res.name, nv)
+    } else {
+        res.name.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ttfm::types::{ItemId, ItemKind, Label, LabelValue, Origin, TagType};
+    use ttfm::SearchResult;
+
+    #[test]
+    fn test_short_format_with_nvalue() {
+        // fetch_label_groupsでの生成プロセスに近い形でダミーデータを作成
+        let mut res_with_nvalue = SearchResult::new_empty(
+            ItemId::new_volatile(),
+            ItemKind::Volatile,
+            "test_label".to_string(),
+        );
+        res_with_nvalue.apply_tag(
+            Label::resolve(TagType::from("nvalue"), LabelValue::Integer(9986)),
+            Origin::System,
+        );
+
+        let output = format_short_result(&res_with_nvalue);
+        assert_eq!(output, "test_label 9986");
+    }
+
+    #[test]
+    fn test_short_format_without_nvalue() {
+        // nvalueを持たないダミーダミーデータを作成
+        let res_without_nvalue = SearchResult::new_empty(
+            ItemId::new_volatile(),
+            ItemKind::Volatile,
+            "test_label_no_nv".to_string(),
+        );
+
+        let output = format_short_result(&res_without_nvalue);
+        assert_eq!(output, "test_label_no_nv");
     }
 }
