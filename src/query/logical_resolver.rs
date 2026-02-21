@@ -676,6 +676,9 @@ fn expand_nest(
     // 右辺が Comparison の場合、比較を Nest の外に分配する:
     // Nest(L, Cmp(agg op lit)) → Cmp(Nest(L, agg) :op lit)
     // Nest(L, Cmp(agg1 op agg2)) → Cmp(Nest(L, agg1) :op Nest(L, agg2))
+    //
+    // 右辺が Calculation の場合、算術演算を Nest の外に分配する:
+    // Nest(L, Calc{agg1, op, agg2}) → Calc{Query(Nest(L,agg1)), op, Query(Nest(L,agg2))}
     let nest_node = match right {
         QueryNode::Comparison(cmp) => expand_nest_comparison(proj_left, cmp)?,
         QueryNode::And(nodes) => {
@@ -691,6 +694,15 @@ fn expand_nest(
                 }
             }
             QueryNode::And(distributed)
+        }
+        // 右辺が Projection(Calculation) → 算術演算を Nest の外に分配する。
+        // Nest(L, Projection(Calc{agg1, op, agg2}))
+        //   → Projection(Calc{Query(Nest(L,agg1)), op, Query(Nest(L,agg2))})
+        // ただし、TypeRef（カラム参照）を含まない純粋な集約・定数計算のみを分配の対象とする。
+        QueryNode::Projection(Operand::Calculation(calc)) if calc_has_only_aggregations_and_literals(&calc) => {
+            let distributed =
+                distribute_nest_over_calc(&proj_left, *calc);
+            QueryNode::Projection(Operand::Calculation(Box::new(distributed)))
         }
         _ => QueryNode::Nest(NestNode {
             left: Box::new(proj_left),
@@ -713,11 +725,11 @@ fn expand_nest_comparison(
     left: QueryNode,
     cmp: ComparisonNode,
 ) -> Result<QueryNode> {
-    let first = wrap_operand_for_nest(left.clone(), cmp.first);
+    let first = distribute_nest_over_operand(&left, cmp.first);
 
     let mut rest = Vec::new();
     for (op, operand) in cmp.rest {
-        let wrapped = wrap_operand_for_nest(left.clone(), operand);
+        let wrapped = distribute_nest_over_operand(&left, operand);
         // スカラー比較をラベル比較に変換（Nest結果はProjectionなので）
         let label_op = match op {
             ComparisonOp::Scalar(basic) => ComparisonOp::Label(basic),
@@ -729,34 +741,69 @@ fn expand_nest_comparison(
     Ok(QueryNode::Comparison(ComparisonNode { first, rest }))
 }
 
-/// 比較オペランドを Nest 分配用に変換する。
-/// Aggregation/TypeRef/Calculation/Query → Nest で包んで Query オペランドにする。
-/// Literal → そのまま残す（Nest で包まない）。
-fn wrap_operand_for_nest(left: QueryNode, operand: Operand) -> Operand {
-    match operand {
-        Operand::Literal(_) => operand,
-        other => {
-            let right_query = operand_to_query_node(other);
-            let nest = QueryNode::Nest(NestNode {
-                left: Box::new(left),
-                right: Box::new(right_query),
-            });
-            Operand::Query(Box::new(nest))
-        }
+/// Nest を算術 Calculation の全オペランドに再帰的に分配する。
+/// Nest(L, Calc{agg1, op, agg2}) → Calc{Query(Nest(L,agg1)), op, Query(Nest(L,agg2))}
+fn distribute_nest_over_calc(
+    key: &QueryNode,
+    calc: CalculationNode,
+) -> CalculationNode {
+    CalculationNode {
+        left: distribute_nest_over_operand(key, calc.left),
+        op: calc.op,
+        right: distribute_nest_over_operand(key, calc.right),
     }
 }
 
-/// Operand を QueryNode に変換するヘルパー。
-/// Nest の右辺として使用可能な形に変換する。
-fn operand_to_query_node(operand: Operand) -> QueryNode {
+/// Calculation 内に集約関数とリテラルのみが含まれ、TypeRef(カラム参照)が含まれていないかを判定します。
+/// 分配対象のガード条件として使用します。
+fn calc_has_only_aggregations_and_literals(calc: &CalculationNode) -> bool {
+    operand_has_only_aggregations_and_literals(&calc.left)
+        && operand_has_only_aggregations_and_literals(&calc.right)
+}
+
+fn operand_has_only_aggregations_and_literals(operand: &Operand) -> bool {
     match operand {
-        Operand::Aggregation(agg) => QueryNode::Aggregation(*agg),
-        Operand::TypeRef(tt) => QueryNode::Projection(Operand::TypeRef(tt)),
-        Operand::Calculation(calc) => {
-            QueryNode::Projection(Operand::Calculation(calc))
+        Operand::Literal(_) | Operand::Aggregation(_) => true,
+        Operand::Calculation(c) => calc_has_only_aggregations_and_literals(c),
+        Operand::Query(q) => match &**q {
+            QueryNode::Projection(op) => operand_has_only_aggregations_and_literals(op),
+            QueryNode::Aggregation(_) => true,
+            _ => false,
+        },
+        Operand::TypeRef(_) => false,
+    }
+}
+
+/// Operand に Nest キーを分配する。
+/// - Aggregation → Query(Nest(key, Aggregation))
+/// - Calculation → 再帰的に両辺に分配
+/// - Literal     → そのまま（スカラーは Nest 不要）
+/// - TypeRef     → Query(Nest(key, Projection(TypeRef)))
+/// - Query       → Query(Nest(key, Query))
+fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
+    match operand {
+        Operand::Literal(l) => Operand::Literal(l),
+        Operand::Aggregation(agg) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: Box::new(QueryNode::Aggregation(*agg)),
+            })))
         }
-        Operand::Query(node) => *node,
-        Operand::Literal(_) => QueryNode::Projection(operand),
+        Operand::Calculation(calc) => Operand::Calculation(Box::new(
+            distribute_nest_over_calc(key, *calc),
+        )),
+        Operand::TypeRef(tt) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(tt))),
+            })))
+        }
+        Operand::Query(node) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: node,
+            })))
+        }
     }
 }
 

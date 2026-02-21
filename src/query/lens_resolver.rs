@@ -19,7 +19,9 @@
 //! ```
 
 use crate::db::{Col, SqlType};
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    ArithmeticOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
+};
 use crate::query::lens_schema::{Lens, StorageMapping};
 use crate::types::{Label, LabelValue, SType, TagType};
 use anyhow::{bail, Result};
@@ -119,16 +121,26 @@ pub enum ResolvedNode {
         /// このプロジェクション（およびそのnvalue集計）に適用されるべきフィルタ
         context: Option<Box<ResolvedNode>>,
     },
-    /// nvalue 付き Projection 同士の比較。
+        /// nvalue 付き Projection 同士の比較または算術演算。
+    /// - op: Comparison → フィルタ結果（どのグループが条件を満たすか）
+    /// - op: Arithmetic → nvalue 付き Projection 結果（各グループの計算値）
     ProjectionProjectionMatch {
         left_operand: ResolvedOperand,
         left_nvalue: ResolvedOperand,
         left_context: Option<Box<ResolvedNode>>,
-        op: ComparisonOp,
+        op: ProjectionOp,
         right_operand: ResolvedOperand,
         right_nvalue: ResolvedOperand,
         right_context: Option<Box<ResolvedNode>>,
     },
+}
+
+/// nvalue 付き Projection 同士を結ぶ演算子。
+/// 比較（フィルタ）と算術（nvalue 計算）の両方を統一的に扱う。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectionOp {
+    Comparison(ComparisonOp),
+    Arithmetic(ArithmeticOp),
 }
 #[derive(Debug, PartialEq, Clone)]
 pub enum ResolvedAggregationNode {
@@ -439,6 +451,38 @@ impl ResolvedNode {
         }
     }
 
+    /// nvalueの再構築（主に算術演算のProjectionProjectionMatch用）
+    /// get_nvalue() は参照を返すが、ProjectionProjectionMatch(Arithmetic) の場合は
+    /// 左右のオペランドを結合したCalculationを所有権付きで返す必要があるため新設。
+    pub fn get_nvalue_combined(&self) -> Option<ResolvedOperand> {
+        match self {
+            ResolvedNode::Projection { nvalue, .. } => nvalue.clone(),
+            ResolvedNode::ProjectionMatch { nvalue, .. } => Some(nvalue.clone()),
+            ResolvedNode::ProjectionProjectionMatch {
+                left_nvalue,
+                op: ProjectionOp::Arithmetic(arith_op),
+                right_nvalue,
+                ..
+            } => Some(ResolvedOperand::Calculation(Box::new(
+                ResolvedCalculationNode {
+                    left: left_nvalue.clone(),
+                    op: *arith_op,
+                    right: right_nvalue.clone(),
+                },
+            ))),
+            ResolvedNode::ProjectionProjectionMatch { left_nvalue, .. } => {
+                Some(left_nvalue.clone())
+            }
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                nodes.iter().find_map(|n| n.get_nvalue_combined())
+            }
+            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+                l.get_nvalue_combined()
+            }
+            _ => None,
+        }
+    }
+
     /// Projection が Calculation を含むかどうか（ラベルグループ取得時に使用）
     pub fn get_projection_operand(&self) -> Option<&ResolvedOperand> {
         match self {
@@ -564,8 +608,11 @@ impl ResolvedNode {
             | ResolvedNode::AggregationAggregationMatch { .. }
             | ResolvedNode::AggregationTagMatch { .. }
             | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::ProjectionMatch { .. }
-            | ResolvedNode::ProjectionProjectionMatch { .. } => true,
+            | ResolvedNode::ProjectionMatch { .. } => true,
+            // Arithmetic は Projection 結果（nvalue 付き）なので false
+            ResolvedNode::ProjectionProjectionMatch { op, .. } => {
+                matches!(op, ProjectionOp::Comparison(_))
+            }
             ResolvedNode::TagCalculationMatch { calc, .. }
             | ResolvedNode::CalculationMatch { calc, .. } => {
                 calc.contains_aggregation()
@@ -866,6 +913,13 @@ pub(crate) fn resolve_query_node(
         QueryNode::Complement(c) => Ok(ResolvedNode::Complement(Box::new(
             resolve_query_node(lens, *c)?,
         ))),
+        // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
+        // → logical_resolver が算術分配した形式。ProjectionProjectionMatch に解決する。
+        QueryNode::Projection(Operand::Calculation(calc))
+            if calc_has_nest_operands(&calc) =>
+        {
+            resolve_projection_arithmetic(lens, *calc)
+        }
         QueryNode::Projection(op) => {
             let resolved_op = resolve_operand(lens, &op)?;
             Ok(ResolvedNode::Projection {
@@ -935,18 +989,19 @@ fn resolve_nest(
                 context: None,
             })
         }
-        // 右辺が Projection(Calculation) → nvalue に算術式を付与
+        // 右辺が Projection(Calculation) は logical_resolver で算術分配済みのため
+        // ここには来ない（Query 形式に変換されている）
         QueryNode::Projection(Operand::Calculation(calc)) => {
+            // 集約と定数のみの算術式は logical_resolver で分配済みだが、
+            // TypeRef を含む純粋な計算式（e.g., size: * 2）はここに到達する
             let resolved_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::Projection {
                 operand,
-                nvalue: Some(ResolvedOperand::Calculation(Box::new(
-                    resolved_calc,
-                ))),
+                nvalue: Some(ResolvedOperand::Calculation(Box::new(resolved_calc))),
                 context: None,
             })
         }
-        // 深さ2+: 右辺が Projection(TypeRef) → Phase 5 で実装
+        // 深さ2+: 右辺が Projection(TypeRef) → Phase 6 で実装
         QueryNode::Projection(_) => {
             bail!("Nest with Projection right side (depth 2+) not yet implemented")
         }
@@ -956,6 +1011,156 @@ fn resolve_nest(
         _ => {
             bail!("Unsupported Nest right side: {:?}", right_node)
         }
+    }
+}
+
+/// Calculation 内に Query(Nest(...)) オペランドが含まれるか確認するヘルパー。
+fn calc_has_nest_operands(
+    calc: &crate::query::ast::CalculationNode,
+) -> bool {
+    operand_has_nest(&calc.left) || operand_has_nest(&calc.right)
+}
+
+fn operand_has_nest(op: &Operand) -> bool {
+    match op {
+        Operand::Query(node) => matches!(node.as_ref(), QueryNode::Nest(_)),
+        Operand::Calculation(calc) => {
+            operand_has_nest(&calc.left) || operand_has_nest(&calc.right)
+        }
+        _ => false,
+    }
+}
+
+/// Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))}) を
+/// ProjectionProjectionMatch { op: Arithmetic } に解決する。
+fn resolve_projection_arithmetic(
+    lens: &Lens,
+    calc: crate::query::ast::CalculationNode,
+) -> Result<ResolvedNode> {
+    let arith_op = calc.op;
+    let (common_key, left_nv, right_nv) = if let Ok((k, l_nv)) =
+        resolve_nest_operand_extract_key(lens, calc.left.clone())
+    {
+        let r_nv = resolve_nest_calc_operand(lens, calc.right, &k)?;
+        (k, l_nv, r_nv)
+    } else if let Ok((k, r_nv)) =
+        resolve_nest_operand_extract_key(lens, calc.right.clone())
+    {
+        let l_nv = resolve_nest_calc_operand(lens, calc.left, &k)?;
+        (k, l_nv, r_nv)
+    } else {
+        bail!("Could not extract GROUP BY key from either side of arithmetic expression");
+    };
+
+    validate_calculation_types(&left_nv, &right_nv, arith_op)?;
+    Ok(ResolvedNode::ProjectionProjectionMatch {
+        left_operand: common_key.clone(),
+        left_nvalue: left_nv,
+        left_context: None,
+        op: ProjectionOp::Arithmetic(arith_op),
+        right_operand: common_key,
+        right_nvalue: right_nv,
+        right_context: None,
+    })
+}
+
+/// Operand を解決し、GROUP BY キー (operand) と nvalue を返す。
+/// Nest(A, agg) → (A_resolved, agg_resolved)
+/// Calculation{...} → (common_key, Calculation{resolved_agg, op, resolved_agg})
+fn resolve_nest_operand_extract_key(
+    lens: &Lens,
+    operand: Operand,
+) -> Result<(ResolvedOperand, ResolvedOperand)> {
+    match operand {
+        Operand::Query(node) => {
+            let resolved = resolve_query_node(lens, *node)?;
+            match resolved {
+                ResolvedNode::Projection {
+                    operand: key,
+                    nvalue: Some(nv),
+                    ..
+                } => Ok((key, nv)),
+                _ => bail!(
+                    "Arithmetic Nest operand must resolve to Projection with nvalue"
+                ),
+            }
+        }
+        Operand::Calculation(calc) => {
+            let arith_op = calc.op;
+            // 左辺または右辺からキーの抽出を試みる
+            let (key, left_nv, right_nv) = if let Ok((k, l_nv)) =
+                resolve_nest_operand_extract_key(lens, calc.left.clone())
+            {
+                let r_nv = resolve_nest_calc_operand(lens, calc.right, &k)?;
+                (k, l_nv, r_nv)
+            } else if let Ok((k, r_nv)) =
+                resolve_nest_operand_extract_key(lens, calc.right.clone())
+            {
+                let l_nv = resolve_nest_calc_operand(lens, calc.left, &k)?;
+                (k, l_nv, r_nv)
+            } else {
+                bail!("Could not extract key from either side of calculation");
+            };
+
+            validate_calculation_types(&left_nv, &right_nv, arith_op)?;
+            let combined = ResolvedOperand::Calculation(Box::new(
+                ResolvedCalculationNode {
+                    left: left_nv,
+                    op: arith_op,
+                    right: right_nv,
+                },
+            ));
+            Ok((key, combined))
+        }
+        Operand::Literal(_) => {
+            bail!("Literal does not contain a key");
+        }
+        _ => bail!("Expected Query(Nest) or Calculation in arithmetic Nest"),
+    }
+}
+
+/// Nest 算術式のオペランドを解決する（キーは既知）。
+fn resolve_nest_calc_operand(
+    lens: &Lens,
+    operand: Operand,
+    expected_key: &ResolvedOperand,
+) -> Result<ResolvedOperand> {
+    match operand {
+        Operand::Query(node) => {
+            let resolved = resolve_query_node(lens, *node)?;
+            match resolved {
+                ResolvedNode::Projection {
+                    operand: key,
+                    nvalue: Some(nv),
+                    ..
+                } => {
+                    if key != *expected_key {
+                        bail!("Mismatched GROUP BY keys in arithmetic Nest expression");
+                    }
+                    Ok(nv)
+                }
+                _ => bail!(
+                    "Arithmetic Nest operand must resolve to Projection with nvalue"
+                ),
+            }
+        }
+        Operand::Calculation(calc) => {
+            let arith_op = calc.op;
+            let left =
+                resolve_nest_calc_operand(lens, calc.left, expected_key)?;
+            let right =
+                resolve_nest_calc_operand(lens, calc.right, expected_key)?;
+            validate_calculation_types(&left, &right, arith_op)?;
+            Ok(ResolvedOperand::Calculation(Box::new(
+                ResolvedCalculationNode {
+                    left,
+                    op: arith_op,
+                    right,
+                },
+            )))
+        }
+        Operand::Literal(l) => Ok(ResolvedOperand::Literal(l)),
+        _ => bail!("Unexpected operand type in arithmetic Nest expression"),
     }
 }
 
@@ -1243,7 +1448,7 @@ fn resolve_single_match(
                 ),
             }
         }
-        // Query vs Query (両辺が Nest)
+        // Query vs Query (両辺が Nest、比較演算子)
         (Operand::Query(l_node), Operand::Query(r_node)) => {
             let res_l = resolve_query_node(lens, *l_node)?;
             let res_r = resolve_query_node(lens, *r_node)?;
@@ -1264,7 +1469,7 @@ fn resolve_single_match(
                     left_operand: lo,
                     left_nvalue: lnv,
                     left_context: lc,
-                    op,
+                    op: ProjectionOp::Comparison(op),
                     right_operand: ro,
                     right_nvalue: rnv,
                     right_context: rc,
@@ -1390,6 +1595,10 @@ impl Resolver {
     /// nvalue（評価値）定義を返す
     pub fn get_nvalue(&self) -> Option<&ResolvedOperand> {
         self.resolved_query.get_nvalue()
+    }
+
+    pub fn get_nvalue_combined(&self) -> Option<ResolvedOperand> {
+        self.resolved_query.get_nvalue_combined()
     }
 
     /// nvalue に対するフィルタ条件を返す（resolved_query から再帰的に探索）

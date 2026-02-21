@@ -4,7 +4,7 @@ use crate::query::ast::{
     QueryNode,
 };
 use crate::query::lens_resolver::{
-    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
+    ProjectionOp, ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
@@ -291,54 +291,72 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             right_operand,
             right_nvalue,
             right_context,
-        } => {
-            // プロジェクション同士の比較：左辺ベースの SQL を作成
-            let mut stmt = build_resolved_projection_sql(left_operand, view);
+        } => match op {
+            ProjectionOp::Comparison(cmp_op) => {
+                // プロジェクション同士の比較：左辺ベースの SQL を作成
+                let mut stmt =
+                    build_resolved_projection_sql(left_operand, view);
 
-            // 左辺と右辺の nvalue サブクエリを生成（コンテキスト反映）
-            let sub_l = build_nvalue_standalone_subquery(
-                left_operand,
-                left_nvalue,
-                left_context.as_deref(),
-                view,
-            );
-            let sub_r = build_nvalue_standalone_subquery(
-                right_operand,
-                right_nvalue,
-                right_context.as_deref(),
-                view,
-            );
+                // 左辺と右辺の nvalue サブクエリを生成（コンテキスト反映）
+                let sub_l = build_nvalue_standalone_subquery(
+                    left_operand,
+                    left_nvalue,
+                    left_context.as_deref(),
+                    view,
+                );
+                let sub_r = build_nvalue_standalone_subquery(
+                    right_operand,
+                    right_nvalue,
+                    right_context.as_deref(),
+                    view,
+                );
 
-            // JOIN して比較
-            let bin_op = to_bin_op(*op);
-            let join_sql = Query::select()
-                .column((Alias::new("L"), Alias::new("group_label")))
-                .from_subquery(sub_l, Alias::new("L"))
-                .join_subquery(
-                    sea_query::JoinType::InnerJoin,
-                    sub_r,
-                    Alias::new("R"),
-                    Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
-                        Expr::col((Alias::new("R"), Alias::new("group_label"))),
-                    ),
-                )
-                .and_where(
-                    Expr::col((Alias::new("L"), Alias::new("nvalue"))).binary(
-                        bin_op,
-                        Expr::col((Alias::new("R"), Alias::new("nvalue"))),
-                    ),
-                )
-                .to_owned();
+                // JOIN して比較
+                let bin_op = to_bin_op(*cmp_op);
+                let join_sql = Query::select()
+                    .column((Alias::new("L"), Alias::new("group_label")))
+                    .from_subquery(sub_l, Alias::new("L"))
+                    .join_subquery(
+                        sea_query::JoinType::InnerJoin,
+                        sub_r,
+                        Alias::new("R"),
+                        Expr::col((
+                            Alias::new("L"),
+                            Alias::new("group_label"),
+                        ))
+                        .eq(Expr::col((
+                            Alias::new("R"),
+                            Alias::new("group_label"),
+                        ))),
+                    )
+                    .and_where(
+                        Expr::col((Alias::new("L"), Alias::new("nvalue")))
+                            .binary(
+                                bin_op,
+                                Expr::col((
+                                    Alias::new("R"),
+                                    Alias::new("nvalue"),
+                                )),
+                            ),
+                    )
+                    .to_owned();
 
-            let proj_col = match left_operand.get_storage() {
-                Some(StorageMapping::RowTag { column, .. }) => *column,
-                Some(StorageMapping::Column(col)) => *col,
-                _ => return SelectStatement::default(),
-            };
+                let proj_col = match left_operand.get_storage() {
+                    Some(StorageMapping::RowTag { column, .. }) => *column,
+                    Some(StorageMapping::Column(col)) => *col,
+                    _ => return SelectStatement::default(),
+                };
 
-            stmt.and_where(Expr::col(proj_col).in_subquery(join_sql));
-            stmt
-        }
+                stmt.and_where(Expr::col(proj_col).in_subquery(join_sql));
+                stmt
+            }
+            ProjectionOp::Arithmetic(_) => {
+                // 算術演算の ProjectionProjectionMatch は
+                // Optimizer が単一 GROUP BY に最適化した形式で処理される予定。
+                // 現在は左辺キーの Projection として扱う（nvalue は fetcher が計算）。
+                build_resolved_projection_sql(left_operand, view)
+            }
+        },
         ResolvedNode::ScalarMatch { left, op, right } => {
             // リテラル同士のスカラー比較: is_boolean_result() 経由で
             // build_boolean_sql が使われるため通常ここには到達しないが、
@@ -1875,10 +1893,10 @@ pub fn build_fetch_label_groups_sql(
 
     // nvalue CTE: nvalue付きProjectionの場合、ラベルごとの集約値を計算
     let nvalue_condition = resolver.get_nvalue_condition();
-    let has_nvalue = if let Some(nv) = resolver.get_nvalue() {
+    let has_nvalue = if let Some(nv) = resolver.get_nvalue_combined() {
         let mut nvalue_sql = build_nvalue_cte(
             resolver.resolved_query.get_projection_operand().unwrap(),
-            nv,
+            &nv,
             resolver.resolved_query.get_context(),
             view,
         );
@@ -3652,13 +3670,13 @@ mod tests {
                 .expect("Should have projection");
             let nvalue = resolver
                 .resolved_query
-                .get_nvalue()
+                .get_nvalue_combined()
                 .expect("Should have nvalue");
 
             // 修正前はこの呼び出しで panic! するはず
             let sql = build_nvalue_standalone_subquery(
                 proj_operand,
-                nvalue,
+                &nvalue,
                 resolver.resolved_query.get_context(),
                 "oneview",
             );
@@ -3759,12 +3777,12 @@ mod tests {
                 .expect("Should have projection");
             let nvalue = resolver
                 .resolved_query
-                .get_nvalue()
+                .get_nvalue_combined()
                 .expect("Should have nvalue");
 
             let sql = build_nvalue_standalone_subquery(
                 proj_operand,
-                nvalue,
+                &nvalue,
                 resolver.resolved_query.get_context(),
                 "oneview",
             );
