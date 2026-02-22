@@ -82,6 +82,11 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Projection { operand: op, .. } => {
             build_resolved_projection_sql(op, view)
         }
+        ResolvedNode::MergedProjectionMatch {
+            operand: op,
+            matches,
+            is_or,
+        } => build_merged_projection_match_sql(op, matches, *is_or, view),
         ResolvedNode::ColumnMatch { tag, label } => {
             build_column_match_sql(*tag, label, view)
         }
@@ -357,6 +362,8 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 build_resolved_projection_sql(left_operand, view)
             }
         },
+
+
         ResolvedNode::ScalarMatch { left, op, right } => {
             // リテラル同士のスカラー比較: is_boolean_result() 経由で
             // build_boolean_sql が使われるため通常ここには到達しないが、
@@ -602,6 +609,135 @@ fn build_count_nvalue_sql(
     stmt
 }
 
+fn resolve_simple_filter_condition(
+    node: &ResolvedNode,
+    table: Alias,
+) -> Option<Condition> {
+    match node {
+        ResolvedNode::Match { storage, label, .. } => {
+            if let StorageMapping::RowTag { tag_type, .. } = storage {
+                let s_val = label.as_str();
+                let cond = Condition::all()
+                    .add(Expr::col((table.clone(), Col::Type)).eq(tag_type.as_str()))
+                    .add(Expr::col((table, Col::LabelStr)).eq(s_val));
+                Some(cond)
+            } else {
+                None
+            }
+        }
+        ResolvedNode::ColumnMatch { tag, label } => {
+            let s_val = label.as_str();
+            Some(Condition::all().add(Expr::col((table, *tag)).eq(s_val)))
+        }
+        ResolvedNode::And(nodes) => {
+            let mut all_cond = Condition::all();
+            for n in nodes {
+                if let Some(c) = resolve_simple_filter_condition(n, table.clone()) {
+                    all_cond = all_cond.add(c);
+                } else {
+                    return None;
+                }
+            }
+            Some(all_cond)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn build_merged_nvalue_agg_expr(
+    nvalue: &ResolvedOperand,
+    view: &str,
+) -> SimpleExpr {
+    match nvalue {
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
+            let (inner_tag, inner_filter, _) = inner.extract_agg_parts();
+            if let Some(filter_node) = inner_filter {
+                let case_expr = if let Some(cond) =
+                    resolve_simple_filter_condition(&filter_node, Alias::new(view))
+                {
+                    Expr::case(cond, Expr::col((Alias::new(view), Col::ItemId)))
+                        .finally(Expr::val(None::<i32>))
+                } else {
+                    let filter_pick = build_pick_sql(&filter_node, view);
+                    let filter_sub = Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(filter_pick, Alias::new("nv_filter"))
+                        .to_owned();
+                    let in_expr = Expr::col((Alias::new(view), Col::ItemId))
+                        .in_subquery(filter_sub);
+                    Expr::case(in_expr, Expr::col((Alias::new(view), Col::ItemId)))
+                        .finally(Expr::val(None::<i32>))
+                };
+                Expr::expr(case_expr).count_distinct().into()
+            } else if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
+                let cond = Condition::all()
+                    .add(Expr::col((Alias::new(view), Col::Type)).eq(tag_type.as_str()));
+                let case_expr = Expr::case(cond, Expr::col((Alias::new(view), Col::ItemId)))
+                    .finally(Expr::val(None::<i32>));
+                Expr::expr(case_expr).count_distinct().into()
+            } else {
+                Expr::col((Alias::new(view), Col::ItemId))
+                    .count_distinct()
+                    .into()
+            }
+        }
+        ResolvedOperand::Aggregation(ResolvedAggregationNode::Arithmetic {
+            op,
+            inner,
+        }) => {
+            let (inner_tag, inner_filter, operand) = inner.extract_agg_parts();
+            let is_string = operand.map(|o| o.is_string_type()).unwrap_or(false);
+
+            let val_expr: SimpleExpr = if is_string {
+                Expr::col((Alias::new(view), Col::LabelStr)).into()
+            } else {
+                Expr::cust(&format!("TRY_CAST({}.label_str AS DOUBLE)", view))
+            };
+
+            if let Some(filter_node) = inner_filter {
+                let case_expr = if let Some(cond) =
+                    resolve_simple_filter_condition(&filter_node, Alias::new(view))
+                {
+                    Expr::case(cond, val_expr).finally(Expr::val(0i64))
+                } else {
+                    let filter_pick = build_pick_sql(&filter_node, view);
+                    let filter_sub = Query::select()
+                        .column(Col::ItemId)
+                        .from_subquery(filter_pick, Alias::new("nv_filter"))
+                        .to_owned();
+                    let in_expr = Expr::col((Alias::new(view), Col::ItemId))
+                        .in_subquery(filter_sub);
+                    Expr::case(in_expr, val_expr).finally(Expr::val(0i64))
+                };
+                apply_arithmetic_agg(op, Expr::expr(case_expr).into(), is_string)
+            } else if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
+                let cond = Condition::all()
+                    .add(Expr::col((Alias::new(view), Col::Type)).eq(tag_type.as_str()));
+                let case_expr =
+                    Expr::case(cond, val_expr).finally(Expr::val(0i64));
+                apply_arithmetic_agg(op, Expr::expr(case_expr).into(), is_string)
+            } else {
+                apply_arithmetic_agg(op, Expr::expr(val_expr).into(), is_string)
+            }
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let left_expr = build_merged_nvalue_agg_expr(&calc.left, view);
+            let right_expr = build_merged_nvalue_agg_expr(&calc.right, view);
+
+            let left_val = Expr::expr(left_expr)
+                .cast_as(crate::db::SqlType::DOUBLE)
+                .into();
+            let right_val = Expr::expr(right_expr)
+                .cast_as(crate::db::SqlType::DOUBLE)
+                .into();
+
+            apply_arithmetic_op(&calc.op, left_val, right_val, false)
+        }
+        ResolvedOperand::Literal(l) => label_to_simple_expr(l),
+        ResolvedOperand::TagRef { .. } => Expr::val(1i32).into(),
+    }
+}
+
 /// nvalue サブクエリ（スタンドアロン版）。
 /// `build_nvalue_cte` と同じロジックだが、picked_ids CTE を参照せず
 /// 自己完結した SELECT を返す。
@@ -708,6 +844,23 @@ fn build_nvalue_standalone_subquery(
             let is_string =
                 calc.left.is_string_type() && calc.right.is_string_type();
 
+            // NULL 伝播防止のため RIGHT 側の nvalue を COALESCE で補完する。
+            // count(extension:rs) など、マッチなしのグループは R に行が存在しないため
+            // LEFT JOIN + COALESCE(R.nvalue, default) でそのグループを保持する。
+            let r_nvalue_expr: SimpleExpr = if is_string {
+                Func::coalesce([
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    Expr::val("").into(),
+                ])
+                .into()
+            } else {
+                Func::coalesce([
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    Expr::val(0.0f64).into(),
+                ])
+                .into()
+            };
+
             let mut stmt = Query::select();
             stmt.expr_as(
                 Expr::col((Alias::new("L"), Alias::new("group_label"))),
@@ -717,7 +870,7 @@ fn build_nvalue_standalone_subquery(
                 apply_arithmetic_op(
                     &calc.op,
                     Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
-                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    r_nvalue_expr,
                     is_string,
                 ),
                 Alias::new("nvalue"),
@@ -725,7 +878,7 @@ fn build_nvalue_standalone_subquery(
 
             stmt.from_subquery(sub_l, Alias::new("L"));
             stmt.join_subquery(
-                sea_query::JoinType::InnerJoin,
+                sea_query::JoinType::LeftJoin,
                 sub_r,
                 Alias::new("R"),
                 Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
@@ -1811,6 +1964,21 @@ fn build_nvalue_cte(
             let is_string =
                 calc.left.is_string_type() && calc.right.is_string_type();
 
+            // NULL 伝播防止のため RIGHT 側の nvalue を COALESCE で補完する。
+            let r_nvalue_expr: SimpleExpr = if is_string {
+                Func::coalesce([
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    Expr::val("").into(),
+                ])
+                .into()
+            } else {
+                Func::coalesce([
+                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    Expr::val(0.0f64).into(),
+                ])
+                .into()
+            };
+
             let mut stmt = Query::select();
             stmt.expr_as(
                 Expr::col((Alias::new("L"), Alias::new("group_label"))),
@@ -1820,7 +1988,7 @@ fn build_nvalue_cte(
                 apply_arithmetic_op(
                     &calc.op,
                     Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
-                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+                    r_nvalue_expr,
                     is_string,
                 ),
                 Alias::new("nvalue"),
@@ -1828,7 +1996,7 @@ fn build_nvalue_cte(
 
             stmt.from_subquery(sub_l, Alias::new("L"));
             stmt.join_subquery(
-                sea_query::JoinType::InnerJoin,
+                sea_query::JoinType::LeftJoin,
                 sub_r,
                 Alias::new("R"),
                 Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
@@ -1892,32 +2060,45 @@ pub fn build_fetch_label_groups_sql(
     with_clause.cte(picked_ids_cte);
 
     // nvalue CTE: nvalue付きProjectionの場合、ラベルごとの集約値を計算
+    //
+    // OR クエリの場合は nvalue 条件の適用をスキップする。
+    // OR の各部分が異なる nvalue 条件を持つ場合、先頭の条件のみを取得した
+    // nvalue_agg で all_hits をフィルタすると、別の条件を満たすグループが
+    // 誤って除外されてしまう。OR クエリでは picked_ids UNION が既に正しく
+    // 絞り込みを行っているため、追加フィルタは不要。
+    let is_or_query =
+        matches!(&resolver.resolved_query, ResolvedNode::Or(_));
     let nvalue_condition = resolver.get_nvalue_condition();
-    let has_nvalue = if let Some(nv) = resolver.get_nvalue_combined() {
-        let mut nvalue_sql = build_nvalue_cte(
-            resolver.resolved_query.get_projection_operand().unwrap(),
-            &nv,
-            resolver.resolved_query.get_context(),
-            view,
-        );
-        // nvalue_condition がある場合、HAVING 句を追加
-        if let Some((op, value)) = nvalue_condition {
-            let bin_op = to_bin_op(*op);
-            let val = label_to_simple_expr(value);
-            nvalue_sql.and_having(
-                Expr::col(Alias::new("nvalue")).binary(bin_op, val),
+    let has_nvalue = if !is_or_query {
+        if let Some(nv) = resolver.get_nvalue_combined() {
+            let mut nvalue_sql = build_nvalue_cte(
+                resolver.resolved_query.get_projection_operand().unwrap(),
+                &nv,
+                resolver.resolved_query.get_context(),
+                view,
             );
+            // nvalue_condition がある場合、HAVING 句を追加
+            if let Some((op, value)) = nvalue_condition {
+                let bin_op = to_bin_op(*op);
+                let val = label_to_simple_expr(value);
+                nvalue_sql.and_having(
+                    Expr::col(Alias::new("nvalue")).binary(bin_op, val),
+                );
+            }
+            let nvalue_cte = CommonTableExpression::new()
+                .query(nvalue_sql)
+                .table_name(Alias::new("nvalue_agg"))
+                .to_owned();
+            with_clause.cte(nvalue_cte);
+            true
+        } else {
+            false
         }
-        let nvalue_cte = CommonTableExpression::new()
-            .query(nvalue_sql)
-            .table_name(Alias::new("nvalue_agg"))
-            .to_owned();
-        with_clause.cte(nvalue_cte);
-        true
     } else {
         false
     };
-    let has_nvalue_condition = nvalue_condition.is_some();
+    // OR クエリでは nvalue フィルタを all_hits に適用しない
+    let has_nvalue_condition = nvalue_condition.is_some() && !is_or_query;
 
     // Calculation 投影の検出: Projection(Calculation(...)) の場合は
     // 算術式を事前計算する computed CTE を挿入する
@@ -2257,6 +2438,126 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
         .from_subquery(build_pick_sql(c, view), Tbl::NotSide);
     q.union(sea_query::UnionType::Except, eq);
     q
+}
+
+fn build_merged_projection_match_sql(
+    operand: &crate::query::lens_resolver::ResolvedOperand,
+    matches: &[crate::query::lens_resolver::ProjectionMatchCondition],
+    is_or: bool,
+    view: &str,
+) -> SelectStatement {
+    // 1. Projection operand base query setup
+    let (proj_col, tag_type_opt) = match operand {
+        crate::query::lens_resolver::ResolvedOperand::TagRef {
+            storage,
+            tag_type,
+            ..
+        } => {
+            let col = match storage {
+                StorageMapping::RowTag { column, .. } => *column,
+                StorageMapping::Column(col) => *col,
+                _ => return SelectStatement::default(),
+            };
+            (col, Some(tag_type.as_str()))
+        }
+        _ => return SelectStatement::default(),
+    };
+
+    let mut outer_stmt = build_resolved_projection_sql(operand, view);
+
+    // 2. We use a unified Subquery that joins tags_view to itself ON item_id
+    // to evaluate all matches in a single pass.
+    let mut sub = Query::select();
+    sub.expr_as(
+        Expr::col((Alias::new("proj"), proj_col)),
+        Alias::new("group_label"),
+    );
+    sub.from_as(Alias::new(view), Alias::new("proj"));
+    sub.join(
+        sea_query::JoinType::InnerJoin,
+        (Alias::new(view), Alias::new("c")),
+        Condition::all().add(
+            Expr::col((Alias::new("proj"), Col::ItemId))
+                .equals((Alias::new("c"), Col::ItemId)),
+        ),
+    );
+
+    if let Some(tag_type) = tag_type_opt {
+        sub.and_where(
+            Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type),
+        );
+    }
+    sub.group_by_col((Alias::new("proj"), proj_col));
+
+    // 3. Build HAVING condition for each match
+    let mut having_cond = if is_or {
+        Condition::any()
+    } else {
+        Condition::all()
+    };
+
+    for cond in matches {
+        // HAVING 内の集約式は子テーブル c エイリアスを使用する
+        let nvalue_expr = build_merged_nvalue_agg_expr(&cond.nvalue, "c");
+        let right_expr =
+            build_resolved_operand_expr_for_arithmetic(&cond.right);
+
+        let cmp_op = match cond.op {
+            crate::query::lens_resolver::ProjectionOp::Comparison(op) => op,
+            _ => panic!(
+                "Expected ComparisonOp for MergedProjectionMatch condition"
+            ),
+        };
+        let bin_op = to_bin_op(cmp_op);
+
+        let mut term = Condition::all()
+            .add(Expr::expr(nvalue_expr).binary(bin_op, right_expr));
+
+        if let Some(ctx) = &cond.context {
+            let (ctx_tag_type, ctx_val) = match &**ctx {
+                ResolvedNode::Match {
+                    tag_type, label, ..
+                } => (
+                    tag_type.as_str().to_string(),
+                    label.as_str().to_string(),
+                ),
+                ResolvedNode::ColumnMatch { tag, label } => {
+                    (tag.as_str().to_string(), label.as_str().to_string())
+                }
+                _ => {
+                    // ignore unhandled context types for this optimization
+                    having_cond = having_cond.add(term);
+                    continue;
+                }
+            };
+            let mut ctx_sub = Query::select();
+            ctx_sub
+                .column(Col::ItemId)
+                .from(Alias::new(view))
+                .and_where(Expr::col(Col::Type).eq(ctx_tag_type))
+                .and_where(Expr::col(Col::LabelStr).eq(ctx_val));
+            term = term.add(
+                Expr::col((Alias::new("proj"), Col::ItemId))
+                    .in_subquery(ctx_sub),
+            );
+        }
+
+        having_cond = having_cond.add(term);
+    }
+
+    sub.cond_having(having_cond);
+
+    // 4. Wrap outer statement with subquery filter
+    outer_stmt.and_where(
+        Expr::col(proj_col).in_subquery(
+            Query::select()
+                .column(Alias::new("group_label"))
+                .from_subquery(sub, Alias::new("nfilter"))
+                .to_owned(),
+        ),
+    );
+
+    outer_stmt
 }
 
 fn build_resolved_projection_sql(

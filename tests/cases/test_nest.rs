@@ -1527,11 +1527,16 @@ fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    assert_eq!(nv1.as_deref(), Some("45"), "dir1 (avg+sum) nvalue should be 45");
+    assert_eq!(
+        nv1.as_deref(),
+        Some("45"),
+        "dir1 (avg+sum) nvalue should be 45"
+    );
 
     // 2. 集計 vs リテラル: max(size:) * 2
     // dir1: max=20 => 40
-    let res = fm.search("parentdir: &: (max(size:) * 2)", Default::default())?;
+    let res =
+        fm.search("parentdir: &: (max(size:) * 2)", Default::default())?;
     let nv1 = res
         .results
         .iter()
@@ -1542,11 +1547,16 @@ fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    assert_eq!(nv1.as_deref(), Some("40"), "dir1 (max*2) nvalue should be 40");
+    assert_eq!(
+        nv1.as_deref(),
+        Some("40"),
+        "dir1 (max*2) nvalue should be 40"
+    );
 
     // 3. リテラル vs 集計: 1000 / min(size:)
     // dir1: min=10 => 100
-    let res = fm.search("parentdir: &: (1000 / min(size:))", Default::default())?;
+    let res =
+        fm.search("parentdir: &: (1000 / min(size:))", Default::default())?;
     let nv1 = res
         .results
         .iter()
@@ -1557,7 +1567,11 @@ fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    assert_eq!(nv1.as_deref(), Some("100"), "dir1 (1000/min) nvalue should be 100");
+    assert_eq!(
+        nv1.as_deref(),
+        Some("100"),
+        "dir1 (1000/min) nvalue should be 100"
+    );
 
     // 4. 入れ子になった算術演算: (sum(size:) + 10) * count(size:)
     // dir1: (30 + 10) * 2 = 80
@@ -1575,7 +1589,150 @@ fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    assert_eq!(nv1.as_deref(), Some("80"), "dir1 (nested) nvalue should be 80");
+    assert_eq!(
+        nv1.as_deref(),
+        Some("80"),
+        "dir1 (nested) nvalue should be 80"
+    );
 
     Ok(())
 }
+
+// ──────────────────────────────────────────────
+// バグ再現テスト（修正前に追加、修正後に pass する）
+// ──────────────────────────────────────────────
+
+/// Issue 1: OR演算子でMergedProjectionMatchが正しくユニオンを返すことを確認
+///
+/// バグ: `P &: C1 | P &: C2` がC1のみの結果を返す（ORが機能しない）
+///
+/// 期待値:
+/// - dirA: count(extension:rs) = 1 > 0 ✓ → マッチ
+/// - dirB: count(extension:rs) = 0, count(*:*) = 2 > 1 ✓ → マッチ
+/// - dirC: count(*:*) = 1, どちらも不一致 → 除外
+#[test]
+fn test_nest_or_merged_projection_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dirA: .rs file 1件 → count(ext:rs)=1 > 0 ✓, count(*:*)=1 (NOT > 1)
+    let dira = root.join("dirA");
+    std::fs::create_dir(&dira)?;
+    std::fs::write(dira.join("main.rs"), vec![0u8; 10])?;
+
+    // dirB: .txt files 2件 → count(ext:rs)=0 (NOT > 0), count(*:*)=2 > 1 ✓
+    let dirb = root.join("dirB");
+    std::fs::create_dir(&dirb)?;
+    std::fs::write(dirb.join("a.txt"), vec![0u8; 20])?;
+    std::fs::write(dirb.join("b.txt"), vec![0u8; 30])?;
+
+    // dirC: .txt 1件 → どちらの条件にも一致しない
+    let dirc = root.join("dirC");
+    std::fs::create_dir(&dirc)?;
+    std::fs::write(dirc.join("c.txt"), vec![0u8; 40])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "parentdir: &: (count(extension:rs) > 0) | parentdir: &: (count(*:*) > 1)",
+        Default::default(),
+    )?;
+
+    let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+
+    assert!(
+        names.iter().any(|n| n.contains("dirA")),
+        "dirA should be included (count(rs) > 0). Got: {:?}",
+        names
+    );
+    assert!(
+        names.iter().any(|n| n.contains("dirB")),
+        "dirB should be included (count(*) > 1). Got: {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("dirC")),
+        "dirC should be excluded (count(rs)=0, count(*)=1). Got: {:?}",
+        names
+    );
+
+    Ok(())
+}
+
+/// Issue 2: 異なる集約次元の算術演算でNULL伝播が起きないことを確認
+///
+/// バグ: `parentdir: &: (sum(size:) + count(extension:rs))` において、
+/// extension:rs を持たないディレクトリで count(extension:rs) が 0 でなく NULL を返し、
+/// sum(size:) + NULL = NULL となり nvalue が消える。
+///
+/// 期待値:
+/// - dir_rs: sum(size:)=10, count(ext:rs)=1 → nvalue=11
+/// - dir_txt: sum(size:)=50, count(ext:rs)=0 → nvalue=50 (0でなくNULLになるとバグ)
+#[test]
+fn test_nest_arithmetic_mixed_agg_null_propagation_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // dir_rs: .rs file 1件 10バイト → sum(size:)=10, count(ext:rs)=1 → nvalue=11
+    let dir_rs = root.join("dir_rs");
+    std::fs::create_dir(&dir_rs)?;
+    std::fs::write(dir_rs.join("main.rs"), vec![0u8; 10])?;
+
+    // dir_txt: .txt file 1件 50バイト → sum(size:)=50, count(ext:rs)=0 → nvalue=50
+    let dir_txt = root.join("dir_txt");
+    std::fs::create_dir(&dir_txt)?;
+    std::fs::write(dir_txt.join("readme.txt"), vec![0u8; 50])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "parentdir: &: (sum(size:) + count(extension:rs))",
+        Default::default(),
+    )?;
+
+    let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+
+    // dir_rs: sum=10 + count_rs=1 = 11
+    let rs_res = res.results.iter().find(|r| r.name.contains("dir_rs"));
+    assert!(
+        rs_res.is_some(),
+        "dir_rs should appear in results. Got: {:?}",
+        names
+    );
+    let nv_rs = rs_res
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(nv_rs.as_deref(), Some("11"), "dir_rs nvalue should be 11 (10+1)");
+
+    // dir_txt: sum=50 + count_rs=0 = 50
+    // このケースでバグが発生: count(extension:rs) が NULL を返し nvalue が消える
+    let txt_res = res.results.iter().find(|r| r.name.contains("dir_txt"));
+    assert!(
+        txt_res.is_some(),
+        "dir_txt should appear in results (count(rs)=0, sum+0=50). Got: {:?}",
+        names
+    );
+    let nv_txt = txt_res
+        .unwrap()
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.label.as_str().to_string());
+    assert_eq!(
+        nv_txt.as_deref(),
+        Some("50"),
+        "dir_txt nvalue should be 50 (50+0), but got None due to NULL propagation bug"
+    );
+
+    Ok(())
+}
+

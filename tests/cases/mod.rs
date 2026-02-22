@@ -18,6 +18,7 @@ pub mod test_label_calc;
 pub mod test_literal_ops;
 pub mod test_nest;
 pub mod test_null_propagation;
+pub mod test_optimize_sql;
 pub mod test_projection;
 pub mod test_reverse_patterns;
 pub mod test_search_progress;

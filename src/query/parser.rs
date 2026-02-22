@@ -1483,7 +1483,8 @@ mod tests {
         assert!(parse(query_no_inner_space).is_ok());
 
         // スペースあり (以前は失敗していたケース)
-        let query_with_inner_space = "parentdir: &: ( (sum(size:) + count()) / 2 )";
+        let query_with_inner_space =
+            "parentdir: &: ( (sum(size:) + count()) / 2 )";
         let res = parse(query_with_inner_space);
         assert!(res.is_ok(), "Should now parse with spaces: {:?}", res.err());
     }

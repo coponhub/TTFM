@@ -73,7 +73,7 @@ comparison = {
 // Label comparison: operand (including projection) followed by label-style operator
 // Specification: Proj :Op Scalar | Scalar :Op Proj | Scalar :Op Proj :Op Scalar ...
 label_comparison = ${
-    ( (type_ref | calculation) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
+    ( (type_ref | calculation | parenthesized_expr) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
   | ( (number | quoted_string | unquoted_string | unquoted_tag_string | calculation) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
 }
 
@@ -120,6 +120,7 @@ operand = {
     aggregation
   | calculation
   | type_ref
+  | parenthesized_expr
   | label
 }
 

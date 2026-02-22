@@ -133,6 +133,13 @@ pub enum ResolvedNode {
         right_nvalue: ResolvedOperand,
         right_context: Option<Box<ResolvedNode>>,
     },
+    /// マージされた nvalue 付き Projection マッチ。
+    /// 共通の GROUP BY キー（operand）に対して複数の条件を AND/OR で適用する。
+    MergedProjectionMatch {
+        operand: ResolvedOperand,
+        matches: Vec<ProjectionMatchCondition>,
+        is_or: bool,
+    },
 }
 
 /// nvalue 付き Projection 同士を結ぶ演算子。
@@ -141,6 +148,15 @@ pub enum ResolvedNode {
 pub enum ProjectionOp {
     Comparison(ComparisonOp),
     Arithmetic(ArithmeticOp),
+}
+
+/// 同一 operand（GROUP BY キー）に対する検索条件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionMatchCondition {
+    pub nvalue: ResolvedOperand,
+    pub op: ProjectionOp,
+    pub right: ResolvedOperand,
+    pub context: Option<Box<ResolvedNode>>,
 }
 #[derive(Debug, PartialEq, Clone)]
 pub enum ResolvedAggregationNode {
@@ -285,7 +301,8 @@ impl ResolvedNode {
         match self {
             ResolvedNode::Projection { .. }
             | ResolvedNode::ProjectionMatch { .. }
-            | ResolvedNode::ProjectionProjectionMatch { .. } => true,
+            | ResolvedNode::ProjectionProjectionMatch { .. }
+            | ResolvedNode::MergedProjectionMatch { .. } => true,
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().any(|n| n.is_projection_recursive())
             }
@@ -406,6 +423,7 @@ impl ResolvedNode {
             | ResolvedNode::AggregationTagMatch { .. }
             | ResolvedNode::TagTagMatch { .. }
             | ResolvedNode::ProjectionProjectionMatch { .. }
+            | ResolvedNode::MergedProjectionMatch { .. }
             | ResolvedNode::ScalarMatch { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
@@ -423,7 +441,10 @@ impl ResolvedNode {
             | ResolvedNode::ProjectionProjectionMatch {
                 left_operand: op,
                 ..
-            } => extract_tag_type_from_operand(op),
+            }
+            | ResolvedNode::MergedProjectionMatch { operand: op, .. } => {
+                extract_tag_type_from_operand(op)
+            }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
             }
@@ -608,7 +629,8 @@ impl ResolvedNode {
             | ResolvedNode::AggregationAggregationMatch { .. }
             | ResolvedNode::AggregationTagMatch { .. }
             | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::ProjectionMatch { .. } => true,
+            | ResolvedNode::ProjectionMatch { .. }
+            | ResolvedNode::MergedProjectionMatch { .. } => true,
             // Arithmetic は Projection 結果（nvalue 付き）なので false
             ResolvedNode::ProjectionProjectionMatch { op, .. } => {
                 matches!(op, ProjectionOp::Comparison(_))
@@ -920,6 +942,13 @@ pub(crate) fn resolve_query_node(
         {
             resolve_projection_arithmetic(lens, *calc)
         }
+        // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
+        // → logical_resolver が算術分配した形式。ProjectionProjectionMatch に解決する。
+        QueryNode::Projection(Operand::Calculation(calc))
+            if calc_has_nest_operands(&calc) =>
+        {
+            resolve_projection_arithmetic(lens, *calc)
+        }
         QueryNode::Projection(op) => {
             let resolved_op = resolve_operand(lens, &op)?;
             Ok(ResolvedNode::Projection {
@@ -1164,6 +1193,8 @@ fn resolve_nest_calc_operand(
     }
 }
 
+
+
 /// Nest の左辺から ResolvedOperand を抽出するヘルパー。
 fn extract_projection_operand(left: ResolvedNode) -> Result<ResolvedOperand> {
     match left {
@@ -1171,6 +1202,68 @@ fn extract_projection_operand(left: ResolvedNode) -> Result<ResolvedOperand> {
         _ => bail!("Nest left side must resolve to Projection"),
     }
 }
+
+/// nvalue 付き Projection を ResolvedNode から抽出するヘルパー。
+///
+/// `extension:` などは展開後に `And([TypedTag(is_dir:false), Projection { nvalue }])` に
+/// なるため、And の中から Projection を取り出し、残りをコンテキストフィルタとして返す。
+///
+/// # 戻り値
+/// `(operand, nvalue, context)` — context は is_dir:false などのフィルタノード
+fn extract_nvalue_projection_parts(
+    node: ResolvedNode,
+) -> Result<(ResolvedOperand, ResolvedOperand, Option<Box<ResolvedNode>>)> {
+    match node {
+        ResolvedNode::Projection {
+            operand,
+            nvalue: Some(nv),
+            context,
+        } => Ok((operand, nv, context)),
+        ResolvedNode::And(mut nodes) => {
+            // nvalue 付き Projection の位置を探す
+            let proj_idx = nodes.iter().position(|n| {
+                matches!(n, ResolvedNode::Projection { nvalue: Some(_), .. })
+            });
+            if let Some(idx) = proj_idx {
+                let proj = nodes.remove(idx);
+                if let ResolvedNode::Projection {
+                    operand,
+                    nvalue: Some(nv),
+                    context: proj_ctx,
+                } = proj
+                {
+                    // 残りのノード（is_dir:false などのフィルタ）をコンテキストとして統合
+                    let filter_ctx = if nodes.is_empty() {
+                        None
+                    } else if nodes.len() == 1 {
+                        Some(Box::new(nodes.remove(0)))
+                    } else {
+                        Some(Box::new(ResolvedNode::And(nodes)))
+                    };
+                    // proj_ctx は現時点では常に None だが念のためマージ
+                    let merged_ctx = match (proj_ctx, filter_ctx) {
+                        (None, fc) => fc,
+                        (pc, None) => pc,
+                        (Some(pc), Some(fc)) => {
+                            Some(Box::new(ResolvedNode::And(vec![*pc, *fc])))
+                        }
+                    };
+                    Ok((operand, nv, merged_ctx))
+                } else {
+                    unreachable!()
+                }
+            } else {
+                bail!("And node does not contain a nvalue-bearing Projection")
+            }
+        }
+        other => bail!(
+            "Both sides of Nest comparison must resolve to nvalue-bearing Projection, got: {:?}",
+            other
+        ),
+    }
+}
+
+
 
 pub(crate) fn resolve_calculation(
     lens: &Lens,
@@ -1272,6 +1365,37 @@ fn resolve_single_match(
                 label: lab,
             })
         }
+        // (nest_calc) :> 100 → Nest 算術演算子の ProjectionMatch に変換
+        (Operand::Calculation(calc), Operand::Literal(lab))
+            if calc_has_nest_operands(&calc) =>
+        {
+            let arithmetic_op = calc.op;
+            let resolved = resolve_projection_arithmetic(lens, *calc)?;
+            match resolved {
+                ResolvedNode::ProjectionProjectionMatch {
+                    left_operand,
+                    left_nvalue,
+                    left_context,
+                    op: _,
+                    right_operand: _,
+                    right_nvalue,
+                    right_context: _,
+                } => Ok(ResolvedNode::ProjectionMatch {
+                    operand: left_operand,
+                    nvalue: ResolvedOperand::Calculation(Box::new(
+                        ResolvedCalculationNode {
+                            left: left_nvalue,
+                            op: arithmetic_op,
+                            right: right_nvalue,
+                        },
+                    )),
+                    op,
+                    label: lab,
+                    context: left_context,
+                }),
+                _ => Ok(resolved),
+            }
+        }
         // (1 + 2) :> size:
         (Operand::Calculation(calc), Operand::Literal(lab)) => {
             let res_calc = resolve_calculation(lens, *calc)?;
@@ -1361,6 +1485,37 @@ fn resolve_single_match(
                 sql_type,
             })
         }
+        // 100 :< (nest_calc) → Nest 算術演算子の ProjectionMatch に変換（flip）
+        (Operand::Literal(lab), Operand::Calculation(calc))
+            if calc_has_nest_operands(&calc) =>
+        {
+            let arithmetic_op = calc.op;
+            let resolved = resolve_projection_arithmetic(lens, *calc)?;
+            match resolved {
+                ResolvedNode::ProjectionProjectionMatch {
+                    left_operand,
+                    left_nvalue,
+                    left_context,
+                    op: _,
+                    right_operand: _,
+                    right_nvalue,
+                    right_context: _,
+                } => Ok(ResolvedNode::ProjectionMatch {
+                    operand: left_operand,
+                    nvalue: ResolvedOperand::Calculation(Box::new(
+                        ResolvedCalculationNode {
+                            left: left_nvalue,
+                            op: arithmetic_op,
+                            right: right_nvalue,
+                        },
+                    )),
+                    op: flip_op(op),
+                    label: lab,
+                    context: left_context,
+                }),
+                _ => Ok(resolved),
+            }
+        }
         // Literal < Calculation のパターン (例: 100MB < (size: / 2))
         (Operand::Literal(lab), Operand::Calculation(calc)) => {
             let res_calc = resolve_calculation(lens, *calc)?;
@@ -1449,33 +1604,23 @@ fn resolve_single_match(
             }
         }
         // Query vs Query (両辺が Nest、比較演算子)
+        // extension: などが And([is_dir:false, Projection { nvalue }]) に展開されるケースも処理する
         (Operand::Query(l_node), Operand::Query(r_node)) => {
             let res_l = resolve_query_node(lens, *l_node)?;
             let res_r = resolve_query_node(lens, *r_node)?;
 
-            match (res_l, res_r) {
-                (
-                    ResolvedNode::Projection {
-                        operand: lo,
-                        nvalue: Some(lnv),
-                        context: lc,
-                    },
-                    ResolvedNode::Projection {
-                        operand: ro,
-                        nvalue: Some(rnv),
-                        context: rc,
-                    },
-                ) => Ok(ResolvedNode::ProjectionProjectionMatch {
-                    left_operand: lo,
-                    left_nvalue: lnv,
-                    left_context: lc,
-                    op: ProjectionOp::Comparison(op),
-                    right_operand: ro,
-                    right_nvalue: rnv,
-                    right_context: rc,
-                }),
-                _ => bail!("Both sides of Nest comparison must resolve to nvalue-bearing Projection"),
-            }
+            let (lo, lnv, lc) = extract_nvalue_projection_parts(res_l)?;
+            let (ro, rnv, rc) = extract_nvalue_projection_parts(res_r)?;
+
+            Ok(ResolvedNode::ProjectionProjectionMatch {
+                left_operand: lo,
+                left_nvalue: lnv,
+                left_context: lc,
+                op: ProjectionOp::Comparison(op),
+                right_operand: ro,
+                right_nvalue: rnv,
+                right_context: rc,
+            })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
     }
