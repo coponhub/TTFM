@@ -1,6 +1,7 @@
+use crate::query::lens_resolver::{
+    ProjectionMatchCondition, ProjectionOp, ResolvedAggregationNode,
+};
 use crate::query::{ResolvedNode, ResolvedOperand};
-
-use crate::query::lens_resolver::{ProjectionMatchCondition, ProjectionOp};
 
 /// Performs various optimizations on the resolved AST.
 pub fn optimize(node: ResolvedNode) -> ResolvedNode {
@@ -18,7 +19,9 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
         ResolvedNode::Or(children) => {
             let mut optimized_children: Vec<ResolvedNode> =
                 children.into_iter().map(optimize).collect();
-            merge_projection_matches(&mut optimized_children, true);
+            // DuckDB has a bug evaluating `HAVING A OR B` when A or B contains an `IN` subquery with `INTERSECT`.
+            // By NOT merging ORs, it falls back to UNION which works perfectly.
+            // merge_projection_matches(&mut optimized_children, true);
             if optimized_children.len() == 1 {
                 optimized_children.pop().unwrap()
             } else {
@@ -40,7 +43,10 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             right_operand,
             right_nvalue,
             right_context,
-        } if left_operand == right_operand && left_context == right_context => {
+        } if left_operand == right_operand
+            && left_context == right_context
+            && matches!(op, ProjectionOp::Comparison(_)) =>
+        {
             // Convert self-comparing ProjectionProjectionMatch into a MergedProjectionMatch
             ResolvedNode::MergedProjectionMatch {
                 operand: left_operand,
@@ -93,21 +99,23 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             op,
             label,
             context,
-        } if nvalue.contains_aggregation() => ResolvedNode::MergedProjectionMatch {
-            operand,
-            matches: vec![ProjectionMatchCondition {
-                nvalue,
-                op: ProjectionOp::Comparison(op),
-                right: ResolvedOperand::Literal(label),
-                context,
-            }],
-            is_or: false,
-        },
+        } if nvalue.contains_aggregation() => {
+            ResolvedNode::MergedProjectionMatch {
+                operand,
+                matches: vec![ProjectionMatchCondition {
+                    nvalue,
+                    op: ProjectionOp::Comparison(op),
+                    right: ResolvedOperand::Literal(label),
+                    context,
+                }],
+                is_or: false,
+            }
+        }
         _ => node,
     }
 }
 
-use crate::query::lens_resolver::ResolvedAggregationNode;
+// (Moved import to the top)
 
 fn flatten_aggregation(
     agg: ResolvedAggregationNode,
@@ -236,14 +244,22 @@ fn merge_projection_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
             });
         } else {
             // Just one match, convert back to ProjectionMatch to avoid unnecessary merging
-            let cond = matches.into_iter().next().unwrap();
-            let op = match cond.op {
-                ProjectionOp::Comparison(c) => c,
-                _ => panic!("Expected ComparisonOp for single ProjectionMatch"),
+            let cond = matches
+                .into_iter()
+                .next()
+                .expect("matches should have at least one element");
+            let ProjectionOp::Comparison(op) = cond.op else {
+                panic!(
+                    "Expected ComparisonOp for single ProjectionMatch, got: {:?}",
+                    cond.op
+                );
             };
-            let label = match cond.right {
-                crate::query::ResolvedOperand::Literal(l) => l,
-                _ => panic!("Expected Literal for single ProjectionMatch"),
+            let crate::query::ResolvedOperand::Literal(label) = cond.right
+            else {
+                panic!(
+                    "Expected Literal for single ProjectionMatch, got: {:?}",
+                    cond.right
+                );
             };
             remaining.push(ResolvedNode::ProjectionMatch {
                 operand,
@@ -281,13 +297,16 @@ mod tests {
             } => {
                 assert!(!is_or, "Should be an AND merge");
                 assert_eq!(matches.len(), 2, "Should have 2 merged conditions");
-                
+
                 // operand (GROUP BY x) が parentdir であることを確認
                 match operand {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
-                    _ => panic!("Expected TagRef(parentdir) as operand, got: {:?}", operand),
+                    _ => panic!(
+                        "Expected TagRef(parentdir) as operand, got: {:?}",
+                        operand
+                    ),
                 }
             }
             _ => panic!(
@@ -305,25 +324,33 @@ mod tests {
         let optimized = optimize(resolved);
 
         match optimized {
-            ResolvedNode::MergedProjectionMatch {
-                operand,
-                matches,
-                is_or,
-            } => {
-                assert!(is_or, "Should be an OR merge");
-                assert_eq!(matches.len(), 2, "Should have 2 merged conditions");
-                
-                match operand {
-                    ResolvedOperand::TagRef { tag_type, .. } => {
-                        assert_eq!(tag_type.as_str(), "parentdir");
+            ResolvedNode::Or(children) => {
+                assert_eq!(
+                    children.len(),
+                    2,
+                    "Should remain an Or node with 2 children"
+                );
+                for child in children {
+                    match child {
+                        ResolvedNode::MergedProjectionMatch {
+                            operand,
+                            matches,
+                            is_or,
+                        } => {
+                            assert!(!is_or, "Child projection match should not be OR");
+                            assert_eq!(matches.len(), 1, "Child should have 1 condition");
+                            match operand {
+                                ResolvedOperand::TagRef { tag_type, .. } => {
+                                    assert_eq!(tag_type.as_str(), "parentdir");
+                                }
+                                _ => panic!("Expected TagRef(parentdir) as operand, got: {:?}", operand),
+                            }
+                        }
+                        _ => panic!("Expected children to be MergedProjectionMatch, got: {:?}", child),
                     }
-                    _ => panic!("Expected TagRef(parentdir) as operand, got: {:?}", operand),
                 }
             }
-            _ => panic!(
-                "Expected MergedProjectionMatch as root, got: {:?}",
-                optimized
-            ),
+            _ => panic!("Expected Or as root, got: {:?}", optimized),
         }
     }
 
@@ -411,10 +438,7 @@ mod tests {
                 matches,
                 is_or,
             } => {
-                assert!(
-                    !is_or,
-                    "Comparison merge should be AND (is_or=false)"
-                );
+                assert!(!is_or, "Comparison merge should be AND (is_or=false)");
                 assert_eq!(
                     matches.len(),
                     1,
@@ -431,18 +455,12 @@ mod tests {
                 }
                 // op は Comparison であること
                 assert!(
-                    matches!(
-                        matches[0].op,
-                        ProjectionOp::Comparison(_)
-                    ),
+                    matches!(matches[0].op, ProjectionOp::Comparison(_)),
                     "Condition op should be Comparison, got: {:?}",
                     matches[0].op
                 );
             }
-            _ => panic!(
-                "Expected MergedProjectionMatch, got: {:?}",
-                optimized
-            ),
+            _ => panic!("Expected MergedProjectionMatch, got: {:?}", optimized),
         }
     }
 
@@ -467,10 +485,9 @@ mod tests {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
-                    _ => panic!(
-                        "Expected TagRef(parentdir), got: {:?}",
-                        operand
-                    ),
+                    _ => {
+                        panic!("Expected TagRef(parentdir), got: {:?}", operand)
+                    }
                 }
                 // nvalue は Calculation (count / count の算術式) であること
                 assert!(
@@ -482,10 +499,7 @@ mod tests {
                     matches[0].nvalue
                 );
             }
-            _ => panic!(
-                "Expected MergedProjectionMatch, got: {:?}",
-                optimized
-            ),
+            _ => panic!("Expected MergedProjectionMatch, got: {:?}", optimized),
         }
     }
 

@@ -81,6 +81,7 @@ fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::aggregation => {
             build_aggregation(pair).map(QueryNode::Aggregation)
         }
+        Rule::nest_expr => build_nest_expr(pair),
         Rule::expr => build_expr(pair),
         Rule::primary => build_primary(pair),
         Rule::factor => build_factor(pair),
@@ -204,6 +205,7 @@ fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
         Rule::expr => build_ast(inner),
         Rule::typed_tag => build_typed_tag(inner),
         Rule::comparison => build_comparison(inner),
+        Rule::nest_expr => build_nest_expr(inner),
         Rule::projection => build_projection(inner),
         Rule::aggregation => {
             build_aggregation(inner).map(QueryNode::Aggregation)
@@ -284,6 +286,16 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
 fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
     // comparison = { label_comparison | scalar_comparison }
     let inner = pair.into_inner().next().unwrap();
+    build_comparison_inner(inner)
+}
+
+/// scalar_comparison を nest_operand 内で直接処理するためのヘルパー。
+fn build_comparison_from_scalar(pair: Pair<Rule>) -> Result<QueryNode> {
+    build_comparison_inner(pair)
+}
+
+/// label_comparison または scalar_comparison のペアを受け取り Comparison ノードを構築します。
+fn build_comparison_inner(inner: Pair<Rule>) -> Result<QueryNode> {
     let rule = inner.as_rule();
     let mut inner_pairs = inner.into_inner();
 
@@ -423,9 +435,57 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
             let node = build_expr(expr_pair)?;
             Ok(Operand::Query(Box::new(node)))
         }
+        Rule::nest_expr => {
+            let node = build_nest_expr(inner)?;
+            Ok(Operand::Query(Box::new(node)))
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             error::UNKNOWN_OPERAND_RULE,
+            inner.as_rule()
+        )),
+    }
+}
+
+/// `nest_expr = ${ nest_operand ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_operand)+ }`
+/// を左結合で Nest ノードにビルドします。
+fn build_nest_expr(pair: Pair<Rule>) -> Result<QueryNode> {
+    let mut inner = pair.into_inner();
+
+    let first = inner.next().unwrap();
+    let mut left = build_nest_operand(first)?;
+
+    // inner yields alternating: ampersand_colon, nest_operand, ampersand_colon, nest_operand, ...
+    // (WHITESPACE is silent _{ } so it doesn't produce tokens)
+    while let Some(op_pair) = inner.next() {
+        // op_pair should be ampersand_colon
+        debug_assert_eq!(op_pair.as_rule(), Rule::ampersand_colon);
+        let right_pair = inner.next().unwrap();
+        let right = build_nest_operand(right_pair)?;
+        left = QueryNode::Nest(NestNode {
+            left: Box::new(left),
+            right: Box::new(right),
+        });
+    }
+    Ok(left)
+}
+
+/// `nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }`
+fn build_nest_operand(pair: Pair<Rule>) -> Result<QueryNode> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::scalar_comparison => build_comparison_from_scalar(inner),
+        Rule::aggregation => {
+            build_aggregation(inner).map(QueryNode::Aggregation)
+        }
+        Rule::projection => build_projection(inner),
+        Rule::expr => build_expr(inner),
+        Rule::label => {
+            let label = build_label(inner)?;
+            Ok(QueryNode::Projection(Operand::Literal(label)))
+        }
+        _ => Err(anyhow!(
+            "Unexpected rule in nest_operand: {:?}",
             inner.as_rule()
         )),
     }

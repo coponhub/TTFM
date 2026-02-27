@@ -731,30 +731,28 @@ fn test_nest_comparison_count_gt_e2e() -> anyhow::Result<()> {
         Default::default(),
     )?;
 
+    // QUERY.md L77: ラベル比較はアイテムリストを返す
     assert!(
-        res.type_for_projection.is_some(),
-        "Should be treated as projection"
+        res.type_for_projection.is_none(),
+        "Should return items, not projection"
     );
 
-    // src は count(ext:jpg) = 3 > 1 → 含まれる
-    let has_src = res.results.iter().any(|r| r.name.contains("src"));
+    // src/ 配下のアイテム (a.jpg, b.jpg, c.jpg) が含まれる
+    let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
     assert!(
-        has_src,
-        "src (3 jpg) should be included. Got: {:?}",
-        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        names
+            .iter()
+            .any(|n| *n == "a.jpg" || *n == "b.jpg" || *n == "c.jpg"),
+        "src items should be included. Got: {:?}",
+        names
     );
 
-    // docs は count(ext:jpg) = 1 で > 1 を満たさない → 含まれない
-    let has_docs = res.results.iter().any(|r| r.name.contains("docs"));
+    // docs/ の d.jpg は除外 (count=1, not > 1)
     assert!(
-        !has_docs,
-        "docs (1 jpg) should be excluded by HAVING count > 1"
+        !names.iter().any(|n| *n == "d.jpg"),
+        "docs items should be excluded (count=1). Got: {:?}",
+        names
     );
-
-    // src の nvalue は 3
-    let src_item = res.results.iter().find(|r| r.name.contains("src")).unwrap();
-    let nv = get_nvalue(src_item);
-    assert_eq!(nv.as_deref(), Some("3"), "src count(ext:jpg) should be 3");
 
     Ok(())
 }
@@ -778,15 +776,25 @@ fn test_nest_comparison_sum_gt_e2e() -> anyhow::Result<()> {
     let res =
         fm.search("extension: &: (sum(size:) > 100)", Default::default())?;
 
-    assert!(res.type_for_projection.is_some());
-
-    let has_rs = res.results.iter().any(|r| r.name == "rs");
-    assert!(has_rs, "rs (sum=110) should be included");
-
-    let has_txt = res.results.iter().any(|r| r.name == "txt");
+    // QUERY.md L77: ラベル比較はアイテムリストを返す
     assert!(
-        !has_txt,
-        "txt (sum=30) should be excluded by HAVING sum > 100"
+        res.type_for_projection.is_none(),
+        "Should return items, not projection"
+    );
+
+    let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    // rs ファイル (a.rs, b.rs) は sum=110 > 100 → 含まれる
+    assert!(
+        names.iter().any(|n| *n == "a.rs" || *n == "b.rs"),
+        "rs items (sum=110) should be included. Got: {:?}",
+        names
+    );
+
+    // txt ファイル (c.txt) は sum=30 → 除外
+    assert!(
+        !names.iter().any(|n| *n == "c.txt"),
+        "txt items (sum=30) should be excluded. Got: {:?}",
+        names
     );
 
     Ok(())
@@ -1193,19 +1201,18 @@ fn test_nest_pick_filter_repro() -> anyhow::Result<()> {
         res.results.iter().map(|r| r.name.clone()).collect();
     println!("Item names: {:?}", item_names);
 
-    // dirA のアイテムが含まれていないことを確認
-    for name in &item_names {
-        assert!(
-            !name.contains("dirA"),
-            "Item from dirA ({}) should be filtered out",
-            name
-        );
-        assert!(
-            name.contains("dirB"),
-            "Item should be from dirB, got {}",
-            name
-        );
-    }
+    // dirA のアイテム (f1.jpg, f2.jpg) が含まれていないことを確認
+    assert!(
+        !item_names.iter().any(|n| n == "f1.jpg" || n == "f2.jpg"),
+        "Items from dirA should be filtered out. Got: {:?}",
+        item_names
+    );
+    // dirB のアイテム (g0.jpg..g10.jpg) が含まれていることを確認
+    assert!(
+        item_names.iter().any(|n| n.starts_with('g')),
+        "Items from dirB should be included. Got: {:?}",
+        item_names
+    );
 
     assert!(!item_names.is_empty(), "Should have items from dirB");
 
@@ -1240,14 +1247,20 @@ fn test_nest_scenario_a_context_propagation() -> anyhow::Result<()> {
     )?;
 
     let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    // dirA の html ファイルが含まれること
     assert!(
-        item_names.iter().any(|n| n.contains("dirA")),
-        "Results should contain dirA, got: {:?}",
+        item_names
+            .iter()
+            .any(|n| *n == "f1.html" || *n == "f2.html"),
+        "Results should contain dirA html files, got: {:?}",
         item_names
     );
+    // dirB の html ファイルが含まれること
     assert!(
-        item_names.iter().any(|n| n.contains("dirB")),
-        "Results should contain dirB, got: {:?}",
+        item_names
+            .iter()
+            .any(|n| *n == "apple.html" || *n == "f3.html"),
+        "Results should contain dirB html files, got: {:?}",
         item_names
     );
 
@@ -1328,15 +1341,21 @@ fn test_nest_scenario_stem_wildcard_context() -> anyhow::Result<()> {
 
     let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
     // dirA は (apple.html, banana.html) の2つが条件に合うため含まれる。
+    // dirA の html ファイルが含まれること (count(stem:*a*)=2: apple, banana)
     assert!(
-        item_names.iter().any(|n| n.contains("dirA")),
-        "Results should contain dirA, got: {:?}",
+        item_names
+            .iter()
+            .any(|n| n.as_str() == "apple.html" || n.as_str() == "banana.html"),
+        "Results should contain dirA html files, got: {:?}",
         item_names
     );
-    // dirB は apple.html の1つのみが条件に合うため含まれない。
-    assert!(
-        !item_names.iter().any(|n| n.contains("dirB")),
-        "Results should NOT contain dirB, got: {:?}",
+    // dirA の html は apple.html, banana.html の2件
+    // (cherry.jpg は extension:html コンテキストで除外)
+    // dirB は count(stem:*a*)=1 なので除外
+    assert_eq!(
+        item_names.len(),
+        2,
+        "Only dirA's 2 html files should be returned, got: {:?}",
         item_names
     );
 
@@ -1379,31 +1398,32 @@ fn test_nest_chained_comparison_e2e() -> anyhow::Result<()> {
     let res =
         fm.search("parentdir: &: (200 > sum(size:) > 50)", Default::default())?;
 
+    // QUERY.md L77: ラベル比較はアイテムリストを返す
     assert!(
-        res.type_for_projection.is_some(),
-        "Should be treated as projection"
+        res.type_for_projection.is_none(),
+        "Should return items, not projection"
     );
 
     let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
 
-    // dirA (sum=100): 50 < 100 < 200 → 含まれる
+    // dirA (sum=100): 50 < 100 < 200 → a.txt, b.txt が返る
     assert!(
-        names.iter().any(|n| n.contains("dirA")),
-        "dirA (sum=100) should be included. Got: {:?}",
+        names.iter().any(|n| *n == "a.txt" || *n == "b.txt"),
+        "dirA items (sum=100) should be included. Got: {:?}",
         names
     );
 
-    // dirB (sum=350): 350 > 200 → 含まれない
+    // dirB (sum=350): 350 > 200 → c.txt, d.txt は除外
     assert!(
-        !names.iter().any(|n| n.contains("dirB")),
-        "dirB (sum=350) should be excluded. Got: {:?}",
+        !names.iter().any(|n| *n == "c.txt" || *n == "d.txt"),
+        "dirB items (sum=350) should be excluded. Got: {:?}",
         names
     );
 
-    // dirC (sum=30): 30 < 50 → 含まれない
+    // dirC (sum=30): 30 < 50 → e.txt, f.txt は除外
     assert!(
-        !names.iter().any(|n| n.contains("dirC")),
-        "dirC (sum=30) should be excluded. Got: {:?}",
+        !names.iter().any(|n| *n == "e.txt" || *n == "f.txt"),
+        "dirC items (sum=30) should be excluded. Got: {:?}",
         names
     );
 
@@ -1642,19 +1662,22 @@ fn test_nest_or_merged_projection_e2e() -> anyhow::Result<()> {
 
     let names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
 
+    // dirA: main.rs が含まれる (count(rs)=1 > 0)
     assert!(
-        names.iter().any(|n| n.contains("dirA")),
-        "dirA should be included (count(rs) > 0). Got: {:?}",
+        names.iter().any(|n| *n == "main.rs"),
+        "dirA items should be included (count(rs) > 0). Got: {:?}",
         names
     );
+    // dirB: a.txt, b.txt が含まれる (count(*:*)=2 > 1)
     assert!(
-        names.iter().any(|n| n.contains("dirB")),
-        "dirB should be included (count(*) > 1). Got: {:?}",
+        names.iter().any(|n| *n == "a.txt" || *n == "b.txt"),
+        "dirB items should be included (count(*) > 1). Got: {:?}",
         names
     );
+    // dirC: c.txt は除外
     assert!(
-        !names.iter().any(|n| n.contains("dirC")),
-        "dirC should be excluded (count(rs)=0, count(*)=1). Got: {:?}",
+        !names.iter().any(|n| *n == "c.txt"),
+        "dirC items should be excluded. Got: {:?}",
         names
     );
 
@@ -1710,7 +1733,11 @@ fn test_nest_arithmetic_mixed_agg_null_propagation_e2e() -> anyhow::Result<()> {
         .iter()
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
-    assert_eq!(nv_rs.as_deref(), Some("11"), "dir_rs nvalue should be 11 (10+1)");
+    assert_eq!(
+        nv_rs.as_deref(),
+        Some("11"),
+        "dir_rs nvalue should be 11 (10+1)"
+    );
 
     // dir_txt: sum=50 + count_rs=0 = 50
     // このケースでバグが発生: count(extension:rs) が NULL を返し nvalue が消える
@@ -1735,4 +1762,3 @@ fn test_nest_arithmetic_mixed_agg_null_propagation_e2e() -> anyhow::Result<()> {
 
     Ok(())
 }
-

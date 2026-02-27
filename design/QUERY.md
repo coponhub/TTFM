@@ -74,6 +74,7 @@
     - **演算** Nestに対して算術演算や比較を行う場合、以下のルールに従う
         - 最も右側のprojectionのラベルを使用して演算する。
             - ただし、そのProjectionに`nvalue`が付与されていた場合`nvalue`を使用して演算する
+            - ラベル比較に対しては、通常の演算と同様アイテムリストを返す
         - Nestは、他の演算に対しては`Projection`として振る舞う
     - **返り値**
         - `Projection &: [Scalar|(Scalar comparison)|Aggregation]`はProjectionに対して`nvalue`を付与するだけで、結果はNestとならずProjectionが返る(ネストの深さがLevel 1)。
@@ -96,7 +97,7 @@
         `sum({item(paretdir:dirB, nvalue:6), item(paretdir:dirC, nvalue:6)})` =
         `sum([6, 6])` = `12`
     - 例:
-        - `sum(sum(parentdir: &: size:) :> 1GB)` (フォルダ毎の合計サイズが1GB超のアイテムのサイズの合計)
+        - `sum(sum(parentdir: &: size:) :> 1GB & size:)` (フォルダ毎の合計サイズが1GB超のアイテムのサイズの合計)
         - `count(parentdir: &: count(extension:jpg) :> 10)` (JPGファイルを10個以上含むフォルダの数の合計)
         - `parentdir: &: (sum(mtime: :> "7d ago" & size:) < 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムの一覧を取得)
 - **汎用ラベル比較 (Label Comparison)**:
@@ -116,7 +117,7 @@
         - 連鎖比較が可能（例: `50 :< height: :< 100`）。
         - 演算子とオペランドの間にはスペースを入れなければならない。
         - Proj同士の場合、同一ItemのLabelを比較し、抽出した集合を返す
-		- ラベルに評価値`nvalue`が付与されている場合は、Projectionを返す
+        - nvalueが付与されていてもアイテム集合を返す
 - **密着ラベル比較 (Stuck Label Comparison)**
     - `[Projection][ComparisonOp][Scalar]` 形式
     - **Projection**: 上記「ラベル取得」汎用ラベル比較と違い左辺は必ずProjectionとなる
@@ -165,7 +166,7 @@
 
 ## 2.  **評価の優先順位**:
 - 以下の順序で評価される。
-- `(算術演算)` > `ネスト` > `密着ラベル比較 / TypedTag` > `汎用ラベル比較` > `ラベル取得` > `集約` > `集合演算 `
+-  `ネスト` > `密着ラベル比較 / TypedTag` > `汎用ラベル比較` > `ラベル取得` > `集約` > `算術演算` > `集合演算 `
 - **注**: `集約` や `ネスト`、`算術演算` 等で使用される括弧 `()` 内の式は、再帰的に評価され、常に括弧の外側の演算よりも優先される。
 
 #### 5.2.6 検索における型

@@ -34,9 +34,9 @@ arithmetic_operator = { "+" | "-" | "*" | "/" | "%" }
 // DESIGN.md: Spaces are REQUIRED around set operators
 // "a:1&b:2" -> Not a set operation, parsed as TypedTag "a:1&b:2"
 // "a:1 & b:2" -> Set AND operation
-expr = ${ WHITESPACE* ~ primary ~ (WHITESPACE+ ~ infix ~ WHITESPACE+ ~ primary)* ~ WHITESPACE* }
+expr = ${ WHITESPACE* ~ primary ~ (WHITESPACE+ ~ set_infix ~ WHITESPACE+ ~ primary)* ~ WHITESPACE* }
 
-infix = _{ ampersand_colon | ampersand | pipe | minus_colon | minus }
+set_infix = _{ ampersand | pipe | minus_colon | minus }
     ampersand_colon = { "&:" }
     ampersand       = { "&" }
     pipe            = { "|" }
@@ -50,12 +50,21 @@ primary = { factor }
 // PEG priority: Try specific rules first.
 factor = {
     comparison
+  | nest_expr
   | typed_tag
   | projection
   | aggregation
   | "(" ~ expr ~ ")"
   | label
 }
+
+// Nest expression: &: operator, higher priority than set operations.
+// Requires at least one &: to match; standalone operands fall through to other factor alternatives.
+nest_expr = ${ nest_operand ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_operand)+ }
+// scalar_comparison is tried first so bare scalar comparisons (e.g. count(...) > 0) work as nest
+// right operand without causing left-recursion (comparison->label_comparison->nest_expr->nest_operand).
+// aggregation is the fallback when scalar_comparison fails (e.g. count(...) :> X leaves :>X for outer label_op).
+nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }
 
 projection = { type_ref | calculation }
 
@@ -73,7 +82,7 @@ comparison = {
 // Label comparison: operand (including projection) followed by label-style operator
 // Specification: Proj :Op Scalar | Scalar :Op Proj | Scalar :Op Proj :Op Scalar ...
 label_comparison = ${
-    ( (type_ref | calculation | parenthesized_expr) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
+    ( (nest_expr | type_ref | calculation | parenthesized_expr) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
   | ( (number | quoted_string | unquoted_string | unquoted_tag_string | calculation) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
 }
 

@@ -504,14 +504,46 @@ fn expand_operand(
             // 括弧で囲まれた式を論理展開
             let expanded_node = expand_query_node(schema, *node)?;
 
+            // And([filter, Nest(proj, agg)]) → Nest(And([filter, proj]), agg)
+            // extension: 等の展開で is_dir:false フィルタが追加される場合に対応。
+            // フィルタを Nest 左辺に押し込むことで、Calculation のオペランドに
+            // Query(And(...)) が残るのを防ぐ。
+            let flattened = try_flatten_filtered_nest(expanded_node);
+
             // Queryが算術演算のコンテキストで使用される場合、Projectionを返す必要がある
-            if !returns_projection(&expanded_node) {
+            if !returns_projection(&flattened) {
                 bail!(error::PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION);
             }
 
-            Ok(Operand::Query(Box::new(expanded_node)))
+            Ok(Operand::Query(Box::new(flattened)))
         }
     }
+}
+
+/// And([filter, Nest(proj, agg)]) という構造を Nest(And([filter, proj]), agg) に平坦化します。
+fn try_flatten_filtered_nest(node: QueryNode) -> QueryNode {
+    if let QueryNode::And(nodes) = &node {
+        let mut filters = Vec::new();
+        let mut nests = Vec::new();
+        for n in nodes {
+            if matches!(n, QueryNode::Nest(_)) {
+                nests.push(n.clone());
+            } else {
+                filters.push(n.clone());
+            }
+        }
+        if nests.len() == 1 && !filters.is_empty() {
+            if let QueryNode::Nest(nest) = nests.pop().unwrap() {
+                let mut new_left = filters;
+                new_left.push(*nest.left);
+                return QueryNode::Nest(NestNode {
+                    left: Box::new(QueryNode::And(new_left)),
+                    right: nest.right,
+                });
+            }
+        }
+    }
+    node
 }
 
 /// 算術演算ノードを論理展開します。
@@ -699,9 +731,10 @@ fn expand_nest(
         // Nest(L, Projection(Calc{agg1, op, agg2}))
         //   → Projection(Calc{Query(Nest(L,agg1)), op, Query(Nest(L,agg2))})
         // ただし、TypeRef（カラム参照）を含まない純粋な集約・定数計算のみを分配の対象とする。
-        QueryNode::Projection(Operand::Calculation(calc)) if calc_has_only_aggregations_and_literals(&calc) => {
-            let distributed =
-                distribute_nest_over_calc(&proj_left, *calc);
+        QueryNode::Projection(Operand::Calculation(calc))
+            if calc_has_only_aggregations_and_literals(&calc) =>
+        {
+            let distributed = distribute_nest_over_calc(&proj_left, *calc);
             QueryNode::Projection(Operand::Calculation(Box::new(distributed)))
         }
         _ => QueryNode::Nest(NestNode {
@@ -766,7 +799,9 @@ fn operand_has_only_aggregations_and_literals(operand: &Operand) -> bool {
         Operand::Literal(_) | Operand::Aggregation(_) => true,
         Operand::Calculation(c) => calc_has_only_aggregations_and_literals(c),
         Operand::Query(q) => match &**q {
-            QueryNode::Projection(op) => operand_has_only_aggregations_and_literals(op),
+            QueryNode::Projection(op) => {
+                operand_has_only_aggregations_and_literals(op)
+            }
             QueryNode::Aggregation(_) => true,
             _ => false,
         },

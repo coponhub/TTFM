@@ -292,3 +292,35 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_parse_nest_in_comparison_left() {
+    let query = "count(parentdir: &: count(extension:rs) :> 5)";
+    let result = ttfm::parse(query);
+    assert!(
+        result.is_ok(),
+        "Nested label comparison inside aggregation should parse successfully: {:?}",
+        result.err()
+    );
+
+    let node = result.unwrap();
+    if let ttfm::QueryNode::Aggregation(ttfm::query::AggregationNode::Count(
+        inner,
+    )) = node
+    {
+        if let ttfm::QueryNode::Comparison(cmp) = *inner {
+            if let ttfm::query::Operand::Query(inner_query) = cmp.first {
+                assert!(
+                    matches!(*inner_query, ttfm::QueryNode::Nest(_)),
+                    "Comparison left side should be a Nest node"
+                );
+            } else {
+                panic!("Expected Query(Nest) as comparison first operand, got: {:?}", cmp.first);
+            }
+        } else {
+            panic!("Expected Comparison inside count, got {:?}", inner);
+        }
+    } else {
+        panic!("Expected Count Aggregation, got {:?}", node);
+    }
+}
