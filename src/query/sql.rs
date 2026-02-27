@@ -267,9 +267,15 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             let bin_op = to_bin_op(*comparison_op);
             let label_expr = label_to_unit_aware_expr(label);
-            sub.and_having(
-                Expr::col(Alias::new("nvalue")).binary(bin_op, label_expr),
-            );
+            let cond =
+                Expr::col(Alias::new("nvalue")).binary(bin_op, label_expr);
+            // Calculation の nvalue は GROUP BY なしのサブクエリ包装のため
+            // HAVING ではなく WHERE を使用
+            if matches!(nvalue, ResolvedOperand::Calculation(_)) {
+                sub.and_where(cond);
+            } else {
+                sub.and_having(cond);
+            }
 
             // プロジェクションカラム
             let proj_col = match op.get_storage() {
@@ -415,12 +421,17 @@ fn build_agg_over_nvalue_projection(
     let mut nvalue_sub =
         build_nvalue_standalone_subquery(&proj_operand, &nvalue, context, view);
 
-    // nvalue_condition がある場合、HAVING 句を追加
+    // nvalue_condition がある場合、フィルタ条件を追加
+    // Calculation の nvalue は GROUP BY なしのサブクエリ包装のため HAVING ではなく WHERE を使用
     if let Some((op, value)) = nvalue_condition {
         let bin_op = to_bin_op(*op);
         let val = label_to_simple_expr(value);
-        nvalue_sub
-            .and_having(Expr::col(Alias::new("nvalue")).binary(bin_op, val));
+        let cond = Expr::col(Alias::new("nvalue")).binary(bin_op, val);
+        if matches!(&nvalue, ResolvedOperand::Calculation(_)) {
+            nvalue_sub.and_where(cond);
+        } else {
+            nvalue_sub.and_having(cond);
+        }
     }
 
     let mut stmt = Query::select();
@@ -735,9 +746,19 @@ pub(crate) fn build_merged_nvalue_agg_expr(
             let val_expr: SimpleExpr = if is_string {
                 Expr::col((Alias::new(tbl_alias), Col::LabelStr)).into()
             } else {
+                // 数値型の場合は、数値カラムを優先し、文字列カラムは CAST を試みる。
+                // DuckDB において、集計時に NULL は無視されるため、COALESCE で結合して
+                // いずれかのカラムに値があればそれを集計対象とする。
                 Expr::cust_with_exprs(
-                    "TRY_CAST($1 AS DOUBLE)",
-                    [Expr::col((Alias::new(tbl_alias), Col::LabelStr)).into()],
+                    "COALESCE($1, $2, TRY_CAST($3 AS DOUBLE))",
+                    [
+                        Expr::col((Alias::new(tbl_alias), Col::LabelInt))
+                            .into(),
+                        Expr::col((Alias::new(tbl_alias), Col::LabelDouble))
+                            .into(),
+                        Expr::col((Alias::new(tbl_alias), Col::LabelStr))
+                            .into(),
+                    ],
                 )
             };
 
@@ -951,7 +972,14 @@ fn build_nvalue_standalone_subquery(
                     Expr::col((Alias::new("R"), Alias::new("group_label"))),
                 ),
             );
-            stmt
+            // 曖昧性排除: Calculation JOIN をサブクエリで包み、
+            // 後続の HAVING 等で "nvalue" を一意に参照できるようにする。
+            let sub = stmt.to_owned();
+            Query::select()
+                .column(Alias::new("group_label"))
+                .column(Alias::new("nvalue"))
+                .from_subquery(sub, Alias::new("calc_sub"))
+                .to_owned()
         }
         _ => {
             panic!(
@@ -2552,6 +2580,7 @@ fn build_merged_projection_match_sql(
     if let Some(tag_type) = tag_type_opt {
         sub.and_where(Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type));
     }
+
     sub.group_by_col((Alias::new("proj"), proj_col));
 
     // 3. Build HAVING condition for each match
@@ -2574,36 +2603,8 @@ fn build_merged_projection_match_sql(
         };
         let bin_op = to_bin_op(cmp_op);
 
-        let mut term = Condition::all()
+        let term = Condition::all()
             .add(Expr::expr(nvalue_expr).binary(bin_op, right_expr));
-
-        if let Some(ctx) = &cond.context {
-            let (ctx_tag_type, ctx_val) = match &**ctx {
-                ResolvedNode::Match {
-                    tag_type, label, ..
-                } => {
-                    (tag_type.as_str().to_string(), label.as_str().to_string())
-                }
-                ResolvedNode::ColumnMatch { tag, label } => {
-                    (tag.as_str().to_string(), label.as_str().to_string())
-                }
-                _ => {
-                    // ignore unhandled context types for this optimization
-                    having_cond = having_cond.add(term);
-                    continue;
-                }
-            };
-            let mut ctx_sub = Query::select();
-            ctx_sub
-                .column(Col::ItemId)
-                .from(Alias::new(view))
-                .and_where(Expr::col(Col::Type).eq(ctx_tag_type))
-                .and_where(Expr::col(Col::LabelStr).eq(ctx_val));
-            term = term.add(
-                Expr::col((Alias::new("proj"), Col::ItemId))
-                    .in_subquery(ctx_sub),
-            );
-        }
 
         having_cond = having_cond.add(term);
     }

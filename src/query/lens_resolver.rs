@@ -1250,9 +1250,9 @@ fn extract_projection_operand_with_context(
     left: ResolvedNode,
 ) -> Result<(ResolvedOperand, Option<Box<ResolvedNode>>)> {
     match left {
-        ResolvedNode::Projection { operand, context, .. } => {
-            Ok((operand, context))
-        }
+        ResolvedNode::Projection {
+            operand, context, ..
+        } => Ok((operand, context)),
         ResolvedNode::And(nodes) => {
             for n in nodes {
                 if let ResolvedNode::Projection {
@@ -1638,12 +1638,9 @@ fn resolve_single_match(
                     label: lit,
                     context,
                 }),
-                // nvalue なしの Projection は通常の比較扱い不可
                 ResolvedNode::Projection { .. } => {
                     bail!("Comparison on Projection without nvalue is not supported as label comparison")
                 }
-                // And([filter, Projection]) のケースも対応
-                // (extension: &: count(...)) のように展開後 And になる場合
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
                 {

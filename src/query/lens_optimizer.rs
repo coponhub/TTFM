@@ -213,13 +213,12 @@ fn merge_projection_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
             } if child_is_or == is_or || matches.len() == 1 => {
                 // すでにマージされているが、同じレベル (AND/OR) かつ operand が同じならさらにマージ可能
                 // MergedProjectionMatch の各 condition は自身の context を持つが、
-                // 今回の実装では operand ごとにまとめる
                 let mut found = false;
+                // Contextが同じ場合のみマージ可能
+                let matches_context =
+                    matches.first().and_then(|m| m.context.clone());
                 for group in &mut groups {
-                    // MergedProjectionMatch の場合、外側の context は None であることが多いが、
-                    // operand 同値性を優先してマージする。
-                    // (将来的に個別のコンテキスト保持が必要な場合は微調整が必要)
-                    if group.0 == operand {
+                    if group.0 == operand && group.1 == matches_context {
                         group.2.extend(matches.clone());
                         found = true;
                         break;

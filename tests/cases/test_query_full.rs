@@ -1,4 +1,10 @@
+use std::collections::HashSet;
+use std::fs::File;
+use tempfile::tempdir;
 use ttfm::query::lens_resolver::Resolver;
+
+use ttfm::types::TagType;
+use ttfm::FileManager;
 
 #[test]
 fn test_full_resolution() {
@@ -310,21 +316,19 @@ fn test_expanded_projection_calculation_e2e() -> anyhow::Result<()> {
     )?;
 
     // エラーなしで正常なアイテム群が返る
-    assert!(
-        !res.results.is_empty(),
-        "Should return items without error"
-    );
+    assert!(!res.results.is_empty(), "Should return items without error");
 
     // rs を含む extension (つまり rs や txt 以外の rs ファイル自体)
     // このテストデータでは a.rs, b.rs, c.rs の extension は "rs"
     // "rs" extension グループには a.rs, b.rs, c.rs が属し、count(extension:rs) は 3 > 0
     // d.txt の extension は "txt" で "txt" グループには d.txt のみ属し、count(extension:rs) は 0
-    let names: Vec<_> =
-        res.results.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
 
     // extension: はアイテム一覧を返すため、条件を満たした extension ("rs") に属するアイテム一覧が返る
     assert!(
-        names.contains(&"a.rs") && names.contains(&"b.rs") && names.contains(&"c.rs"),
+        names.contains(&"a.rs")
+            && names.contains(&"b.rs")
+            && names.contains(&"c.rs"),
         "rs files should be included. Got: {:?}",
         names
     );
@@ -332,6 +336,69 @@ fn test_expanded_projection_calculation_e2e() -> anyhow::Result<()> {
         !names.contains(&"d.txt"),
         "txt files should be excluded. Got: {:?}",
         names
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_expanded_projection_complex_division_e2e() -> anyhow::Result<()> {
+    let db_dir = tempdir()?;
+    let root = tempdir()?;
+
+    // a.rs, b.rs, c.rs (extension: rs) -> 3 files
+    // d.html, e.html (extension: html) -> 2 files
+    for name in &["a.rs", "b.rs", "c.rs", "d.html", "e.html"] {
+        File::create(root.path().join(name))?;
+    }
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let query = r#"((extension: &: count(extension:rs)) / (extension: &: count(extension:html))) :> 0"#;
+
+    // We expect it to NOT fail (it should parse, bind, and execute).
+    let res = fm.search(query, Default::default());
+
+    assert!(
+        res.is_ok(),
+        "Complex calculation with expanded projection shouldn't fail: {:?}",
+        res.err()
+    );
+
+    Ok(())
+}
+
+/// 3要素の Calculation: (A * B + C) :> 0 で nvalue サブクエリの再帰的な
+/// calc_sub 包装が正しく機能することを検証
+#[test]
+fn test_expanded_projection_three_operand_calc_e2e() -> anyhow::Result<()> {
+    let db_dir = tempdir()?;
+    let root = tempdir()?;
+
+    for name in &["a.rs", "b.rs", "c.rs", "d.html", "e.html"] {
+        File::create(root.path().join(name))?;
+    }
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 3要素: (count(rs) * 10 + count(html)) :> 0
+    // rs グループ: (3 * 10 + 2) = 32 > 0 ✓
+    // html グループ: (0 * 10 + 2) = 2 > 0 ✓
+    let query = r#"((extension: &: count(extension:rs)) * 10 + (extension: &: count(extension:html))) :> 0"#;
+
+    let res = fm.search(query, Default::default());
+    assert!(
+        res.is_ok(),
+        "Three-operand calculation with expanded projection shouldn't fail: {:?}",
+        res.err()
+    );
+
+    let results = res.unwrap();
+    assert!(
+        !results.results.is_empty(),
+        "Should return results for three-operand calculation"
     );
 
     Ok(())

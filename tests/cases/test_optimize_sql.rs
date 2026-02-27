@@ -33,7 +33,7 @@ fn test_build_optimized_merged_projection_sql_logical() {
                 WHERE "proj"."type" = 'parentdir'
                 GROUP BY "proj"."label_str"
                 HAVING COUNT(DISTINCT (CASE WHEN ("c"."item_id" IN (SELECT "item_id" FROM (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'extension' AND "label_str" = 'rs') AS "sub" INTERSECT (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'is_dir' AND ("label_bool" = 'false' OR "label_bool" = FALSE)) AS "sub")) AS "nv_filter")) THEN "c"."item_id" ELSE NULL END)) > 0
-                AND SUM((CASE WHEN ("c"."type" = 'size') THEN TRY_CAST("c"."label_str" AS DOUBLE) ELSE NULL END)) > 1000
+                AND SUM((CASE WHEN ("c"."type" = 'size') THEN COALESCE("c"."label_int", "c"."label_double", TRY_CAST("c"."label_str" AS DOUBLE)) ELSE NULL END)) > 1000
             ) AS "nfilter"
         )
     "#,
@@ -110,7 +110,7 @@ fn test_build_optimized_merged_projection_sql_comparison() {
                 INNER JOIN "tags_view" AS "c" ON "proj"."item_id" = "c"."item_id"
                 WHERE "proj"."type" = 'parentdir'
                 GROUP BY "proj"."label_str"
-                HAVING COUNT(DISTINCT (CASE WHEN ("c"."type" = 'size') THEN "c"."item_id" ELSE NULL END)) = SUM((CASE WHEN ("c"."type" = 'size') THEN TRY_CAST("c"."label_str" AS DOUBLE) ELSE NULL END))
+                HAVING COUNT(DISTINCT (CASE WHEN ("c"."type" = 'size') THEN "c"."item_id" ELSE NULL END)) = SUM((CASE WHEN ("c"."type" = 'size') THEN COALESCE("c"."label_int", "c"."label_double", TRY_CAST("c"."label_str" AS DOUBLE)) ELSE NULL END))
             ) AS "nfilter"
         )
     "#,
