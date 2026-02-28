@@ -425,21 +425,21 @@ fn check_label_op_misuse(
     line_str: &str,
     col: usize,
 ) -> Option<String> {
-    let next_char = line_str.chars().nth(col).unwrap_or(' ');
-    if !is_scalar_op_char(next_char) {
+    // col points to ':' (1-indexed). line_str.chars().nth(col-1) is ':'
+    let label_op_char = line_str.chars().nth(col).unwrap_or(' ');
+    if !is_scalar_op_char(label_op_char) {
         return None;
     }
 
-    let label_op_suffix = next_char;
-    let full_op = format!(":{}", label_op_suffix);
+    let full_op = format!(":{}", label_op_char);
 
-    // Check LHS
+    // lhs is from start of line until just before the ':' (col - 1 chars)
+    let lhs = line_str.chars().take(col - 1).collect::<String>();
+    // rhs starts after the ':' and the operator character (skip(col + 1))
+    let rhs = line_str.chars().skip(col + 1).collect::<String>();
+
+    // Check LHS type
     let lhs_token = tokens.last()?;
-    // If we are here, it means 'scalar_comparison' failed at ':'
-    // behavior. This means LHS was parsed as scalar_operand.
-    // If LHS was 'sum(size:)', it is aggregation.
-    // If LHS was '1', it is numeric scalar.
-    // We want to explain that ':>' (Label Op) cannot be used with these.
 
     let object_type = if lhs_token.ends_with(')') {
         "Aggregation/Calculation"
@@ -449,10 +449,33 @@ fn check_label_op_misuse(
         "Scalar/Value"
     };
 
-    Some(format!(
-        "Invalid operator '{}': Label Comparison cannot be applied to {} ('{}'). \nDid you mean: '{} {} ...'",
-        full_op, object_type, lhs_token, lhs_token, label_op_suffix
-     ))
+    // Check if it looks like an arithmetic expression that needs parentheses
+    let is_arithmetic = tokens
+        .iter()
+        .any(|t| ["/", "*", "+", "-", "x", "%"].contains(t));
+
+    if is_arithmetic && object_type == "Aggregation/Calculation" {
+        // Concrete suggestion for arithmetic context
+        Some(format!(
+            "Invalid operator '{}': Cannot apply label comparison to an unparenthesized arithmetic expression.\n\
+             Did you mean: '({}) {}{}'",
+            full_op,
+            lhs.trim(),
+            full_op,
+            rhs
+        ))
+    } else {
+        // Standard message with specific suggestion
+        Some(format!(
+            "Invalid operator '{}': Label Comparison cannot be applied to {} ('{}'). \nDid you mean: '{} {} {}'",
+            full_op,
+            object_type,
+            lhs_token,
+            lhs_token,
+            label_op_char,
+            rhs.trim()
+        ))
+    }
 }
 
 fn check_scalar_op_target_proj_start(
