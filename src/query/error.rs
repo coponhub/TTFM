@@ -208,6 +208,13 @@ pub fn map_grammar_error(
         return anyhow::anyhow!(e);
     }
 
+    if let Some(msg) =
+        check_arithmetic_parentheses_misuse(line_str, error_char_orig, col)
+    {
+        e.variant = ErrorVariant::CustomError { message: msg };
+        return anyhow::anyhow!(e);
+    }
+
     // --- 2. Enhanced Lookback for Redirection ---
     // Pest often reports errors at the deepest point. For "1 :> 100", Case 2 matches until ":"
     // but fails at "100" (expecting Proj). We want to treat this error at ":" for friendly message.
@@ -588,4 +595,123 @@ mod tests {
         let err = aggregator_requires_argument("sum");
         assert_eq!(err.to_string(), "Aggregator 'sum' requires an argument");
     }
+}
+fn check_arithmetic_parentheses_misuse(
+    line_str: &str,
+    error_char: char,
+    col: usize,
+) -> Option<String> {
+    if !"+-*/%x".contains(error_char) {
+        return None;
+    }
+
+    // Identify operand boundaries
+    let op_idx = col - 1;
+    let lhs_start = find_lhs_boundary(line_str, op_idx);
+    let rhs_end = find_rhs_boundary(line_str, op_idx);
+
+    let lhs = &line_str[lhs_start..op_idx];
+    let rhs = &line_str[op_idx + 1..rhs_end];
+
+    let prefix = &line_str[..lhs_start];
+    let suffix = &line_str[rhs_end..];
+
+    let lhs_trimmed = lhs.trim();
+    let rhs_trimmed = rhs.trim();
+
+    // The core suggestion: (LHS) OP (RHS)
+    // We add an outer wrapper ( ... ) ONLY if we are not already inside a matching pair
+    // of parentheses that define the extent of this arithmetic operation.
+    let suggestion_body = format!("({}) {} ({})", lhs_trimmed, error_char, rhs_trimmed);
+
+    // If we're not at the top level (prefix or suffix exist), we should ensure
+    // the whole calculation is parenthesized to be a valid calculation node.
+    let full_suggestion = if prefix.ends_with('(') && suffix.starts_with(')') {
+        // Already looks wrapped in ( ... )
+        format!("{}{}{}", prefix, suggestion_body, suffix)
+    } else {
+        format!("{}({}){}", prefix, suggestion_body, suffix)
+    };
+
+    Some(format!(
+        "Syntax Error: Arithmetic operations require parentheses when mixed with other operations at the same level.\n\
+         Did you mean: '{}'",
+        full_suggestion
+    ))
+}
+
+fn find_lhs_boundary(line_str: &str, op_idx: usize) -> usize {
+    let mut paren_count = 0;
+    let chars: Vec<char> = line_str.chars().collect();
+
+    for i in (0..op_idx).rev() {
+        let c = chars[i];
+        match c {
+            ')' => paren_count += 1,
+            '(' if paren_count == 0 => return i + 1,
+            '(' => paren_count -= 1,
+            _ if paren_count == 0 && c.is_whitespace() => {
+                if check_boundary_before_whitespace(&chars, i) {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    0
+}
+
+fn check_boundary_before_whitespace(chars: &[char], space_idx: usize) -> bool {
+    let mut prev_idx = space_idx;
+    while prev_idx > 0 && chars[prev_idx - 1].is_whitespace() {
+        prev_idx -= 1;
+    }
+    if prev_idx == 0 {
+        return false;
+    }
+
+    let pc = chars[prev_idx - 1];
+    if "&|-".contains(pc) {
+        // Avoid stopping at &: or -:
+        return !(prev_idx < chars.len() && chars[prev_idx] == ':');
+    }
+    "> < =".contains(pc)
+}
+
+fn find_rhs_boundary(line_str: &str, op_idx: usize) -> usize {
+    let mut paren_count = 0;
+    let chars: Vec<char> = line_str.chars().collect();
+
+    for i in (op_idx + 1)..chars.len() {
+        let c = chars[i];
+        match c {
+            '(' => paren_count += 1,
+            ')' if paren_count == 0 => return i,
+            ')' => paren_count -= 1,
+            _ if paren_count == 0 && c.is_whitespace() => {
+                if check_boundary_at_whitespace(&chars, i) {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    chars.len()
+}
+
+fn check_boundary_at_whitespace(chars: &[char], space_idx: usize) -> bool {
+    let mut next_idx = space_idx;
+    while next_idx < chars.len() && chars[next_idx].is_whitespace() {
+        next_idx += 1;
+    }
+    if next_idx >= chars.len() {
+        return false;
+    }
+
+    let nc = chars[next_idx];
+    if "&|-".contains(nc) {
+        // Avoid stopping at &: or -:
+        return !(next_idx + 1 < chars.len() && chars[next_idx + 1] == ':');
+    }
+    ":><=".contains(nc)
 }
