@@ -622,7 +622,8 @@ fn check_arithmetic_parentheses_misuse(
     // The core suggestion: (LHS) OP (RHS)
     // We add an outer wrapper ( ... ) ONLY if we are not already inside a matching pair
     // of parentheses that define the extent of this arithmetic operation.
-    let suggestion_body = format!("({}) {} ({})", lhs_trimmed, error_char, rhs_trimmed);
+    let suggestion_body =
+        format!("({}) {} ({})", lhs_trimmed, error_char, rhs_trimmed);
 
     // If we're not at the top level (prefix or suffix exist), we should ensure
     // the whole calculation is parenthesized to be a valid calculation node.

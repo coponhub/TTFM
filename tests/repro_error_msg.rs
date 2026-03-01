@@ -26,7 +26,8 @@ fn test_repro_top_level_arithmetic_error_msg() {
 
 #[test]
 fn test_repro_nested_arithmetic_error_msg() {
-    let input = "(parentdir: &: count(extension:rs) / parentdir: &: count()) :> 1";
+    let input =
+        "(parentdir: &: count(extension:rs) / parentdir: &: count()) :> 1";
     let err = parse(input).unwrap_err();
     let err_msg = format!("{}", err);
     println!("Actual Error Output:\n{}", err_msg);

@@ -2191,8 +2191,11 @@ pub fn build_fetch_label_groups_sql(
     } else {
         false
     };
-    // OR クエリでは nvalue フィルタを all_hits に適用しない
-    let has_nvalue_condition = nvalue_condition.is_some() && !is_or_query;
+    // 比較条件の有無に関わらず、nvalue (集計等の評価値) を持つ場合、
+    // nvalue_agg に存在する(集計結果を持つ)グループのみを残す。
+    // ※OR クエリでは各条件の独立性を保つため適用しない
+    // Note: has_nvalue の生成時に既に !is_or_query が考慮されているため has_nvalue をそのまま使用。
+    let must_filter_by_nvalue = has_nvalue;
 
     // Calculation 投影の検出: Projection(Calculation(...)) の場合は
     // 算術式を事前計算する computed CTE を挿入する
@@ -2280,8 +2283,8 @@ pub fn build_fetch_label_groups_sql(
         }
     }
 
-    // nvalue_condition がある場合、HAVING で除外されたグループを結果から除外
-    if has_nvalue_condition {
+    // nvalueの計算を伴う場合、値が存在しなかった(NULL/0件)や条件で除外されたグループを除外
+    if must_filter_by_nvalue {
         all_hits_q.and_where(
             Expr::col(label_col.clone()).in_subquery(
                 Query::select()

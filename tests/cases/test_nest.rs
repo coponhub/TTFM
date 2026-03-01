@@ -1762,3 +1762,44 @@ fn test_nest_arithmetic_mixed_agg_null_propagation_e2e() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// `parentdir: &: count(extension:rs)` 等で、該当アイテムがない親ディレクトリが結果から除外されることを確認
+#[test]
+fn test_nest_filter_empty_groups() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    let dir1 = root.join("dir1");
+    let dir2 = root.join("dir2");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::create_dir_all(&dir2)?;
+
+    // dir1 には rs ファイルが存在する
+    std::fs::write(dir1.join("a.rs"), "code")?;
+    // dir2 には txt ファイルしか存在しない
+    std::fs::write(dir2.join("b.txt"), "text")?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // parentdir: &: count(extension:rs)
+    // 期待結果: dir1 は結果に含まれるが、rs ファイルが存在しない dir2 は完全に除外される
+    let res =
+        fm.search("parentdir: &: count(extension:rs)", Default::default())?;
+
+    assert!(res.type_for_projection.is_some(), "Should be projection");
+
+    let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
+
+    assert!(
+        names.iter().any(|&n| n.contains("dir1")),
+        "dir1 should be included"
+    );
+    assert!(
+        !names.iter().any(|&n| n.contains("dir2")),
+        "dir2 should be excluded because it has no rs files"
+    );
+
+    Ok(())
+}
