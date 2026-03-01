@@ -1073,8 +1073,15 @@ fn resolve_nest(
         // 右辺が Projection(Calculation) は logical_resolver で算術分配済みのため
         // ここには来ない（Query 形式に変換されている）
         QueryNode::Projection(Operand::Calculation(calc)) => {
-            // 集約と定数のみの算術式は logical_resolver で分配済みだが、
-            // TypeRef を含む純粋な計算式（e.g., size: * 2）はここに到達する
+            // TypeRef を含む算術式（e.g., size: + mtime:）は Level 2 Nest に相当するため未実装。
+            // 集約関数を使用してください（例: sum(size:) + count()）。
+            if calc_has_multiple_type_refs(&calc) {
+                bail!(
+                    "Nest with arithmetic over non-aggregated tags is not yet implemented \
+                    (e.g., 'parentdir: &: (size: + mtime:)'). \
+                    Use aggregation functions instead (e.g., 'parentdir: &: (sum(size:) + count())')."
+                );
+            }
             let resolved_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::Projection {
                 operand,
@@ -1107,6 +1114,23 @@ fn operand_has_nest(op: &Operand) -> bool {
         Operand::Query(node) => matches!(node.as_ref(), QueryNode::Nest(_)),
         Operand::Calculation(calc) => {
             operand_has_nest(&calc.left) || operand_has_nest(&calc.right)
+        }
+        _ => false,
+    }
+}
+
+/// Calculation の両辺に TypeRef（非集約タグ参照）が含まれるか確認するヘルパー。
+/// 両辺に TypeRef がある場合（e.g., size: + mtime:）は Level 2+ Nest に相当し未実装。
+/// 片辺のみ（e.g., size: * 2）は許容する。
+fn calc_has_multiple_type_refs(calc: &crate::query::ast::CalculationNode) -> bool {
+    operand_has_type_ref(&calc.left) && operand_has_type_ref(&calc.right)
+}
+
+fn operand_has_type_ref(op: &Operand) -> bool {
+    match op {
+        Operand::TypeRef(_) => true,
+        Operand::Calculation(calc) => {
+            operand_has_type_ref(&calc.left) || operand_has_type_ref(&calc.right)
         }
         _ => false,
     }

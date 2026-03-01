@@ -105,31 +105,43 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             build_resolved_aggregation_match_sql(agg, *op, label, view)
         }
         ResolvedNode::CalculationMatch { calc, op, label } => {
-            let mut stmt = Query::select();
-            stmt.from(Alias::new(view));
-            stmt.column(Col::ItemId);
-
-            // 集約関数が含まれている場合はサブクエリを使用
-            let calc_expr = if calc.contains_aggregation() {
-                build_calculation_subquery(calc, view)
+            if calc.contains_row_tag() {
+                // RowTag を含む場合は GROUP BY item_id + HAVING で集約計算する。
+                // EAV モデル上、type='size' と type='mtime' は別行に存在するため、
+                // WHERE で両方同時にフィルタすると必ず空になる。HAVING で解決する。
+                let mut stmt = Query::select();
+                stmt.column(Col::ItemId)
+                    .from(Alias::new(view))
+                    .group_by_col(Col::ItemId);
+                let calc_expr = build_calculation_eav_expr(calc);
+                let label_expr = label_to_unit_aware_expr(label);
+                let bin_op = to_bin_op(*op);
+                stmt.and_having(
+                    Expr::expr(calc_expr).binary(bin_op, label_expr),
+                );
+                stmt
             } else {
-                build_calculation_expr(calc)
-            };
+                // RowTag を含まない純粋なスカラー/集約計算（既存処理）
+                let mut stmt = Query::select();
+                stmt.from(Alias::new(view));
+                stmt.column(Col::ItemId);
 
-            // ヘルパー関数で簡潔に記述（単位パース付き）
-            let label_expr = label_to_unit_aware_expr(label);
-            let bin_op = to_bin_op(*op);
-            let cond = Expr::expr(calc_expr).binary(bin_op, label_expr);
+                let calc_expr = if calc.contains_aggregation() {
+                    build_calculation_subquery(calc, view)
+                } else {
+                    build_calculation_expr(calc)
+                };
 
-            stmt.cond_where(cond);
+                let label_expr = label_to_unit_aware_expr(label);
+                let bin_op = to_bin_op(*op);
+                let cond = Expr::expr(calc_expr).binary(bin_op, label_expr);
+                stmt.cond_where(cond);
 
-            // 集約関数が含まれていない場合のみ、
-            // calcに含まれるRowTagのtypeフィルタを追加
-            if !calc.contains_aggregation() {
-                extract_and_add_row_tag_filters(&mut stmt, calc);
+                if !calc.contains_aggregation() {
+                    extract_and_add_row_tag_filters(&mut stmt, calc);
+                }
+                stmt
             }
-
-            stmt
         }
         ResolvedNode::TagCalculationMatch {
             storage,
@@ -981,11 +993,87 @@ fn build_nvalue_standalone_subquery(
                 .from_subquery(sub, Alias::new("calc_sub"))
                 .to_owned()
         }
-        _ => {
-            panic!(
-                "Unsupported nvalue type for standalone subquery: {:?}",
-                nvalue
-            )
+        ResolvedOperand::TagRef {
+            storage: nval_storage,
+            ..
+        } => {
+            use crate::db::CustomFunc;
+            let mut stmt = Query::select();
+            stmt.from_as(Alias::new(view), Alias::new("proj"));
+
+            match nval_storage {
+                StorageMapping::Column(nv_col) => {
+                    // Column タグ: proj の同一行にカラムとして存在するため結合不要。
+                    stmt.expr_as(
+                        Expr::col((Alias::new("proj"), proj_col)),
+                        Alias::new("group_label"),
+                    );
+                    stmt.expr_as(
+                        CustomFunc::any_value(Expr::col((
+                            Alias::new("proj"),
+                            *nv_col,
+                        ))),
+                        Alias::new("nvalue"),
+                    );
+                }
+                StorageMapping::RowTag {
+                    column: nv_col,
+                    tag_type: nv_tag_type,
+                } => {
+                    // RowTag タグ: proj とは別 type の行を LEFT JOIN で取得する。
+                    let nv_sub = Query::select()
+                        .column(Col::ItemId)
+                        .expr_as(
+                            Expr::cust_with_exprs(
+                                "TRY_CAST($1 AS DOUBLE)",
+                                [Expr::col(*nv_col).into()],
+                            ),
+                            Alias::new("nval"),
+                        )
+                        .from(Alias::new(view))
+                        .and_where(
+                            Expr::col(Col::Type).eq(nv_tag_type.as_str()),
+                        )
+                        .to_owned();
+                    stmt.join_subquery(
+                        sea_query::JoinType::LeftJoin,
+                        nv_sub,
+                        Alias::new("nv"),
+                        Expr::col((Alias::new("proj"), Col::ItemId))
+                            .equals((Alias::new("nv"), Col::ItemId)),
+                    );
+                    stmt.expr_as(
+                        Expr::col((Alias::new("proj"), proj_col)),
+                        Alias::new("group_label"),
+                    );
+                    stmt.expr_as(
+                        CustomFunc::any_value(Func::coalesce([
+                            Expr::col((
+                                Alias::new("nv"),
+                                Alias::new("nval"),
+                            ))
+                            .into(),
+                            Expr::val(0.0f64).into(),
+                        ])),
+                        Alias::new("nvalue"),
+                    );
+                }
+                StorageMapping::Virtual => {
+                    stmt.expr_as(
+                        Expr::col((Alias::new("proj"), proj_col)),
+                        Alias::new("group_label"),
+                    );
+                    stmt.expr_as(Expr::val(0.0f64), Alias::new("nvalue"));
+                }
+            }
+
+            if let Some(tt) = proj_tag_type {
+                stmt.and_where(
+                    Expr::col((Alias::new("proj"), Col::Type)).eq(tt),
+                );
+            }
+            stmt.group_by_col((Alias::new("proj"), proj_col));
+            stmt
         }
     }
 }
@@ -1824,11 +1912,10 @@ pub fn build_fetch_items_sql(
 ) -> SelectStatement {
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
     // oneview との結合を行わず、集約計算結果だけをそのまま返す。
+    // ProjectionMatch / ProjectionProjectionMatch は tags カラムが必要なため
+    // ここでは早期リターンせず、通常のタグパッキング処理に委ねる。
     match node {
-        ResolvedNode::Aggregation(_)
-        | ResolvedNode::AggregationMatch { .. }
-        | ResolvedNode::ProjectionMatch { .. }
-        | ResolvedNode::ProjectionProjectionMatch { .. } => {
+        ResolvedNode::Aggregation(_) | ResolvedNode::AggregationMatch { .. } => {
             return build_pick_sql(node, view);
         }
         _ => {}

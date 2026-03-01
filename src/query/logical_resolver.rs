@@ -228,7 +228,7 @@ fn validate_operand(
 /// オペランドから集計の基底となるキー構成（GROUP BY signature）を抽出します
 fn extract_group_by_signature(operand: &Operand) -> Option<String> {
     match operand {
-        Operand::TypeRef(tt) => Some(tt.as_str().to_string()),
+        Operand::TypeRef(_) => None, // TypeRef は集計スコープを持たない（行レベルの値）
         Operand::Query(q) => extract_query_signature(q),
         Operand::Calculation(calc) => extract_group_by_signature(&calc.left)
             .or_else(|| extract_group_by_signature(&calc.right)),
@@ -241,7 +241,14 @@ fn extract_query_signature(node: &QueryNode) -> Option<String> {
     match node {
         QueryNode::Projection(op) => extract_group_by_signature(op),
         QueryNode::Nest(nest) => {
-            let left_sig = extract_query_signature(&nest.left)?;
+            // Nest の left が Projection(TypeRef) の場合は型名を直接取り出す。
+            // TypeRef が None を返すようになったため、間接参照では取得できない。
+            let left_sig = match nest.left.as_ref() {
+                QueryNode::Projection(Operand::TypeRef(tt)) => {
+                    Some(tt.as_str().to_string())
+                }
+                other => extract_query_signature(other),
+            }?;
             match extract_query_signature(&nest.right) {
                 Some(right_sig) => {
                     Some(format!("{} &: {}", left_sig, right_sig))
@@ -1108,17 +1115,18 @@ mod tests {
     #[test]
     fn test_validate_calculation_mismatched_keys() {
         let lens = Lens::base_standard();
-        // size: + mtime: (Numeric + Numeric, but keys differ) -> Error
-        let calc_err = CalculationNode {
+        // size: + mtime: (Numeric + Numeric, TypeRef 同士) -> OK
+        // TypeRef は集計スコープを持たないため、異なるタグ名でもエラーにならない。
+        let calc_ok = CalculationNode {
             left: Operand::TypeRef(TagType::from("size")),
             op: crate::query::ast::ArithmeticOp::Add,
             right: Operand::TypeRef(TagType::from("mtime")),
         };
-        let res = validate_calculation(&calc_err, &lens);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains(
-            "Arithmetic operations between different Group By target keys"
-        ));
+        let res = validate_calculation(&calc_ok, &lens);
+        assert!(
+            res.is_ok(),
+            "size: + mtime: should be allowed (row-level arithmetic)"
+        );
     }
 
     #[test]
