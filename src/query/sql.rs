@@ -2299,35 +2299,64 @@ pub fn build_fetch_label_groups_sql(
     // need_extra_filter: computed CTE で処理済みでなければ NULL/type フィルタが必要
     let (label_col_name, all_hits_source, need_extra_filter) =
         if let Some(calc) = calc_node {
-            // CTE 1.5: computed — 算術式を事前計算してエイリアスを付与
-            let calc_expr = build_calculation_expr(&calc);
-            let mut computed_q = Query::select();
-            computed_q
-                .column(Col::ItemId)
-                .expr_as(calc_expr, Alias::new("calc_value"))
-                .column(Col::Rank)
-                .distinct()
-                .from(Alias::new(view))
-                .and_where(
-                    Expr::col(Col::ItemId).in_subquery(
-                        Query::select()
-                            .column(Col::ItemId)
-                            .from(Tbl::PickedIds)
-                            .to_owned(),
-                    ),
-                )
-                .and_where(Expr::col(col_iden).is_not_null());
-            if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
+            if calc.contains_row_tag() {
+                // EAV 算術: 条件集計で item_id ごとに計算値を集約
+                // (例: size: + mtime: → SUM(CASE WHEN type='size' ...) + SUM(CASE WHEN type='mtime' ...))
+                let calc_expr = build_calculation_eav_expr(&calc);
+                let mut computed_q = Query::select();
                 computed_q
-                    .and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+                    .column(Col::ItemId)
+                    .expr_as(calc_expr, Alias::new("calc_value"))
+                    .expr_as(
+                        CustomFunc::any_value(Expr::col(Col::Rank)),
+                        Alias::new("rank"),
+                    )
+                    .from(Alias::new(view))
+                    .and_where(
+                        Expr::col(Col::ItemId).in_subquery(
+                            Query::select()
+                                .column(Col::ItemId)
+                                .from(Tbl::PickedIds)
+                                .to_owned(),
+                        ),
+                    )
+                    .group_by_col(Col::ItemId);
+                let computed_cte = CommonTableExpression::new()
+                    .query(computed_q)
+                    .table_name(Alias::new("computed"))
+                    .to_owned();
+                with_clause.cte(computed_cte);
+                ("calc_value".to_string(), "computed".to_string(), false)
+            } else {
+                // 既存: カラムベース算術（RowTag なし）
+                let calc_expr = build_calculation_expr(&calc);
+                let mut computed_q = Query::select();
+                computed_q
+                    .column(Col::ItemId)
+                    .expr_as(calc_expr, Alias::new("calc_value"))
+                    .column(Col::Rank)
+                    .distinct()
+                    .from(Alias::new(view))
+                    .and_where(
+                        Expr::col(Col::ItemId).in_subquery(
+                            Query::select()
+                                .column(Col::ItemId)
+                                .from(Tbl::PickedIds)
+                                .to_owned(),
+                        ),
+                    )
+                    .and_where(Expr::col(col_iden).is_not_null());
+                if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
+                    computed_q
+                        .and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+                }
+                let computed_cte = CommonTableExpression::new()
+                    .query(computed_q)
+                    .table_name(Alias::new("computed"))
+                    .to_owned();
+                with_clause.cte(computed_cte);
+                ("calc_value".to_string(), "computed".to_string(), false)
             }
-            let computed_cte = CommonTableExpression::new()
-                .query(computed_q)
-                .table_name(Alias::new("computed"))
-                .to_owned();
-            with_clause.cte(computed_cte);
-
-            ("calc_value".to_string(), "computed".to_string(), false)
         } else {
             (Iden::to_string(&col_iden), view.to_string(), true)
         };
