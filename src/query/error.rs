@@ -531,7 +531,23 @@ pub const PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION: &str =
 pub const PARENTHESIZED_EXPR_IN_COMPARISON_MUST_RETURN_PROJECTION: &str =
     "Parenthesized expression '(...)' in comparison or arithmetic context must return a Projection";
 
+pub const ARITHMETIC_MISMATCHED_KEYS: &str =
+    "Arithmetic operations between different Group By target keys are not allowed.";
+
+pub fn mismatched_arithmetic_keys(
+    left_key: &str,
+    right_key: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}\nLeft side uses group key '{}', but right side uses group key '{}'.\nPlease ensure both sides of the arithmetic operation share the same projection context.",
+        ARITHMETIC_MISMATCHED_KEYS,
+        left_key,
+        right_key
+    )
+}
+
 // =========================================================================
+
 // Lens Resolver Errors
 // =========================================================================
 
