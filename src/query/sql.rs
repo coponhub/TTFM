@@ -206,6 +206,21 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             stmt
         }
+        ResolvedNode::CalculationCalculationMatch {
+            left_calc,
+            op,
+            right_calc,
+        } => {
+            let mut stmt = Query::select();
+            stmt.column(Col::ItemId)
+                .from(Alias::new(view))
+                .group_by_col(Col::ItemId);
+            let left_expr = build_calculation_eav_expr(left_calc);
+            let right_expr = build_calculation_eav_expr(right_calc);
+            let bin_op = to_bin_op(*op);
+            stmt.and_having(Expr::expr(left_expr).binary(bin_op, right_expr));
+            stmt
+        }
         ResolvedNode::AggregationAggregationMatch { left, op, right } => {
             let mut stmt = Query::select();
             stmt.from(Alias::new(view));

@@ -106,6 +106,12 @@ pub enum ResolvedNode {
         right_storage: StorageMapping,
         right_sql_type: SqlType,
     },
+    /// 算術演算同士の比較 (例: (size: - 100) :> (size: * 0.1))
+    CalculationCalculationMatch {
+        left_calc: ResolvedCalculationNode,
+        op: ComparisonOp,
+        right_calc: ResolvedCalculationNode,
+    },
     /// リテラル同士のスカラー比較 (例: 10 > 2)
     ScalarMatch {
         left: Label,
@@ -432,6 +438,7 @@ impl ResolvedNode {
             | ResolvedNode::AggregationAggregationMatch { .. }
             | ResolvedNode::AggregationTagMatch { .. }
             | ResolvedNode::TagTagMatch { .. }
+            | ResolvedNode::CalculationCalculationMatch { .. }
             | ResolvedNode::ProjectionProjectionMatch { .. }
             | ResolvedNode::MergedProjectionMatch { .. }
             | ResolvedNode::ScalarMatch { .. } => {
@@ -684,6 +691,11 @@ impl ResolvedNode {
             | ResolvedNode::CalculationMatch { calc, .. } => {
                 calc.contains_aggregation()
             }
+            ResolvedNode::CalculationCalculationMatch {
+                left_calc,
+                right_calc,
+                ..
+            } => left_calc.contains_aggregation() || right_calc.contains_aggregation(),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
             }
@@ -1721,6 +1733,16 @@ fn resolve_single_match(
                 right_operand: ro,
                 right_nvalue: rnv,
                 right_context: rc,
+            })
+        }
+        // (size: - 100) :> (size: * 0.1)
+        (Operand::Calculation(l_calc), Operand::Calculation(r_calc)) => {
+            let left_calc = resolve_calculation(lens, *l_calc)?;
+            let right_calc = resolve_calculation(lens, *r_calc)?;
+            Ok(ResolvedNode::CalculationCalculationMatch {
+                left_calc,
+                op,
+                right_calc,
             })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),
