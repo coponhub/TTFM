@@ -524,7 +524,8 @@ fn test_calculation_vs_calculation() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&db_dir)?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("(size: - 100) :> (size: * 0.1)", Default::default())?;
+    let res =
+        fm.search("(size: - 100) :> (size: * 0.1)", Default::default())?;
 
     let names: Vec<&str> =
         res.results.iter().map(|r| r.name.as_str()).collect();

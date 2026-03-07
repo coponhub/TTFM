@@ -80,8 +80,8 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
         ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        ResolvedNode::Projection { operand: op, .. } => {
-            build_resolved_projection_sql(op, view)
+        ResolvedNode::Nest { keys, .. } => {
+            build_resolved_projection_sql(keys.first().unwrap(), view)
         }
         ResolvedNode::MergedProjectionMatch {
             operand: op,
@@ -1063,11 +1063,8 @@ fn build_nvalue_standalone_subquery(
                     );
                     stmt.expr_as(
                         CustomFunc::any_value(Func::coalesce([
-                            Expr::col((
-                                Alias::new("nv"),
-                                Alias::new("nval"),
-                            ))
-                            .into(),
+                            Expr::col((Alias::new("nv"), Alias::new("nval")))
+                                .into(),
                             Expr::val(0.0f64).into(),
                         ])),
                         Alias::new("nvalue"),
@@ -1930,7 +1927,8 @@ pub fn build_fetch_items_sql(
     // ProjectionMatch / ProjectionProjectionMatch は tags カラムが必要なため
     // ここでは早期リターンせず、通常のタグパッキング処理に委ねる。
     match node {
-        ResolvedNode::Aggregation(_) | ResolvedNode::AggregationMatch { .. } => {
+        ResolvedNode::Aggregation(_)
+        | ResolvedNode::AggregationMatch { .. } => {
             return build_pick_sql(node, view);
         }
         _ => {}
@@ -2775,9 +2773,9 @@ fn build_resolved_projection_sql(
                 .distinct()
                 .from(Alias::new(view));
 
-            // ResolvedNode の Projection 用条件生成を利用
-            let cond = ResolvedNode::Projection {
-                operand: op.clone(),
+            // ResolvedNode の Nest 用条件生成を利用
+            let cond = ResolvedNode::Nest {
+                keys: vec![op.clone()],
                 nvalue: None,
                 context: None,
             }
@@ -3719,15 +3717,15 @@ mod tests {
         use crate::query::ast::ArithmeticAggOp;
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(ResolvedNode::Projection {
-                operand: ResolvedOperand::TagRef {
+            inner: Box::new(ResolvedNode::Nest {
+                keys: vec![ResolvedOperand::TagRef {
                     tag_type: TagType::Base(SType::Size),
                     storage: StorageMapping::RowTag {
                         column: Col::LabelInt,
                         tag_type: "size".to_string(),
                     },
                     sql_type: crate::db::SqlType::BIGINT,
-                },
+                }],
                 nvalue: None,
                 context: None,
             }),
@@ -3770,12 +3768,12 @@ mod tests {
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::And(vec![
-                ResolvedNode::Projection {
-                    operand: ResolvedOperand::TagRef {
+                ResolvedNode::Nest {
+                    keys: vec![ResolvedOperand::TagRef {
                         tag_type: TagType::Base(SType::Size),
                         storage: StorageMapping::Column(Col::Size),
                         sql_type: crate::db::SqlType::BIGINT,
-                    },
+                    }],
                     nvalue: None,
                     context: None,
                 },

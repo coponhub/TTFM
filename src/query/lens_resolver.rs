@@ -35,9 +35,10 @@ pub enum ResolvedNode {
     Or(Vec<ResolvedNode>),
     Difference(Box<ResolvedNode>, Box<ResolvedNode>),
     Complement(Box<ResolvedNode>),
-    /// 投影クエリ用。
-    Projection {
-        operand: ResolvedOperand,
+    /// 投影クエリ用（ネスト構造を含む）。
+    /// 深さ1の純粋なプロジェクション（例: `extension:`）も `keys: vec![op]` として表現する。
+    Nest {
+        keys: Vec<ResolvedOperand>,
         /// nvalue（評価値）。付与されている場合、算術演算や比較において
         /// 実際のラベル値の代わりに使用される（集合演算を除く）。
         /// 集約・スカラー・算術式のいずれも取りうる。
@@ -118,7 +119,7 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         right: Label,
     },
-    /// nvalue 付き Projection への比較。フィルタされたラベル集合を返す。
+    /// nvalue 付き Nest への比較。フィルタされたラベル集合を返す。
     /// 例: `(parentdir: &: count(ext:jpg)) :> 10`
     ProjectionMatch {
         operand: ResolvedOperand,
@@ -128,9 +129,9 @@ pub enum ResolvedNode {
         /// このプロジェクション（およびそのnvalue集計）に適用されるべきフィルタ
         context: Option<Box<ResolvedNode>>,
     },
-    /// nvalue 付き Projection 同士の比較または算術演算。
+    /// nvalue 付き Nest 同士の比較または算術演算。
     /// - op: Comparison → フィルタ結果（どのグループが条件を満たすか）
-    /// - op: Arithmetic → nvalue 付き Projection 結果（各グループの計算値）
+    /// - op: Arithmetic → nvalue 付き Nest 結果（各グループの計算値）
     ProjectionProjectionMatch {
         left_operand: ResolvedOperand,
         left_nvalue: ResolvedOperand,
@@ -140,7 +141,7 @@ pub enum ResolvedNode {
         right_nvalue: ResolvedOperand,
         right_context: Option<Box<ResolvedNode>>,
     },
-    /// マージされた nvalue 付き Projection マッチ。
+    /// マージされた nvalue 付き Nest マッチ。
     /// 共通の GROUP BY キー（operand）に対して複数の条件を AND/OR で適用する。
     MergedProjectionMatch {
         operand: ResolvedOperand,
@@ -149,7 +150,7 @@ pub enum ResolvedNode {
     },
 }
 
-/// nvalue 付き Projection 同士を結ぶ演算子。
+/// nvalue 付き Nest 同士を結ぶ演算子。
 /// 比較（フィルタ）と算術（nvalue 計算）の両方を統一的に扱う。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionOp {
@@ -315,7 +316,7 @@ impl ResolvedNode {
     /// 自身、または入れ子のいずれかに Projection / ProjectionMatch を含むかチェックします。
     pub fn is_projection_recursive(&self) -> bool {
         match self {
-            ResolvedNode::Projection { .. }
+            ResolvedNode::Nest { .. }
             | ResolvedNode::ProjectionMatch { .. }
             | ResolvedNode::ProjectionProjectionMatch { .. }
             | ResolvedNode::MergedProjectionMatch { .. } => true,
@@ -333,7 +334,7 @@ impl ResolvedNode {
     /// 自身、または入れ子の全ての Projection / ProjectionMatch にコンテキストを注入します。
     pub fn inject_context(&mut self, context: ResolvedNode) {
         match self {
-            ResolvedNode::Projection {
+            ResolvedNode::Nest {
                 context: ref mut ctx,
                 ..
             }
@@ -401,12 +402,14 @@ impl ResolvedNode {
                 // COMPLEMENT も同様
                 Condition::any()
             }
-            ResolvedNode::Projection {
-                operand: op,
-                context,
-                ..
+            ResolvedNode::Nest { keys, context, .. } => {
+                let mut cond = keys.first().unwrap().to_condition();
+                if let Some(ctx) = context {
+                    cond = cond.add(ctx.to_condition());
+                }
+                cond
             }
-            | ResolvedNode::ProjectionMatch {
+            ResolvedNode::ProjectionMatch {
                 operand: op,
                 context,
                 ..
@@ -453,8 +456,10 @@ impl ResolvedNode {
     /// このノードが投影（Projection）を目的としている場合、その対象の型を返します。
     pub fn get_projection(&self) -> Option<TagType> {
         match self {
-            ResolvedNode::Projection { operand: op, .. }
-            | ResolvedNode::ProjectionMatch { operand: op, .. }
+            ResolvedNode::Nest { keys, .. } => {
+                extract_tag_type_from_operand(keys.first().unwrap())
+            }
+            ResolvedNode::ProjectionMatch { operand: op, .. }
             | ResolvedNode::ProjectionProjectionMatch {
                 left_operand: op,
                 ..
@@ -474,7 +479,7 @@ impl ResolvedNode {
 
     pub fn get_nvalue(&self) -> Option<&ResolvedOperand> {
         match self {
-            ResolvedNode::Projection { nvalue, .. } => nvalue.as_ref(),
+            ResolvedNode::Nest { nvalue, .. } => nvalue.as_ref(),
             ResolvedNode::ProjectionMatch { nvalue, .. } => Some(nvalue),
             ResolvedNode::ProjectionProjectionMatch { left_nvalue, .. } => {
                 Some(left_nvalue)
@@ -497,7 +502,7 @@ impl ResolvedNode {
     /// 左右のオペランドを結合したCalculationを所有権付きで返す必要があるため新設。
     pub fn get_nvalue_combined(&self) -> Option<ResolvedOperand> {
         match self {
-            ResolvedNode::Projection { nvalue, .. } => nvalue.clone(),
+            ResolvedNode::Nest { nvalue, .. } => nvalue.clone(),
             ResolvedNode::ProjectionMatch { nvalue, .. } => {
                 Some(nvalue.clone())
             }
@@ -544,8 +549,8 @@ impl ResolvedNode {
     /// Projection が Calculation を含むかどうか（ラベルグループ取得時に使用）
     pub fn get_projection_operand(&self) -> Option<&ResolvedOperand> {
         match self {
-            ResolvedNode::Projection { operand: op, .. }
-            | ResolvedNode::ProjectionMatch { operand: op, .. }
+            ResolvedNode::Nest { keys, .. } => keys.first(),
+            ResolvedNode::ProjectionMatch { operand: op, .. }
             | ResolvedNode::ProjectionProjectionMatch {
                 left_operand: op,
                 ..
@@ -566,7 +571,7 @@ impl ResolvedNode {
     /// ノードからコンテキスト（フィルタ）を取得します。
     pub fn get_context(&self) -> Option<&ResolvedNode> {
         match self {
-            ResolvedNode::Projection { context, .. }
+            ResolvedNode::Nest { context, .. }
             | ResolvedNode::ProjectionMatch { context, .. } => {
                 context.as_deref()
             }
@@ -580,8 +585,8 @@ impl ResolvedNode {
     /// ネストされた Projection を再帰的に探索して返します。
     pub fn get_nested_projection(&self) -> Option<&ResolvedOperand> {
         match self {
-            ResolvedNode::Projection { operand: op, .. }
-            | ResolvedNode::ProjectionMatch { operand: op, .. } => Some(op),
+            ResolvedNode::Nest { keys, .. } => keys.first(),
+            ResolvedNode::ProjectionMatch { operand: op, .. } => Some(op),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nested_projection())
             }
@@ -605,10 +610,10 @@ impl ResolvedNode {
         {
             let storage = extract_storage_from_operand(op);
 
-            // 1. 自身が Projection/ProjectionMatch の場合はフィルタなし
+            // 1. 自身が Nest/ProjectionMatch の場合はフィルタなし
             if matches!(
                 self,
-                ResolvedNode::Projection { .. }
+                ResolvedNode::Nest { .. }
                     | ResolvedNode::ProjectionMatch { .. }
             ) {
                 return (storage, None, Some(op));
@@ -695,7 +700,10 @@ impl ResolvedNode {
                 left_calc,
                 right_calc,
                 ..
-            } => left_calc.contains_aggregation() || right_calc.contains_aggregation(),
+            } => {
+                left_calc.contains_aggregation()
+                    || right_calc.contains_aggregation()
+            }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
             }
@@ -1015,8 +1023,8 @@ pub(crate) fn resolve_query_node(
         }
         QueryNode::Projection(op) => {
             let resolved_op = resolve_operand(lens, &op)?;
-            Ok(ResolvedNode::Projection {
-                operand: resolved_op,
+            Ok(ResolvedNode::Nest {
+                keys: vec![resolved_op],
                 nvalue: None,
                 context: None,
             })
@@ -1058,14 +1066,14 @@ fn resolve_nest(
     let left = resolve_query_node(lens, *nest.left)?;
     let right_node = *nest.right;
 
-    let (operand, context) = extract_projection_operand_with_context(left)?;
+    let (keys, context) = extract_projection_operand_with_context(left)?;
 
     match right_node {
-        // 深さ1: 右辺が Aggregation → nvalue 付き Projection
+        // 深さ1: 右辺が Aggregation → nvalue 付き Nest
         QueryNode::Aggregation(agg) => {
             let resolved_agg = resolve_aggregation(lens, agg)?;
-            Ok(ResolvedNode::Projection {
-                operand,
+            Ok(ResolvedNode::Nest {
+                keys,
                 nvalue: Some(ResolvedOperand::Aggregation(resolved_agg)),
                 context,
             })
@@ -1076,8 +1084,8 @@ fn resolve_nest(
         }
         // 右辺が Projection(Literal) → nvalue にスカラー値を付与
         QueryNode::Projection(Operand::Literal(label)) => {
-            Ok(ResolvedNode::Projection {
-                operand,
+            Ok(ResolvedNode::Nest {
+                keys,
                 nvalue: Some(ResolvedOperand::Literal(label)),
                 context,
             })
@@ -1095,8 +1103,8 @@ fn resolve_nest(
                 );
             }
             let resolved_calc = resolve_calculation(lens, *calc)?;
-            Ok(ResolvedNode::Projection {
-                operand,
+            Ok(ResolvedNode::Nest {
+                keys,
                 nvalue: Some(ResolvedOperand::Calculation(Box::new(
                     resolved_calc,
                 ))),
@@ -1134,7 +1142,9 @@ fn operand_has_nest(op: &Operand) -> bool {
 /// Calculation の両辺に TypeRef（非集約タグ参照）が含まれるか確認するヘルパー。
 /// 両辺に TypeRef がある場合（e.g., size: + mtime:）は Level 2+ Nest に相当し未実装。
 /// 片辺のみ（e.g., size: * 2）は許容する。
-fn calc_has_multiple_type_refs(calc: &crate::query::ast::CalculationNode) -> bool {
+fn calc_has_multiple_type_refs(
+    calc: &crate::query::ast::CalculationNode,
+) -> bool {
     operand_has_type_ref(&calc.left) && operand_has_type_ref(&calc.right)
 }
 
@@ -1142,7 +1152,8 @@ fn operand_has_type_ref(op: &Operand) -> bool {
     match op {
         Operand::TypeRef(_) => true,
         Operand::Calculation(calc) => {
-            operand_has_type_ref(&calc.left) || operand_has_type_ref(&calc.right)
+            operand_has_type_ref(&calc.left)
+                || operand_has_type_ref(&calc.right)
         }
         _ => false,
     }
@@ -1192,13 +1203,13 @@ fn resolve_nest_operand_extract_key(
         Operand::Query(node) => {
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
-                ResolvedNode::Projection {
-                    operand: key,
+                ResolvedNode::Nest {
+                    mut keys,
                     nvalue: Some(nv),
                     ..
-                } => Ok((key, nv)),
+                } => Ok((keys.remove(0), nv)),
                 _ => bail!(
-                    "Arithmetic Nest operand must resolve to Projection with nvalue"
+                    "Arithmetic Nest operand must resolve to Nest with nvalue"
                 ),
             }
         }
@@ -1246,18 +1257,19 @@ fn resolve_nest_calc_operand(
         Operand::Query(node) => {
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
-                ResolvedNode::Projection {
-                    operand: key,
+                ResolvedNode::Nest {
+                    mut keys,
                     nvalue: Some(nv),
                     ..
                 } => {
+                    let key = keys.remove(0);
                     if key != *expected_key {
                         bail!("Mismatched GROUP BY keys in arithmetic Nest expression");
                     }
                     Ok(nv)
                 }
                 _ => bail!(
-                    "Arithmetic Nest operand must resolve to Projection with nvalue"
+                    "Arithmetic Nest operand must resolve to Nest with nvalue"
                 ),
             }
         }
@@ -1284,23 +1296,18 @@ fn resolve_nest_calc_operand(
 /// Nest の左辺から ResolvedOperand と、付随するコンテキスト (And などのフィルタ) を抽出するヘルパー。
 fn extract_projection_operand_with_context(
     left: ResolvedNode,
-) -> Result<(ResolvedOperand, Option<Box<ResolvedNode>>)> {
+) -> Result<(Vec<ResolvedOperand>, Option<Box<ResolvedNode>>)> {
     match left {
-        ResolvedNode::Projection {
-            operand, context, ..
-        } => Ok((operand, context)),
+        ResolvedNode::Nest { keys, context, .. } => Ok((keys, context)),
         ResolvedNode::And(nodes) => {
             for n in nodes {
-                if let ResolvedNode::Projection {
-                    operand, context, ..
-                } = n
-                {
-                    return Ok((operand, context));
+                if let ResolvedNode::Nest { keys, context, .. } = n {
+                    return Ok((keys, context));
                 }
             }
-            bail!("Nest left side And must contain a Projection")
+            bail!("Nest left side And must contain a Nest node")
         }
-        _ => bail!("Nest left side must resolve to Projection or And"),
+        _ => bail!("Nest left side must resolve to Nest or And"),
     }
 }
 
@@ -1315,40 +1322,60 @@ pub(crate) fn extract_nvalue_projection_parts(
     node: ResolvedNode,
 ) -> Result<(ResolvedOperand, ResolvedOperand, Option<Box<ResolvedNode>>)> {
     match node {
-        ResolvedNode::Projection {
-            operand,
+        ResolvedNode::Nest {
+            keys,
             nvalue: Some(nv),
             context,
-        } => Ok((operand, nv, context)),
+        } => Ok((keys.first().unwrap().clone(), nv.clone(), context.clone())),
         ResolvedNode::ProjectionMatch {
             operand,
             nvalue,
             context,
             ..
         } => Ok((operand, nvalue, context)),
+        ResolvedNode::MergedProjectionMatch { operand, matches, .. } => {
+            if let Some(first_match) = matches.first() {
+                Ok((
+                    operand,
+                    first_match.nvalue.clone(),
+                    first_match.context.clone(),
+                ))
+            } else {
+                bail!("MergedProjectionMatch is empty")
+            }
+        }
         ResolvedNode::And(mut nodes) => {
-            // nvalue 付き Projection または ProjectionMatch の位置を探す
+            // nvalue 付き Nest または ProjectionMatch の位置を探す
             let proj_idx = nodes.iter().position(|n| {
                 matches!(
                     n,
-                    ResolvedNode::Projection { nvalue: Some(_), .. }
+                    ResolvedNode::Nest { nvalue: Some(_), .. }
                         | ResolvedNode::ProjectionMatch { .. }
+                        | ResolvedNode::MergedProjectionMatch { .. }
                 )
             });
             if let Some(idx) = proj_idx {
                 let proj = nodes.remove(idx);
                 let (operand, nv, proj_ctx) = match proj {
-                    ResolvedNode::Projection {
-                        operand,
+                    ResolvedNode::Nest {
+                        keys,
                         nvalue: Some(nv),
                         context,
-                    } => (operand, nv, context),
+                    } => (keys.first().unwrap().clone(), nv, context),
                     ResolvedNode::ProjectionMatch {
                         operand,
                         nvalue,
                         context,
                         ..
                     } => (operand, nvalue, context),
+                    ResolvedNode::MergedProjectionMatch {
+                        operand,
+                        mut matches,
+                        ..
+                    } => {
+                        let first = matches.remove(0);
+                        (operand, first.nvalue, first.context)
+                    }
                     _ => unreachable!(),
                 };
 
@@ -1371,7 +1398,7 @@ pub(crate) fn extract_nvalue_projection_parts(
                 };
                 Ok((operand, nv, merged_ctx))
             } else {
-                bail!("And node does not contain a nvalue-bearing Projection")
+                bail!("And node does not contain a nvalue-bearing Nest")
             }
         }
         other => bail!(
@@ -1663,19 +1690,19 @@ fn resolve_single_match(
         (Operand::Query(node), Operand::Literal(lit)) => {
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
-                ResolvedNode::Projection {
-                    operand,
+                ResolvedNode::Nest {
+                    mut keys,
                     nvalue: Some(nv),
                     context,
                 } => Ok(ResolvedNode::ProjectionMatch {
-                    operand,
+                    operand: keys.remove(0),
                     nvalue: nv,
                     op,
                     label: lit,
                     context,
                 }),
-                ResolvedNode::Projection { .. } => {
-                    bail!("Comparison on Projection without nvalue is not supported as label comparison")
+                ResolvedNode::Nest { .. } => {
+                    bail!("Comparison on Nest without nvalue is not supported as label comparison")
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
@@ -1683,7 +1710,7 @@ fn resolve_single_match(
                     Ok(resolved)
                 }
                 _ => bail!(
-                    "Query operand in comparison must resolve to Projection, got: {:?}",
+                    "Query operand in comparison must resolve to Nest, got: {:?}",
                     resolved
                 ),
             }
@@ -1691,19 +1718,19 @@ fn resolve_single_match(
         (Operand::Literal(lit), Operand::Query(node)) => {
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
-                ResolvedNode::Projection {
-                    operand,
+                ResolvedNode::Nest {
+                    mut keys,
                     nvalue: Some(nv),
                     context,
                 } => Ok(ResolvedNode::ProjectionMatch {
-                    operand,
+                    operand: keys.remove(0),
                     nvalue: nv,
                     op: flip_op(op),
                     label: lit,
                     context,
                 }),
-                ResolvedNode::Projection { .. } => {
-                    bail!("Comparison on Projection without nvalue is not supported as label comparison")
+                ResolvedNode::Nest { .. } => {
+                    bail!("Comparison on Nest without nvalue is not supported as label comparison")
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
@@ -1711,7 +1738,7 @@ fn resolve_single_match(
                     Ok(resolved)
                 }
                 _ => bail!(
-                    "Query operand in comparison must resolve to Projection, got: {:?}",
+                    "Query operand in comparison must resolve to Nest, got: {:?}",
                     resolved
                 ),
             }
@@ -1883,7 +1910,8 @@ impl Resolver {
             ResolvedNode::Aggregation(agg) => {
                 Some(ResolvedOperand::Aggregation(agg.clone()))
             }
-            ResolvedNode::Projection { operand: op, .. } => {
+            ResolvedNode::Nest { keys, .. } => {
+                let op = keys.first().unwrap();
                 if op.contains_aggregation() || op.is_pure_scalar() {
                     Some(op.clone())
                 } else {
@@ -1985,12 +2013,12 @@ mod tests {
 
         // Prepare nodes
         // Case 1: And(Projection, Filter)
-        let projection = ResolvedNode::Projection {
-            operand: ResolvedOperand::TagRef {
+        let projection = ResolvedNode::Nest {
+            keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::Base(SType::Size),
                 storage: StorageMapping::Column(Col::Size),
                 sql_type: SqlType::BIGINT,
-            },
+            }],
             nvalue: None,
             context: None,
         };
@@ -2271,8 +2299,8 @@ mod tests {
         };
         let resolved_calc = resolve_calculation(&lens, calc).unwrap();
         let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
-        let node = ResolvedNode::Projection {
-            operand: operand.clone(),
+        let node = ResolvedNode::Nest {
+            keys: vec![operand.clone()],
             nvalue: None,
             context: None,
         };
@@ -2369,9 +2397,7 @@ mod tests {
         let resolver = Resolver::new("parentdir: &: count(extension:jpg)")
             .expect("nest with agg should resolve");
         match &resolver.resolved_query {
-            ResolvedNode::Projection {
-                nvalue, operand, ..
-            } => {
+            ResolvedNode::Nest { nvalue, keys, .. } => {
                 assert!(nvalue.is_some(), "nvalue should be present");
                 match nvalue.as_ref().unwrap() {
                     ResolvedOperand::Aggregation(
@@ -2380,14 +2406,17 @@ mod tests {
                     other => panic!("Expected Count nvalue, got {:?}", other),
                 }
                 // operand は parentdir の TagRef
-                match operand {
+                match keys.first().unwrap() {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
-                    _ => panic!("Expected TagRef operand, got {:?}", operand),
+                    _ => panic!(
+                        "Expected TagRef operand, got {:?}",
+                        keys.first().unwrap()
+                    ),
                 }
             }
-            other => panic!("Expected Projection with nvalue, got {:?}", other),
+            other => panic!("Expected Nest with nvalue, got {:?}", other),
         }
     }
 
@@ -2397,9 +2426,7 @@ mod tests {
         let resolver = Resolver::new("project: &: sum(size:)")
             .expect("nest with sum should resolve");
         match &resolver.resolved_query {
-            ResolvedNode::Projection {
-                nvalue, operand, ..
-            } => {
+            ResolvedNode::Nest { nvalue, keys, .. } => {
                 assert!(nvalue.is_some());
                 match nvalue.as_ref().unwrap() {
                     ResolvedOperand::Aggregation(
@@ -2410,14 +2437,14 @@ mod tests {
                     ) => {}
                     other => panic!("Expected Sum nvalue, got {:?}", other),
                 }
-                match operand {
+                match keys.first().unwrap() {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "project");
                     }
                     _ => panic!("Expected TagRef operand"),
                 }
             }
-            other => panic!("Expected Projection with nvalue, got {:?}", other),
+            other => panic!("Expected Nest with nvalue, got {:?}", other),
         }
     }
 
@@ -2427,13 +2454,13 @@ mod tests {
         let resolver =
             Resolver::new("size:").expect("simple projection should resolve");
         match &resolver.resolved_query {
-            ResolvedNode::Projection { nvalue, .. } => {
+            ResolvedNode::Nest { nvalue, .. } => {
                 assert!(
                     nvalue.is_none(),
                     "plain projection should have no nvalue"
                 );
             }
-            other => panic!("Expected Projection, got {:?}", other),
+            other => panic!("Expected Nest, got {:?}", other),
         }
     }
 
@@ -2593,7 +2620,7 @@ mod tests {
             let filter = &nodes[0];
             let proj = &nodes[1];
 
-            if let ResolvedNode::Projection { context, .. } = proj {
+            if let ResolvedNode::Nest { context, .. } = proj {
                 assert!(context.is_some(), "Context should be injected");
                 assert_eq!(
                     context.as_deref().unwrap(),
@@ -2601,7 +2628,7 @@ mod tests {
                     "Context should be the adjacent filter"
                 );
             } else {
-                panic!("Expected Projection node at index 1, got {:?}", proj);
+                panic!("Expected Nest node at index 1, got {:?}", proj);
             }
         } else {
             panic!("Expected And node, got {:?}", result.resolved_query);
@@ -2624,6 +2651,42 @@ mod tests {
             "Expected ProjectionProjectionMatch or MergedProjectionMatch, got: {:?}",
             result.resolved_query
         );
+    }
+
+    #[test]
+    fn test_resolve_nest_depth1_produces_nest_variant() {
+        let query = "parentdir: &: count()";
+        let result = Resolver::new(query).expect("Should resolve query");
+        match result.resolved_query {
+            ResolvedNode::Nest { keys, nvalue, .. } => {
+                assert_eq!(keys.len(), 1);
+                assert!(nvalue.is_some());
+            }
+            _ => {
+                panic!("Expected Nest variant, got {:?}", result.resolved_query)
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_projection_produces_nest_variant() {
+        let query = "extension:";
+        let result = Resolver::new(query).expect("Should resolve query");
+        match result.resolved_query {
+            ResolvedNode::And(ref nodes) => {
+                let has_nest = nodes.iter().any(|n| {
+                    matches!(n, ResolvedNode::Nest { nvalue: None, .. })
+                });
+                assert!(has_nest, "Expected Nest variant with nvalue: None in And node. Got: {:?}", nodes);
+            }
+            ResolvedNode::Nest { nvalue, .. } => {
+                assert!(nvalue.is_none());
+            }
+            _ => panic!(
+                "Expected Nest variant (or And containing Nest), got {:?}",
+                result.resolved_query
+            ),
+        }
     }
 }
 

@@ -122,7 +122,7 @@ fn flatten_aggregation(
 ) -> ResolvedAggregationNode {
     use crate::query::ast::ArithmeticAggOp::*;
     use crate::query::lens_resolver::ResolvedAggregationNode::Arithmetic;
-    use crate::query::ResolvedNode::Projection;
+    use crate::query::ResolvedNode::Nest;
     use crate::query::ResolvedOperand::Aggregation;
 
     // 1. Check if outer is an arithmetic aggregation
@@ -131,7 +131,7 @@ fn flatten_aggregation(
     };
 
     // 2. Check if inner is a projection without context
-    let Projection {
+    let Nest {
         nvalue: Some(nval),
         context: None,
         ..

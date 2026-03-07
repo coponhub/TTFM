@@ -63,7 +63,10 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     if let Err(e) = &ok_result1 {
         println!("QUERY 1 ERROR: {:?}", e);
     }
-    assert!(ok_result1.is_ok(), "Simple projection arithmetic should succeed (Top level)");
+    assert!(
+        ok_result1.is_ok(),
+        "Simple projection arithmetic should succeed (Top level)"
+    );
 
     // 1.2 異常系: Nest 内での非集約タグ算術（Level 2 Nest は未実装）
     let err_query2 = "(parentdir: &: (size: + mtime:)) :> 10";

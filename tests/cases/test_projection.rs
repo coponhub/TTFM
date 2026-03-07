@@ -393,9 +393,14 @@ fn test_arithmetic_projection_eav() -> anyhow::Result<()> {
     );
 
     // 各グループの name が正の数値であることを確認（size + Unix timestamp > 0）
-    let vals: Vec<f64> = result.results.iter()
-        .map(|r| r.name.parse::<f64>()
-            .unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
         .collect();
     for &v in &vals {
         assert!(v > 0.0, "calc value should be > 0, got: {}", v);
@@ -403,9 +408,9 @@ fn test_arithmetic_projection_eav() -> anyhow::Result<()> {
 
     // a.txt(size=5) と b.txt(size=7) は同時刻に作成されるため、
     // 結果の中に差が正確に 2 となるペアが存在するはず
-    let has_pair_with_diff_2 = vals.iter().any(|&vi| {
-        vals.iter().any(|&vj| (vj - vi - 2.0).abs() < 0.001)
-    });
+    let has_pair_with_diff_2 = vals
+        .iter()
+        .any(|&vi| vals.iter().any(|&vj| (vj - vi - 2.0).abs() < 0.001));
     assert!(
         has_pair_with_diff_2,
         "Expected a pair of results differing by exactly 2 (size diff: b.txt=7 vs a.txt=5). Got vals: {:?}",
@@ -438,19 +443,28 @@ fn test_arithmetic_projection_eav_subtraction() -> anyhow::Result<()> {
     );
 
     // 全結果が正の数値（Unix timestamp - small size > 0）
-    let vals: Vec<f64> = result.results.iter()
-        .map(|r| r.name.parse::<f64>()
-            .unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
         .collect();
     for &v in &vals {
-        assert!(v > 0.0, "mtime - size should be > 0 (timestamp >> file size), got: {}", v);
+        assert!(
+            v > 0.0,
+            "mtime - size should be > 0 (timestamp >> file size), got: {}",
+            v
+        );
     }
 
     // a.txt(size=5) と b.txt(size=7) が同時刻なら差は -2（mtime が同じで size が 2 違う）
     // つまり b.txt の calc_value は a.txt より 2 小さい → 差が -2 のペアが存在する
-    let has_pair_with_diff_minus2 = vals.iter().any(|&vi| {
-        vals.iter().any(|&vj| (vj - vi + 2.0).abs() < 0.001)
-    });
+    let has_pair_with_diff_minus2 = vals
+        .iter()
+        .any(|&vi| vals.iter().any(|&vj| (vj - vi + 2.0).abs() < 0.001));
     assert!(
         has_pair_with_diff_minus2,
         "Expected a pair differing by -2 (mtime same, b.txt size=7 vs a.txt size=5). Got vals: {:?}",
@@ -483,9 +497,14 @@ fn test_arithmetic_projection_eav_with_literal() -> anyhow::Result<()> {
     );
 
     // 全結果が数値
-    let vals: Vec<f64> = result.results.iter()
-        .map(|r| r.name.parse::<f64>()
-            .unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
         .collect();
 
     // a.txt(size=5) と b.txt(size=7) の結果は 5/1024 と 7/1024
