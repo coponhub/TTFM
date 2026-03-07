@@ -988,7 +988,7 @@ fn test_nest_agg_over_nvalue_sum_with_comparison_e2e() -> anyhow::Result<()> {
 }
 
 /// Calculation が nvalue 条件付き集約をラップするケース。
-/// ProjectionMatch が inner に埋め込まれた条件を正しく伝播するかを検証。
+/// NestMatch が inner に埋め込まれた条件を正しく伝播するかを検証。
 /// 例: `100 - count(parentdir: &: (count(extension:jpg) > 1))`
 #[test]
 fn test_nest_agg_calc_wrap_e2e() -> anyhow::Result<()> {
@@ -1031,7 +1031,7 @@ fn test_nest_agg_calc_wrap_e2e() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// sum() で nvalue 付き ProjectionMatch をラップし、
+/// sum() で nvalue 付き NestMatch をラップし、
 /// さらに算術演算を行うケース。
 /// 例: `sum(parentdir: &: (count(extension:jpg) > 1)) * 2`
 #[test]
@@ -1622,7 +1622,7 @@ fn test_nest_arithmetic_e2e() -> anyhow::Result<()> {
 // バグ再現テスト（修正前に追加、修正後に pass する）
 // ──────────────────────────────────────────────
 
-/// Issue 1: OR演算子でMergedProjectionMatchが正しくユニオンを返すことを確認
+/// Issue 1: OR演算子でMergedNestMatchが正しくユニオンを返すことを確認
 ///
 /// バグ: `P &: C1 | P &: C2` がC1のみの結果を返す（ORが機能しない）
 ///

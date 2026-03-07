@@ -49,7 +49,7 @@ impl FileManager {
 
         // 2-A. Projection ケース（転置: Label → Items）
         // QUERY.md L77: ラベル比較はアイテムリストを返すため、
-        // nvalue_condition 付き（ProjectionMatch/MergedProjectionMatch）
+        // nvalue_condition 付き（NestMatch/MergedNestMatch）
         // では通常検索ケース (2-C) に委ねる。
         if let Some(tag) = resolver.get_projection() {
             if resolver.get_nvalue_condition().is_none() {

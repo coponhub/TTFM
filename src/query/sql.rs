@@ -4,7 +4,7 @@ use crate::query::ast::{
     QueryNode,
 };
 use crate::query::lens_resolver::{
-    extract_nvalue_projection_parts, ProjectionOp, ResolvedAggregationNode,
+    extract_nvalue_projection_parts, NestMatchOp, ResolvedAggregationNode,
     ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
@@ -83,11 +83,11 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::Nest { keys, .. } => {
             build_resolved_projection_sql(keys.first().unwrap(), view)
         }
-        ResolvedNode::MergedProjectionMatch {
+        ResolvedNode::MergedNestMatch {
             operand: op,
             matches,
             is_or,
-        } => build_merged_projection_match_sql(op, matches, *is_or, view),
+        } => build_merged_nest_match_sql(op, matches, *is_or, view),
         ResolvedNode::ColumnMatch { tag, label } => {
             build_column_match_sql(*tag, label, view)
         }
@@ -277,7 +277,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
 
             stmt
         }
-        ResolvedNode::ProjectionMatch {
+        ResolvedNode::NestMatch {
             operand: op,
             nvalue,
             op: comparison_op,
@@ -321,7 +321,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             );
             stmt
         }
-        ResolvedNode::ProjectionProjectionMatch {
+        ResolvedNode::NestNestMatch {
             left_operand,
             left_nvalue,
             left_context,
@@ -330,7 +330,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             right_nvalue,
             right_context,
         } => match op {
-            ProjectionOp::Comparison(cmp_op) => {
+            NestMatchOp::Comparison(cmp_op) => {
                 // プロジェクション同士の比較：左辺ベースの SQL を作成
                 let mut stmt =
                     build_resolved_projection_sql(left_operand, view);
@@ -385,10 +385,10 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 stmt.and_where(Expr::col(proj_col).in_subquery(join_sql));
                 stmt
             }
-            ProjectionOp::Arithmetic(_) => {
-                // 算術演算の ProjectionProjectionMatch は
+            NestMatchOp::Arithmetic(_) => {
+                // 算術演算の NestNestMatch は
                 // Optimizer が単一 GROUP BY に最適化した形式で処理される予定。
-                // 現在は左辺キーの Projection として扱う（nvalue は fetcher が計算）。
+                // 現在は左辺キーの Nest として扱う（nvalue は fetcher が計算）。
                 build_resolved_projection_sql(left_operand, view)
             }
         },
@@ -418,9 +418,9 @@ pub fn build_aggregation_sql(
     Query::select().to_owned()
 }
 
-/// nvalue 付き Projection に対する集約 SQL を生成する。
+/// nvalue 付き Nest に対する集約 SQL を生成する。
 /// `sum(parentdir: &: count(ext:jpg))` のように、集約の inner が
-/// nvalue 付き Projection の場合、nvalue を集約対象にした SQL を返す。
+/// nvalue 付き Nest の場合、nvalue を集約対象にした SQL を返す。
 /// 該当しない場合は None を返す。
 fn build_agg_over_nvalue_projection(
     agg: &ResolvedAggregationNode,
@@ -433,14 +433,14 @@ fn build_agg_over_nvalue_projection(
         }
     };
 
-    // inner が nvalue 付き Projection または ProjectionMatch かチェック
+    // inner が nvalue 付き Projection または NestMatch かチェック
     let (proj_operand, nvalue, merged_context) =
         match extract_nvalue_projection_parts(inner.clone()) {
             Ok(parts) => parts,
             Err(_) => return None,
         };
 
-    // nvalue_condition は ProjectionMatch の場合に存在する
+    // nvalue_condition は NestMatch の場合に存在する
     let nvalue_condition = inner.get_nvalue_condition();
     let context = merged_context.as_deref();
 
@@ -463,10 +463,10 @@ fn build_agg_over_nvalue_projection(
 
     let mut stmt = Query::select();
     if outer_is_count {
-        // count(Projection_with_nvalue) → ラベルグループ数
+        // count(Nest_with_nvalue) → ラベルグループ数
         stmt.expr_as(Expr::cust("COUNT(*)"), Alias::new("scalar_value"));
     } else {
-        // sum/avg/max/min(Projection_with_nvalue) → nvalue の集約
+        // sum/avg/max/min(Nest_with_nvalue) → nvalue の集約
         let op = outer_arith_op.unwrap();
         let is_string = nvalue.is_string_type();
         stmt.expr_as(
@@ -486,7 +486,7 @@ fn build_agg_over_nvalue_projection(
 /// Count の引数ノードから、カウント対象のカラムと内部タグタイプを決定する。
 ///
 /// count の基本セマンティクス:
-/// - Projection (`extension:`) → 種類数: `COUNT(DISTINCT label_col)` + タグタイプ
+/// - Nest (`extension:`) → 種類数: `COUNT(DISTINCT label_col)` + タグタイプ
 /// - TypedTag (`extension:jpg`) → アイテム数: `COUNT(DISTINCT item_id)`
 ///
 /// 戻り値: `(count_col, Option<inner_tag_type>)`
@@ -526,7 +526,7 @@ fn build_count_nvalue_sql(
     let mut stmt = Query::select();
 
     if let Some(tag_type) = inner_tag_type {
-        // ── Projection Count: 種類数を数える ──
+        // ── Nest Count: 種類数を数える ──
         // JOIN して inner タグのラベルカラムで COUNT DISTINCT
         stmt.expr_as(
             Expr::col((Alias::new("proj"), proj_col)),
@@ -1094,7 +1094,7 @@ pub fn build_resolved_aggregation_sql(
     agg: &ResolvedAggregationNode,
     view: &str,
 ) -> SelectStatement {
-    // nvalue 付き Projection に対する集約の場合、nvalue を集約対象にする
+    // nvalue 付き Nest に対する集約の場合、nvalue を集約対象にする
     if let Some(nvalue_agg_sql) = build_agg_over_nvalue_projection(agg, view) {
         return nvalue_agg_sql;
     }
@@ -1259,7 +1259,7 @@ pub(crate) fn build_resolved_aggregation_match_sql(
 
     let condition = Expr::expr(agg_expr.clone()).binary(op_bin, rhs);
 
-    // 集計対象（Projection）がある場合、その型(type)自体で行を絞り込む必要がある
+    // 集計対象（Nest）がある場合、その型(type)自体で行を絞り込む必要がある
     let _target_type = match agg {
         ResolvedAggregationNode::Count(inner) => inner.get_projection(),
         ResolvedAggregationNode::Arithmetic { inner, .. } => {
@@ -1924,7 +1924,7 @@ pub fn build_fetch_items_sql(
 ) -> SelectStatement {
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
     // oneview との結合を行わず、集約計算結果だけをそのまま返す。
-    // ProjectionMatch / ProjectionProjectionMatch は tags カラムが必要なため
+    // NestMatch / NestNestMatch は tags カラムが必要なため
     // ここでは早期リターンせず、通常のタグパッキング処理に委ねる。
     match node {
         ResolvedNode::Aggregation(_)
@@ -2250,7 +2250,7 @@ pub fn build_fetch_label_groups_sql(
         .to_owned();
     with_clause.cte(picked_ids_cte);
 
-    // nvalue CTE: nvalue付きProjectionの場合、ラベルごとの集約値を計算
+    // nvalue CTE: nvalue付きNestの場合、ラベルごとの集約値を計算
     //
     // OR クエリの場合は nvalue 条件の適用をスキップする。
     // OR の各部分が異なる nvalue 条件を持つ場合、先頭の条件のみを取得した
@@ -2297,7 +2297,7 @@ pub fn build_fetch_label_groups_sql(
     // Note: has_nvalue の生成時に既に !is_or_query が考慮されているため has_nvalue をそのまま使用。
     let must_filter_by_nvalue = has_nvalue;
 
-    // Calculation 投影の検出: Projection(Calculation(...)) の場合は
+    // Calculation 投影の検出: Nest(Calculation(...)) の場合は
     // 算術式を事前計算する computed CTE を挿入する
     let proj_operand = resolver.resolved_query.get_projection_operand();
     let calc_node = match proj_operand {
@@ -2666,13 +2666,13 @@ fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
     q
 }
 
-fn build_merged_projection_match_sql(
+fn build_merged_nest_match_sql(
     operand: &crate::query::lens_resolver::ResolvedOperand,
-    matches: &[crate::query::lens_resolver::ProjectionMatchCondition],
+    matches: &[crate::query::lens_resolver::NestMatchCondition],
     is_or: bool,
     view: &str,
 ) -> SelectStatement {
-    // 1. Projection operand base query setup
+    // 1. Nest operand base query setup
     let (proj_col, tag_type_opt) = match operand {
         crate::query::lens_resolver::ResolvedOperand::TagRef {
             storage,
@@ -2728,10 +2728,8 @@ fn build_merged_projection_match_sql(
         let right_expr = build_merged_nvalue_agg_expr(&cond.right, "c", view);
 
         let cmp_op = match cond.op {
-            crate::query::lens_resolver::ProjectionOp::Comparison(op) => op,
-            _ => panic!(
-                "Expected ComparisonOp for MergedProjectionMatch condition"
-            ),
+            crate::query::lens_resolver::NestMatchOp::Comparison(op) => op,
+            _ => panic!("Expected ComparisonOp for MergedNestMatch condition"),
         };
         let bin_op = to_bin_op(cmp_op);
 
@@ -3764,7 +3762,7 @@ mod tests {
         use sea_query::PostgresQueryBuilder;
 
         // SUM(size) inside Aggregation with Filter(project:ttfm)
-        // AggregationNode::Arithmetic { op: Sum, inner: And(Projection, Filter) }
+        // AggregationNode::Arithmetic { op: Sum, inner: And(Nest, Filter) }
         let agg = ResolvedAggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
             inner: Box::new(ResolvedNode::And(vec![
@@ -4004,7 +4002,7 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use sea_query::PostgresQueryBuilder;
 
-        // parentdir: &: count(extension:jpg) → nvalue付きProjection
+        // parentdir: &: count(extension:jpg) → nvalue付きNest
         let resolver =
             Resolver::new("parentdir: &: count(extension:jpg)").unwrap();
         let proj_type =
@@ -4050,7 +4048,7 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use sea_query::PostgresQueryBuilder;
 
-        // parentdir: &: sum(size:) → nvalue付きProjection (Arithmetic)
+        // parentdir: &: sum(size:) → nvalue付きNest (Arithmetic)
         let resolver = Resolver::new("parentdir: &: sum(size:)").unwrap();
         let proj_type =
             resolver.get_projection().expect("Should have projection");

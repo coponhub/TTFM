@@ -18,7 +18,7 @@ fn test_full_resolution() {
 }
 
 /// Binder Error 再現テスト:
-/// Calculation nvalue を含む ProjectionMatch の表示用SQL
+/// Calculation nvalue を含む NestMatch の表示用SQL
 /// (build_fetch_label_groups_sql) で HAVING が不正に適用され
 /// Binder Error が発生する問題を検証する。
 ///
@@ -100,7 +100,7 @@ fn test_calculation_nvalue_label_groups() {
     let resolver = Resolver::new(q).unwrap();
 
     // 1. アイテム取得パスの検証
-    //    (build_merged_projection_match_sql 経由)
+    //    (build_merged_nest_match_sql 経由)
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let plan = fetcher.pick(None, None).unwrap();
 

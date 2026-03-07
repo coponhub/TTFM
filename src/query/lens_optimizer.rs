@@ -1,5 +1,5 @@
 use crate::query::lens_resolver::{
-    ProjectionMatchCondition, ProjectionOp, ResolvedAggregationNode,
+    NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
 };
 use crate::query::{ResolvedNode, ResolvedOperand};
 
@@ -9,7 +9,7 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
         ResolvedNode::And(children) => {
             let mut optimized_children: Vec<ResolvedNode> =
                 children.into_iter().map(optimize).collect();
-            merge_projection_matches(&mut optimized_children, false);
+            merge_nest_matches(&mut optimized_children, false);
             if optimized_children.len() == 1 {
                 optimized_children.pop().unwrap()
             } else {
@@ -21,7 +21,7 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
                 children.into_iter().map(optimize).collect();
             // DuckDB has a bug evaluating `HAVING A OR B` when A or B contains an `IN` subquery with `INTERSECT`.
             // By NOT merging ORs, it falls back to UNION which works perfectly.
-            // merge_projection_matches(&mut optimized_children, true);
+            // merge_nest_matches(&mut optimized_children, true);
             if optimized_children.len() == 1 {
                 optimized_children.pop().unwrap()
             } else {
@@ -35,7 +35,7 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
         ResolvedNode::Complement(c) => {
             ResolvedNode::Complement(Box::new(optimize(*c)))
         }
-        ResolvedNode::ProjectionProjectionMatch {
+        ResolvedNode::NestNestMatch {
             left_operand,
             left_nvalue,
             left_context,
@@ -45,12 +45,12 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             right_context,
         } if left_operand == right_operand
             && left_context == right_context
-            && matches!(op, ProjectionOp::Comparison(_)) =>
+            && matches!(op, NestMatchOp::Comparison(_)) =>
         {
-            // Convert self-comparing ProjectionProjectionMatch into a MergedProjectionMatch
-            ResolvedNode::MergedProjectionMatch {
+            // Convert self-comparing NestNestMatch into a MergedNestMatch
+            ResolvedNode::MergedNestMatch {
                 operand: left_operand,
-                matches: vec![ProjectionMatchCondition {
+                matches: vec![NestMatchCondition {
                     nvalue: left_nvalue,
                     op,
                     right: right_nvalue,
@@ -93,24 +93,22 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             storage,
             sql_type,
         },
-        ResolvedNode::ProjectionMatch {
+        ResolvedNode::NestMatch {
             operand,
             nvalue,
             op,
             label,
             context,
-        } if nvalue.contains_aggregation() => {
-            ResolvedNode::MergedProjectionMatch {
-                operand,
-                matches: vec![ProjectionMatchCondition {
-                    nvalue,
-                    op: ProjectionOp::Comparison(op),
-                    right: ResolvedOperand::Literal(label),
-                    context,
-                }],
-                is_or: false,
-            }
-        }
+        } if nvalue.contains_aggregation() => ResolvedNode::MergedNestMatch {
+            operand,
+            matches: vec![NestMatchCondition {
+                nvalue,
+                op: NestMatchOp::Comparison(op),
+                right: ResolvedOperand::Literal(label),
+                context,
+            }],
+            is_or: false,
+        },
         _ => node,
     }
 }
@@ -165,30 +163,30 @@ fn flatten_aggregation(
     }
 }
 
-fn merge_projection_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
-    // We will group ProjectionMatch nodes by (operand, context)
+fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
+    // We will group NestMatch nodes by (operand, context)
     // To use them as hash keys, we could derive Hash or just use a O(N^2) search since N is usually small.
     // Let's use a simple O(N^2) grouping approach to avoid requiring Hash trait on AST.
     let mut groups: Vec<(
         crate::query::ResolvedOperand,
         Option<Box<ResolvedNode>>,
-        Vec<ProjectionMatchCondition>,
+        Vec<NestMatchCondition>,
     )> = Vec::new();
 
     let mut remaining = Vec::new();
 
     for child in children.drain(..) {
         match child {
-            ResolvedNode::ProjectionMatch {
+            ResolvedNode::NestMatch {
                 operand,
                 nvalue,
                 op,
                 label,
                 context,
             } => {
-                let cond = ProjectionMatchCondition {
+                let cond = NestMatchCondition {
                     nvalue,
-                    op: ProjectionOp::Comparison(op),
+                    op: NestMatchOp::Comparison(op),
                     right: crate::query::ResolvedOperand::Literal(label),
                     context: context.clone(),
                 };
@@ -206,13 +204,13 @@ fn merge_projection_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                     groups.push((operand, context, vec![cond]));
                 }
             }
-            ResolvedNode::MergedProjectionMatch {
+            ResolvedNode::MergedNestMatch {
                 operand,
                 matches,
                 is_or: child_is_or,
             } if child_is_or == is_or || matches.len() == 1 => {
                 // すでにマージされているが、同じレベル (AND/OR) かつ operand が同じならさらにマージ可能
-                // MergedProjectionMatch の各 condition は自身の context を持つが、
+                // MergedNestMatch の各 condition は自身の context を持つが、
                 let mut found = false;
                 // Contextが同じ場合のみマージ可能
                 let matches_context =
@@ -236,31 +234,31 @@ fn merge_projection_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
     // Now reconstruct the children vector
     for (operand, _context, matches) in groups {
         if matches.len() > 1 {
-            remaining.push(ResolvedNode::MergedProjectionMatch {
+            remaining.push(ResolvedNode::MergedNestMatch {
                 operand,
                 matches,
                 is_or,
             });
         } else {
-            // Just one match, convert back to ProjectionMatch to avoid unnecessary merging
+            // Just one match, convert back to NestMatch to avoid unnecessary merging
             let cond = matches
                 .into_iter()
                 .next()
                 .expect("matches should have at least one element");
-            let ProjectionOp::Comparison(op) = cond.op else {
+            let NestMatchOp::Comparison(op) = cond.op else {
                 panic!(
-                    "Expected ComparisonOp for single ProjectionMatch, got: {:?}",
+                    "Expected ComparisonOp for single NestMatch, got: {:?}",
                     cond.op
                 );
             };
             let crate::query::ResolvedOperand::Literal(label) = cond.right
             else {
                 panic!(
-                    "Expected Literal for single ProjectionMatch, got: {:?}",
+                    "Expected Literal for single NestMatch, got: {:?}",
                     cond.right
                 );
             };
-            remaining.push(ResolvedNode::ProjectionMatch {
+            remaining.push(ResolvedNode::NestMatch {
                 operand,
                 nvalue: cond.nvalue,
                 op,
@@ -285,11 +283,11 @@ mod tests {
         let query_str = "parentdir: &: (count(ext:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
         let resolved = Resolver::new(query_str).unwrap().resolved_query;
 
-        // At this point `resolved` is an `And` node containing two ProjectionMatches.
+        // At this point `resolved` is an `And` node containing two NestMatches.
         let optimized = optimize(resolved);
 
         match optimized {
-            ResolvedNode::MergedProjectionMatch {
+            ResolvedNode::MergedNestMatch {
                 operand,
                 matches,
                 is_or,
@@ -308,10 +306,9 @@ mod tests {
                     ),
                 }
             }
-            _ => panic!(
-                "Expected MergedProjectionMatch as root, got: {:?}",
-                optimized
-            ),
+            _ => {
+                panic!("Expected MergedNestMatch as root, got: {:?}", optimized)
+            }
         }
     }
 
@@ -331,7 +328,7 @@ mod tests {
                 );
                 for child in children {
                     match child {
-                        ResolvedNode::MergedProjectionMatch {
+                        ResolvedNode::MergedNestMatch {
                             operand,
                             matches,
                             is_or,
@@ -345,7 +342,7 @@ mod tests {
                                 _ => panic!("Expected TagRef(parentdir) as operand, got: {:?}", operand),
                             }
                         }
-                        _ => panic!("Expected children to be MergedProjectionMatch, got: {:?}", child),
+                        _ => panic!("Expected children to be MergedNestMatch, got: {:?}", child),
                     }
                 }
             }
@@ -365,10 +362,10 @@ mod tests {
 
         let proj_match = nodes
             .into_iter()
-            .find(|n| matches!(n, ResolvedNode::ProjectionMatch { .. }))
-            .expect("Should contain a ProjectionMatch");
+            .find(|n| matches!(n, ResolvedNode::NestMatch { .. }))
+            .expect("Should contain a NestMatch");
 
-        let ResolvedNode::ProjectionMatch {
+        let ResolvedNode::NestMatch {
             context: Some(ctx), ..
         } = proj_match
         else {
@@ -425,14 +422,14 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_comparison() {
         // ((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))
-        // 同一キー (parentdir) の ProjectionProjectionMatch → MergedProjectionMatch に変換されること
+        // 同一キー (parentdir) の NestNestMatch → MergedNestMatch に変換されること
         let query_str =
             "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
         let resolved = Resolver::new(query_str).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
-            ResolvedNode::MergedProjectionMatch {
+            ResolvedNode::MergedNestMatch {
                 operand,
                 matches,
                 is_or,
@@ -454,26 +451,26 @@ mod tests {
                 }
                 // op は Comparison であること
                 assert!(
-                    matches!(matches[0].op, ProjectionOp::Comparison(_)),
+                    matches!(matches[0].op, NestMatchOp::Comparison(_)),
                     "Condition op should be Comparison, got: {:?}",
                     matches[0].op
                 );
             }
-            _ => panic!("Expected MergedProjectionMatch, got: {:?}", optimized),
+            _ => panic!("Expected MergedNestMatch, got: {:?}", optimized),
         }
     }
 
     #[test]
     fn test_optimize_same_key_merge_arithmetic() {
         // (parentdir: &: count(ext:rs)) / (parentdir: &: count()) :> 100
-        // 同一キーの算術演算 nvalue → Calculation を持つ MergedProjectionMatch に変換されること
+        // 同一キーの算術演算 nvalue → Calculation を持つ MergedNestMatch に変換されること
         let query_str =
             "((parentdir: &: count(ext:rs)) / (parentdir: &: count())) :> 100";
         let resolved = Resolver::new(query_str).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
-            ResolvedNode::MergedProjectionMatch {
+            ResolvedNode::MergedNestMatch {
                 operand,
                 matches,
                 is_or,
@@ -498,7 +495,7 @@ mod tests {
                     matches[0].nvalue
                 );
             }
-            _ => panic!("Expected MergedProjectionMatch, got: {:?}", optimized),
+            _ => panic!("Expected MergedNestMatch, got: {:?}", optimized),
         }
     }
 
@@ -510,10 +507,10 @@ mod tests {
         let resolved = Resolver::new(query_str).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
-        // MergedProjectionMatch にはなってはいけない
+        // MergedNestMatch にはなってはいけない
         assert!(
-            !matches!(optimized, ResolvedNode::MergedProjectionMatch { .. }),
-            "Different keys should NOT be merged into MergedProjectionMatch"
+            !matches!(optimized, ResolvedNode::MergedNestMatch { .. }),
+            "Different keys should NOT be merged into MergedNestMatch"
         );
         // And として維持されること
         assert!(
@@ -532,7 +529,7 @@ mod tests {
         let optimized = optimize(resolved);
 
         assert!(
-            !matches!(optimized, ResolvedNode::MergedProjectionMatch { .. }),
+            !matches!(optimized, ResolvedNode::MergedNestMatch { .. }),
             "Different simple keys (parentdir vs stem) should NOT be merged"
         );
         assert!(
