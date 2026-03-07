@@ -7,6 +7,36 @@
 /// - Phase 4: SQL生成・Fetch — nvalue付きProjectionの検索結果
 use tempfile::tempdir;
 use ttfm::FileManager;
+use ttfm::SearchOptions;
+
+#[test]
+fn test_mixed_key_calculation() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+
+    // dir1 に 2つ rs ファイル
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "rust")?;
+    std::fs::write(dir1.join("b.rs"), "rust")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // (parentdir: &: count()) + (extension: &: count())
+    let query = "(parentdir: &: count()) + (extension: &: count())";
+
+    // 異種キー演算がサポートされていることを確認
+    let res = fm.search(query, SearchOptions::default());
+
+    assert!(res.is_ok(), "Mixed key calculation should be supported in Phase 2, but currently fails: {:?}", res.err());
+
+    let results = res?;
+    assert!(!results.results.is_empty(), "Results should not be empty");
+    Ok(())
+}
 
 // ──────────────────────────────────────────────
 // Phase 1: パース

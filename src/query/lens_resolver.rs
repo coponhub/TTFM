@@ -1157,30 +1157,39 @@ fn resolve_projection_arithmetic(
     calc: crate::query::ast::CalculationNode,
 ) -> Result<ResolvedNode> {
     let arith_op = calc.op;
-    let (common_key, left_nv, right_nv) = if let Ok((k, l_nv)) =
-        resolve_nest_operand_extract_key(lens, calc.left.clone())
-    {
-        let r_nv = resolve_nest_calc_operand(lens, calc.right, &k)?;
-        (k, l_nv, r_nv)
-    } else if let Ok((k, r_nv)) =
-        resolve_nest_operand_extract_key(lens, calc.right.clone())
-    {
-        let l_nv = resolve_nest_calc_operand(lens, calc.left, &k)?;
-        (k, l_nv, r_nv)
-    } else {
-        bail!("Could not extract GROUP BY key from either side of arithmetic expression");
-    };
+    let (left_key, left_nv) =
+        resolve_nest_operand_extract_key(lens, calc.left)?;
+    let (right_key, right_nv) =
+        resolve_nest_operand_extract_key(lens, calc.right)?;
 
     validate_calculation_types(&left_nv, &right_nv, arith_op)?;
-    Ok(ResolvedNode::NestNestMatch {
-        left_operand: common_key.clone(),
-        left_nvalue: left_nv,
-        left_context: None,
-        op: NestMatchOp::Arithmetic(arith_op),
-        right_operand: common_key,
-        right_nvalue: right_nv,
-        right_context: None,
-    })
+
+    let final_left_key = left_key.clone().or_else(|| right_key.clone());
+    let final_right_key = right_key.or(left_key);
+
+    match (final_left_key, final_right_key) {
+        (Some(lk), Some(rk)) if lk == rk => Ok(ResolvedNode::Nest {
+            keys: vec![lk],
+            nvalue: Some(ResolvedOperand::Calculation(Box::new(
+                ResolvedCalculationNode {
+                    left: left_nv,
+                    op: arith_op,
+                    right: right_nv,
+                },
+            ))),
+            context: None,
+        }),
+        (Some(lk), Some(rk)) => Ok(ResolvedNode::NestNestMatch {
+            left_operand: lk,
+            left_nvalue: left_nv,
+            left_context: None,
+            op: NestMatchOp::Arithmetic(arith_op),
+            right_operand: rk,
+            right_nvalue: right_nv,
+            right_context: None,
+        }),
+        _ => bail!("Could not extract key from either side of arithmetic Nest"),
+    }
 }
 
 /// Operand を解決し、GROUP BY キー (operand) と nvalue を返す。
@@ -1189,7 +1198,7 @@ fn resolve_projection_arithmetic(
 fn resolve_nest_operand_extract_key(
     lens: &Lens,
     operand: Operand,
-) -> Result<(ResolvedOperand, ResolvedOperand)> {
+) -> Result<(Option<ResolvedOperand>, ResolvedOperand)> {
     match operand {
         Operand::Query(node) => {
             let resolved = resolve_query_node(lens, *node)?;
@@ -1198,7 +1207,7 @@ fn resolve_nest_operand_extract_key(
                     mut keys,
                     nvalue: Some(nv),
                     ..
-                } => Ok((keys.remove(0), nv)),
+                } => Ok((Some(keys.remove(0)), nv)),
                 _ => bail!(
                     "Arithmetic Nest operand must resolve to Nest with nvalue"
                 ),
@@ -1206,20 +1215,12 @@ fn resolve_nest_operand_extract_key(
         }
         Operand::Calculation(calc) => {
             let arith_op = calc.op;
-            // 左辺または右辺からキーの抽出を試みる
-            let (key, left_nv, right_nv) = if let Ok((k, l_nv)) =
-                resolve_nest_operand_extract_key(lens, calc.left.clone())
-            {
-                let r_nv = resolve_nest_calc_operand(lens, calc.right, &k)?;
-                (k, l_nv, r_nv)
-            } else if let Ok((k, r_nv)) =
-                resolve_nest_operand_extract_key(lens, calc.right.clone())
-            {
-                let l_nv = resolve_nest_calc_operand(lens, calc.left, &k)?;
-                (k, l_nv, r_nv)
-            } else {
-                bail!("Could not extract key from either side of calculation");
-            };
+            let (left_key, left_nv) =
+                resolve_nest_operand_extract_key(lens, calc.left)?;
+            let (right_key, right_nv) =
+                resolve_nest_operand_extract_key(lens, calc.right)?;
+
+            let key = left_key.or(right_key);
 
             validate_calculation_types(&left_nv, &right_nv, arith_op)?;
             let combined = ResolvedOperand::Calculation(Box::new(
@@ -1231,56 +1232,10 @@ fn resolve_nest_operand_extract_key(
             ));
             Ok((key, combined))
         }
-        Operand::Literal(_) => {
-            bail!("Literal does not contain a key");
-        }
-        _ => bail!("Expected Query(Nest) or Calculation in arithmetic Nest"),
-    }
-}
-
-/// Nest 算術式のオペランドを解決する（キーは既知）。
-fn resolve_nest_calc_operand(
-    lens: &Lens,
-    operand: Operand,
-    expected_key: &ResolvedOperand,
-) -> Result<ResolvedOperand> {
-    match operand {
-        Operand::Query(node) => {
-            let resolved = resolve_query_node(lens, *node)?;
-            match resolved {
-                ResolvedNode::Nest {
-                    mut keys,
-                    nvalue: Some(nv),
-                    ..
-                } => {
-                    let key = keys.remove(0);
-                    if key != *expected_key {
-                        bail!("Mismatched GROUP BY keys in arithmetic Nest expression");
-                    }
-                    Ok(nv)
-                }
-                _ => bail!(
-                    "Arithmetic Nest operand must resolve to Nest with nvalue"
-                ),
-            }
-        }
-        Operand::Calculation(calc) => {
-            let arith_op = calc.op;
-            let left =
-                resolve_nest_calc_operand(lens, calc.left, expected_key)?;
-            let right =
-                resolve_nest_calc_operand(lens, calc.right, expected_key)?;
-            validate_calculation_types(&left, &right, arith_op)?;
-            Ok(ResolvedOperand::Calculation(Box::new(
-                ResolvedCalculationNode {
-                    left,
-                    op: arith_op,
-                    right,
-                },
-            )))
-        }
-        Operand::Literal(l) => Ok(ResolvedOperand::Literal(l)),
-        _ => bail!("Unexpected operand type in arithmetic Nest expression"),
+        Operand::Literal(l) => Ok((None, ResolvedOperand::Literal(l))),
+        _ => bail!(
+            "Expected Query(Nest), Calculation or Literal in arithmetic Nest"
+        ),
     }
 }
 

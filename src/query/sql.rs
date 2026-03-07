@@ -290,20 +290,20 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 nvalue,
                 context.as_deref(),
                 view,
+                false, // include_item_id: Simple NestMatch only needs group-level rows
             );
 
             let bin_op = to_bin_op(*comparison_op);
             let label_expr = label_to_unit_aware_expr(label);
             let cond =
                 Expr::col(Alias::new("nvalue")).binary(bin_op, label_expr);
-            // Calculation の nvalue は GROUP BY なしのサブクエリ包装のため
-            // HAVING ではなく WHERE を使用
-            if matches!(nvalue, ResolvedOperand::Calculation(_)) {
-                sub.and_where(cond);
-            } else {
+            // item_id でのラップを行っていないため、集約した結果へのフィルタとなる。
+            // 物理カラムなら WHERE, 集約なら HAVING。
+            if nvalue.contains_aggregation() {
                 sub.and_having(cond);
+            } else {
+                sub.and_where(cond);
             }
-
             // プロジェクションカラム
             let proj_col = match op.get_storage() {
                 Some(StorageMapping::RowTag { column, .. }) => *column,
@@ -341,12 +341,14 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                     left_nvalue,
                     left_context.as_deref(),
                     view,
+                    true, // include_item_id: 不同キー同士の結合には item_id が必要
                 );
                 let sub_r = build_nvalue_standalone_subquery(
                     right_operand,
                     right_nvalue,
                     right_context.as_deref(),
                     view,
+                    true, // include_item_id: 同上
                 );
 
                 // JOIN して比較
@@ -358,11 +360,8 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                         sea_query::JoinType::InnerJoin,
                         sub_r,
                         Alias::new("R"),
-                        Expr::col((Alias::new("L"), Alias::new("group_label")))
-                            .eq(Expr::col((
-                                Alias::new("R"),
-                                Alias::new("group_label"),
-                            ))),
+                        Expr::col((Alias::new("L"), Col::ItemId))
+                            .eq(Expr::col((Alias::new("R"), Col::ItemId))),
                     )
                     .and_where(
                         Expr::col((Alias::new("L"), Alias::new("nvalue")))
@@ -445,25 +444,36 @@ fn build_agg_over_nvalue_projection(
     let context = merged_context.as_deref();
 
     // nvalue サブクエリを生成（picked_ids を使わないスタンドアロン版）
-    let mut nvalue_sub =
-        build_nvalue_standalone_subquery(&proj_operand, &nvalue, context, view);
+    // 混合キー対応のため item-level (true) で取得し、後でグループ化する。
+    let mut nvalue_sub = build_nvalue_standalone_subquery(
+        &proj_operand,
+        &nvalue,
+        context,
+        view,
+        true,
+    );
 
     // nvalue_condition がある場合、フィルタ条件を追加
-    // Calculation の nvalue は GROUP BY なしのサブクエリ包装のため HAVING ではなく WHERE を使用
     if let Some((op, value)) = nvalue_condition {
         let bin_op = to_bin_op(*op);
         let val = label_to_simple_expr(value);
         let cond = Expr::col(Alias::new("nvalue")).binary(bin_op, val);
-        if matches!(&nvalue, ResolvedOperand::Calculation(_)) {
-            nvalue_sub.and_where(cond);
-        } else {
-            nvalue_sub.and_having(cond);
-        }
+        // wrap_with_item_id されているため常に WHERE
+        nvalue_sub.and_where(cond);
     }
+
+    // group_label と nvalue のペアで投影をマージ（重複排除）
+    let deduped = Query::select()
+        .column(Alias::new("group_label"))
+        .column(Alias::new("nvalue"))
+        .from_subquery(nvalue_sub, Alias::new("nv_items"))
+        .group_by_col(Alias::new("group_label"))
+        .group_by_col(Alias::new("nvalue"))
+        .to_owned();
 
     let mut stmt = Query::select();
     if outer_is_count {
-        // count(Nest_with_nvalue) → ラベルグループ数
+        // count(Nest_with_nvalue) → ラベル＋評価値ペアの数
         stmt.expr_as(Expr::cust("COUNT(*)"), Alias::new("scalar_value"));
     } else {
         // sum/avg/max/min(Nest_with_nvalue) → nvalue の集約
@@ -478,8 +488,7 @@ fn build_agg_over_nvalue_projection(
             Alias::new("scalar_value"),
         );
     }
-    stmt.from_subquery(nvalue_sub, Alias::new("nvalue_agg"));
-
+    stmt.from_subquery(deduped, Alias::new("nv_groups"));
     Some(stmt)
 }
 
@@ -513,6 +522,35 @@ fn resolve_count_target(inner: &ResolvedNode) -> (Col, Option<String>) {
 /// - `context`: Nest 左辺のコンテキストフィルタ
 /// - `item_scope`: アイテムのスコープを制限するサブクエリ（CTE版: picked_ids, standalone版: None）
 /// - `view`: ビュー名
+fn wrap_with_item_id(
+    agg_sub: SelectStatement,
+    proj_col: Col,
+    proj_tag_type: Option<&str>,
+    view: &str,
+) -> SelectStatement {
+    let mut wrapped = Query::select();
+    wrapped
+        .column((Alias::new("view"), Col::ItemId))
+        .expr_as(
+            Expr::col((Alias::new("view"), proj_col)),
+            Alias::new("group_label"),
+        )
+        .column((Alias::new("agg"), Alias::new("nvalue")))
+        .from_as(Alias::new(view), Alias::new("view"))
+        .join_subquery(
+            sea_query::JoinType::InnerJoin,
+            agg_sub,
+            Alias::new("agg"),
+            Expr::col((Alias::new("view"), proj_col))
+                .eq(Expr::col((Alias::new("agg"), Alias::new("group_label")))),
+        );
+    if let Some(tag_type) = proj_tag_type {
+        wrapped
+            .and_where(Expr::col((Alias::new("view"), Col::Type)).eq(tag_type));
+    }
+    wrapped
+}
+
 fn build_count_nvalue_sql(
     proj_col: Col,
     proj_tag_type: Option<&str>,
@@ -520,6 +558,7 @@ fn build_count_nvalue_sql(
     context: Option<&ResolvedNode>,
     item_scope: Option<SelectStatement>,
     view: &str,
+    include_item_id: bool,
 ) -> SelectStatement {
     let (count_col, inner_tag_type) = resolve_count_target(inner);
 
@@ -634,7 +673,11 @@ fn build_count_nvalue_sql(
         stmt.group_by_col(proj_col);
     }
 
-    stmt
+    if include_item_id {
+        wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
+    } else {
+        stmt
+    }
 }
 
 fn get_required_row_tags(node: &ResolvedNode) -> Vec<String> {
@@ -768,7 +811,7 @@ pub(crate) fn build_merged_nvalue_agg_expr(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let (inner_tag, inner_filter, operand) = inner.extract_agg_parts();
+            let (inner_tag, inner_filter, _operand) = inner.extract_agg_parts();
 
             let val_expr: SimpleExpr = if is_string {
                 Expr::col((Alias::new(tbl_alias), Col::LabelStr)).into()
@@ -862,6 +905,7 @@ fn build_nvalue_standalone_subquery(
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
     view: &str,
+    include_item_id: bool,
 ) -> SelectStatement {
     // 物理カラム情報の抽出
     let (proj_col, proj_tag_type) = match proj_operand {
@@ -884,13 +928,14 @@ fn build_nvalue_standalone_subquery(
                 context,
                 None, // standalone: no item_scope
                 view,
+                include_item_id,
             )
         }
         ResolvedOperand::Aggregation(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let (_, _, operand) = inner.extract_agg_parts();
+            let (_, _, _operand) = inner.extract_agg_parts();
 
             let deduped = build_deduplicated_agg_subquery(inner, view, context);
 
@@ -925,7 +970,12 @@ fn build_nvalue_standalone_subquery(
             }
 
             stmt.group_by_col((Alias::new("proj"), proj_col));
-            stmt
+
+            if include_item_id {
+                wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
+            } else {
+                stmt
+            }
         }
         ResolvedOperand::Literal(label) => {
             let val = label_to_simple_expr(label);
@@ -938,8 +988,15 @@ fn build_nvalue_standalone_subquery(
                 stmt.and_where(Expr::col(Col::Type).eq(tag_type));
             }
 
-            stmt.group_by_col(proj_col);
-            stmt
+            if include_item_id {
+                stmt.column(Col::ItemId);
+                stmt.group_by_col(proj_col);
+                stmt.group_by_col(Col::ItemId);
+                stmt
+            } else {
+                stmt.group_by_col(proj_col);
+                stmt
+            }
         }
         ResolvedOperand::Calculation(calc) => {
             let sub_l = build_nvalue_standalone_subquery(
@@ -947,20 +1004,20 @@ fn build_nvalue_standalone_subquery(
                 &calc.left,
                 context,
                 view,
+                include_item_id,
             );
             let sub_r = build_nvalue_standalone_subquery(
                 proj_operand,
                 &calc.right,
                 context,
                 view,
+                include_item_id,
             );
 
             let is_string =
                 calc.left.is_string_type() && calc.right.is_string_type();
 
             // NULL 伝播防止のため RIGHT 側の nvalue を COALESCE で補完する。
-            // count(extension:rs) など、マッチなしのグループは R に行が存在しないため
-            // LEFT JOIN + COALESCE(R.nvalue, default) でそのグループを保持する。
             let r_nvalue_expr: SimpleExpr = if is_string {
                 Func::coalesce([
                     Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
@@ -990,23 +1047,43 @@ fn build_nvalue_standalone_subquery(
                 Alias::new("nvalue"),
             );
 
+            if include_item_id {
+                stmt.column((Alias::new("L"), Col::ItemId));
+            }
+
             stmt.from_subquery(sub_l, Alias::new("L"));
-            stmt.join_subquery(
-                sea_query::JoinType::LeftJoin,
-                sub_r,
-                Alias::new("R"),
-                Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
-                    Expr::col((Alias::new("R"), Alias::new("group_label"))),
-                ),
-            );
-            // 曖昧性排除: Calculation JOIN をサブクエリで包み、
-            // 後続の HAVING 等で "nvalue" を一意に参照できるようにする。
-            let sub = stmt.to_owned();
-            Query::select()
-                .column(Alias::new("group_label"))
-                .column(Alias::new("nvalue"))
-                .from_subquery(sub, Alias::new("calc_sub"))
-                .to_owned()
+
+            if include_item_id {
+                stmt.join_subquery(
+                    sea_query::JoinType::LeftJoin,
+                    sub_r,
+                    Alias::new("R"),
+                    Expr::col((Alias::new("L"), Col::ItemId))
+                        .eq(Expr::col((Alias::new("R"), Col::ItemId))),
+                );
+            } else {
+                stmt.join_subquery(
+                    sea_query::JoinType::LeftJoin,
+                    sub_r,
+                    Alias::new("R"),
+                    Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
+                        Expr::col((Alias::new("R"), Alias::new("group_label"))),
+                    ),
+                );
+            }
+
+            if include_item_id {
+                // Calculation を再ラップして曖昧性を排除
+                let sub = stmt.to_owned();
+                Query::select()
+                    .column(Alias::new("group_label"))
+                    .column(Alias::new("nvalue"))
+                    .column(Col::ItemId)
+                    .from_subquery(sub, Alias::new("calc_sub"))
+                    .to_owned()
+            } else {
+                stmt
+            }
         }
         ResolvedOperand::TagRef {
             storage: nval_storage,
@@ -1085,7 +1162,12 @@ fn build_nvalue_standalone_subquery(
                 );
             }
             stmt.group_by_col((Alias::new("proj"), proj_col));
-            stmt
+
+            if include_item_id {
+                wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
+            } else {
+                stmt
+            }
         }
     }
 }
@@ -2034,14 +2116,15 @@ fn build_nvalue_cte(
         _ => return SelectStatement::default(),
     };
 
-    match nvalue {
+    let proj_tag_type =
+        if let StorageMapping::RowTag { tag_type, .. } = &proj_storage {
+            Some(tag_type.as_str())
+        } else {
+            None
+        };
+
+    let inner_q = match nvalue {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
-            let proj_tag_type = match proj_storage {
-                StorageMapping::RowTag { tag_type, .. } => {
-                    Some(tag_type.as_str())
-                }
-                _ => None,
-            };
             build_count_nvalue_sql(
                 proj_col,
                 proj_tag_type,
@@ -2054,15 +2137,13 @@ fn build_nvalue_cte(
                         .to_owned(),
                 ),
                 view,
+                true, // include_item_id
             )
         }
         ResolvedOperand::Aggregation(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let _ = inner.extract_agg_parts();
-
-            // Dedup subquery for values (item_id, val)
             let deduped = build_deduplicated_agg_subquery(inner, view, context);
 
             let mut stmt = Query::select();
@@ -2080,10 +2161,7 @@ fn build_nvalue_cte(
                 Alias::new("nvalue"),
             );
 
-            // FROM oneview AS proj
             stmt.from_as(Alias::new(view), Alias::new("proj"));
-
-            // JOIN deduped ON proj.item_id = deduped.item_id
             stmt.join_subquery(
                 sea_query::JoinType::InnerJoin,
                 deduped,
@@ -2091,14 +2169,6 @@ fn build_nvalue_cte(
                 Expr::col((Alias::new("proj"), Col::ItemId))
                     .equals((Alias::new("deduped"), Col::ItemId)),
             );
-
-            // WHERE proj.type = proj_tag_type
-            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
-                stmt.and_where(
-                    Expr::col((Alias::new("proj"), Col::Type))
-                        .eq(tag_type.as_str()),
-                );
-            }
 
             // AND proj.item_id IN picked_ids
             stmt.and_where(
@@ -2110,97 +2180,31 @@ fn build_nvalue_cte(
                 ),
             );
 
-            stmt.group_by_col((Alias::new("proj"), proj_col));
-
-            stmt
-        }
-        ResolvedOperand::Literal(label) => {
-            // スカラー nvalue: 全ラベルに固定値を付与
-            let val = label_to_simple_expr(label);
-            let mut stmt = Query::select();
-            stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
-            stmt.expr_as(val, Alias::new("nvalue"));
-            stmt.from(Alias::new(view));
-
-            if let StorageMapping::RowTag { tag_type, .. } = proj_storage {
-                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            if let Some(tag_type) = proj_tag_type {
+                stmt.and_where(
+                    Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type),
+                );
             }
-
-            stmt.and_where(
-                Expr::col(Col::ItemId).in_subquery(
-                    Query::select()
-                        .column(Col::ItemId)
-                        .from(Tbl::PickedIds)
-                        .to_owned(),
-                ),
-            );
-
-            stmt.group_by_col(proj_col);
-
-            stmt
+            stmt.group_by_col((Alias::new("proj"), proj_col));
+            wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
         }
-        ResolvedOperand::Calculation(calc) => {
-            let sub_l =
-                build_nvalue_cte(proj_operand, &calc.left, context, view);
-            let sub_r =
-                build_nvalue_cte(proj_operand, &calc.right, context, view);
+        _ => build_nvalue_standalone_subquery(
+            proj_operand,
+            nvalue,
+            context,
+            view,
+            true, // CTE 用には現状一貫性のために item-level で取得
+        ),
+    };
 
-            let is_string =
-                calc.left.is_string_type() && calc.right.is_string_type();
-
-            // NULL 伝播防止のため RIGHT 側の nvalue を COALESCE で補完する。
-            let r_nvalue_expr: SimpleExpr = if is_string {
-                Func::coalesce([
-                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
-                    Expr::val("").into(),
-                ])
-                .into()
-            } else {
-                Func::coalesce([
-                    Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
-                    Expr::val(0.0f64).into(),
-                ])
-                .into()
-            };
-
-            let mut stmt = Query::select();
-            stmt.expr_as(
-                Expr::col((Alias::new("L"), Alias::new("group_label"))),
-                Alias::new("group_label"),
-            );
-            stmt.expr_as(
-                apply_arithmetic_op(
-                    &calc.op,
-                    Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
-                    r_nvalue_expr,
-                    is_string,
-                ),
-                Alias::new("nvalue"),
-            );
-
-            stmt.from_subquery(sub_l, Alias::new("L"));
-            stmt.join_subquery(
-                sea_query::JoinType::LeftJoin,
-                sub_r,
-                Alias::new("R"),
-                Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
-                    Expr::col((Alias::new("R"), Alias::new("group_label"))),
-                ),
-            );
-            // 曖昧性排除: Calculation JOIN をサブクエリで包み、
-            // 後続の HAVING 等で "nvalue" を一意に参照できるようにする。
-            let sub = stmt.to_owned();
-            Query::select()
-                .column(Alias::new("group_label"))
-                .column(Alias::new("nvalue"))
-                .from_subquery(sub, Alias::new("calc_sub"))
-                .to_owned()
-        }
-        _ => {
-            // TODO: Calculation nvalue etc.
-            panic!("Unsupported nvalue type for CTE generation: {:?}", nvalue)
-        }
-    }
+    // CTE 用に最終的に (group_label, nvalue) 単位でマージする
+    Query::select()
+        .column(Alias::new("group_label"))
+        .column(Alias::new("nvalue"))
+        .from_subquery(inner_q, Alias::new("nv_items"))
+        .group_by_col(Alias::new("group_label"))
+        .group_by_col(Alias::new("nvalue"))
+        .to_owned()
 }
 
 /// Label を sea_query の SimpleExpr に変換するヘルパー
@@ -4174,6 +4178,7 @@ mod tests {
                 &nvalue,
                 resolver.resolved_query.get_context(),
                 "oneview",
+                false,
             );
             let sql_str = sql.to_string(PostgresQueryBuilder);
 
@@ -4283,6 +4288,7 @@ mod tests {
                 &nvalue,
                 resolver.resolved_query.get_context(),
                 "oneview",
+                false,
             );
             let sql_str = sql.to_string(PostgresQueryBuilder);
 

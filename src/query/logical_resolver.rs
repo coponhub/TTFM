@@ -225,60 +225,12 @@ fn validate_operand(
     }
 }
 
-/// オペランドから集計の基底となるキー構成（GROUP BY signature）を抽出します
-fn extract_group_by_signature(operand: &Operand) -> Option<String> {
-    match operand {
-        Operand::TypeRef(_) => None, // TypeRef は集計スコープを持たない（行レベルの値）
-        Operand::Query(q) => extract_query_signature(q),
-        Operand::Calculation(calc) => extract_group_by_signature(&calc.left)
-            .or_else(|| extract_group_by_signature(&calc.right)),
-        _ => None,
-    }
-}
-
-/// クエリノードから集計キー構成を抽出します
-fn extract_query_signature(node: &QueryNode) -> Option<String> {
-    match node {
-        QueryNode::Projection(op) => extract_group_by_signature(op),
-        QueryNode::Nest(nest) => {
-            // Nest の left が Projection(TypeRef) の場合は型名を直接取り出す。
-            // TypeRef が None を返すようになったため、間接参照では取得できない。
-            let left_sig = match nest.left.as_ref() {
-                QueryNode::Projection(Operand::TypeRef(tt)) => {
-                    Some(tt.as_str().to_string())
-                }
-                other => extract_query_signature(other),
-            }?;
-            match extract_query_signature(&nest.right) {
-                Some(right_sig) => {
-                    Some(format!("{} &: {}", left_sig, right_sig))
-                }
-                None => Some(left_sig),
-            }
-        }
-        _ => None,
-    }
-}
-
 /// 算術演算の型チェック（論理レベル）
-/// Any 型はスキーマに登録されていないカスタムタグを許容するために数値として扱う
+// Any 型はスキーマに登録されていないカスタムタグを許容するために数値として扱う
 pub fn validate_calculation(
     calc: &CalculationNode,
     schema: &impl LogicalSchema,
 ) -> Result<()> {
-    // キーの一致検証を追加
-    let left_key = extract_group_by_signature(&calc.left);
-    let right_key = extract_group_by_signature(&calc.right);
-
-    if let (Some(lk), Some(rk)) = (left_key, right_key) {
-        if lk != rk {
-            return Err(crate::query::error::mismatched_arithmetic_keys(
-                &lk, &rk,
-            )
-            .into());
-        }
-    }
-
     let left_type = infer_type(&calc.left, schema)?;
     let right_type = infer_type(&calc.right, schema)?;
 
@@ -1759,5 +1711,35 @@ mod tests {
             "フィルタなしの場合は Nest がそのまま返ること: {:?}",
             expanded
         );
+    }
+
+    #[test]
+    fn test_validate_calculation_mixed_keys() {
+        let lens = Lens::base_standard();
+        let calc = CalculationNode {
+            left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("parentdir", "foo"),
+                    ))),
+                )),
+            }))),
+            op: ArithmeticOp::Add,
+            right: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("extension"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("extension", "rs"),
+                    ))),
+                )),
+            }))),
+        };
+        // 異種キー演算が validate_calculation で許可されていることを確認
+        assert!(validate_calculation(&calc, &lens).is_ok());
     }
 }
