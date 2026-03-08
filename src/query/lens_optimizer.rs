@@ -36,20 +36,20 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             ResolvedNode::Complement(Box::new(optimize(*c)))
         }
         ResolvedNode::NestNestMatch {
-            left_operand,
+            left_keys,
             left_nvalue,
             left_context,
             op,
-            right_operand,
+            right_keys,
             right_nvalue,
             right_context,
-        } if left_operand == right_operand
+        } if left_keys == right_keys
             && left_context == right_context
             && matches!(op, NestMatchOp::Comparison(_)) =>
         {
             // Convert self-comparing NestNestMatch into a MergedNestMatch
             ResolvedNode::MergedNestMatch {
-                operand: left_operand,
+                keys: left_keys,
                 matches: vec![NestMatchCondition {
                     nvalue: left_nvalue,
                     op,
@@ -94,13 +94,13 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             sql_type,
         },
         ResolvedNode::NestMatch {
-            operand,
+            keys,
             nvalue,
             op,
             label,
             context,
         } if nvalue.contains_aggregation() => ResolvedNode::MergedNestMatch {
-            operand,
+            keys: keys.clone(),
             matches: vec![NestMatchCondition {
                 nvalue,
                 op: NestMatchOp::Comparison(op),
@@ -168,7 +168,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
     // To use them as hash keys, we could derive Hash or just use a O(N^2) search since N is usually small.
     // Let's use a simple O(N^2) grouping approach to avoid requiring Hash trait on AST.
     let mut groups: Vec<(
-        crate::query::ResolvedOperand,
+        Vec<crate::query::ResolvedOperand>,
         Option<Box<ResolvedNode>>,
         Vec<NestMatchCondition>,
     )> = Vec::new();
@@ -177,8 +177,55 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
 
     for child in children.drain(..) {
         match child {
+            ResolvedNode::NestNestMatch {
+                left_keys,
+                left_nvalue,
+                left_context,
+                op,
+                right_keys,
+                right_nvalue,
+                right_context,
+            } => {
+                // Convert NestNestMatch into a MergedNestMatch if it's not self-comparing
+                // (Self-comparing ones are handled in optimize function)
+                // Here we assume left_keys == right_keys and left_context == right_context
+                // If not, they cannot be merged into a single MergedNestMatch condition.
+                if left_keys == right_keys && left_context == right_context {
+                    let cond = NestMatchCondition {
+                        nvalue: left_nvalue,
+                        op,
+                        right: right_nvalue,
+                        context: left_context.clone(),
+                    };
+
+                    let mut found = false;
+                    for group in &mut groups {
+                        if group.0 == left_keys && group.1 == left_context {
+                            group.2.push(cond.clone());
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        groups.push((left_keys, left_context, vec![cond]));
+                    }
+                } else {
+                    // If keys or context don't match, it cannot be merged into a single MergedNestMatch
+                    // so we add it to remaining.
+                    remaining.push(ResolvedNode::NestNestMatch {
+                        left_keys,
+                        left_nvalue,
+                        left_context,
+                        op,
+                        right_keys,
+                        right_nvalue,
+                        right_context,
+                    });
+                }
+            }
             ResolvedNode::NestMatch {
-                operand,
+                keys,
                 nvalue,
                 op,
                 label,
@@ -193,7 +240,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
 
                 let mut found = false;
                 for group in &mut groups {
-                    if group.0 == operand && group.1 == context {
+                    if group.0 == keys && group.1 == context {
                         group.2.push(cond.clone());
                         found = true;
                         break;
@@ -201,11 +248,11 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 }
 
                 if !found {
-                    groups.push((operand, context, vec![cond]));
+                    groups.push((keys, context, vec![cond]));
                 }
             }
             ResolvedNode::MergedNestMatch {
-                operand,
+                keys,
                 matches,
                 is_or: child_is_or,
             } if child_is_or == is_or || matches.len() == 1 => {
@@ -216,7 +263,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 let matches_context =
                     matches.first().and_then(|m| m.context.clone());
                 for group in &mut groups {
-                    if group.0 == operand && group.1 == matches_context {
+                    if group.0 == keys && group.1 == matches_context {
                         group.2.extend(matches.clone());
                         found = true;
                         break;
@@ -224,7 +271,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 }
 
                 if !found {
-                    groups.push((operand, None, matches));
+                    groups.push((keys, None, matches));
                 }
             }
             _ => remaining.push(child),
@@ -235,7 +282,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
     for (operand, _context, matches) in groups {
         if matches.len() > 1 {
             remaining.push(ResolvedNode::MergedNestMatch {
-                operand,
+                keys: operand,
                 matches,
                 is_or,
             });
@@ -245,12 +292,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 .into_iter()
                 .next()
                 .expect("matches should have at least one element");
-            let NestMatchOp::Comparison(op) = cond.op else {
-                panic!(
-                    "Expected ComparisonOp for single NestMatch, got: {:?}",
-                    cond.op
-                );
-            };
+            let NestMatchOp::Comparison(op) = cond.op;
             let crate::query::ResolvedOperand::Literal(label) = cond.right
             else {
                 panic!(
@@ -259,7 +301,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 );
             };
             remaining.push(ResolvedNode::NestMatch {
-                operand,
+                keys: operand,
                 nvalue: cond.nvalue,
                 op,
                 label,
@@ -288,7 +330,7 @@ mod tests {
 
         match optimized {
             ResolvedNode::MergedNestMatch {
-                operand,
+                keys,
                 matches,
                 is_or,
             } => {
@@ -296,13 +338,13 @@ mod tests {
                 assert_eq!(matches.len(), 2, "Should have 2 merged conditions");
 
                 // operand (GROUP BY x) が parentdir であることを確認
-                match operand {
+                match &keys[0] {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
                     _ => panic!(
-                        "Expected TagRef(parentdir) as operand, got: {:?}",
-                        operand
+                        "Expected TagRef(parentdir) as keys, got: {:?}",
+                        keys
                     ),
                 }
             }
@@ -329,17 +371,20 @@ mod tests {
                 for child in children {
                     match child {
                         ResolvedNode::MergedNestMatch {
-                            operand,
+                            keys,
                             matches,
                             is_or,
                         } => {
                             assert!(!is_or, "Child projection match should not be OR");
                             assert_eq!(matches.len(), 1, "Child should have 1 condition");
-                            match operand {
+                            match &keys[0] {
                                 ResolvedOperand::TagRef { tag_type, .. } => {
                                     assert_eq!(tag_type.as_str(), "parentdir");
                                 }
-                                _ => panic!("Expected TagRef(parentdir) as operand, got: {:?}", operand),
+                                _ => panic!(
+                                    "Expected TagRef(parentdir) as keys, got: {:?}",
+                                    keys
+                                ),
                             }
                         }
                         _ => panic!("Expected children to be MergedNestMatch, got: {:?}", child),
@@ -430,7 +475,7 @@ mod tests {
 
         match optimized {
             ResolvedNode::MergedNestMatch {
-                operand,
+                keys,
                 matches,
                 is_or,
             } => {
@@ -440,13 +485,13 @@ mod tests {
                     1,
                     "Single comparison should produce 1 merged condition"
                 );
-                match operand {
+                match &keys[0] {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
                     _ => panic!(
-                        "Expected TagRef(parentdir) as operand, got: {:?}",
-                        operand
+                        "Expected TagRef(parentdir) as keys, got: {:?}",
+                        keys
                     ),
                 }
                 // op は Comparison であること
@@ -471,18 +516,18 @@ mod tests {
 
         match optimized {
             ResolvedNode::MergedNestMatch {
-                operand,
+                keys,
                 matches,
                 is_or,
             } => {
                 assert!(!is_or, "Should be AND (is_or=false)");
                 assert_eq!(matches.len(), 1, "Should have 1 merged condition");
-                match operand {
+                match &keys[0] {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
                     _ => {
-                        panic!("Expected TagRef(parentdir), got: {:?}", operand)
+                        panic!("Expected TagRef(parentdir), got: {:?}", keys)
                     }
                 }
                 // nvalue は Calculation (count / count の算術式) であること

@@ -19,13 +19,11 @@
 //! ```
 
 use crate::db::{Col, SqlType};
-use crate::query::ast::{
-    AggregationNode, ArithmeticAggOp, ArithmeticOp, ComparisonNode,
-    ComparisonOp, NestNode, Operand, QueryNode,
-};
+use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::query::lens_schema::{Lens, StorageMapping};
 use crate::types::{Label, LabelValue, SType, TagType};
 use anyhow::{bail, Result};
+use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
 
 /// 物理マッピングが解決された後のクエリノード。
@@ -122,7 +120,7 @@ pub enum ResolvedNode {
     /// nvalue 付き Nest への比較。フィルタされたラベル集合を返す。
     /// 例: `(parentdir: &: count(ext:jpg)) :> 10`
     NestMatch {
-        operand: ResolvedOperand,
+        keys: Vec<ResolvedOperand>,
         nvalue: ResolvedOperand,
         op: ComparisonOp,
         label: Label,
@@ -133,29 +131,28 @@ pub enum ResolvedNode {
     /// - op: Comparison → フィルタ結果（どのグループが条件を満たすか）
     /// - op: Arithmetic → nvalue 付き Nest 結果（各グループの計算値）
     NestNestMatch {
-        left_operand: ResolvedOperand,
+        left_keys: Vec<ResolvedOperand>,
         left_nvalue: ResolvedOperand,
         left_context: Option<Box<ResolvedNode>>,
         op: NestMatchOp,
-        right_operand: ResolvedOperand,
+        right_keys: Vec<ResolvedOperand>,
         right_nvalue: ResolvedOperand,
         right_context: Option<Box<ResolvedNode>>,
     },
     /// マージされた nvalue 付き Nest マッチ。
     /// 共通の GROUP BY キー（operand）に対して複数の条件を AND/OR で適用する。
     MergedNestMatch {
-        operand: ResolvedOperand,
+        keys: Vec<ResolvedOperand>,
         matches: Vec<NestMatchCondition>,
         is_or: bool,
     },
 }
 
 /// nvalue 付き Nest 同士を結ぶ演算子。
-/// 比較（フィルタ）と算術（nvalue 計算）の両方を統一的に扱う。
+/// 比較（フィルタ）を扱う。
 #[derive(Debug, Clone, PartialEq)]
 pub enum NestMatchOp {
     Comparison(ComparisonOp),
-    Arithmetic(ArithmeticOp),
 }
 
 /// 同一 operand（GROUP BY キー）に対する検索条件。
@@ -258,6 +255,20 @@ impl ResolvedOperand {
                 calc.left.is_pure_scalar() && calc.right.is_pure_scalar()
             }
             ResolvedOperand::TagRef { .. } => false,
+        }
+    }
+
+    /// オペランドの値（Value）を人間が読みやすいラベル文字列に変換します。
+    pub fn resolve_label(&self, lens: &Lens, value: &Value) -> String {
+        match self {
+            ResolvedOperand::TagRef { tag_type, .. } => {
+                lens.resolve_label(tag_type, value).to_string()
+            }
+            _ => {
+                // Calculation 等の場合はデフォルトの 'nvalue' として解決（数値フォーマット等）。
+                lens.resolve_label(&TagType::from("nvalue"), value)
+                    .to_string()
+            }
         }
     }
 
@@ -410,11 +421,14 @@ impl ResolvedNode {
                 cond
             }
             ResolvedNode::NestMatch {
-                operand: op,
+                keys,
                 context,
                 ..
             } => {
-                let mut cond = op.to_condition();
+                let mut cond = Condition::all();
+                for k in keys {
+                    cond = cond.add(k.to_condition());
+                }
                 if let Some(ctx) = context {
                     cond = cond.add(ctx.to_condition());
                 }
@@ -459,12 +473,12 @@ impl ResolvedNode {
             ResolvedNode::Nest { keys, .. } => {
                 extract_tag_type_from_operand(keys.first().unwrap())
             }
-            ResolvedNode::NestMatch { operand: op, .. }
-            | ResolvedNode::NestNestMatch {
-                left_operand: op, ..
+            ResolvedNode::NestMatch { keys, .. } => {
+                extract_tag_type_from_operand(keys.first().unwrap())
             }
-            | ResolvedNode::MergedNestMatch { operand: op, .. } => {
-                extract_tag_type_from_operand(op)
+            ResolvedNode::NestNestMatch { left_keys: keys, .. }
+            | ResolvedNode::MergedNestMatch { keys, .. } => {
+                extract_tag_type_from_operand(keys.first().unwrap())
             }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
@@ -503,18 +517,6 @@ impl ResolvedNode {
         match self {
             ResolvedNode::Nest { nvalue, .. } => nvalue.clone(),
             ResolvedNode::NestMatch { nvalue, .. } => Some(nvalue.clone()),
-            ResolvedNode::NestNestMatch {
-                left_nvalue,
-                op: NestMatchOp::Arithmetic(arith_op),
-                right_nvalue,
-                ..
-            } => Some(ResolvedOperand::Calculation(Box::new(
-                ResolvedCalculationNode {
-                    left: left_nvalue.clone(),
-                    op: *arith_op,
-                    right: right_nvalue.clone(),
-                },
-            ))),
             ResolvedNode::NestNestMatch { left_nvalue, .. } => {
                 Some(left_nvalue.clone())
             }
@@ -525,19 +527,7 @@ impl ResolvedNode {
                 l.get_nvalue_combined()
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
-                matches.first().map(|m| {
-                    if let NestMatchOp::Arithmetic(arith_op) = &m.op {
-                        ResolvedOperand::Calculation(Box::new(
-                            ResolvedCalculationNode {
-                                left: m.nvalue.clone(),
-                                op: *arith_op,
-                                right: m.right.clone(),
-                            },
-                        ))
-                    } else {
-                        m.nvalue.clone()
-                    }
-                })
+                matches.first().map(|m| m.nvalue.clone())
             }
             _ => None,
         }
@@ -547,11 +537,9 @@ impl ResolvedNode {
     pub fn get_projection_operand(&self) -> Option<&ResolvedOperand> {
         match self {
             ResolvedNode::Nest { keys, .. } => keys.first(),
-            ResolvedNode::NestMatch { operand: op, .. }
-            | ResolvedNode::NestNestMatch {
-                left_operand: op, ..
-            }
-            | ResolvedNode::MergedNestMatch { operand: op, .. } => Some(op),
+            ResolvedNode::NestMatch { keys, .. } => keys.first(),
+            ResolvedNode::NestNestMatch { left_keys, .. } => left_keys.first(),
+            | ResolvedNode::MergedNestMatch { keys, .. } => keys.first(),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
@@ -559,6 +547,21 @@ impl ResolvedNode {
                 l.get_projection_operand()
             }
             _ => None,
+        }
+    }
+
+    pub fn get_projection_operands(&self) -> Option<&[ResolvedOperand]> {
+        match self {
+            ResolvedNode::Nest { keys, .. } => Some(keys.as_slice()),
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                nodes.iter().find_map(|n| n.get_projection_operands())
+            }
+            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+                l.get_projection_operands()
+            }
+            node => node
+                .get_projection_operand()
+                .map(|op| std::slice::from_ref(op)),
         }
     }
 
@@ -578,7 +581,7 @@ impl ResolvedNode {
     pub fn get_nested_projection(&self) -> Option<&ResolvedOperand> {
         match self {
             ResolvedNode::Nest { keys, .. } => keys.first(),
-            ResolvedNode::NestMatch { operand: op, .. } => Some(op),
+            ResolvedNode::NestMatch { keys, .. } => keys.first(),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nested_projection())
             }
@@ -657,10 +660,9 @@ impl ResolvedNode {
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.iter().find_map(|m| {
-                    if let crate::query::lens_resolver::NestMatchOp::Comparison(op) = &m.op {
-                        if let crate::query::ResolvedOperand::Literal(label) = &m.right {
-                            return Some((op, label));
-                        }
+                    let crate::query::lens_resolver::NestMatchOp::Comparison(op) = &m.op;
+                    if let crate::query::ResolvedOperand::Literal(label) = &m.right {
+                        return Some((op, label));
                     }
                     None
                 })
@@ -999,14 +1001,7 @@ pub(crate) fn resolve_query_node(
             resolve_query_node(lens, *c)?,
         ))),
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
-        // → logical_resolver が算術分配した形式。NestNestMatch に解決する。
-        QueryNode::Projection(Operand::Calculation(calc))
-            if calc_has_nest_operands(&calc) =>
-        {
-            resolve_projection_arithmetic(lens, *calc)
-        }
-        // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
-        // → logical_resolver が算術分配した形式。NestNestMatch に解決する。
+        // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
         QueryNode::Projection(Operand::Calculation(calc))
             if calc_has_nest_operands(&calc) =>
         {
@@ -1049,11 +1044,27 @@ fn resolve_aggregation(
 /// Nest ノードの物理解決。
 ///
 /// 深さ1: `Nest(Proj, Agg/Scalar)` → `Nest { keys, nvalue }`
-/// 深さ2+: Phase 5 で実装
+/// 深さ2+
+fn merge_nest_keys(
+    left: Vec<ResolvedOperand>,
+    right: Vec<ResolvedOperand>,
+) -> Vec<ResolvedOperand> {
+    let mut merged = left;
+    for r in right {
+        if !merged.contains(&r) {
+            merged.push(r);
+        }
+    }
+    merged
+}
+
 fn resolve_nest(
     lens: &Lens,
     nest: crate::query::ast::NestNode,
 ) -> Result<ResolvedNode> {
+    if std::env::var("TTFM_DEBUG").is_ok() {
+        println!("DEBUG resolve_nest: entering");
+    }
     let left = resolve_query_node(lens, *nest.left)?;
     let right_node = *nest.right;
 
@@ -1069,11 +1080,7 @@ fn resolve_nest(
                 context,
             })
         }
-        // Comparison は logical_resolver で分配済みのためここには来ない
-        QueryNode::Comparison(_) => {
-            bail!("Comparison in Nest right side should have been distributed by logical_resolver")
-        }
-        // 右辺が Projection(Literal) → nvalue にスカラー値を付与
+        // 深さ1: 右辺が Projection(Literal) → nvalue にスカラー値を付与
         QueryNode::Projection(Operand::Literal(label)) => {
             Ok(ResolvedNode::Nest {
                 keys,
@@ -1081,36 +1088,128 @@ fn resolve_nest(
                 context,
             })
         }
-        // 右辺が Projection(Calculation) は logical_resolver で算術分配済みのため
-        // ここには来ない（Query 形式に変換されている）
+        // 深さ1: 右辺が Projection(Calculation)
         QueryNode::Projection(Operand::Calculation(calc)) => {
-            // TypeRef を含む算術式（e.g., size: + mtime:）は Level 2 Nest に相当するため未実装。
-            // 集約関数を使用してください（例: sum(size:) + count()）。
-            if calc_has_multiple_type_refs(&calc) {
-                bail!(
-                    "Nest with arithmetic over non-aggregated tags is not yet implemented \
-                    (e.g., 'parentdir: &: (size: + mtime:)'). \
-                    Use aggregation functions instead (e.g., 'parentdir: &: (sum(size:) + count())')."
-                );
-            }
             let resolved_calc = resolve_calculation(lens, *calc)?;
-            Ok(ResolvedNode::Nest {
-                keys,
-                nvalue: Some(ResolvedOperand::Calculation(Box::new(
-                    resolved_calc,
-                ))),
-                context,
-            })
+            let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
+
+            // 投影演算（タグ参照を含む）の場合、現在のグループ階層を深化させる。
+            // これにより、グループ内の各アイテムに対して計算が行われ、結果がリストとして返される。
+            if !operand.is_pure_scalar() {
+                let mut new_keys = keys;
+                new_keys.push(operand);
+                Ok(ResolvedNode::Nest {
+                    keys: new_keys,
+                    nvalue: None,
+                    context,
+                })
+            } else {
+                // スカラー演算（集約やリテラルのみ）の場合、現在のグループの評価値として保持する。
+                Ok(ResolvedNode::Nest {
+                    keys,
+                    nvalue: Some(operand),
+                    context,
+                })
+            }
         }
-        // 深さ2+: 右辺が投影（TypeRefなど）の場合は未実装
-        QueryNode::Projection(_) => {
-            bail!("Nest with Projection right side (depth 2+) not yet implemented")
-        }
-        QueryNode::Nest(_) => {
-            bail!("Nested Nest (depth 2+) not yet implemented")
-        }
-        _ => {
-            bail!("Unsupported Nest right side: {:?}", right_node)
+        // 右辺を一般的に解決し、その結果に応じて分岐する（深さ2+）
+        right_node => {
+            let resolved_right = resolve_query_node(lens, right_node)?;
+            match resolved_right {
+                ResolvedNode::Nest {
+                    keys: inner_keys,
+                    nvalue: inner_nvalue,
+                    context: inner_ctx,
+                } => {
+                    // プロジェクションの場合はキーをマージ
+                    let merged_keys = merge_nest_keys(keys, inner_keys);
+                    if std::env::var("TTFM_DEBUG").is_ok() {
+                        println!(
+                            "DEBUG resolve_nest: merged_keys.len() = {}",
+                            merged_keys.len()
+                        );
+                    }
+                    let merged_ctx = match (context, inner_ctx) {
+                        (None, ic) => ic,
+                        (c, None) => c,
+                        (Some(c), Some(ic)) => {
+                            Some(Box::new(ResolvedNode::And(vec![*c, *ic])))
+                        }
+                    };
+                    Ok(ResolvedNode::Nest {
+                        keys: merged_keys,
+                        nvalue: inner_nvalue,
+                        context: merged_ctx,
+                    })
+                }
+                // And([filters..., Nest{inner_keys, nvalue, ctx}]) の形:
+                // extension: などが And([is_dir:false, Nest{extension}]) に展開された場合
+                ResolvedNode::And(nodes)
+                    if nodes
+                        .iter()
+                        .any(|n| matches!(n, ResolvedNode::Nest { .. })) =>
+                {
+                    let mut inner_keys = Vec::new();
+                    let mut inner_nvalue = None;
+                    let mut inner_ctx: Option<Box<ResolvedNode>> = None;
+                    let mut filters = Vec::new();
+                    for n in nodes {
+                        match n {
+                            ResolvedNode::Nest {
+                                keys: k,
+                                nvalue: nv,
+                                context: c,
+                            } => {
+                                inner_keys = k;
+                                inner_nvalue = nv;
+                                inner_ctx = c;
+                            }
+                            other => filters.push(other),
+                        }
+                    }
+                    let merged_keys = merge_nest_keys(keys, inner_keys);
+                    // フィルタを context にマージ
+                    let filter_node = match filters.len() {
+                        0 => None,
+                        1 => Some(Box::new(filters.remove(0))),
+                        _ => Some(Box::new(ResolvedNode::And(filters))),
+                    };
+                    let base_ctx = match (context, inner_ctx) {
+                        (None, ic) => ic,
+                        (c, None) => c,
+                        (Some(c), Some(ic)) => {
+                            Some(Box::new(ResolvedNode::And(vec![*c, *ic])))
+                        }
+                    };
+                    let merged_ctx = match (base_ctx, filter_node) {
+                        (None, f) => f,
+                        (c, None) => c,
+                        (Some(c), Some(f)) => {
+                            Some(Box::new(ResolvedNode::And(vec![*c, *f])))
+                        }
+                    };
+                    Ok(ResolvedNode::Nest {
+                        keys: merged_keys,
+                        nvalue: inner_nvalue,
+                        context: merged_ctx,
+                    })
+                }
+                filtered_node => {
+                    // プロジェクションでない（単なるフィルタなどの）場合は context に追加
+                    let merged_ctx = match context {
+                        None => Some(Box::new(filtered_node)),
+                        Some(c) => Some(Box::new(ResolvedNode::And(vec![
+                            *c,
+                            filtered_node,
+                        ]))),
+                    };
+                    Ok(ResolvedNode::Nest {
+                        keys,
+                        nvalue: None,
+                        context: merged_ctx,
+                    })
+                }
+            }
         }
     }
 }
@@ -1130,37 +1229,59 @@ fn operand_has_nest(op: &Operand) -> bool {
     }
 }
 
-/// Calculation の両辺に TypeRef（非集約タグ参照）が含まれるか確認するヘルパー。
-/// 両辺に TypeRef がある場合（e.g., size: + mtime:）は Level 2+ Nest に相当し未実装。
-/// 片辺のみ（e.g., size: * 2）は許容する。
-fn calc_has_multiple_type_refs(
-    calc: &crate::query::ast::CalculationNode,
-) -> bool {
-    operand_has_type_ref(&calc.left) && operand_has_type_ref(&calc.right)
-}
-
-fn operand_has_type_ref(op: &Operand) -> bool {
-    match op {
-        Operand::TypeRef(_) => true,
-        Operand::Calculation(calc) => {
-            operand_has_type_ref(&calc.left)
-                || operand_has_type_ref(&calc.right)
+/// Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(B,agg2))}) を
+/// 両辺のキーをマージした Nest に解決する。
+/// キー: left_keys ∪ right_keys、nvalue: left_nv op right_nv
+fn resolve_mixed_key_arithmetic(
+    left_nest: ResolvedNode,
+    right_nest: ResolvedNode,
+    op: crate::query::ast::ArithmeticOp,
+) -> Result<ResolvedNode> {
+    let (left_keys, left_nvalue, left_ctx) = match left_nest {
+        ResolvedNode::Nest {
+            keys,
+            nvalue,
+            context,
+        } => (keys, nvalue, context),
+        _ => bail!("Left operand must be a Nest"),
+    };
+    let (right_keys, right_nvalue) = match right_nest {
+        ResolvedNode::Nest {
+            keys,
+            nvalue: Some(nv),
+            ..
+        } => (keys, nv),
+        _ => bail!("Right operand must be a Nest with nvalue"),
+    };
+    // 左辺 nvalue と右辺 nvalue の演算結果を nvalue とする
+    let calc_operand = match left_nvalue {
+        Some(left_nv) => {
+            ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
+                left: left_nv,
+                op,
+                right: right_nvalue,
+            }))
         }
-        _ => false,
-    }
+        None => right_nvalue,
+    };
+    // 両辺のキーをマージして多段 Nest を構成し、演算結果を nvalue に置く
+    let merged_keys = merge_nest_keys(left_keys, right_keys);
+    Ok(ResolvedNode::Nest {
+        keys: merged_keys,
+        nvalue: Some(calc_operand),
+        context: left_ctx,
+    })
 }
 
-/// Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))}) を
-/// NestNestMatch { op: Arithmetic } に解決する。
 fn resolve_projection_arithmetic(
     lens: &Lens,
     calc: crate::query::ast::CalculationNode,
 ) -> Result<ResolvedNode> {
     let arith_op = calc.op;
     let (left_key, left_nv) =
-        resolve_nest_operand_extract_key(lens, calc.left)?;
+        resolve_nest_operand_extract_key(lens, calc.left.clone())?;
     let (right_key, right_nv) =
-        resolve_nest_operand_extract_key(lens, calc.right)?;
+        resolve_nest_operand_extract_key(lens, calc.right.clone())?;
 
     validate_calculation_types(&left_nv, &right_nv, arith_op)?;
 
@@ -1179,15 +1300,19 @@ fn resolve_projection_arithmetic(
             ))),
             context: None,
         }),
-        (Some(lk), Some(rk)) => Ok(ResolvedNode::NestNestMatch {
-            left_operand: lk,
-            left_nvalue: left_nv,
-            left_context: None,
-            op: NestMatchOp::Arithmetic(arith_op),
-            right_operand: rk,
-            right_nvalue: right_nv,
-            right_context: None,
-        }),
+        (Some(_), Some(_)) => {
+            // 異種キー演算: NestNestMatch::Arithmetic を返す代わりに、
+            // 左辺 Nest の keys に演算結果を追加して1段深い Nest を返す
+            let left_nest = match calc.left {
+                Operand::Query(node) => resolve_query_node(lens, *node)?,
+                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+            };
+            let right_nest = match calc.right {
+                Operand::Query(node) => resolve_query_node(lens, *node)?,
+                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+            };
+            resolve_mixed_key_arithmetic(left_nest, right_nest, arith_op)
+        }
         _ => bail!("Could not extract key from either side of arithmetic Nest"),
     }
 }
@@ -1266,23 +1391,27 @@ fn extract_projection_operand_with_context(
 /// `(operand, nvalue, context)` — context は is_dir:false などのフィルタノード
 pub(crate) fn extract_nvalue_projection_parts(
     node: ResolvedNode,
-) -> Result<(ResolvedOperand, ResolvedOperand, Option<Box<ResolvedNode>>)> {
+) -> Result<(
+    Vec<ResolvedOperand>,
+    ResolvedOperand,
+    Option<Box<ResolvedNode>>,
+)> {
     match node {
         ResolvedNode::Nest {
             keys,
             nvalue: Some(nv),
             context,
-        } => Ok((keys.first().unwrap().clone(), nv.clone(), context.clone())),
+        } => Ok((keys, nv.clone(), context.clone())),
         ResolvedNode::NestMatch {
-            operand,
+            keys,
             nvalue,
             context,
             ..
-        } => Ok((operand, nvalue, context)),
-        ResolvedNode::MergedNestMatch { operand, matches, .. } => {
+        } => Ok((keys, nvalue, context)),
+        ResolvedNode::MergedNestMatch { keys, matches, .. } => {
             if let Some(first_match) = matches.first() {
                 Ok((
-                    operand,
+                    keys,
                     first_match.nvalue.clone(),
                     first_match.context.clone(),
                 ))
@@ -1302,25 +1431,25 @@ pub(crate) fn extract_nvalue_projection_parts(
             });
             if let Some(idx) = proj_idx {
                 let proj = nodes.remove(idx);
-                let (operand, nv, proj_ctx) = match proj {
+                let (keys, nv, proj_ctx) = match proj {
                     ResolvedNode::Nest {
                         keys,
                         nvalue: Some(nv),
                         context,
-                    } => (keys.first().unwrap().clone(), nv, context),
+                    } => (keys, nv, context),
                     ResolvedNode::NestMatch {
-                        operand,
-                        nvalue,
+                        keys,
+                        nvalue: nv,
                         context,
                         ..
-                    } => (operand, nvalue, context),
+                    } => (keys, nv, context),
                     ResolvedNode::MergedNestMatch {
-                        operand,
+                        keys,
                         mut matches,
                         ..
                     } => {
                         let first = matches.remove(0);
-                        (operand, first.nvalue, first.context)
+                        (keys, first.nvalue, first.context)
                     }
                     _ => unreachable!(),
                 };
@@ -1342,7 +1471,7 @@ pub(crate) fn extract_nvalue_projection_parts(
                         Some(Box::new(ResolvedNode::And(vec![*pc, *fc])))
                     }
                 };
-                Ok((operand, nv, merged_ctx))
+                Ok((keys, nv, merged_ctx))
             } else {
                 bail!("And node does not contain a nvalue-bearing Nest")
             }
@@ -1461,16 +1590,17 @@ fn resolve_single_match(
             let arithmetic_op = calc.op;
             let resolved = resolve_projection_arithmetic(lens, *calc)?;
             match resolved {
+                // 異なるキーの算術演算: NestNestMatch 経由 (old path)
                 ResolvedNode::NestNestMatch {
-                    left_operand,
+                    left_keys,
                     left_nvalue,
                     left_context,
                     op: _,
-                    right_operand: _,
+                    right_keys: _,
                     right_nvalue,
                     right_context: _,
                 } => Ok(ResolvedNode::NestMatch {
-                    operand: left_operand,
+                    keys: left_keys, // Arithmetic results usually keep left key
                     nvalue: ResolvedOperand::Calculation(Box::new(
                         ResolvedCalculationNode {
                             left: left_nvalue,
@@ -1482,6 +1612,31 @@ fn resolve_single_match(
                     label: lab,
                     context: left_context,
                 }),
+                // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
+                ResolvedNode::Nest {
+                    keys,
+                    nvalue: Some(nv),
+                    context,
+                } => Ok(ResolvedNode::NestMatch {
+                    keys,
+                    nvalue: nv,
+                    op,
+                    label: lab,
+                    context,
+                }),
+                // 多段キー (keys > 1): 比較演算子は未サポート
+                ResolvedNode::Nest { ref keys, .. } if keys.len() > 1 => {
+                    let tag_name = |op: &ResolvedOperand| match op {
+                        ResolvedOperand::TagRef { tag_type, .. } => {
+                            format!("{}", tag_type)
+                        }
+                        other => format!("{:?}", other),
+                    };
+                    Err(crate::query::error::mismatched_arithmetic_keys(
+                        &tag_name(&keys[0]),
+                        &tag_name(&keys[1]),
+                    ))
+                }
                 _ => Ok(resolved),
             }
         }
@@ -1581,16 +1736,17 @@ fn resolve_single_match(
             let arithmetic_op = calc.op;
             let resolved = resolve_projection_arithmetic(lens, *calc)?;
             match resolved {
+                // 異なるキーの算術演算: NestNestMatch 経由 (old path)
                 ResolvedNode::NestNestMatch {
-                    left_operand,
+                    left_keys,
                     left_nvalue,
                     left_context,
                     op: _,
-                    right_operand: _,
+                    right_keys: _,
                     right_nvalue,
                     right_context: _,
                 } => Ok(ResolvedNode::NestMatch {
-                    operand: left_operand,
+                    keys: left_keys,
                     nvalue: ResolvedOperand::Calculation(Box::new(
                         ResolvedCalculationNode {
                             left: left_nvalue,
@@ -1601,6 +1757,18 @@ fn resolve_single_match(
                     op: flip_op(op),
                     label: lab,
                     context: left_context,
+                }),
+                // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
+                ResolvedNode::Nest {
+                    keys,
+                    nvalue: Some(nv),
+                    context,
+                } => Ok(ResolvedNode::NestMatch {
+                    keys,
+                    nvalue: nv,
+                    op: flip_op(op),
+                    label: lab,
+                    context,
                 }),
                 _ => Ok(resolved),
             }
@@ -1637,18 +1805,18 @@ fn resolve_single_match(
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
                 ResolvedNode::Nest {
-                    mut keys,
+                    keys,
                     nvalue: Some(nv),
                     context,
                 } => Ok(ResolvedNode::NestMatch {
-                    operand: keys.remove(0),
+                    keys,
                     nvalue: nv,
                     op,
                     label: lit,
                     context,
                 }),
                 ResolvedNode::Nest { .. } => {
-                    bail!("Comparison on Nest without nvalue is not supported as label comparison")
+                    bail!("not yet implemented: Comparison on Nest without nvalue is not supported as label comparison")
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
@@ -1665,18 +1833,18 @@ fn resolve_single_match(
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
                 ResolvedNode::Nest {
-                    mut keys,
+                    keys,
                     nvalue: Some(nv),
                     context,
                 } => Ok(ResolvedNode::NestMatch {
-                    operand: keys.remove(0),
+                    keys,
                     nvalue: nv,
                     op: flip_op(op),
                     label: lit,
                     context,
                 }),
                 ResolvedNode::Nest { .. } => {
-                    bail!("Comparison on Nest without nvalue is not supported as label comparison")
+                    bail!("not yet implemented: Comparison on Nest without nvalue is not supported as label comparison")
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
@@ -1695,17 +1863,17 @@ fn resolve_single_match(
             let res_l = resolve_query_node(lens, *l_node)?;
             let res_r = resolve_query_node(lens, *r_node)?;
 
-            let (lo, lnv, lc) = extract_nvalue_projection_parts(res_l)?;
-            let (ro, rnv, rc) = extract_nvalue_projection_parts(res_r)?;
+            let (left_keys, left_nvalue, left_context) = extract_nvalue_projection_parts(res_l)?;
+            let (right_keys, right_nvalue, right_context) = extract_nvalue_projection_parts(res_r)?;
 
             Ok(ResolvedNode::NestNestMatch {
-                left_operand: lo,
-                left_nvalue: lnv,
-                left_context: lc,
+                left_keys,
+                left_nvalue,
+                left_context,
                 op: NestMatchOp::Comparison(op),
-                right_operand: ro,
-                right_nvalue: rnv,
-                right_context: rc,
+                right_keys,
+                right_nvalue,
+                right_context,
             })
         }
         // (size: - 100) :> (size: * 0.1)
@@ -1872,8 +2040,50 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::SqlType;
+    use crate::query::ast::ArithmeticOp;
+    use crate::query::lens_schema::StorageMapping;
     use crate::query::lens_schema::{build_int_condition, build_str_condition};
     use crate::types::{Label, SType};
+
+    #[test]
+    fn test_is_pure_scalar() {
+        // Literal is pure scalar
+        let lit = ResolvedOperand::Literal(Label::from(10));
+        assert!(lit.is_pure_scalar());
+
+        // TagRef is NOT pure scalar
+        let tag = ResolvedOperand::TagRef {
+            tag_type: TagType::Base(SType::Size),
+            storage: StorageMapping::Column(crate::db::Col::LabelInt),
+            sql_type: SqlType::BIGINT,
+        };
+        assert!(!tag.is_pure_scalar());
+
+        // Aggregation is pure scalar
+        let agg = ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(
+            Box::new(ResolvedNode::And(vec![])),
+        ));
+        assert!(agg.is_pure_scalar());
+
+        // Calculation of pure scalars is pure scalar
+        let calc_pure =
+            ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
+                left: lit.clone(),
+                op: ArithmeticOp::Add,
+                right: agg.clone(),
+            }));
+        assert!(calc_pure.is_pure_scalar());
+
+        // Calculation with TagRef is NOT pure scalar
+        let calc_not_pure =
+            ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
+                left: tag.clone(),
+                op: ArithmeticOp::Add,
+                right: lit.clone(),
+            }));
+        assert!(!calc_not_pure.is_pure_scalar());
+    }
 
     #[test]
     fn test_cond_and_basic() {
@@ -2534,16 +2744,25 @@ mod tests {
     /// `parentdir: &: (size: * 2)` は深さ1、nvalue が算術式
     #[test]
     fn test_resolve_nest_calculation_right() {
+        // TypeRef を含む Calculation は純粋スカラーではないため、
+        // nvalue ではなく複合キーの一つとして Nest を深化させる。
+        // QUERY.md Level n 例: `project: &: (extension: + 1)`
         let resolver = Resolver::new("parentdir: &: (size: * 2)")
             .expect("nest with calculation right should resolve");
 
         assert!(resolver.get_projection().is_some());
-        let nvalue = resolver.get_nvalue();
-        assert!(nvalue.is_some(), "Calculation right should have nvalue");
+        // size: * 2 は TypeRef を含むため key として扱われる → nvalue は None
         assert!(
-            matches!(nvalue.unwrap(), ResolvedOperand::Calculation(_)),
-            "nvalue should be Calculation, got: {:?}",
+            resolver.get_nvalue().is_none(),
+            "TypeRef calculation should be a key (Level n), not nvalue, got: {:?}",
             resolver.get_nvalue()
+        );
+        // Nest { keys: [parentdir, Calculation(size*2)], nvalue: None } になる
+        let operands = resolver.resolved_query.get_projection_operands();
+        assert!(
+            matches!(operands, Some(s) if s.len() >= 2),
+            "size: * 2 should be added as a key (depth 2+), got operands: {:?}",
+            operands
         );
     }
 
@@ -2651,6 +2870,57 @@ mod tests_integration {
                 crate::query::ResolvedNode::MergedNestMatch { .. }
             ),
             "Resolved query should be optimized (merged). Got: {:?}",
+            resolver.resolved_query
+        );
+    }
+
+    #[test]
+    fn test_resolve_nest_depth2_produces_nest_with_two_keys() {
+        let query = "parentdir: &: filename:";
+        let resolver = Resolver::new(query).unwrap();
+        assert!(
+            matches!(
+                resolver.resolved_query,
+                crate::query::ResolvedNode::Nest { ref keys, .. }
+                    if keys.len() == 2
+            ),
+            "Depth 2 nest should resolve to Nest with 2 keys, got: {:?}",
+            resolver.resolved_query
+        );
+    }
+
+    #[test]
+    fn test_resolve_nest_left_is_nest() {
+        let query = "(parentdir: &: filename:) &: extension:";
+        let resolver = Resolver::new(query).unwrap();
+        assert!(
+            matches!(
+                resolver.resolved_query,
+                crate::query::ResolvedNode::Nest { ref keys, .. }
+                    if keys.len() >= 2
+            ),
+            "Left-is-Nest should produce Nest with 2+ keys, got: {:?}",
+            resolver.resolved_query
+        );
+    }
+
+    #[test]
+    fn test_mixed_key_arithmetic_returns_deeper_nest() {
+        let query = "(parentdir: &: count()) + (extension: &: count())";
+        let resolver = Resolver::new(query).unwrap();
+        // extension: expands to And([is_dir:false, Nest(extension)]), so the result
+        // may be And([filter, Nest { keys: [parentdir, extension], ... }]).
+        // Find the Nest node inside And if necessary.
+        let inner_nest = match &resolver.resolved_query {
+            crate::query::ResolvedNode::And(nodes) => nodes
+                .iter()
+                .find(|n| matches!(n, crate::query::ResolvedNode::Nest { .. })),
+            n @ crate::query::ResolvedNode::Nest { .. } => Some(n),
+            _ => None,
+        };
+        assert!(
+            matches!(inner_nest, Some(crate::query::ResolvedNode::Nest { keys, .. }) if keys.len() >= 2),
+            "Mixed-key arithmetic should produce a deeper Nest with >=2 keys, got: {:?}",
             resolver.resolved_query
         );
     }

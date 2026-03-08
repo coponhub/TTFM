@@ -263,18 +263,36 @@ impl<'a> Fetcher<'a> {
         let mut rows = stmt.query([])?;
         let mut results = Vec::new();
 
+        let operands = self
+            .resolver
+            .resolved_query
+            .get_projection_operands()
+            .unwrap();
+
         while let Some(row) = rows.next()? {
             // SQLから label_value, group_total, item_refs を取得
-            let label_val: Value = row.get("label_value")?;
+            // ラベル値を解決（複数キー対応）
+            let mut label_parts = Vec::new();
+            if operands.len() > 1 {
+                for i in 0..operands.len() {
+                    let col_name = format!("label_value_{}", i);
+                    let val: Value = row.get(col_name.as_str())?;
+                    label_parts.push(
+                        operands[i].resolve_label(self.resolver.lens(), &val),
+                    );
+                }
+            } else {
+                let label_val: Value = row.get("label_value")?;
+                label_parts.push(
+                    operands[0].resolve_label(self.resolver.lens(), &label_val),
+                );
+            }
+            let label_str = label_parts.join(" &: ");
+
             let total_count: i64 = row.get("group_total")?;
             let Value::List(item_refs_list) = row.get("item_refs")? else {
                 continue;
             };
-
-            // ラベル値を解決
-            let label =
-                self.resolver.lens().resolve_label(proj_type, &label_val);
-            let label_str = label.as_str();
 
             // Label volatile item を作成
             let label_id = ItemId::new_volatile();

@@ -1833,3 +1833,377 @@ fn test_nest_filter_empty_groups() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_resolve_nest_dedup_keys() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+    std::fs::write(root_path.join("a.rs"), "content")?;
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let query = "parentdir: &: parentdir: &: count()";
+    let res = fm.search(query, SearchOptions::default());
+    assert!(
+        res.is_ok(),
+        "Depth 2+ nest with same keys should succeed and dedup"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_level3_nest_projection() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let work_dir = root_path.join("work");
+    std::fs::create_dir(&work_dir)?;
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+    std::fs::write(work_dir.join("a.rs"), "content")?;
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let query = "parentdir: &: filename:";
+    let res = fm.search(query, SearchOptions::default())?;
+
+    assert!(res.results.iter().any(|r| r.name.contains("work") && r.name.contains("a.rs")), 
+        "At least one result should contain both parentdir(work) and filename(a.rs). Found: {:?}", 
+        res.results.iter().map(|r| &r.name).collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
+fn test_level3_nest_projection_with_agg() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+
+    // dir1: a.rs (7), a.txt (10)
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?; // 7 bytes
+    std::fs::write(dir1.join("a.txt"), "0123456789")?; // 10 bytes
+
+    // dir2: a.rs (5), a.txt (3), b.txt (2)
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir_all(&dir2)?;
+    std::fs::write(dir2.join("a.rs"), "abcde")?; // 5 bytes
+    std::fs::write(dir2.join("a.txt"), "xyz")?; // 3 bytes
+    std::fs::write(dir2.join("b.txt"), "ok")?; // 2 bytes
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // parentdir: &: extension: &: sum(size:)
+    // このクエリは parentdir と extension でグループ化し、各グループのサイズ合計を nvalue として出す
+    let query = "parentdir: &: extension: &: sum(size:)";
+    let res = fm.search(query, SearchOptions::default())?;
+
+
+    // 期待されるグループ:
+    // 1. dir1, rs  -> sum=7
+    // 2. dir1, txt -> sum=10
+    // 3. dir2, rs  -> sum=5
+    // 4. dir2, txt -> sum=3+2=5
+    assert_eq!(res.results.len(), 4, "Should have 4 groups, but got: {:?}", res.results);
+
+    let find_group = |pdir: &str, ext: &str, expected_sum: f64| {
+        res.results.iter().find(|r| {
+            let label = &r.name;
+            label.contains(pdir) && label.contains(ext) && 
+            r.tags.entries.iter().any(|e| {
+                if e.label.tag_type().as_str() == "nvalue" {
+                    let val = match e.label.value() {
+                        ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+                        ttfm::types::LabelValue::Integer(i) => i as f64,
+                        _ => 0.0,
+                    };
+                    return (val - expected_sum).abs() < 0.001;
+                }
+                false
+            })
+        }).expect(&format!("Should find group {}/{} with sum {}", pdir, ext, expected_sum));
+    };
+
+    find_group("dir1", "rs", 7.0);
+    find_group("dir1", "txt", 10.0);
+    find_group("dir2", "rs", 5.0);
+    find_group("dir2", "txt", 5.0);
+
+    Ok(())
+}
+
+#[test]
+fn test_level3_nest_arithmetic() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+    let target_dir = root_path.join("dir1");
+    std::fs::create_dir_all(&target_dir)?;
+    std::fs::write(target_dir.join("a.rs"), "content")?; // size: 7
+
+    let target_dir2 = root_path.join("dir2");
+    std::fs::create_dir_all(&target_dir2)?;
+    std::fs::write(target_dir2.join("b.rs"), "0123456789")?; // size: 10
+    std::fs::write(target_dir2.join("c.rs"), "abcde")?; // size: 5
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // size: は数値型タグなので算術が可能
+    // 仕様により、集計なしの投影演算はネストを深化させる
+    let query1 = "parentdir: &: (size: + 1)";
+    let res1 = fm.search(query1, SearchOptions::default())?;
+
+    // dir1 は 1 ファイルなので 1 結果
+    res1.results
+        .iter()
+        .find(|r| r.name.contains("dir1") && r.name.contains("8"))
+        .expect("Should find dir1 8.0 result");
+
+    // dir2 は 2 ファイルなので、深化により 2 つの結果が返るはず
+    res1.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("11"))
+        .expect("Should find dir2 11.0 result (b.rs)");
+    res1.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("6"))
+        .expect("Should find dir2 6.0 result (c.rs)");
+
+    // size: * 2 も数値型算術
+    let query2 = "parentdir: &: (size: * 2)";
+    let res2 = fm.search(query2, SearchOptions::default())?;
+
+    res2.results
+        .iter()
+        .find(|r| r.name.contains("dir1") && r.name.contains("14"))
+        .expect("Should find dir1 14.0 result");
+    res2.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("20"))
+        .expect("Should find dir2 20.0 result");
+    res2.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("10"))
+        .expect("Should find dir2 10.0 result");
+
+    // parentdir: &: (width: * height:)
+    let file_path = target_dir.join("a.rs");
+    fm.tag_item(&file_path.to_string_lossy(), "width:10")?;
+    fm.tag_item(&file_path.to_string_lossy(), "height:20")?;
+
+    let file_path2 = target_dir2.join("b.rs");
+    fm.tag_item(&file_path2.to_string_lossy(), "width:15")?;
+    fm.tag_item(&file_path2.to_string_lossy(), "height:30")?;
+
+    let file_path3 = target_dir2.join("c.rs");
+    fm.tag_item(&file_path3.to_string_lossy(), "width:5")?;
+    fm.tag_item(&file_path3.to_string_lossy(), "height:6")?;
+
+    let query3 = "parentdir: &: (width: * height:)";
+    let res3 = fm.search(query3, SearchOptions::default())?;
+
+    res3.results
+        .iter()
+        .find(|r| r.name.contains("dir1") && r.name.contains("200"))
+        .expect("Should find dir1 200.0 result");
+    res3.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("450"))
+        .expect("Should find dir2 450.0 result");
+    res3.results
+        .iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("30"))
+        .expect("Should find dir2 30.0 result");
+
+    Ok(())
+}
+
+#[test]
+fn test_level3_nest_projection_with_agg_filter() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+
+    // dir1/a.rs (7) -> Group dir1/rs Sum=7 (OK)
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?;
+    
+    // dir1/b.txt (1) -> Group dir1/txt Sum=1 (FAIL)
+    std::fs::write(dir1.join("b.txt"), "x")?;
+
+    // dir2/a.rs (5) -> Group dir2/rs Sum=5 (OK)
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir_all(&dir2)?;
+    std::fs::write(dir2.join("a.rs"), "abcde")?;
+
+    // dir2/c.txt (2) + dir2/d.txt (1) -> Group dir2/txt Sum=3 (OK)
+    std::fs::write(dir2.join("c.txt"), "ok")?;
+    std::fs::write(dir2.join("d.txt"), "z")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // parentdir: &: extension: &: (sum(size:) > 2)
+    // 仕様により、比較が行われた時点でネストは解体され、フラットリストが返る
+    let query = "parentdir: &: extension: &: (sum(size:) > 2)";
+    let res = fm.search(query, SearchOptions::default())?;
+
+    println!("Result Count: {}", res.results.len());
+    for r in &res.results {
+        println!("  RESULT: name='{}', tags={:?}", r.name, r.tags);
+    }
+
+    assert_eq!(
+        res.type_for_projection, None,
+        "Nest comparison should result in flat list"
+    );
+
+    // 期待されるファイル: dir1/a.rs, dir2/a.rs, dir2/c.txt, dir2/d.txt
+    // 除外されるファイル: dir1/b.txt (sum=1), 各ディレクトリ (is_dir: true)
+    let files: Vec<_> = res.results.iter().filter(|r| {
+        !r.tags.entries.iter().any(|e| {
+            e.label.tag_type().to_string() == "is_dir" && e.label.as_str() == "true"
+        })
+    }).collect();
+
+    assert_eq!(files.len(), 4, "Should return 4 files, but got: {:?}", files);
+
+    let names: Vec<String> = files.iter().map(|r| r.name.clone()).collect();
+    assert!(names.iter().any(|n| n.contains("a.rs")), "Missing a.rs"); // dir1, dir2 両方 a.rs なので ambiguity あるが、とりあえず存在確認
+    assert!(names.iter().any(|n| n.contains("c.txt")), "Missing c.txt");
+    assert!(names.iter().any(|n| n.contains("d.txt")), "Missing d.txt");
+    assert!(!names.iter().any(|n| n.contains("b.txt")), "dir1/b.txt should have been filtered out");
+
+    Ok(())
+}
+
+#[test]
+fn test_level4_nest() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+    let target_dir = root_path.join("dir1");
+    std::fs::create_dir_all(&target_dir)?;
+    std::fs::write(target_dir.join("a.rs"), "content")?;
+    std::fs::write(target_dir.join("b.rs"), "content")?;
+
+    let target_dir2 = root_path.join("dir2");
+    std::fs::create_dir_all(&target_dir2)?;
+    std::fs::write(target_dir2.join("c.txt"), "content2")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let query = "parentdir: &: extension: &: size:";
+    let res = fm.search(query, SearchOptions::default())?;
+    for (i, r) in res.results.iter().enumerate() {
+        println!("  result[{}] name = {}", i, r.name);
+    }
+
+    // We expect 3 distinct groupings at the file level:
+    // dir1 &: rs &: 7 (covers a.rs and b.rs)
+    // dir2 &: txt &: 8 (covers c.txt)
+    let mut dir1_rs_count = 0;
+    let mut dir2_txt_count = 0;
+
+    for r in res.results.iter() {
+        if r.name.contains("dir1") && r.name.contains("rs") {
+            dir1_rs_count += 1;
+        }
+        if r.name.contains("dir2") && r.name.contains("txt") {
+            dir2_txt_count += 1;
+        }
+    }
+
+    assert_eq!(
+        dir1_rs_count, 1,
+        "Should find exactly 1 group for rs inside dir1"
+    );
+    assert_eq!(
+        dir2_txt_count, 1,
+        "Should find exactly 1 group for txt inside dir2"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_mixed_key_arithmetic_deepens_nest() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+    std::fs::create_dir_all(root_path.join("dir1"))?;
+    std::fs::write(root_path.join("dir1/a.rs"), "a")?;
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let query = "(parentdir: &: sum(size:)) + (extension: &: sum(size:))";
+    let res = fm.search(query, SearchOptions::default())?;
+
+    for (i, r) in res.results.iter().enumerate() {
+        println!("  result[{}] name = {}", i, r.name);
+    }
+
+    assert_eq!(res.results.len(), 1);
+
+    // The keys are merged: [parentdir, extension]
+    assert!(res.results[0].name.contains("rs"));
+
+    Ok(())
+}
+
+#[test]
+fn test_level3_nest_agg_internal_filter_repro() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+    let db_dir_path = db_dir.path();
+
+    let fm = FileManager::new_with_db_dir(db_dir_path)?;
+
+    // dir1/small.rs (size=5) -> sum(size: :> 10 & size:) では除外されるべき
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::write(dir1.join("small.rs"), "12345")?; // 5 bytes
+
+    // dir1/large.rs (size=15) -> sum(size: :> 10 & size:) でカウントされるべき
+    std::fs::write(dir1.join("large.rs"), "0123456789ABCDE")?; // 15 bytes
+
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // parentdir: &: extension: &: sum(size: :> 10 & size:)
+    // Level 3+ (parentdir, extension) であるため Pivot CTE パスを通る
+    let query = "parentdir: &: extension: &: sum(size: :> 10 & size:)";
+    let res = fm.search(query, SearchOptions::default())?;
+
+    // 期待されるグループ:
+    // dir1, rs -> nvalue=15.0 (large.rs のみ。small.rs は除外)
+    
+    let dir1_rs = res.results.iter().find(|r| {
+        r.name.contains("dir1") && r.name.contains("rs")
+    }).expect("Should find dir1/rs group");
+
+    let nvalue = dir1_rs.tags.entries.iter().find(|e| e.label.tag_type().as_str() == "nvalue")
+        .expect("Should have nvalue tag");
+    
+    let val = match nvalue.label.value() {
+        ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+        ttfm::types::LabelValue::Integer(i) => i as f64,
+        _ => 0.0,
+    };
+
+    // フィルタが無視されると 5 + 15 = 20 になる。正しく動作すれば 15.0。
+    assert_eq!(val, 15.0, "Sum should only include files > 10 bytes, but got: {}", val);
+
+    Ok(())
+}

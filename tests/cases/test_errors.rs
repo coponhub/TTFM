@@ -82,28 +82,16 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
         err_msg2
     );
 
-    // 2. 異常系: 異なる集計キーを持つクエリ
+    // 2. Phase 3 以降: 異なるキーを持つ Nest 同士の算術は Level 3+ Nest として解決される
+    // (parentdir: &: count()) / (extension: &: count()) はエラーではなく、
+    // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
     let result = fm.search(query, Default::default());
 
-    assert!(result.is_err(), "Should fail for mismatched group by keys");
-
-    let err_msg = format!("{}", result.unwrap_err());
-    println!("Err msg: {}", err_msg);
-
     assert!(
-        err_msg.contains(
-            "Arithmetic operations between different Group By target keys"
-        ),
-        "Error message should explain the mismatch"
-    );
-    assert!(
-        err_msg.contains("parentdir"),
-        "Error message should mention parentdir"
-    );
-    assert!(
-        err_msg.contains("extension"),
-        "Error message should mention extension"
+        result.is_ok(),
+        "Mixed-key Nest arithmetic should succeed in Phase 3 (Level 3+ Nest), got: {:?}",
+        result.err()
     );
 
     Ok(())

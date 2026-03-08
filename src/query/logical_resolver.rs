@@ -748,25 +748,72 @@ fn expand_nest(
     };
 
     let result = match right_with_filter {
-        QueryNode::Comparison(cmp) => expand_nest_comparison(left, cmp)?,
-        QueryNode::And(nodes) => {
-            // 右辺が And (連鎖比較や、展開された And([filter, proj]) など) の場合、各要素に左辺を分配する
-            let mut distributed = Vec::new();
-            for node in nodes {
-                match node {
-                    QueryNode::Comparison(c) => {
-                        distributed
-                            .push(expand_nest_comparison(left.clone(), c)?);
+        QueryNode::Comparison(cmp) => {
+            expand_nest_comparison(left.clone(), cmp)?
+        }
+        QueryNode::And(mut nodes) => {
+            // 右辺が And の場合、プロジェクションが含まれているか確認
+            let mut projections = Vec::new();
+            let mut filters = Vec::new();
+            let mut has_comparison = false;
+
+            for node in nodes.drain(..) {
+                if node.get_projections().is_empty() {
+                    if matches!(node, QueryNode::Comparison(_)) {
+                        has_comparison = true;
                     }
-                    _ => {
-                        distributed.push(QueryNode::Nest(NestNode {
-                            left: Box::new(left.clone()),
-                            right: Box::new(node),
-                        }));
-                    }
+                    filters.push(node);
+                } else {
+                    projections.push(node);
                 }
             }
-            QueryNode::And(distributed)
+
+            if !projections.is_empty() && !has_comparison {
+                // プロジェクションが含まれる場合、フィルタを左辺のコンテキストに寄せる
+                let sub_filter = if filters.is_empty() {
+                    None
+                } else if filters.len() == 1 {
+                    Some(filters.remove(0))
+                } else {
+                    Some(QueryNode::And(filters))
+                };
+
+                // 右辺のプロジェクション要素を結合
+                let right_proj = if projections.len() == 1 {
+                    projections.remove(0)
+                } else {
+                    QueryNode::And(projections)
+                };
+
+                // 左辺に右辺由来のフィルタを注入
+                let left_with_sub_filter = match sub_filter {
+                    Some(sf) => inject_filter_into_aggregations(left, &sf),
+                    None => left,
+                };
+
+                QueryNode::Nest(NestNode {
+                    left: Box::new(left_with_sub_filter),
+                    right: Box::new(right_proj),
+                })
+            } else {
+                // プロジェクションがない、または単純な比較の And の場合は、各要素に左辺を分配する（従来通り）
+                let mut distributed = Vec::new();
+                for node in filters.into_iter().chain(projections.into_iter()) {
+                    match node {
+                        QueryNode::Comparison(c) => {
+                            distributed
+                                .push(expand_nest_comparison(left.clone(), c)?);
+                        }
+                        _ => {
+                            distributed.push(QueryNode::Nest(NestNode {
+                                left: Box::new(left.clone()),
+                                right: Box::new(node),
+                            }));
+                        }
+                    }
+                }
+                QueryNode::And(distributed)
+            }
         }
         // 右辺が Projection(Calculation) → 算術演算の両辺に Nest キーを分配する
         QueryNode::Projection(Operand::Calculation(calc))
@@ -1639,7 +1686,7 @@ mod tests {
     /// クエリ: (extension: &: count(extension:rs)) * 10 :> 0
     #[test]
     fn test_nest_in_calculation_filter_lifted() {
-        use crate::query::ast::ArithmeticAggOp;
+        
         let lens = Lens::base_standard();
         let node = QueryNode::Comparison(ComparisonNode {
             first: Operand::Calculation(Box::new(CalculationNode {

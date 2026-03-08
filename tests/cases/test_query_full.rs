@@ -1,9 +1,7 @@
-use std::collections::HashSet;
 use std::fs::File;
 use tempfile::tempdir;
 use ttfm::query::lens_resolver::Resolver;
 
-use ttfm::types::TagType;
 use ttfm::FileManager;
 
 #[test]
