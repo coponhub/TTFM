@@ -4900,6 +4900,11 @@ fn build_nvalue_pivot_aggregate_sql(
     context: Option<&ResolvedNode>,
     view: &str,
 ) -> SelectStatement {
+    // Calculation nvalue: 各次元のキーに対して独立した集計を行い、後でJOINする
+    if let ResolvedOperand::Calculation(calc) = nvalue {
+        return build_mixed_key_calc_nvalue_sql(keys, calc, context, view);
+    }
+
     let pivot_q = build_nest_pivot_cte(keys, Some(nvalue), view);
     let mut stmt = Query::select();
     for i in 0..keys.len() {
@@ -4937,6 +4942,117 @@ fn build_nvalue_pivot_aggregate_sql(
     }
 
     stmt
+}
+
+/// Calculation nvalue を持つ異種キー Nest の nvalue 集計 SQL を構築します。
+/// 各 nvalue コンポーネントを対応するキー次元で独立して集計し、JOIN して合算します。
+///
+/// 例: `(parentdir: &: count()) + (extension: &: count())`
+/// → count(parentdir) per parentdir group と count(extension) per extension group を
+///   pivot CTE 経由で得た有効な (key0, key1) 組み合わせに対して JOIN で結合します。
+fn build_mixed_key_calc_nvalue_sql(
+    keys: &[ResolvedOperand],
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+    context: Option<&ResolvedNode>,
+    view: &str,
+) -> SelectStatement {
+    let n_left = count_nvalue_keys(&calc.left).max(1).min(keys.len() - 1);
+
+    // 各コンポーネントをそれぞれのキーで独立集計するサブクエリ
+    let left_sub = build_nvalue_standalone_subquery(
+        &keys[0],
+        &calc.left,
+        context,
+        view,
+        false,
+    );
+    let right_sub = build_nvalue_standalone_subquery(
+        &keys[n_left],
+        &calc.right,
+        context,
+        view,
+        false,
+    );
+
+    // キーのみ pivot CTE: 有効な (key0, key1, ...) の組み合わせを列挙
+    let pivot_sub = build_nest_pivot_cte(keys, None, view);
+
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+
+    let l_nvalue: SimpleExpr = Func::coalesce([
+        Expr::col((Alias::new("L"), Alias::new("nvalue"))).into(),
+        if is_string { Expr::val("").into() } else { Expr::val(0.0f64).into() },
+    ])
+    .into();
+    let r_nvalue: SimpleExpr = Func::coalesce([
+        Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
+        if is_string { Expr::val("").into() } else { Expr::val(0.0f64).into() },
+    ])
+    .into();
+
+    let mut stmt = Query::select();
+    stmt.distinct();
+
+    for i in 0..keys.len() {
+        stmt.expr_as(
+            Expr::col((Alias::new("pivot"), Alias::new(&format!("key{}", i)))),
+            Alias::new(&format!("key{}", i)),
+        );
+    }
+
+    stmt.expr_as(
+        apply_arithmetic_op(&calc.op, l_nvalue, r_nvalue, is_string),
+        Alias::new("nvalue"),
+    );
+
+    stmt.from_subquery(pivot_sub, Alias::new("pivot"));
+
+    // LEFT JOIN left_sub L ON pivot.key0 = L.group_label
+    stmt.join_subquery(
+        sea_query::JoinType::LeftJoin,
+        left_sub,
+        Alias::new("L"),
+        Expr::col((Alias::new("pivot"), Alias::new("key0")))
+            .equals((Alias::new("L"), Alias::new("group_label"))),
+    );
+
+    // LEFT JOIN right_sub R ON pivot.key{n_left} = R.group_label
+    stmt.join_subquery(
+        sea_query::JoinType::LeftJoin,
+        right_sub,
+        Alias::new("R"),
+        Expr::col((Alias::new("pivot"), Alias::new(&format!("key{}", n_left))))
+            .equals((Alias::new("R"), Alias::new("group_label"))),
+    );
+
+    // 全キーが非 NULL のものだけを対象とする
+    for i in 0..keys.len() {
+        stmt.and_where(
+            Expr::col((Alias::new("pivot"), Alias::new(&format!("key{}", i))))
+                .is_not_null(),
+        );
+    }
+
+    if let Some(ctx) = context {
+        stmt.and_where(
+            Expr::col((Alias::new("pivot"), Col::ItemId))
+                .in_subquery(build_pick_sql(ctx, view)),
+        );
+    }
+
+    stmt
+}
+
+/// ResolvedOperand が対応するキー数を返します。
+/// Calculation の場合は左右の再帰的な合計。
+fn count_nvalue_keys(nvalue: &ResolvedOperand) -> usize {
+    match nvalue {
+        ResolvedOperand::Calculation(calc) => {
+            count_nvalue_keys(&calc.left) + count_nvalue_keys(&calc.right)
+        }
+        ResolvedOperand::Literal(_) => 0,
+        _ => 1,
+    }
 }
 fn build_nest_pivot_multi_nv_cte(
     keys: &[ResolvedOperand],

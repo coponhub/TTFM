@@ -16,25 +16,50 @@ fn test_mixed_key_calculation() -> anyhow::Result<()> {
     let db_dir = tempdir()?;
     let db_dir_path = db_dir.path();
 
-    // dir1 に 2つ rs ファイル
+    // dir1 に rs ファイル2件、dir2 に rs ファイル1件
+    // → count(parentdir:dir1)=2, count(parentdir:dir2)=1, count(extension:rs)=3
     let dir1 = root_path.join("dir1");
     std::fs::create_dir(&dir1)?;
     std::fs::write(dir1.join("a.rs"), "rust")?;
     std::fs::write(dir1.join("b.rs"), "rust")?;
 
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "rust")?;
+
     let fm = FileManager::new_with_db_dir(db_dir_path)?;
     fm.index_directory(root_path, None::<&fn(usize)>, false)?;
 
     // (parentdir: &: count()) + (extension: &: count())
+    // dir1 グループ: count(dir1)=2, count(rs)=3 → nvalue = 2+3 = 5
+    // dir2 グループ: count(dir2)=1, count(rs)=3 → nvalue = 1+3 = 4
     let query = "(parentdir: &: count()) + (extension: &: count())";
 
-    // 異種キー演算がサポートされていることを確認
-    let res = fm.search(query, SearchOptions::default());
+    let results = fm.search(query, SearchOptions::default())?;
 
-    assert!(res.is_ok(), "Mixed key calculation should be supported in Phase 2, but currently fails: {:?}", res.err());
+    let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
+        let nvalue = group.tags.entries.iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
 
-    let results = res?;
-    assert!(!results.results.is_empty(), "Results should not be empty");
+    let dir1_group = results.results.iter()
+        .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
+        .expect("Should have (dir1, rs) group");
+    assert_eq!(get_nvalue(dir1_group), 5.0,
+        "dir1 group: count(dir1)=2 + count(rs)=3 should be 5");
+
+    let dir2_group = results.results.iter()
+        .find(|r| r.name.contains("dir2") && r.name.contains("rs"))
+        .expect("Should have (dir2, rs) group");
+    assert_eq!(get_nvalue(dir2_group), 4.0,
+        "dir2 group: count(dir2)=1 + count(rs)=3 should be 4");
+
     Ok(())
 }
 
@@ -2160,18 +2185,25 @@ fn test_mixed_key_arithmetic_deepens_nest() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(db_dir_path)?;
     fm.index_directory(root_path, None::<&fn(usize)>, false)?;
 
+    // dir1/a.rs は "a" = 1byte: sum(size: dir1)=1, sum(size: rs)=1 → nvalue = 1+1 = 2
     let query = "(parentdir: &: sum(size:)) + (extension: &: sum(size:))";
     let res = fm.search(query, SearchOptions::default())?;
 
-    for (i, r) in res.results.iter().enumerate() {
-        println!("  result[{}] name = {}", i, r.name);
-    }
+    // (dir1, rs) の 1グループ
+    assert_eq!(res.results.len(), 1, "Should have 1 merged group");
+    let group = &res.results[0];
+    assert!(group.name.contains("rs"), "Group key should contain rs, got: {}", group.name);
 
-    assert_eq!(res.results.len(), 1);
-
-    // The keys are merged: [parentdir, extension]
-    assert!(res.results[0].name.contains("rs"));
-
+    // nvalue = sum(size: dir1) + sum(size: rs) = 1 + 1 = 2
+    let nvalue = group.tags.entries.iter()
+        .find(|e| e.label.tag_type().as_str() == "nvalue")
+        .expect("Should have nvalue tag");
+    let val = match nvalue.label.value() {
+        ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+        ttfm::types::LabelValue::Integer(i) => i as f64,
+        _ => panic!("Unexpected nvalue type"),
+    };
+    assert_eq!(val, 2.0, "nvalue should be sum(size:dir1)+sum(size:rs)=1+1=2, got: {}", val);
     Ok(())
 }
 
