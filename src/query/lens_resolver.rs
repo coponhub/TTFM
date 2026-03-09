@@ -476,8 +476,8 @@ impl ResolvedNode {
             ResolvedNode::NestMatch { keys, .. } => {
                 extract_tag_type_from_operand(keys.first().unwrap())
             }
-            ResolvedNode::NestNestMatch { left_keys: keys, .. }
-            | ResolvedNode::MergedNestMatch { keys, .. } => {
+            ResolvedNode::NestNestMatch { .. } => None, // 比較演算子 → フラットリスト (Lv.1)
+            ResolvedNode::MergedNestMatch { keys, .. } => {
                 extract_tag_type_from_operand(keys.first().unwrap())
             }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
@@ -681,9 +681,12 @@ impl ResolvedNode {
             | ResolvedNode::ScalarMatch { .. }
             | ResolvedNode::NestMatch { .. }
             | ResolvedNode::MergedNestMatch { .. } => true,
-            // Arithmetic は Nest 結果（nvalue 付き）なので false
-            ResolvedNode::NestNestMatch { op, .. } => {
+            // Comparison 演算子の NestNestMatch:
+            // right_nvalue が Literal の場合はブーリアン結果（フィルタリング）。
+            // right_nvalue が Aggregation/Calculation の場合はフラットリスト比較なので false。
+            ResolvedNode::NestNestMatch { op, right_nvalue, .. } => {
                 matches!(op, NestMatchOp::Comparison(_))
+                    && matches!(right_nvalue, ResolvedOperand::Literal(_))
             }
             ResolvedNode::TagCalculationMatch { calc, .. }
             | ResolvedNode::CalculationMatch { calc, .. } => {
@@ -1519,10 +1522,23 @@ fn resolve_operand_for_calc(
             let resolved = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedOperand::Aggregation(resolved))
         }
-        Operand::Query(_) => {
-            bail!(
-                "Operand::Query should have been flattened by logical resolver"
-            );
+        Operand::Query(node) => {
+            // Query(Nest with nvalue) が Calculation 内に現れる場合（expand_nest 後）、
+            // Nest の nvalue オペランドを抽出して返す。
+            let resolved = resolve_query_node(lens, *node)?;
+            let nvalue = resolved.get_nvalue().cloned()
+                .or_else(|| {
+                    // And([filter, Nest{nvalue}]) パターン
+                    if let ResolvedNode::And(ref nodes) = resolved {
+                        nodes.iter().find_map(|n| n.get_nvalue()).cloned()
+                    } else {
+                        None
+                    }
+                });
+            nvalue.ok_or_else(|| anyhow::anyhow!(
+                "Operand::Query inside Calculation must resolve to Nest with nvalue, got: {:?}",
+                resolved
+            ))
         }
     }
 }
@@ -1884,6 +1900,40 @@ fn resolve_single_match(
                 left_calc,
                 op,
                 right_calc,
+            })
+        }
+        // (Query(Nest), >, Calculation(Query(Nest), /, Literal))
+        // expand_nest 後に Nest が Calculation 内に Query として現れるパターン
+        (Operand::Query(l_node), Operand::Calculation(calc)) => {
+            let res_l = resolve_query_node(lens, *l_node)?;
+            let (left_keys, left_nvalue, left_context) =
+                extract_nvalue_projection_parts(res_l)?;
+            let right_calc = resolve_calculation(lens, *calc)?;
+            let right_nvalue = ResolvedOperand::Calculation(Box::new(right_calc));
+            Ok(ResolvedNode::NestNestMatch {
+                left_keys: left_keys.clone(),
+                left_nvalue,
+                left_context: left_context.clone(),
+                op: NestMatchOp::Comparison(op),
+                right_keys: left_keys,
+                right_nvalue,
+                right_context: left_context,
+            })
+        }
+        (Operand::Calculation(calc), Operand::Query(r_node)) => {
+            let res_r = resolve_query_node(lens, *r_node)?;
+            let (right_keys, right_nvalue, right_context) =
+                extract_nvalue_projection_parts(res_r)?;
+            let left_calc = resolve_calculation(lens, *calc)?;
+            let left_nvalue = ResolvedOperand::Calculation(Box::new(left_calc));
+            Ok(ResolvedNode::NestNestMatch {
+                left_keys: right_keys.clone(),
+                left_nvalue,
+                left_context: right_context.clone(),
+                op: NestMatchOp::Comparison(op),
+                right_keys,
+                right_nvalue,
+                right_context,
             })
         }
         _ => Err(anyhow::anyhow!("Unsupported comparison pattern")),

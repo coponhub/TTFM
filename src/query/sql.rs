@@ -4,8 +4,8 @@ use crate::query::ast::{
     QueryNode,
 };
 use crate::query::lens_resolver::{
-    extract_nvalue_projection_parts, NestMatchOp, ResolvedAggregationNode,
-    ResolvedNode, ResolvedOperand,
+    extract_nvalue_projection_parts, NestMatchCondition, NestMatchOp,
+    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType, TagType};
@@ -431,6 +431,25 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             right_context,
         } => match op {
             NestMatchOp::Comparison(cmp_op) => {
+                // right_nvalue が Aggregation/Calculation の場合（agg vs agg/calc 比較）：
+                // MergedNestMatch の HAVING アプローチを再利用する。
+                // これにより GROUP BY group_label HAVING agg_l == agg_r が正しく評価される。
+                let is_agg_or_calc = matches!(
+                    right_nvalue,
+                    ResolvedOperand::Aggregation(_) | ResolvedOperand::Calculation(_)
+                );
+
+                if is_agg_or_calc {
+                    let cond = NestMatchCondition {
+                        nvalue: left_nvalue.clone(),
+                        op: NestMatchOp::Comparison(*cmp_op),
+                        right: right_nvalue.clone(),
+                        context: left_context.clone(),
+                    };
+                    return build_merged_nest_match_sql(left_keys, &[cond], false, view);
+                }
+
+                // right_nvalue が Literal の場合（通常の nvalue フィルタ）：
                 // プロジェクション同士の比較：左辺ベースの SQL を作成
                 let mut stmt =
                     build_resolved_projection_sql(&left_keys[0], view);
@@ -928,31 +947,35 @@ pub(crate) fn build_merged_nvalue_agg_expr(
             };
 
             if let Some(filter_node) = inner_filter {
-                let case_expr: SimpleExpr = if let Some(cond) =
-                    resolve_simple_filter_condition(
-                        &filter_node,
-                        Alias::new(tbl_alias),
-                    ) {
-                    if cond.is_empty() {
-                        val_expr.clone()
-                    } else {
-                        Expr::case(cond, val_expr.clone())
+                // フィルタがある場合：集計対象タグ型条件（type='size'等）と
+                // フィルタ条件（item_id IN サブクエリ）を組み合わせる。
+                // フィルタは同じ行のタグ条件ではなく、アイテムIDベースのフィルタとして扱う。
+                let filter_pick = build_pick_sql(&filter_node, view);
+                let filter_sub = Query::select()
+                    .column(Col::ItemId)
+                    .from_subquery(filter_pick, Alias::new("nv_filter"))
+                    .to_owned();
+                let in_expr =
+                    Expr::col((Alias::new(tbl_alias), Col::ItemId))
+                        .in_subquery(filter_sub);
+
+                // inner_tag がある場合は type='size' 等の条件も追加する
+                let case_expr: SimpleExpr =
+                    if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
+                        let combined_cond = Condition::all()
+                            .add(
+                                Expr::col((Alias::new(tbl_alias), Col::Type))
+                                    .eq(tag_type.as_str()),
+                            )
+                            .add(in_expr);
+                        Expr::case(combined_cond, val_expr.clone())
                             .finally(Expr::val(None::<f64>))
                             .into()
-                    }
-                } else {
-                    let filter_pick = build_pick_sql(&filter_node, view);
-                    let filter_sub = Query::select()
-                        .column(Col::ItemId)
-                        .from_subquery(filter_pick, Alias::new("nv_filter"))
-                        .to_owned();
-                    let in_expr =
-                        Expr::col((Alias::new(tbl_alias), Col::ItemId))
-                            .in_subquery(filter_sub);
-                    Expr::case(in_expr, val_expr.clone())
-                        .finally(Expr::val(None::<f64>))
-                        .into()
-                };
+                    } else {
+                        Expr::case(in_expr, val_expr.clone())
+                            .finally(Expr::val(None::<f64>))
+                            .into()
+                    };
                 apply_arithmetic_agg(op, case_expr, is_string)
             } else if let Some(StorageMapping::RowTag { tag_type, .. }) =
                 inner_tag

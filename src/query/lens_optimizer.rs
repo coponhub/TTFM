@@ -45,7 +45,10 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             right_context,
         } if left_keys == right_keys
             && left_context == right_context
-            && matches!(op, NestMatchOp::Comparison(_)) =>
+            && matches!(op, NestMatchOp::Comparison(_))
+            // right が Literal の場合のみ MergedNestMatch に変換する。
+            // Aggregation や Calculation の場合はフラットリスト比較なので NestNestMatch を保持する。
+            && matches!(right_nvalue, ResolvedOperand::Literal(_)) =>
         {
             // Convert self-comparing NestNestMatch into a MergedNestMatch
             ResolvedNode::MergedNestMatch {
@@ -287,26 +290,33 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 is_or,
             });
         } else {
-            // Just one match, convert back to NestMatch to avoid unnecessary merging
+            // Just one match; convert back to NestMatch if right is Literal,
+            // otherwise keep as NestNestMatch (e.g., right is Calculation).
             let cond = matches
                 .into_iter()
                 .next()
                 .expect("matches should have at least one element");
             let NestMatchOp::Comparison(op) = cond.op;
-            let crate::query::ResolvedOperand::Literal(label) = cond.right
-            else {
-                panic!(
-                    "Expected Literal for single NestMatch, got: {:?}",
-                    cond.right
-                );
-            };
-            remaining.push(ResolvedNode::NestMatch {
-                keys: operand,
-                nvalue: cond.nvalue,
-                op,
-                label,
-                context: cond.context,
-            });
+            if let crate::query::ResolvedOperand::Literal(label) = cond.right {
+                remaining.push(ResolvedNode::NestMatch {
+                    keys: operand.clone(),
+                    nvalue: cond.nvalue,
+                    op,
+                    label,
+                    context: cond.context,
+                });
+            } else {
+                // right is Calculation or other non-Literal: keep as NestNestMatch
+                remaining.push(ResolvedNode::NestNestMatch {
+                    left_keys: operand.clone(),
+                    left_nvalue: cond.nvalue,
+                    left_context: cond.context.clone(),
+                    op: NestMatchOp::Comparison(op),
+                    right_keys: operand,
+                    right_nvalue: cond.right,
+                    right_context: cond.context,
+                });
+            }
         }
     }
 
@@ -467,41 +477,42 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_comparison() {
         // ((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))
-        // 同一キー (parentdir) の NestNestMatch → MergedNestMatch に変換されること
+        // agg vs agg の比較: right が Aggregation なので NestNestMatch のまま保持される
+        // (フラットリストを返すべき比較演算のため、MergedNestMatch には変換しない)
         let query_str =
             "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
         let resolved = Resolver::new(query_str).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
-            ResolvedNode::MergedNestMatch {
-                keys,
-                matches,
-                is_or,
+            ResolvedNode::NestNestMatch {
+                left_keys,
+                op,
+                right_nvalue,
+                ..
             } => {
-                assert!(!is_or, "Comparison merge should be AND (is_or=false)");
-                assert_eq!(
-                    matches.len(),
-                    1,
-                    "Single comparison should produce 1 merged condition"
-                );
-                match &keys[0] {
+                match &left_keys[0] {
                     ResolvedOperand::TagRef { tag_type, .. } => {
                         assert_eq!(tag_type.as_str(), "parentdir");
                     }
                     _ => panic!(
-                        "Expected TagRef(parentdir) as keys, got: {:?}",
-                        keys
+                        "Expected TagRef(parentdir) as left_keys, got: {:?}",
+                        left_keys
                     ),
                 }
-                // op は Comparison であること
                 assert!(
-                    matches!(matches[0].op, NestMatchOp::Comparison(_)),
-                    "Condition op should be Comparison, got: {:?}",
-                    matches[0].op
+                    matches!(op, NestMatchOp::Comparison(_)),
+                    "op should be Comparison, got: {:?}",
+                    op
+                );
+                // right は Aggregation であること (sum(size:))
+                assert!(
+                    matches!(right_nvalue, ResolvedOperand::Aggregation(_)),
+                    "right_nvalue should be Aggregation, got: {:?}",
+                    right_nvalue
                 );
             }
-            _ => panic!("Expected MergedNestMatch, got: {:?}", optimized),
+            _ => panic!("Expected NestNestMatch (agg vs agg comparison), got: {:?}", optimized),
         }
     }
 

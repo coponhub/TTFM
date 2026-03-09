@@ -1324,16 +1324,29 @@ fn test_nest_scenario_b_query_vs_query() -> anyhow::Result<()> {
         Default::default(),
     )?;
 
-    let item_names: Vec<_> = res.results.iter().map(|r| &r.name).collect();
+    // Lv.1フラットリスト: type_for_projection は None
     assert!(
-        item_names.iter().any(|n| n.contains("dirA")),
-        "Results should contain dirA, got: {:?}",
-        item_names
+        res.type_for_projection.is_none(),
+        "agg==agg comparison should return flat list (Lv.1), not projection"
+    );
+
+    // フラットリストではparentdir=dirA(path)のファイルが返る。
+    // アイテムのタグから parentdir の値でdirA/dirBの所属を確認する。
+    let result_parentdirs: Vec<String> = res.results.iter().flat_map(|r| {
+        r.tags.entries.iter()
+            .filter(|e| e.label.tag_type().as_str() == "parentdir")
+            .map(|e| e.label.as_str().to_string())
+            .collect::<Vec<_>>()
+    }).collect();
+    assert!(
+        result_parentdirs.iter().any(|p| p.contains("dirA")),
+        "Results should contain items from dirA, parentdirs: {:?}",
+        result_parentdirs
     );
     assert!(
-        !item_names.iter().any(|n| n.contains("dirB")),
-        "Results should NOT contain dirB, got: {:?}",
-        item_names
+        !result_parentdirs.iter().any(|p| p.contains("dirB")),
+        "Results should NOT contain items from dirB, parentdirs: {:?}",
+        result_parentdirs
     );
 
     Ok(())
@@ -2204,6 +2217,64 @@ fn test_level3_nest_agg_internal_filter_repro() -> anyhow::Result<()> {
 
     // フィルタが無視されると 5 + 15 = 20 になる。正しく動作すれば 15.0。
     assert_eq!(val, 15.0, "Sum should only include files > 10 bytes, but got: {}", val);
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_query_vs_calc_resolves() {
+    let queries = [
+        "extension: &: (sum(size:) > (sum(size:) / 2))",
+        "parentdir: &: (sum(size:) > (sum(size:) / 2))",
+        "parentdir: &: (avg(size:) > (sum(size:) / count()))",
+    ];
+    for query in &queries {
+        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        assert!(
+            result.is_ok(),
+            "Query '{}' should resolve without error, got: {}",
+            query,
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn test_nest_query_vs_calc_e2e() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 3 rs files of size 10, 20, 30 → sum(size) = 60, sum/2 = 30
+    // sum > sum/2 is always true for positive sum, so rs extension should be included
+    std::fs::write(root.join("a.rs"), vec![0u8; 10])?;
+    std::fs::write(root.join("b.rs"), vec![0u8; 20])?;
+    std::fs::write(root.join("c.rs"), vec![0u8; 30])?;
+    // 1 txt file
+    std::fs::write(root.join("d.txt"), vec![0u8; 5])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "extension: &: (sum(size:) > (sum(size:) / 2))",
+        Default::default(),
+    )?;
+
+    // Result should be flat list (not projection)
+    assert!(
+        res.type_for_projection.is_none(),
+        "Query should return flat list, not projection"
+    );
+
+    // sum(rs) = 60, 60 > 60/2=30 → true → rs files included
+    // sum(txt) = 5, 5 > 5/2=2.5 → true → txt files included
+    // All files should be in the result (condition is always true for positive sizes)
+    assert!(
+        !res.results.is_empty(),
+        "Should have results, got: {:?}",
+        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
 
     Ok(())
 }

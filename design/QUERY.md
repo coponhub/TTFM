@@ -200,7 +200,7 @@
             - `extension:`
             - `project:gtk4 & extension:`
             - `project: &: count()`
-            - `project: &: sum(width: :> height)`
+            - `project: &: sum(width: :> height:)`
     - level n. ネスト(Lv.n)
         - 例
             - `project: &: extension:`
