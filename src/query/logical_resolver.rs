@@ -120,7 +120,11 @@ pub(crate) fn expand_query_node(
             expand_comparison_with_recursion(schema, cmp)
         }
         QueryNode::Aggregation(agg) => {
-            Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+            if is_unnestable_aggregation(&agg) {
+                expand_query_node(schema, unnest_aggregation(agg))
+            } else {
+                Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+            }
         }
         QueryNode::Nest(nest) => Ok(expand_nest(schema, nest)?),
         other => Ok(other),
@@ -924,6 +928,52 @@ fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
     }
 }
 
+/// Nestの右辺がunnest対象（Projection または Nest）かを判定します。
+fn is_unnestable_right(right: &QueryNode) -> bool {
+    matches!(right, QueryNode::Projection(_) | QueryNode::Nest(_))
+}
+
+/// 集約の内部がNestで、かつ右辺がunnest可能かを判定します。
+fn is_unnestable_aggregation(agg: &AggregationNode) -> bool {
+    let inner = match agg {
+        AggregationNode::Count(n) => n.as_ref(),
+        AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
+    };
+    matches!(inner, QueryNode::Nest(n) if is_unnestable_right(&n.right))
+}
+
+/// agg(Nest(L, R)) → Nest(L, agg(R)) の書き換えを実行します。
+/// 呼び出し前に `is_unnestable_aggregation` で判定済みであること。
+fn unnest_aggregation(agg: AggregationNode) -> QueryNode {
+    match agg {
+        AggregationNode::Count(inner) => {
+            let QueryNode::Nest(nest) = *inner else {
+                unreachable!()
+            };
+            QueryNode::Nest(NestNode {
+                left: nest.left,
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(nest.right),
+                )),
+            })
+        }
+        AggregationNode::Arithmetic { op, inner } => {
+            let QueryNode::Nest(nest) = *inner else {
+                unreachable!()
+            };
+            QueryNode::Nest(NestNode {
+                left: nest.left,
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Arithmetic {
+                        op,
+                        inner: nest.right,
+                    },
+                )),
+            })
+        }
+    }
+}
+
 /// 集約ノードを論理展開します。
 fn expand_aggregation(
     schema: &impl LogicalSchema,
@@ -1686,7 +1736,6 @@ mod tests {
     /// クエリ: (extension: &: count(extension:rs)) * 10 :> 0
     #[test]
     fn test_nest_in_calculation_filter_lifted() {
-        
         let lens = Lens::base_standard();
         let node = QueryNode::Comparison(ComparisonNode {
             first: Operand::Calculation(Box::new(CalculationNode {
@@ -1788,5 +1837,181 @@ mod tests {
         };
         // 異種キー演算が validate_calculation で許可されていることを確認
         assert!(validate_calculation(&calc, &lens).is_ok());
+    }
+
+    // ──────────────────────────────────────────────
+    // Phase 7: Unnest by Aggregation
+    // ──────────────────────────────────────────────
+
+    /// sum(Nest(parentdir, Proj(size))) → Nest(parentdir, sum(Proj(size)))
+    #[test]
+    fn test_unnest_sum_projection() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("size"),
+                ))),
+            })),
+        };
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                // left = Proj(parentdir)
+                assert!(matches!(
+                    nest.left.as_ref(),
+                    QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "parentdir"
+                ));
+                // right = Aggregation(Sum, Proj(size))
+                match nest.right.as_ref() {
+                    QueryNode::Aggregation(AggregationNode::Arithmetic {
+                        op,
+                        inner,
+                    }) => {
+                        assert!(matches!(
+                            op,
+                            crate::query::ast::ArithmeticAggOp::Sum
+                        ));
+                        assert!(matches!(
+                            inner.as_ref(),
+                            QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "size"
+                        ));
+                    }
+                    other => panic!("Expected Aggregation, got: {:?}", other),
+                }
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// count(Nest(parentdir, Proj(extension))) → Nest(parentdir, count(Proj(extension)))
+    #[test]
+    fn test_unnest_count_projection() {
+        let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        })));
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                assert!(matches!(
+                    nest.left.as_ref(),
+                    QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "parentdir"
+                ));
+                assert!(matches!(
+                    nest.right.as_ref(),
+                    QueryNode::Aggregation(AggregationNode::Count(_))
+                ));
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// sum(Nest(Nest(a,b), Proj(size))) → Nest(Nest(a,b), sum(Proj(size)))
+    #[test]
+    fn test_unnest_deep_nest() {
+        let inner_nest = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        });
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(inner_nest),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("size"),
+                ))),
+            })),
+        };
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                // left = Nest(parentdir, extension)
+                assert!(matches!(nest.left.as_ref(), QueryNode::Nest(_)));
+                // right = Aggregation(Sum, Proj(size))
+                assert!(matches!(
+                    nest.right.as_ref(),
+                    QueryNode::Aggregation(AggregationNode::Arithmetic { .. })
+                ));
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// sum(Nest(parentdir, Agg(count))) → 変換なし (右辺がAggregation)
+    #[test]
+    fn test_unnest_no_change_right_is_agg() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("*", "*"),
+                    ))),
+                )),
+            })),
+        };
+
+        assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    /// count(Nest(parentdir, Comparison(...))) → 変換なし (右辺がComparison)
+    #[test]
+    fn test_unnest_no_change_right_is_comparison() {
+        let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(ComparisonNode {
+                first: Operand::Aggregation(Box::new(AggregationNode::Count(
+                    Box::new(QueryNode::TypedTag(TypedTag::new(
+                        "extension",
+                        "jpg",
+                    ))),
+                ))),
+                rest: vec![(
+                    ComparisonOp::Scalar(BasicOp::Gt),
+                    Operand::Literal(crate::types::Label::from(10i64)),
+                )],
+            })),
+        })));
+
+        assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    /// sum(Proj(size)) → 変換なし (内部がNestではない)
+    #[test]
+    fn test_unnest_no_change_plain_agg() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+
+        assert!(!is_unnestable_aggregation(&agg));
     }
 }

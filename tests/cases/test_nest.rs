@@ -38,7 +38,10 @@ fn test_mixed_key_calculation() -> anyhow::Result<()> {
     let results = fm.search(query, SearchOptions::default())?;
 
     let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
-        let nvalue = group.tags.entries.iter()
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
             .find(|e| e.label.tag_type().as_str() == "nvalue")
             .expect("Should have nvalue tag");
         match nvalue.label.value() {
@@ -48,17 +51,27 @@ fn test_mixed_key_calculation() -> anyhow::Result<()> {
         }
     };
 
-    let dir1_group = results.results.iter()
+    let dir1_group = results
+        .results
+        .iter()
         .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
         .expect("Should have (dir1, rs) group");
-    assert_eq!(get_nvalue(dir1_group), 5.0,
-        "dir1 group: count(dir1)=2 + count(rs)=3 should be 5");
+    assert_eq!(
+        get_nvalue(dir1_group),
+        5.0,
+        "dir1 group: count(dir1)=2 + count(rs)=3 should be 5"
+    );
 
-    let dir2_group = results.results.iter()
+    let dir2_group = results
+        .results
+        .iter()
         .find(|r| r.name.contains("dir2") && r.name.contains("rs"))
         .expect("Should have (dir2, rs) group");
-    assert_eq!(get_nvalue(dir2_group), 4.0,
-        "dir2 group: count(dir2)=1 + count(rs)=3 should be 4");
+    assert_eq!(
+        get_nvalue(dir2_group),
+        4.0,
+        "dir2 group: count(dir2)=1 + count(rs)=3 should be 4"
+    );
 
     Ok(())
 }
@@ -1357,12 +1370,18 @@ fn test_nest_scenario_b_query_vs_query() -> anyhow::Result<()> {
 
     // フラットリストではparentdir=dirA(path)のファイルが返る。
     // アイテムのタグから parentdir の値でdirA/dirBの所属を確認する。
-    let result_parentdirs: Vec<String> = res.results.iter().flat_map(|r| {
-        r.tags.entries.iter()
-            .filter(|e| e.label.tag_type().as_str() == "parentdir")
-            .map(|e| e.label.as_str().to_string())
-            .collect::<Vec<_>>()
-    }).collect();
+    let result_parentdirs: Vec<String> = res
+        .results
+        .iter()
+        .flat_map(|r| {
+            r.tags
+                .entries
+                .iter()
+                .filter(|e| e.label.tag_type().as_str() == "parentdir")
+                .map(|e| e.label.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     assert!(
         result_parentdirs.iter().any(|p| p.contains("dirA")),
         "Results should contain items from dirA, parentdirs: {:?}",
@@ -1940,30 +1959,43 @@ fn test_level3_nest_projection_with_agg() -> anyhow::Result<()> {
     let query = "parentdir: &: extension: &: sum(size:)";
     let res = fm.search(query, SearchOptions::default())?;
 
-
     // 期待されるグループ:
     // 1. dir1, rs  -> sum=7
     // 2. dir1, txt -> sum=10
     // 3. dir2, rs  -> sum=5
     // 4. dir2, txt -> sum=3+2=5
-    assert_eq!(res.results.len(), 4, "Should have 4 groups, but got: {:?}", res.results);
+    assert_eq!(
+        res.results.len(),
+        4,
+        "Should have 4 groups, but got: {:?}",
+        res.results
+    );
 
     let find_group = |pdir: &str, ext: &str, expected_sum: f64| {
-        res.results.iter().find(|r| {
-            let label = &r.name;
-            label.contains(pdir) && label.contains(ext) && 
-            r.tags.entries.iter().any(|e| {
-                if e.label.tag_type().as_str() == "nvalue" {
-                    let val = match e.label.value() {
-                        ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
-                        ttfm::types::LabelValue::Integer(i) => i as f64,
-                        _ => 0.0,
-                    };
-                    return (val - expected_sum).abs() < 0.001;
-                }
-                false
+        res.results
+            .iter()
+            .find(|r| {
+                let label = &r.name;
+                label.contains(pdir)
+                    && label.contains(ext)
+                    && r.tags.entries.iter().any(|e| {
+                        if e.label.tag_type().as_str() == "nvalue" {
+                            let val = match e.label.value() {
+                                ttfm::types::LabelValue::Double(d_bits) => {
+                                    f64::from_bits(d_bits)
+                                }
+                                ttfm::types::LabelValue::Integer(i) => i as f64,
+                                _ => 0.0,
+                            };
+                            return (val - expected_sum).abs() < 0.001;
+                        }
+                        false
+                    })
             })
-        }).expect(&format!("Should find group {}/{} with sum {}", pdir, ext, expected_sum));
+            .expect(&format!(
+                "Should find group {}/{} with sum {}",
+                pdir, ext, expected_sum
+            ));
     };
 
     find_group("dir1", "rs", 7.0);
@@ -2073,7 +2105,7 @@ fn test_level3_nest_projection_with_agg_filter() -> anyhow::Result<()> {
     let dir1 = root_path.join("dir1");
     std::fs::create_dir_all(&dir1)?;
     std::fs::write(dir1.join("a.rs"), "content")?;
-    
+
     // dir1/b.txt (1) -> Group dir1/txt Sum=1 (FAIL)
     std::fs::write(dir1.join("b.txt"), "x")?;
 
@@ -2106,19 +2138,32 @@ fn test_level3_nest_projection_with_agg_filter() -> anyhow::Result<()> {
 
     // 期待されるファイル: dir1/a.rs, dir2/a.rs, dir2/c.txt, dir2/d.txt
     // 除外されるファイル: dir1/b.txt (sum=1), 各ディレクトリ (is_dir: true)
-    let files: Vec<_> = res.results.iter().filter(|r| {
-        !r.tags.entries.iter().any(|e| {
-            e.label.tag_type().to_string() == "is_dir" && e.label.as_str() == "true"
+    let files: Vec<_> = res
+        .results
+        .iter()
+        .filter(|r| {
+            !r.tags.entries.iter().any(|e| {
+                e.label.tag_type().to_string() == "is_dir"
+                    && e.label.as_str() == "true"
+            })
         })
-    }).collect();
+        .collect();
 
-    assert_eq!(files.len(), 4, "Should return 4 files, but got: {:?}", files);
+    assert_eq!(
+        files.len(),
+        4,
+        "Should return 4 files, but got: {:?}",
+        files
+    );
 
     let names: Vec<String> = files.iter().map(|r| r.name.clone()).collect();
     assert!(names.iter().any(|n| n.contains("a.rs")), "Missing a.rs"); // dir1, dir2 両方 a.rs なので ambiguity あるが、とりあえず存在確認
     assert!(names.iter().any(|n| n.contains("c.txt")), "Missing c.txt");
     assert!(names.iter().any(|n| n.contains("d.txt")), "Missing d.txt");
-    assert!(!names.iter().any(|n| n.contains("b.txt")), "dir1/b.txt should have been filtered out");
+    assert!(
+        !names.iter().any(|n| n.contains("b.txt")),
+        "dir1/b.txt should have been filtered out"
+    );
 
     Ok(())
 }
@@ -2192,10 +2237,17 @@ fn test_mixed_key_arithmetic_deepens_nest() -> anyhow::Result<()> {
     // (dir1, rs) の 1グループ
     assert_eq!(res.results.len(), 1, "Should have 1 merged group");
     let group = &res.results[0];
-    assert!(group.name.contains("rs"), "Group key should contain rs, got: {}", group.name);
+    assert!(
+        group.name.contains("rs"),
+        "Group key should contain rs, got: {}",
+        group.name
+    );
 
     // nvalue = sum(size: dir1) + sum(size: rs) = 1 + 1 = 2
-    let nvalue = group.tags.entries.iter()
+    let nvalue = group
+        .tags
+        .entries
+        .iter()
         .find(|e| e.label.tag_type().as_str() == "nvalue")
         .expect("Should have nvalue tag");
     let val = match nvalue.label.value() {
@@ -2203,7 +2255,11 @@ fn test_mixed_key_arithmetic_deepens_nest() -> anyhow::Result<()> {
         ttfm::types::LabelValue::Integer(i) => i as f64,
         _ => panic!("Unexpected nvalue type"),
     };
-    assert_eq!(val, 2.0, "nvalue should be sum(size:dir1)+sum(size:rs)=1+1=2, got: {}", val);
+    assert_eq!(
+        val, 2.0,
+        "nvalue should be sum(size:dir1)+sum(size:rs)=1+1=2, got: {}",
+        val
+    );
     Ok(())
 }
 
@@ -2233,14 +2289,20 @@ fn test_level3_nest_agg_internal_filter_repro() -> anyhow::Result<()> {
 
     // 期待されるグループ:
     // dir1, rs -> nvalue=15.0 (large.rs のみ。small.rs は除外)
-    
-    let dir1_rs = res.results.iter().find(|r| {
-        r.name.contains("dir1") && r.name.contains("rs")
-    }).expect("Should find dir1/rs group");
 
-    let nvalue = dir1_rs.tags.entries.iter().find(|e| e.label.tag_type().as_str() == "nvalue")
+    let dir1_rs = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
+        .expect("Should find dir1/rs group");
+
+    let nvalue = dir1_rs
+        .tags
+        .entries
+        .iter()
+        .find(|e| e.label.tag_type().as_str() == "nvalue")
         .expect("Should have nvalue tag");
-    
+
     let val = match nvalue.label.value() {
         ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
         ttfm::types::LabelValue::Integer(i) => i as f64,
@@ -2248,7 +2310,11 @@ fn test_level3_nest_agg_internal_filter_repro() -> anyhow::Result<()> {
     };
 
     // フィルタが無視されると 5 + 15 = 20 になる。正しく動作すれば 15.0。
-    assert_eq!(val, 15.0, "Sum should only include files > 10 bytes, but got: {}", val);
+    assert_eq!(
+        val, 15.0,
+        "Sum should only include files > 10 bytes, but got: {}",
+        val
+    );
 
     Ok(())
 }
@@ -2306,6 +2372,474 @@ fn test_nest_query_vs_calc_e2e() -> anyhow::Result<()> {
         !res.results.is_empty(),
         "Should have results, got: {:?}",
         res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────
+// Phase 7: Unnest by Aggregation
+// ──────────────────────────────────────────────
+
+/// sum(parentdir: &: size:) → 各parentdirのサイズ合計がnvalueとして付与される
+#[test]
+fn test_unnest_sum_basic() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: a.rs(7), b.rs(10) → sum=17
+    // dir2: c.rs(5) → sum=5
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?; // 7 bytes
+    std::fs::write(dir1.join("b.rs"), "0123456789")?; // 10 bytes
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "abcde")?; // 5 bytes
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("sum(parentdir: &: size:)", SearchOptions::default())?;
+
+    // Projection結果（各parentdirがラベルとして表示される）
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should return projection result, not scalar"
+    );
+
+    let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
+
+    let dir1_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .expect("Should have dir1 group");
+    assert_eq!(get_nvalue(dir1_group), 17.0);
+
+    let dir2_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir2"))
+        .expect("Should have dir2 group");
+    assert_eq!(get_nvalue(dir2_group), 5.0);
+
+    Ok(())
+}
+
+/// count(parentdir: &: extension:) → 各parentdirの拡張子種類数
+#[test]
+fn test_unnest_count_basic() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: a.rs, b.txt → extension count=2
+    // dir2: c.rs → extension count=1
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "x")?;
+    std::fs::write(dir1.join("b.txt"), "y")?;
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "z")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("count(parentdir: &: extension:)", SearchOptions::default())?;
+
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should return projection result"
+    );
+
+    let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
+
+    let dir1_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir1"))
+        .expect("Should have dir1 group");
+    assert_eq!(get_nvalue(dir1_group), 2.0);
+
+    let dir2_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("dir2"))
+        .expect("Should have dir2 group");
+    assert_eq!(get_nvalue(dir2_group), 1.0);
+
+    Ok(())
+}
+
+/// sum(parentdir: &: extension: &: size:) → 深さ3→2 (2キーNest + nvalue)
+#[test]
+fn test_unnest_deep() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: a.rs(7), b.txt(10)
+    // dir2: c.rs(5), d.txt(3)
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?; // 7 bytes
+    std::fs::write(dir1.join("b.txt"), "0123456789")?; // 10 bytes
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "abcde")?; // 5 bytes
+    std::fs::write(dir2.join("d.txt"), "xyz")?; // 3 bytes
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "sum(parentdir: &: extension: &: size:)",
+        SearchOptions::default(),
+    )?;
+
+    // Projection結果: (parentdir, extension) の組み合わせ4つ
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should return projection result"
+    );
+    assert_eq!(
+        res.results.len(),
+        4,
+        "Should have 4 groups: {:?}",
+        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    let find_group = |pdir: &str, ext: &str| -> f64 {
+        let group = res
+            .results
+            .iter()
+            .find(|r| r.name.contains(pdir) && r.name.contains(ext))
+            .unwrap_or_else(|| panic!("Should find group {}/{}", pdir, ext));
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
+
+    assert_eq!(find_group("dir1", "rs"), 7.0);
+    assert_eq!(find_group("dir1", "txt"), 10.0);
+    assert_eq!(find_group("dir2", "rs"), 5.0);
+    assert_eq!(find_group("dir2", "txt"), 3.0);
+
+    Ok(())
+}
+
+/// sum(extension: &: size:) → is_dir:false フィルタが正常に適用される
+#[test]
+fn test_unnest_with_filter() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // a.rs(7), b.rs(10) → rs: sum=17
+    // c.txt(5) → txt: sum=5
+    std::fs::write(root_path.join("a.rs"), "content")?;
+    std::fs::write(root_path.join("b.rs"), "0123456789")?;
+    std::fs::write(root_path.join("c.txt"), "abcde")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("sum(extension: &: size:)", SearchOptions::default())?;
+
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should return projection result"
+    );
+
+    let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
+
+    let rs_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("rs"))
+        .expect("Should have rs group");
+    assert_eq!(get_nvalue(rs_group), 17.0);
+
+    let txt_group = res
+        .results
+        .iter()
+        .find(|r| r.name.contains("txt"))
+        .expect("Should have txt group");
+    assert_eq!(get_nvalue(txt_group), 5.0);
+
+    Ok(())
+}
+
+/// sum(size:) → 通常集約がunnestの影響を受けないことの確認
+#[test]
+fn test_unnest_regression_plain_agg() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    std::fs::write(root_path.join("a.rs"), "content")?; // 7 bytes
+    std::fs::write(root_path.join("b.rs"), "0123456789")?; // 10 bytes
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("sum(extension:rs & size:)", SearchOptions::default())?;
+
+    // スカラー結果
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should return scalar result, not projection"
+    );
+    assert_eq!(res.results[0].name, "17");
+
+    Ok(())
+}
+
+/// sum(parentdir: &: count()) → 既存のnvalue付きNest集約に影響なし
+#[test]
+fn test_unnest_regression_nvalue_agg() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: 2 files, dir2: 1 file → sum of counts = 3
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "x")?;
+    std::fs::write(dir1.join("b.rs"), "y")?;
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "z")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("sum(parentdir: &: count())", SearchOptions::default())?;
+
+    // スカラー結果: ディレクトリも indexing されるため以下のグループが存在する
+    // - parent_of_root: root → count()=1
+    // - root: dir1, dir2 → count()=2
+    // - dir1: a.rs, b.rs → count()=2
+    // - dir2: c.rs → count()=1
+    // 合計: 1+2+2+1 = 6
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should return scalar result"
+    );
+    let val: f64 = res.results[0].name.parse().expect("Should be a number");
+    assert_eq!(val, 6.0, "sum of per-parentdir counts should be 6");
+
+    Ok(())
+}
+
+/// Lv5→Lv4: sum(parentdir: &: extension: &: filename: &: size:)
+/// 4キー → 3キー + nvalue (単段unnest)
+#[test]
+fn test_unnest_depth4_to_3() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1/a.rs(7), dir1/b.rs(10), dir2/c.txt(5)
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?; // 7 bytes
+    std::fs::write(dir1.join("b.rs"), "0123456789")?; // 10 bytes
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.txt"), "abcde")?; // 5 bytes
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    // 4キー(parentdir, extension, filename, size) → unnest → 3キー + nvalue=sum(size)
+    // 各(parentdir, extension, filename)グループには1ファイルしかないため nvalue=そのファイルのサイズ
+    let res = fm.search(
+        "sum(parentdir: &: extension: &: filename: &: size:)",
+        SearchOptions::default(),
+    )?;
+
+    assert!(
+        res.type_for_projection.is_some(),
+        "Should return projection result"
+    );
+    assert_eq!(
+        res.results.len(),
+        3,
+        "Should have 3 groups (dir1/rs/a.rs, dir1/rs/b.rs, dir2/txt/c.txt): {:?}",
+        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    let find_group = |pdir: &str, ext: &str, fname: &str| -> f64 {
+        let group = res
+            .results
+            .iter()
+            .find(|r| {
+                r.name.contains(pdir)
+                    && r.name.contains(ext)
+                    && r.name.contains(fname)
+            })
+            .unwrap_or_else(|| {
+                panic!("Should find group {}/{}/{}", pdir, ext, fname)
+            });
+        let nvalue = group
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.label.tag_type().as_str() == "nvalue")
+            .expect("Should have nvalue tag");
+        match nvalue.label.value() {
+            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
+            ttfm::types::LabelValue::Integer(i) => i as f64,
+            _ => panic!("Unexpected nvalue type"),
+        }
+    };
+
+    find_group("dir1", "rs", "a.rs");
+    assert_eq!(find_group("dir1", "rs", "a.rs"), 7.0);
+    assert_eq!(find_group("dir1", "rs", "b.rs"), 10.0);
+    assert_eq!(find_group("dir2", "txt", "c.txt"), 5.0);
+
+    Ok(())
+}
+
+/// 多段unnest: Lv4→Lv2→Lv0
+/// sum(sum(parentdir: &: extension: &: size:))
+/// 内側sum: 3キー → 2キー + nvalue=sum(size)
+/// 外側sum: Nest{2キー, nvalue} → スカラー (各グループのnvalueの合計)
+#[test]
+fn test_unnest_multistage_4_to_0() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: a.rs(7), b.rs(10) → (dir1, rs): sum(size)=17
+    // dir2: c.rs(5)           → (dir2, rs): sum(size)=5
+    // 全体の合計: 17 + 5 = 22
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "content")?;
+    std::fs::write(dir1.join("b.rs"), "0123456789")?;
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "abcde")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "sum(sum(parentdir: &: extension: &: size:))",
+        SearchOptions::default(),
+    )?;
+
+    // スカラー結果
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should return scalar result"
+    );
+    let val: f64 = res.results[0].name.parse().expect("Should be a number");
+    assert_eq!(val, 22.0, "sum of per-(parentdir,ext) sums should be 22");
+
+    Ok(())
+}
+
+/// 多段unnest: Lv3→Lv2→Lv0
+/// sum(count(parentdir: &: extension:))
+/// 内側count: 2キー → 1キー + nvalue=count(extension)
+/// 外側sum: Nest{1キー, nvalue} → スカラー (各parentdirの拡張子種類数の合計)
+#[test]
+fn test_unnest_multistage_3_to_0() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // dir1: a.rs, b.txt → 2 extension types
+    // dir2: c.rs         → 1 extension type
+    // 合計: 2 + 1 = 3
+    let dir1 = root_path.join("dir1");
+    std::fs::create_dir(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "x")?;
+    std::fs::write(dir1.join("b.txt"), "y")?;
+
+    let dir2 = root_path.join("dir2");
+    std::fs::create_dir(&dir2)?;
+    std::fs::write(dir2.join("c.rs"), "z")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "sum(count(parentdir: &: extension:))",
+        SearchOptions::default(),
+    )?;
+
+    // スカラー結果: count(dir1のext種類)=2 + count(dir2のext種類)=1 = 3
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should return scalar result"
+    );
+    let val: f64 = res.results[0].name.parse().expect("Should be a number");
+    assert_eq!(
+        val, 3.0,
+        "sum of per-parentdir extension counts should be 3"
     );
 
     Ok(())

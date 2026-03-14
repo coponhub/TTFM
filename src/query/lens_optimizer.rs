@@ -512,7 +512,10 @@ mod tests {
                     right_nvalue
                 );
             }
-            _ => panic!("Expected NestNestMatch (agg vs agg comparison), got: {:?}", optimized),
+            _ => panic!(
+                "Expected NestNestMatch (agg vs agg comparison), got: {:?}",
+                optimized
+            ),
         }
     }
 
