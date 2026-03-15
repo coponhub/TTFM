@@ -2844,3 +2844,35 @@ fn test_unnest_multistage_3_to_0() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// 多段unnest with context (BinderErrorの修正確認用)
+/// count(extension: &: parentdir: &: (sum(size:) > 10))
+#[test]
+fn test_unnest_multistage_with_context() -> anyhow::Result<()> {
+    let root = tempdir()?;
+    let root_path = root.path();
+    let db_dir = tempdir()?;
+
+    // a.rs: size 5 (sum < 10) -> false
+    // b.txt: size 15 (sum > 10) -> true
+    std::fs::write(root_path.join("a.rs"), "12345")?;
+    std::fs::write(root_path.join("b.txt"), "123456789012345")?;
+
+    let fm = FileManager::new_with_db_dir(db_dir.path())?;
+    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
+
+    let res = fm.search(
+        "count(extension: &: parentdir: &: (sum(size:) > 10))",
+        SearchOptions::default(),
+    )?;
+
+    // スカラー結果 (条件を満たすグループの数: 1)
+    assert!(
+        res.type_for_projection.is_none(),
+        "Should return scalar result"
+    );
+    let val: f64 = res.results[0].name.parse().expect("Should be a number");
+    assert_eq!(val, 1.0, "Should count 1 valid group");
+
+    Ok(())
+}

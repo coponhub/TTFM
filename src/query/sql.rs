@@ -5042,9 +5042,11 @@ fn build_nvalue_pivot_aggregate_sql(
     }
 
     if let Some(ctx) = context {
-        stmt.and_where(
-            Expr::col(Col::ItemId).in_subquery(build_pick_sql(ctx, view)),
-        );
+        let ctx_sub = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(build_pick_sql(ctx, view), Alias::new("_ctx"))
+            .to_owned();
+        stmt.and_where(Expr::col(Col::ItemId).in_subquery(ctx_sub));
     }
 
     stmt
@@ -5144,9 +5146,12 @@ fn build_mixed_key_calc_nvalue_sql(
     }
 
     if let Some(ctx) = context {
+        let ctx_sub = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(build_pick_sql(ctx, view), Alias::new("_ctx"))
+            .to_owned();
         stmt.and_where(
-            Expr::col((Alias::new("pivot"), Col::ItemId))
-                .in_subquery(build_pick_sql(ctx, view)),
+            Expr::col((Alias::new("pivot"), Col::ItemId)).in_subquery(ctx_sub),
         );
     }
 
