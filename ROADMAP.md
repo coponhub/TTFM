@@ -65,7 +65,7 @@ Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 - [x] **Aggregation**: Statistical calculations such as `sum(size:)`, `count(ext:jpg)`.
 - [x] **Comparison Operators**: Scalar, Label, and Stuck comparisons (e.g., `size > 100MB`).
 - [x] **Calculation**: Arithmetic operations within queries, including parentheses support.
-- [ ] **Nest & Flatten**:
+- [x] **Nest & Flatten**:
     - Multi-key projections and dynamic mapping using the `&:` operator.
     - Group-based scalar comparisons and filtering (e.g., `parentdir: &: (sum(size:) > 1GB)`).
 - [ ] **Refactoring of Query module**
