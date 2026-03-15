@@ -18,7 +18,7 @@
 
 use crate::query::ast::{
     AggregationNode, ArithmeticOp, CalculationNode, ComparisonNode,
-    ComparisonOp, Operand, QueryNode,
+    ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
 use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
@@ -75,16 +75,19 @@ pub(crate) fn expand_query_node(
                 // それ以外の Operand (Calculation, Aggregation, Query) は展開
                 let expanded_op = expand_operand(schema, op)?;
 
-                // Calculation の中に Query(And([filter, proj])) がある場合、書き換え
-                if let Operand::Calculation(calc) = &expanded_op {
-                    if let Some(rewritten) =
-                        try_rewrite_filtered_calculation(calc)
-                    {
-                        return Ok(rewritten);
-                    }
-                }
+                // Operand 内に埋もれた Nest フィルタを抽出
+                let mut lifted_filters = Vec::new();
+                let cleaned_op = strip_filters_from_operand(
+                    expanded_op,
+                    &mut lifted_filters,
+                );
 
-                Ok(QueryNode::Projection(expanded_op))
+                if lifted_filters.is_empty() {
+                    Ok(QueryNode::Projection(cleaned_op))
+                } else {
+                    lifted_filters.push(QueryNode::Projection(cleaned_op));
+                    Ok(QueryNode::And(lifted_filters))
+                }
             }
         }
         QueryNode::And(nodes) => {
@@ -117,8 +120,13 @@ pub(crate) fn expand_query_node(
             expand_comparison_with_recursion(schema, cmp)
         }
         QueryNode::Aggregation(agg) => {
-            Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+            if is_unnestable_aggregation(&agg) {
+                expand_query_node(schema, unnest_aggregation(agg))
+            } else {
+                Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+            }
         }
+        QueryNode::Nest(nest) => Ok(expand_nest(schema, nest)?),
         other => Ok(other),
     }
 }
@@ -158,10 +166,27 @@ fn expand_comparison_with_recursion(
     }
     cmp.rest = expanded_rest;
 
+    // Operand 内に埋もれた Nest フィルタを抽出
+    let mut lifted_filters = Vec::new();
+    cmp.first = strip_filters_from_operand(cmp.first, &mut lifted_filters);
+    let mut new_rest = Vec::new();
+    for (op, operand) in cmp.rest {
+        let stripped = strip_filters_from_operand(operand, &mut lifted_filters);
+        new_rest.push((op, stripped));
+    }
+    cmp.rest = new_rest;
+
     // 標準の比較ノード展開（日付範囲化など）を実行
     let reg = QueryFunctionRegistry::with_standard();
     let expanded_node = expand_comparison_node(cmp, &reg);
-    Ok(expanded_node)
+
+    // 抽出したフィルタがあれば Comparison 全体を And で包む
+    if lifted_filters.is_empty() {
+        Ok(expanded_node)
+    } else {
+        lifted_filters.push(expanded_node);
+        Ok(QueryNode::And(lifted_filters))
+    }
 }
 
 /// 全てのオペランド（Calculation/Aggregation 含む）の妥当性をチェックします
@@ -205,7 +230,7 @@ fn validate_operand(
 }
 
 /// 算術演算の型チェック（論理レベル）
-/// Any 型はスキーマに登録されていないカスタムタグを許容するために数値として扱う
+// Any 型はスキーマに登録されていないカスタムタグを許容するために数値として扱う
 pub fn validate_calculation(
     calc: &CalculationNode,
     schema: &impl LogicalSchema,
@@ -260,8 +285,10 @@ fn is_set_operation(node: &QueryNode) -> bool {
         | QueryNode::Difference(_, _)
         | QueryNode::Complement(_)
         | QueryNode::TypedTag(_)
-        | QueryNode::ColumnMatch { .. }
-        | QueryNode::Projection(_) => true,
+        | QueryNode::ColumnMatch { .. } => true,
+
+        // Projection は集合を返すが、Literal のみの場合はスカラー
+        QueryNode::Projection(op) => !matches!(op, Operand::Literal(_)),
 
         // ラベル比較は集合を返す、スカラー比較は真偽値を返す
         QueryNode::Comparison(cmp) => {
@@ -273,6 +300,9 @@ fn is_set_operation(node: &QueryNode) -> bool {
 
         // スカラーを返す
         QueryNode::Aggregation(_) => false,
+
+        // Nestは集合を返す
+        QueryNode::Nest(_) => true,
     }
 }
 
@@ -311,74 +341,6 @@ fn validate_set_operation_operands(
         }
     }
     Ok(())
-}
-
-/// Calculation の中に Query(And([filter, Projection])) がある場合、書き換えます。
-///
-/// 例: Projection(Calculation(Query(And([filter, proj])), *, 2))
-///  → And([filter, Projection(Calculation(proj, *, 2))])
-fn try_rewrite_filtered_calculation(
-    calc: &CalculationNode,
-) -> Option<QueryNode> {
-    // left が Query(And([filter, Projection])) の場合
-    if let Operand::Query(node) = &calc.left {
-        if let QueryNode::And(nodes) = &**node {
-            // And の中から filter と Projection を抽出
-            let (filters, projs): (Vec<_>, Vec<_>) = nodes
-                .iter()
-                .cloned()
-                .partition(|n| !matches!(n, QueryNode::Projection(_)));
-
-            if !projs.is_empty() && !filters.is_empty() {
-                // 最初の Projection を取り出す
-                if let QueryNode::Projection(proj_op) = &projs[0] {
-                    // 新しい Calculation を作成: Calculation(proj, op, right)
-                    let new_calc = CalculationNode {
-                        left: proj_op.clone(),
-                        op: calc.op,
-                        right: calc.right.clone(),
-                    };
-
-                    // And([filters..., Projection(new_calc)])
-                    let mut new_nodes = filters;
-                    new_nodes.push(QueryNode::Projection(
-                        Operand::Calculation(Box::new(new_calc)),
-                    ));
-
-                    return Some(QueryNode::And(new_nodes));
-                }
-            }
-        }
-    }
-
-    // right が Query(And([filter, Projection])) の場合も同様
-    if let Operand::Query(node) = &calc.right {
-        if let QueryNode::And(nodes) = &**node {
-            let (filters, projs): (Vec<_>, Vec<_>) = nodes
-                .iter()
-                .cloned()
-                .partition(|n| !matches!(n, QueryNode::Projection(_)));
-
-            if !projs.is_empty() && !filters.is_empty() {
-                if let QueryNode::Projection(proj_op) = &projs[0] {
-                    let new_calc = CalculationNode {
-                        left: calc.left.clone(),
-                        op: calc.op,
-                        right: proj_op.clone(),
-                    };
-
-                    let mut new_nodes = filters;
-                    new_nodes.push(QueryNode::Projection(
-                        Operand::Calculation(Box::new(new_calc)),
-                    ));
-
-                    return Some(QueryNode::And(new_nodes));
-                }
-            }
-        }
-    }
-
-    None
 }
 
 /// QueryNodeが意味論的にProjectionを返すかどうかを判定します。
@@ -426,6 +388,7 @@ fn returns_projection(node: &QueryNode) -> bool {
         | QueryNode::ColumnMatch { .. }
         | QueryNode::Comparison(_)
         | QueryNode::Aggregation(_) => false,
+        QueryNode::Nest(nest) => returns_projection(&nest.left),
     }
 }
 
@@ -460,15 +423,50 @@ fn expand_operand(
         }
         Operand::Query(node) => {
             // 括弧で囲まれた式を論理展開
-            let expanded_node = expand_query_node(schema, *node)?;
+            let flattened = expand_query_node(schema, *node)?;
 
             // Queryが算術演算のコンテキストで使用される場合、Projectionを返す必要がある
-            if !returns_projection(&expanded_node) {
+            if !returns_projection(&flattened) {
                 bail!(error::PARENTHESIZED_EXPR_MUST_RETURN_PROJECTION);
             }
 
-            Ok(Operand::Query(Box::new(expanded_node)))
+            Ok(Operand::Query(Box::new(flattened)))
         }
+    }
+}
+
+/// Operand 内に埋もれた And([filters, core]) からフィルタを抽出し、
+/// core のみの Operand に置き換えます。Calculation 内も再帰的に処理します。
+fn strip_filters_from_operand(
+    operand: Operand,
+    filters: &mut Vec<QueryNode>,
+) -> Operand {
+    match operand {
+        Operand::Query(node) => {
+            if let QueryNode::And(nodes) = *node {
+                let (filter_nodes, core_nodes): (Vec<_>, Vec<_>) =
+                    nodes.into_iter().partition(|n| !returns_projection(n));
+                filters.extend(filter_nodes);
+                match core_nodes.len() {
+                    1 => Operand::Query(Box::new(
+                        core_nodes.into_iter().next().unwrap(),
+                    )),
+                    _ => Operand::Query(Box::new(QueryNode::And(core_nodes))),
+                }
+            } else {
+                Operand::Query(node)
+            }
+        }
+        Operand::Calculation(calc) => {
+            let left = strip_filters_from_operand(calc.left, filters);
+            let right = strip_filters_from_operand(calc.right, filters);
+            Operand::Calculation(Box::new(CalculationNode {
+                left,
+                op: calc.op,
+                right,
+            }))
+        }
+        other => other,
     }
 }
 
@@ -613,6 +611,369 @@ fn double_label(v: f64) -> crate::types::Label {
     )
 }
 
+/// And ノードから投影ノードとそれ以外のフィルタを分離します。
+/// 左辺が And 以外の場合はフィルタなしとして返します。
+fn split_projection_filter(node: QueryNode) -> (QueryNode, Option<QueryNode>) {
+    match node {
+        QueryNode::And(mut nodes) => {
+            let proj_idx = nodes.iter().position(|n| returns_projection(n));
+            if let Some(idx) = proj_idx {
+                let proj = nodes.remove(idx);
+                let filter = match nodes.len() {
+                    0 => None,
+                    1 => Some(nodes.remove(0)),
+                    _ => Some(QueryNode::And(nodes)),
+                };
+                (proj, filter)
+            } else {
+                // 投影が見つからない場合はそのまま返す
+                (QueryNode::And(nodes), None)
+            }
+        }
+        _ => (node, None),
+    }
+}
+
+/// QueryNode 内の全ての AggregationNode の内部クエリにフィルタを And 結合で注入します。
+fn inject_filter_into_aggregations(
+    node: QueryNode,
+    filter: &QueryNode,
+) -> QueryNode {
+    match node {
+        QueryNode::Aggregation(agg) => {
+            let injected = match agg {
+                AggregationNode::Count(inner) => AggregationNode::Count(
+                    Box::new(wrap_with_filter(*inner, filter)),
+                ),
+                AggregationNode::Arithmetic { op, inner } => {
+                    AggregationNode::Arithmetic {
+                        op,
+                        inner: Box::new(wrap_with_filter(*inner, filter)),
+                    }
+                }
+            };
+            QueryNode::Aggregation(injected)
+        }
+        QueryNode::Comparison(cmp) => {
+            let new_first = inject_filter_into_operand(cmp.first, filter);
+            let new_rest = cmp
+                .rest
+                .into_iter()
+                .map(|(op, operand)| {
+                    (op, inject_filter_into_operand(operand, filter))
+                })
+                .collect();
+            QueryNode::Comparison(ComparisonNode {
+                first: new_first,
+                rest: new_rest,
+            })
+        }
+        QueryNode::And(nodes) => QueryNode::And(
+            nodes
+                .into_iter()
+                .map(|n| inject_filter_into_aggregations(n, filter))
+                .collect(),
+        ),
+        QueryNode::Or(nodes) => QueryNode::Or(
+            nodes
+                .into_iter()
+                .map(|n| inject_filter_into_aggregations(n, filter))
+                .collect(),
+        ),
+        QueryNode::Nest(mut nest) => {
+            nest.right =
+                Box::new(inject_filter_into_aggregations(*nest.right, filter));
+            QueryNode::Nest(nest)
+        }
+        QueryNode::Projection(Operand::Calculation(mut calc)) => {
+            calc.left = inject_filter_into_operand(calc.left, filter);
+            calc.right = inject_filter_into_operand(calc.right, filter);
+            QueryNode::Projection(Operand::Calculation(calc))
+        }
+        _ => node,
+    }
+}
+
+/// Operand 内の集約ノードにフィルタを注入します。
+fn inject_filter_into_operand(operand: Operand, filter: &QueryNode) -> Operand {
+    match operand {
+        Operand::Aggregation(agg) => {
+            match inject_filter_into_aggregations(
+                QueryNode::Aggregation(*agg),
+                filter,
+            ) {
+                QueryNode::Aggregation(a) => Operand::Aggregation(Box::new(a)),
+                _ => unreachable!(),
+            }
+        }
+        Operand::Calculation(mut calc) => {
+            calc.left = inject_filter_into_operand(calc.left, filter);
+            calc.right = inject_filter_into_operand(calc.right, filter);
+            Operand::Calculation(calc)
+        }
+        Operand::Query(q) => Operand::Query(Box::new(
+            inject_filter_into_aggregations(*q, filter),
+        )),
+        _ => operand,
+    }
+}
+
+/// 既存のノードをフィルタと And 結合で包みます。
+/// 既存ノードが And の場合は要素として追記します。
+fn wrap_with_filter(node: QueryNode, filter: &QueryNode) -> QueryNode {
+    match node {
+        QueryNode::And(mut nodes) => {
+            nodes.insert(0, filter.clone());
+            QueryNode::And(nodes)
+        }
+        _ => QueryNode::And(vec![filter.clone(), node]),
+    }
+}
+
+/// Nest ノードの論理展開。
+///
+/// 左辺をそのまま維持し、右辺(Comparison, And(連鎖比較), Calculation)の各要素へ
+/// 左辺のコンテキスト全体を素直に分配します。
+/// 左辺がフィルタ付き（And展開後）の場合、フィルタを右辺の集計ノードにも注入します。
+fn expand_nest(
+    schema: &impl LogicalSchema,
+    nest: NestNode,
+) -> Result<QueryNode> {
+    let left_raw = expand_query_node(schema, *nest.left)?;
+    let right = expand_query_node(schema, *nest.right)?;
+
+    // 左辺からフィルタを分離
+    let (left, filter) = split_projection_filter(left_raw);
+
+    // 右辺にフィルタを注入（集計ノード内部に And 結合）
+    let right_with_filter = match &filter {
+        Some(f) => inject_filter_into_aggregations(right, f),
+        None => right,
+    };
+
+    let result = match right_with_filter {
+        QueryNode::Comparison(cmp) => {
+            expand_nest_comparison(left.clone(), cmp)?
+        }
+        QueryNode::And(mut nodes) => {
+            // 右辺が And の場合、プロジェクションが含まれているか確認
+            let mut projections = Vec::new();
+            let mut filters = Vec::new();
+            let mut has_comparison = false;
+
+            for node in nodes.drain(..) {
+                if node.get_projections().is_empty() {
+                    if matches!(node, QueryNode::Comparison(_)) {
+                        has_comparison = true;
+                    }
+                    filters.push(node);
+                } else {
+                    projections.push(node);
+                }
+            }
+
+            if !projections.is_empty() && !has_comparison {
+                // プロジェクションが含まれる場合、フィルタを左辺のコンテキストに寄せる
+                let sub_filter = if filters.is_empty() {
+                    None
+                } else if filters.len() == 1 {
+                    Some(filters.remove(0))
+                } else {
+                    Some(QueryNode::And(filters))
+                };
+
+                // 右辺のプロジェクション要素を結合
+                let right_proj = if projections.len() == 1 {
+                    projections.remove(0)
+                } else {
+                    QueryNode::And(projections)
+                };
+
+                // 左辺に右辺由来のフィルタを注入
+                let left_with_sub_filter = match sub_filter {
+                    Some(sf) => inject_filter_into_aggregations(left, &sf),
+                    None => left,
+                };
+
+                QueryNode::Nest(NestNode {
+                    left: Box::new(left_with_sub_filter),
+                    right: Box::new(right_proj),
+                })
+            } else {
+                // プロジェクションがない、または単純な比較の And の場合は、各要素に左辺を分配する（従来通り）
+                let mut distributed = Vec::new();
+                for node in filters.into_iter().chain(projections.into_iter()) {
+                    match node {
+                        QueryNode::Comparison(c) => {
+                            distributed
+                                .push(expand_nest_comparison(left.clone(), c)?);
+                        }
+                        _ => {
+                            distributed.push(QueryNode::Nest(NestNode {
+                                left: Box::new(left.clone()),
+                                right: Box::new(node),
+                            }));
+                        }
+                    }
+                }
+                QueryNode::And(distributed)
+            }
+        }
+        // 右辺が Projection(Calculation) → 算術演算の両辺に Nest キーを分配する
+        QueryNode::Projection(Operand::Calculation(calc))
+            if calc_has_only_aggregations_and_literals(&calc) =>
+        {
+            let distributed = distribute_nest_over_calc(&left, *calc);
+            QueryNode::Projection(Operand::Calculation(Box::new(distributed)))
+        }
+        _ => QueryNode::Nest(NestNode {
+            left: Box::new(left),
+            right: Box::new(right_with_filter),
+        }),
+    };
+
+    // フィルタを全体にも適用（Projection 結果の絞り込み用）
+    match filter {
+        Some(f) => Ok(QueryNode::And(vec![f, result])),
+        None => Ok(result),
+    }
+}
+
+/// Calculation 内に集約関数とリテラルのみが含まれ、TypeRef(カラム参照)が含まれていないかを判定します。
+/// 分配対象のガード条件として使用します。
+fn calc_has_only_aggregations_and_literals(calc: &CalculationNode) -> bool {
+    operand_has_only_aggregations_and_literals(&calc.left)
+        && operand_has_only_aggregations_and_literals(&calc.right)
+}
+
+fn operand_has_only_aggregations_and_literals(operand: &Operand) -> bool {
+    match operand {
+        Operand::Literal(_) | Operand::Aggregation(_) => true,
+        Operand::Calculation(c) => calc_has_only_aggregations_and_literals(c),
+        Operand::Query(q) => match &**q {
+            QueryNode::Projection(op) => {
+                operand_has_only_aggregations_and_literals(op)
+            }
+            QueryNode::Aggregation(_) => true,
+            _ => false,
+        },
+        Operand::TypeRef(_) => false,
+    }
+}
+
+/// Nest の右辺にある単一 Comparison を分配するヘルパー。
+fn expand_nest_comparison(
+    left: QueryNode,
+    cmp: ComparisonNode,
+) -> Result<QueryNode> {
+    let first = distribute_nest_over_operand(&left, cmp.first);
+
+    let mut rest = Vec::new();
+    for (op, operand) in cmp.rest {
+        let wrapped = distribute_nest_over_operand(&left, operand);
+        // スカラー比較をラベル比較に変換（Nest結果はProjectionなので）
+        let label_op = match op {
+            ComparisonOp::Scalar(basic) => ComparisonOp::Label(basic),
+            label @ ComparisonOp::Label(_) => label,
+        };
+        rest.push((label_op, wrapped));
+    }
+
+    Ok(QueryNode::Comparison(ComparisonNode { first, rest }))
+}
+
+/// Nest を算術 Calculation の全オペランドに再帰的に分配する。
+/// Nest(L, Calc{agg1, op, agg2}) → Calc{Query(Nest(L,agg1)), op, Query(Nest(L,agg2))}
+fn distribute_nest_over_calc(
+    key: &QueryNode,
+    calc: CalculationNode,
+) -> CalculationNode {
+    CalculationNode {
+        left: distribute_nest_over_operand(key, calc.left),
+        op: calc.op,
+        right: distribute_nest_over_operand(key, calc.right),
+    }
+}
+
+/// Operand に Nest キーを分配する。
+/// - Aggregation → Query(Nest(key, Aggregation))
+/// - Calculation → 再帰的に両辺に分配
+/// - Literal     → そのまま（スカラーは Nest 不要）
+/// - TypeRef     → Query(Nest(key, Projection(TypeRef)))
+/// - Query       → Query(Nest(key, Query))
+fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
+    match operand {
+        Operand::Literal(l) => Operand::Literal(l),
+        Operand::Aggregation(agg) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: Box::new(QueryNode::Aggregation(*agg)),
+            })))
+        }
+        Operand::Calculation(calc) => Operand::Calculation(Box::new(
+            distribute_nest_over_calc(key, *calc),
+        )),
+        Operand::TypeRef(tt) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(tt))),
+            })))
+        }
+        Operand::Query(node) => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(key.clone()),
+                right: node,
+            })))
+        }
+    }
+}
+
+/// Nestの右辺がunnest対象（Projection または Nest）かを判定します。
+fn is_unnestable_right(right: &QueryNode) -> bool {
+    matches!(right, QueryNode::Projection(_) | QueryNode::Nest(_))
+}
+
+/// 集約の内部がNestで、かつ右辺がunnest可能かを判定します。
+fn is_unnestable_aggregation(agg: &AggregationNode) -> bool {
+    let inner = match agg {
+        AggregationNode::Count(n) => n.as_ref(),
+        AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
+    };
+    matches!(inner, QueryNode::Nest(n) if is_unnestable_right(&n.right))
+}
+
+/// agg(Nest(L, R)) → Nest(L, agg(R)) の書き換えを実行します。
+/// 呼び出し前に `is_unnestable_aggregation` で判定済みであること。
+fn unnest_aggregation(agg: AggregationNode) -> QueryNode {
+    match agg {
+        AggregationNode::Count(inner) => {
+            let QueryNode::Nest(nest) = *inner else {
+                unreachable!()
+            };
+            QueryNode::Nest(NestNode {
+                left: nest.left,
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(nest.right),
+                )),
+            })
+        }
+        AggregationNode::Arithmetic { op, inner } => {
+            let QueryNode::Nest(nest) = *inner else {
+                unreachable!()
+            };
+            QueryNode::Nest(NestNode {
+                left: nest.left,
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Arithmetic {
+                        op,
+                        inner: nest.right,
+                    },
+                )),
+            })
+        }
+    }
+}
+
 /// 集約ノードを論理展開します。
 fn expand_aggregation(
     schema: &impl LogicalSchema,
@@ -645,7 +1006,9 @@ fn infer_type(
             validate_calculation(calc, schema)?;
             let left_type = infer_type(&calc.left, schema)?;
             let right_type = infer_type(&calc.right, schema)?;
-            if left_type == LogicalType::String && right_type == LogicalType::String {
+            if left_type == LogicalType::String
+                && right_type == LogicalType::String
+            {
                 Ok(LogicalType::String)
             } else {
                 Ok(LogicalType::Integer) // 暫定：数値演算結果は一旦整数扱い
@@ -718,10 +1081,11 @@ fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
 mod tests {
     use super::*;
     use crate::query::ast::{
-        CalculationNode, ComparisonNode, Operand, QueryNode,
+        AggregationNode, ArithmeticOp, BasicOp, CalculationNode,
+        ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
     };
     use crate::query::lens_schema::Lens;
-    use crate::types::{TagType, TypedTag};
+    use crate::types::{LabelValue, TagType, TypedTag};
 
     #[test]
     fn test_expand_simple_and() {
@@ -756,9 +1120,7 @@ mod tests {
         let node = QueryNode::Comparison(cmp);
         let result = expand_query_node(&lens, node);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(
-            "not allowed"
-        ));
+        assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
 
     #[test]
@@ -797,6 +1159,23 @@ mod tests {
             right: Operand::Literal(crate::types::Label::from(1i64)),
         };
         assert!(validate_calculation(&calc_bool, &lens).is_ok());
+    }
+
+    #[test]
+    fn test_validate_calculation_mismatched_keys() {
+        let lens = Lens::base_standard();
+        // size: + mtime: (Numeric + Numeric, TypeRef 同士) -> OK
+        // TypeRef は集計スコープを持たないため、異なるタグ名でもエラーにならない。
+        let calc_ok = CalculationNode {
+            left: Operand::TypeRef(TagType::from("size")),
+            op: crate::query::ast::ArithmeticOp::Add,
+            right: Operand::TypeRef(TagType::from("mtime")),
+        };
+        let res = validate_calculation(&calc_ok, &lens);
+        assert!(
+            res.is_ok(),
+            "size: + mtime: should be allowed (row-level arithmetic)"
+        );
     }
 
     #[test]
@@ -886,5 +1265,753 @@ mod tests {
             expanded,
             QueryNode::Projection(Operand::Calculation(_))
         ));
+    }
+
+    // ========== Nest (&:) テスト ==========
+
+    #[test]
+    fn test_expand_nest_basic() {
+        let lens = Lens::base_standard();
+        // custom: &: custom2: → 子ノードが正しく展開される
+        // (base_standard で特殊展開されないカスタムタグを使用)
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("project"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("category"),
+            ))),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+        match expanded {
+            QueryNode::Nest(nest) => {
+                assert!(
+                    matches!(*nest.left, QueryNode::Projection(_)),
+                    "left should be Projection, got: {:?}",
+                    nest.left
+                );
+                assert!(
+                    matches!(*nest.right, QueryNode::Projection(_)),
+                    "right should be Projection, got: {:?}",
+                    nest.right
+                );
+            }
+            _ => panic!("Expected Nest, got {:?}", expanded),
+        }
+    }
+
+    #[test]
+    fn test_nest_is_set_operation() {
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("project"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        });
+        assert!(is_set_operation(&node));
+    }
+
+    /// agg-vs-literal の Comparison は Nest 外に分配される
+    /// parentdir: &: (count(ext:jpg) > 1) → (parentdir: &: count(ext:jpg)) :> 1
+    #[test]
+    fn test_nest_comparison_agg_literal_distributed() {
+        use crate::query::ast::{AggregationNode, BasicOp, ComparisonOp};
+        let lens = Lens::base_standard();
+
+        let count_agg = AggregationNode::Count(Box::new(QueryNode::TypedTag(
+            TypedTag::new("extension", "jpg"),
+        )));
+        let cmp = ComparisonNode {
+            first: Operand::Aggregation(Box::new(count_agg)),
+            rest: vec![(
+                ComparisonOp::Scalar(BasicOp::Gt),
+                Operand::Literal(crate::types::Label::from(1i64)),
+            )],
+        };
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(cmp)),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は Comparison（分配された形）
+        match &expanded {
+            QueryNode::Comparison(c) => {
+                // first: Query(Nest(parentdir, count(ext:jpg)))
+                assert!(
+                    matches!(&c.first, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_))),
+                    "first should be Query(Nest(...)), got: {:?}",
+                    c.first
+                );
+                // rest[0]: Label(Gt), Literal(1)
+                assert_eq!(c.rest.len(), 1);
+                assert_eq!(c.rest[0].0, ComparisonOp::Label(BasicOp::Gt));
+                assert!(
+                    matches!(&c.rest[0].1, Operand::Literal(_)),
+                    "rest operand should remain Literal, got: {:?}",
+                    c.rest[0].1
+                );
+            }
+            _ => panic!(
+                "Expected Comparison after agg-vs-literal rewrite, got {:?}",
+                expanded
+            ),
+        }
+    }
+
+    /// agg-vs-agg の Comparison は Nest 外に分配される
+    #[test]
+    fn test_nest_comparison_agg_agg_distributed() {
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, BasicOp, ComparisonOp,
+        };
+        let lens = Lens::base_standard();
+
+        // parentdir: &: (avg(size:) == sum(size:))
+        // → Comparison(Nest(parentdir, avg(size:)) := Nest(parentdir, sum(size:)))
+        let avg_agg = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Avg,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+        let sum_agg = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+        let cmp = ComparisonNode {
+            first: Operand::Aggregation(Box::new(avg_agg)),
+            rest: vec![(
+                ComparisonOp::Scalar(BasicOp::Eq),
+                Operand::Aggregation(Box::new(sum_agg)),
+            )],
+        };
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(cmp)),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は Comparison（分配された形）
+        match &expanded {
+            QueryNode::Comparison(c) => {
+                // first: Nest(parentdir, avg(size:))
+                assert!(
+                    matches!(&c.first, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_))),
+                    "first should be Query(Nest(...))"
+                );
+                // rest[0]: Label(Eq), Nest(parentdir, sum(size:))
+                assert_eq!(c.rest.len(), 1);
+                assert_eq!(c.rest[0].0, ComparisonOp::Label(BasicOp::Eq));
+            }
+            _ => panic!(
+                "Expected Comparison after agg-vs-agg rewrite, got {:?}",
+                expanded
+            ),
+        }
+    }
+
+    /// 展開後に And([filter, Projection]) になる左辺から Projection を抽出し、
+    /// フィルタと Nest を And で包むことを確認
+    #[test]
+    fn test_nest_extract_projection_from_and_left() {
+        let lens = Lens::base_standard();
+        // extension: は And([is_dir:false, Projection(extension)]) に展開される
+        // extension: &: count(name:) → And([is_dir:false, Nest(Proj(ext), count(name:))])
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("name"),
+                ))),
+            ))),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // extension: は And に展開されるため、結果も And になるはず
+        match &expanded {
+            QueryNode::And(nodes) => {
+                // フィルタ (is_dir:false) + Nest の2要素
+                assert!(
+                    nodes.len() >= 2,
+                    "Should have filter + nest, got {} nodes: {:?}",
+                    nodes.len(),
+                    nodes
+                );
+                // 最後の要素が Nest であること
+                let nest =
+                    nodes.iter().find(|n| matches!(n, QueryNode::Nest(_)));
+                assert!(
+                    nest.is_some(),
+                    "And should contain a Nest node: {:?}",
+                    nodes
+                );
+            }
+            // extension: が展開されず Projection のままの場合は Nest 直接
+            QueryNode::Nest(_) => {}
+            _ => panic!("Expected And or Nest, got {:?}", expanded),
+        }
+    }
+
+    /// 連鎖比較 + Nest: And に展開された各 Comparison にコンテキストが分配されることを確認
+    /// `parentdir: &: (200 > sum(size:) > 50)` → And([Comparison, Comparison])
+    /// 各 Comparison のオペランドが Nest で包まれること
+    #[test]
+    fn test_nest_chained_comparison_expansion() {
+        use crate::query::ast::*;
+        let lens = Lens::base_standard();
+
+        // parentdir: &: (200 > sum(size:) > 50)
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(ComparisonNode {
+                first: Operand::Literal(Label::from(200)),
+                rest: vec![
+                    (
+                        ComparisonOp::Scalar(BasicOp::Gt),
+                        Operand::Aggregation(Box::new(
+                            AggregationNode::Arithmetic {
+                                op: ArithmeticAggOp::Sum,
+                                inner: Box::new(QueryNode::Projection(
+                                    Operand::TypeRef(TagType::from("size")),
+                                )),
+                            },
+                        )),
+                    ),
+                    (
+                        ComparisonOp::Scalar(BasicOp::Gt),
+                        Operand::Literal(Label::from(50)),
+                    ),
+                ],
+            })),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は And([Comparison, Comparison]) であるべき
+        match &expanded {
+            QueryNode::And(nodes) => {
+                // 各ノードが Comparison であること
+                let comparisons: Vec<_> = nodes
+                    .iter()
+                    .filter(|n| matches!(n, QueryNode::Comparison(_)))
+                    .collect();
+                assert_eq!(
+                    comparisons.len(),
+                    2,
+                    "Should have 2 comparisons, got: {:?}",
+                    nodes
+                );
+
+                // 各 Comparison のオペランドに Query(Nest) が含まれること
+                for cmp_node in &comparisons {
+                    if let QueryNode::Comparison(cmp) = cmp_node {
+                        let has_nest_operand =
+                            matches!(&cmp.first, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_)))
+                            || cmp.rest.iter().any(|(_, op)| {
+                                matches!(op, Operand::Query(q) if matches!(&**q, QueryNode::Nest(_)))
+                            });
+                        assert!(
+                            has_nest_operand || matches!(&cmp.first, Operand::Literal(_)),
+                            "Each comparison should have a Nest operand or Literal: {:?}",
+                            cmp
+                        );
+                    }
+                }
+            }
+            _ => panic!("Expected And with comparisons, got: {:?}", expanded),
+        }
+    }
+
+    /// Nest の正規化構造を検証するテスト
+    /// フィルタを含むタグ (extension:) が Nest の左辺に来た際、
+    /// フィルタが外に持ち上げられ、集計内部にも注入されることを確認する。
+    #[test]
+    fn test_expand_nest_normalization() {
+        let lens = Lens::base_standard();
+        // クエリ: extension: &: count(name:)
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("name"),
+                ))),
+            ))),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 期待: And([is_dir:false, Nest(Projection(ext), Count(And([is_dir:false, name])))])
+        let nest = find_nest_in_and(&expanded);
+        // Nest の左辺は Projection のみ（フィルタは分離済み）
+        assert!(
+            matches!(&*nest.left, QueryNode::Projection(_)),
+            "Nest の左辺は Projection であること: {:?}",
+            nest.left
+        );
+        // 集計内部にフィルタが注入されていること
+        let agg_inner = get_agg_inner(&nest.right);
+        assert_has_injected_filter(agg_inner);
+    }
+
+    /// Calculation における Nest 分配の正規化を検証するテスト
+    /// フィルタが外に持ち上げられ、集計内部にも注入された And 構造を期待する。
+    #[test]
+    fn test_distribute_nest_over_calc_normalization() {
+        use crate::query::ast::ArithmeticOp;
+        let lens = Lens::base_standard();
+
+        // クエリ: extension: &: (count(rs) * 10)
+        let count_agg = AggregationNode::Count(Box::new(QueryNode::TypedTag(
+            TypedTag::new("extension", "rs"),
+        )));
+        let calc = CalculationNode {
+            left: Operand::Aggregation(Box::new(count_agg)),
+            op: ArithmeticOp::Mul,
+            right: Operand::Literal(Label::from(10)),
+        };
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::Calculation(
+                Box::new(calc),
+            ))),
+        });
+
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 期待: And([is_dir:false, Projection(Calculation(Query(Nest(Proj, Count(And([filter, tag])))), *, Literal))])
+        match &expanded {
+            QueryNode::And(nodes) => {
+                assert!(
+                    nodes.iter().any(|n| matches!(n, QueryNode::TypedTag(_))),
+                    "トップレベルにフィルタが存在すること: {:?}",
+                    nodes
+                );
+                let calc_node = nodes.iter().find(|n| {
+                    matches!(n, QueryNode::Projection(Operand::Calculation(_)))
+                });
+                assert!(
+                    calc_node.is_some(),
+                    "Projection(Calculation) が存在すること: {:?}",
+                    nodes
+                );
+            }
+            _ => panic!("展開結果が And であること: {:?}", expanded),
+        }
+    }
+
+    // ---- フィルタ注入テスト用ヘルパー ----
+
+    /// And ノードから Nest を探して返す。見つからなければ panic。
+    fn find_nest_in_and(expanded: &QueryNode) -> &NestNode {
+        let QueryNode::And(nodes) = expanded else {
+            panic!("展開結果が And であること: {:?}", expanded);
+        };
+        assert!(
+            nodes.iter().any(|n| matches!(n, QueryNode::TypedTag(_))),
+            "トップレベルにフィルタ (TypedTag) が存在すること: {:?}",
+            nodes
+        );
+        nodes
+            .iter()
+            .find_map(|n| match n {
+                QueryNode::Nest(nest) => Some(nest),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("And 内に Nest が存在すること: {:?}", nodes)
+            })
+    }
+
+    /// AggregationNode の内部クエリを取得する。
+    fn get_agg_inner(node: &QueryNode) -> &QueryNode {
+        match node {
+            QueryNode::Aggregation(AggregationNode::Count(inner)) => inner,
+            QueryNode::Aggregation(AggregationNode::Arithmetic {
+                inner,
+                ..
+            }) => inner,
+            _ => panic!("Aggregation であること: {:?}", node),
+        }
+    }
+
+    /// ノードが And であり、その中に TypedTag（フィルタ）を含むことを検証する。
+    fn assert_has_injected_filter(node: &QueryNode) {
+        let QueryNode::And(nodes) = node else {
+            panic!("集計内部が And になっていること: {:?}", node);
+        };
+        assert!(
+            nodes.iter().any(|n| matches!(n, QueryNode::TypedTag(_))),
+            "集計内部にフィルタが注入されていること: {:?}",
+            nodes
+        );
+    }
+
+    // ---- フィルタ注入テストケース ----
+
+    /// extension: &: count(name:) で is_dir:false が count 内部に注入されることを検証
+    #[test]
+    fn test_nest_filter_injection_count() {
+        let lens = Lens::base_standard();
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("name"),
+                ))),
+            ))),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        let nest = find_nest_in_and(&expanded);
+        let agg_inner = get_agg_inner(&nest.right);
+        assert_has_injected_filter(agg_inner);
+    }
+
+    /// extension: &: sum(size:) で is_dir:false が sum 内部に注入されることを検証
+    #[test]
+    fn test_nest_filter_injection_sum() {
+        use crate::query::ast::ArithmeticAggOp;
+        let lens = Lens::base_standard();
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(
+                AggregationNode::Arithmetic {
+                    op: ArithmeticAggOp::Sum,
+                    inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("size"),
+                    ))),
+                },
+            )),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        let nest = find_nest_in_and(&expanded);
+        let agg_inner = get_agg_inner(&nest.right);
+        assert_has_injected_filter(agg_inner);
+    }
+
+    /// Operand 内に Operand::Query(And(...)) が残っていないことを再帰的に検証する。
+    fn assert_no_query_and_in_operand(operand: &Operand) {
+        match operand {
+            Operand::Query(node) => {
+                assert!(
+                    !matches!(&**node, QueryNode::And(_)),
+                    "Operand::Query 内に And が残っていないこと: {:?}",
+                    node
+                );
+            }
+            Operand::Calculation(calc) => {
+                assert_no_query_and_in_operand(&calc.left);
+                assert_no_query_and_in_operand(&calc.right);
+            }
+            _ => {}
+        }
+    }
+
+    /// Calculation 内の Nest からフィルタが抽出され、
+    /// Operand::Query に And が残らないことを検証
+    /// クエリ: (extension: &: count(extension:rs)) * 10 :> 0
+    #[test]
+    fn test_nest_in_calculation_filter_lifted() {
+        let lens = Lens::base_standard();
+        let node = QueryNode::Comparison(ComparisonNode {
+            first: Operand::Calculation(Box::new(CalculationNode {
+                left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                    left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("extension"),
+                    ))),
+                    right: Box::new(QueryNode::Aggregation(
+                        AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                            TypedTag::new(
+                                "extension",
+                                LabelValue::String("rs".to_string()),
+                            ),
+                        ))),
+                    )),
+                }))),
+                op: ArithmeticOp::Mul,
+                right: Operand::Literal(crate::types::Label::from(10)),
+            })),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(crate::types::Label::from(0)),
+            )],
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        // 結果は And([is_dir:false, Comparison(Calc(Query(Nest(...)), *, 10), :>, 0)])
+        let QueryNode::And(ref nodes) = expanded else {
+            panic!("結果が And であること: {:?}", expanded);
+        };
+        // フィルタが存在すること
+        assert!(
+            nodes.iter().any(|n| matches!(n, QueryNode::TypedTag(_))),
+            "トップレベルにフィルタが持ち上げられていること: {:?}",
+            nodes
+        );
+        // Comparison が存在すること
+        let cmp_node = nodes
+            .iter()
+            .find(|n| matches!(n, QueryNode::Comparison(_)))
+            .expect("Comparison が存在すること");
+        // Comparison 内の Operand::Query に And が残っていないこと
+        if let QueryNode::Comparison(cmp) = cmp_node {
+            assert_no_query_and_in_operand(&cmp.first);
+            for (_, op) in &cmp.rest {
+                assert_no_query_and_in_operand(op);
+            }
+        }
+    }
+
+    /// フィルタなしの左辺 (parentdir:) の場合、注入は行われないことを検証
+    #[test]
+    fn test_nest_no_filter_no_injection() {
+        let lens = Lens::base_standard();
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("name"),
+                ))),
+            ))),
+        });
+        let expanded = expand_query_node(&lens, node).unwrap();
+
+        assert!(
+            matches!(&expanded, QueryNode::Nest(_)),
+            "フィルタなしの場合は Nest がそのまま返ること: {:?}",
+            expanded
+        );
+    }
+
+    #[test]
+    fn test_validate_calculation_mixed_keys() {
+        let lens = Lens::base_standard();
+        let calc = CalculationNode {
+            left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("parentdir", "foo"),
+                    ))),
+                )),
+            }))),
+            op: ArithmeticOp::Add,
+            right: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("extension"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("extension", "rs"),
+                    ))),
+                )),
+            }))),
+        };
+        // 異種キー演算が validate_calculation で許可されていることを確認
+        assert!(validate_calculation(&calc, &lens).is_ok());
+    }
+
+    // ──────────────────────────────────────────────
+    // Phase 7: Unnest by Aggregation
+    // ──────────────────────────────────────────────
+
+    /// sum(Nest(parentdir, Proj(size))) → Nest(parentdir, sum(Proj(size)))
+    #[test]
+    fn test_unnest_sum_projection() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("size"),
+                ))),
+            })),
+        };
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                // left = Proj(parentdir)
+                assert!(matches!(
+                    nest.left.as_ref(),
+                    QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "parentdir"
+                ));
+                // right = Aggregation(Sum, Proj(size))
+                match nest.right.as_ref() {
+                    QueryNode::Aggregation(AggregationNode::Arithmetic {
+                        op,
+                        inner,
+                    }) => {
+                        assert!(matches!(
+                            op,
+                            crate::query::ast::ArithmeticAggOp::Sum
+                        ));
+                        assert!(matches!(
+                            inner.as_ref(),
+                            QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "size"
+                        ));
+                    }
+                    other => panic!("Expected Aggregation, got: {:?}", other),
+                }
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// count(Nest(parentdir, Proj(extension))) → Nest(parentdir, count(Proj(extension)))
+    #[test]
+    fn test_unnest_count_projection() {
+        let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        })));
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                assert!(matches!(
+                    nest.left.as_ref(),
+                    QueryNode::Projection(Operand::TypeRef(t)) if t.as_str() == "parentdir"
+                ));
+                assert!(matches!(
+                    nest.right.as_ref(),
+                    QueryNode::Aggregation(AggregationNode::Count(_))
+                ));
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// sum(Nest(Nest(a,b), Proj(size))) → Nest(Nest(a,b), sum(Proj(size)))
+    #[test]
+    fn test_unnest_deep_nest() {
+        let inner_nest = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("extension"),
+            ))),
+        });
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(inner_nest),
+                right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("size"),
+                ))),
+            })),
+        };
+
+        assert!(is_unnestable_aggregation(&agg));
+
+        let result = unnest_aggregation(agg);
+        match &result {
+            QueryNode::Nest(nest) => {
+                // left = Nest(parentdir, extension)
+                assert!(matches!(nest.left.as_ref(), QueryNode::Nest(_)));
+                // right = Aggregation(Sum, Proj(size))
+                assert!(matches!(
+                    nest.right.as_ref(),
+                    QueryNode::Aggregation(AggregationNode::Arithmetic { .. })
+                ));
+            }
+            other => panic!("Expected Nest, got: {:?}", other),
+        }
+    }
+
+    /// sum(Nest(parentdir, Agg(count))) → 変換なし (右辺がAggregation)
+    #[test]
+    fn test_unnest_no_change_right_is_agg() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                    TagType::from("parentdir"),
+                ))),
+                right: Box::new(QueryNode::Aggregation(
+                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                        TypedTag::new("*", "*"),
+                    ))),
+                )),
+            })),
+        };
+
+        assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    /// count(Nest(parentdir, Comparison(...))) → 変換なし (右辺がComparison)
+    #[test]
+    fn test_unnest_no_change_right_is_comparison() {
+        let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Comparison(ComparisonNode {
+                first: Operand::Aggregation(Box::new(AggregationNode::Count(
+                    Box::new(QueryNode::TypedTag(TypedTag::new(
+                        "extension",
+                        "jpg",
+                    ))),
+                ))),
+                rest: vec![(
+                    ComparisonOp::Scalar(BasicOp::Gt),
+                    Operand::Literal(crate::types::Label::from(10i64)),
+                )],
+            })),
+        })));
+
+        assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    /// sum(Proj(size)) → 変換なし (内部がNestではない)
+    #[test]
+    fn test_unnest_no_change_plain_agg() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("size"),
+            ))),
+        };
+
+        assert!(!is_unnestable_aggregation(&agg));
     }
 }

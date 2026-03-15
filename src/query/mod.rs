@@ -2,6 +2,7 @@ pub mod ast;
 pub mod error;
 pub mod fetcher;
 pub mod functions;
+pub mod lens_optimizer;
 pub mod lens_resolver;
 pub mod lens_schema;
 pub mod logical_resolver;
@@ -10,6 +11,7 @@ pub mod sql;
 
 pub use ast::*;
 pub use functions::*;
+pub use lens_optimizer::*;
 pub use lens_resolver::*;
 pub use parser::*;
 pub use sql::*;

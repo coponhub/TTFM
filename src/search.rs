@@ -47,9 +47,35 @@ impl FileManager {
         let fetcher =
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
-        // 2-A. スカラー/ブーリアン結果ケース
-        if resolver.get_scalar_expression().is_some()
-            || resolver.resolved_query.is_boolean_result()
+        // 2-A. Projection ケース（転置: Label → Items）
+        // QUERY.md L77: ラベル比較はアイテムリストを返すため、
+        // nvalue_condition 付き（NestMatch/MergedNestMatch）
+        // では通常検索ケース (2-C) に委ねる。
+        if let Some(tag) = resolver.get_projection() {
+            if resolver.get_nvalue_condition().is_none() {
+                let mut label_items =
+                    fetcher.fetch_label_groups(&tag, n, offset)?;
+                let has_more = n > 0 && label_items.len() > n;
+
+                if has_more {
+                    label_items.truncate(n);
+                }
+
+                return Ok(SearchResponse {
+                    results: label_items,
+                    label_results: Vec::new(),
+                    has_more,
+                    type_for_projection: Some(tag),
+                    ..SearchResponse::new_empty(None, has_more, None)
+                });
+            }
+        }
+
+        // 2-B. スカラー/ブーリアン結果ケース
+        // Projection 付きの場合はアイテムリストを返すため除外
+        if (resolver.get_scalar_expression().is_some()
+            || resolver.resolved_query.is_boolean_result())
+            && resolver.get_projection().is_none()
         {
             let res = fetcher.fetch_computation()?;
             return Ok(SearchResponse {
@@ -65,26 +91,6 @@ impl FileManager {
                     is_done: true,
                 },
                 type_for_projection: None,
-            });
-        }
-
-        // 2-B. Projection ケース（転置: Label → Items）
-        if let Some(tag) = resolver.get_projection() {
-            let mut label_items =
-                fetcher.fetch_label_groups(&tag, n, offset)?;
-            let has_more = n > 0 && label_items.len() > n;
-
-            // limit+1件取得している場合は、最後の1件を削除
-            if has_more {
-                label_items.truncate(n);
-            }
-
-            return Ok(SearchResponse {
-                results: label_items,
-                label_results: Vec::new(),
-                has_more,
-                type_for_projection: Some(tag),
-                ..SearchResponse::new_empty(None, has_more, None)
             });
         }
 

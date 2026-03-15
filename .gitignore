@@ -4,4 +4,3 @@ target/
 *.parquet
 *~
 *MEMO.md
-.agent/

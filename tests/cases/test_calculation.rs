@@ -7,6 +7,7 @@
 /// - `(1MB + 100B) :> size:`: サイズ単位の演算
 /// - `size: > (1000 + 500)`: タグと演算の比較
 /// - 全演算子 (+, -, *, /, %) のテスト
+/// - `(size: - 100) :> (size: * 0.1)`: Calculation :> Calculation
 use tempfile::tempdir;
 use ttfm::FileManager;
 
@@ -498,6 +499,50 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     assert_eq!(
         res_explicit.results[0].name, res_bare.results[0].name,
         "bare_calculation and explicit paren should produce the same result"
+    );
+
+    Ok(())
+}
+
+/// Calculation :> Calculation のラベル比較テスト
+/// `(size: - 100) :> (size: * 0.1)` — 両辺が算術演算（Projection を含む）の比較
+///
+/// (size - 100) > (size * 0.1) ⟺ size * 0.9 > 100 ⟺ size > ~111.1
+/// - large.txt (200B): (200 - 100) = 100 > (200 * 0.1) = 20  → マッチ
+/// - small.txt (100B): (100 - 100) = 0   > (100 * 0.1) = 10  → 不一致
+/// - tiny.txt  (50B):  (50 - 100)  = -50 > (50 * 0.1)  = 5   → 不一致
+#[test]
+fn test_calculation_vs_calculation() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("large.txt"), vec![0u8; 200])?;
+    std::fs::write(root.join("small.txt"), vec![0u8; 100])?;
+    std::fs::write(root.join("tiny.txt"), vec![0u8; 50])?;
+
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res =
+        fm.search("(size: - 100) :> (size: * 0.1)", Default::default())?;
+
+    let names: Vec<&str> =
+        res.results.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("large.txt")),
+        "large.txt (200B) should match: got {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("small.txt")),
+        "small.txt (100B) should not match: got {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("tiny.txt")),
+        "tiny.txt (50B) should not match: got {:?}",
+        names
     );
 
     Ok(())

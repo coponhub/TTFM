@@ -396,6 +396,10 @@ pub fn expand_query_node(
                 )
             }
         },
+        QueryNode::Nest(nest) => QueryNode::Nest(crate::query::ast::NestNode {
+            left: Box::new(expand_query_node(*nest.left, registry)),
+            right: Box::new(expand_query_node(*nest.right, registry)),
+        }),
     }
 }
 

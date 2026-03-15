@@ -365,3 +365,158 @@ fn test_projection_no_empty_labels() {
         results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
     );
 }
+
+/// size: + mtime: がEAV算術 Projection として正しく動作することを確認
+#[test]
+fn test_arithmetic_projection_eav() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // 5バイトのファイルを作成 → size=5
+    std::fs::write(root.join("a.txt"), b"hello")?;
+    // 7バイトのファイルを作成 → size=7
+    std::fs::write(root.join("b.txt"), b"hello!!")?;
+
+    let fm = ttfm::FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // size: + mtime: は各アイテムの計算値でグループ化した Projection を返す
+    // Note: root ディレクトリや .ttfm ディレクトリも size+mtime を持つため、
+    //       グループ数はファイル数より多くなる場合がある
+    let result = fm.search("size: + mtime:", Default::default())?;
+
+    assert!(
+        result.results.len() >= 2,
+        "size: + mtime: should return at least 2 groups. Got: {:?}",
+        result.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    // 各グループの name が正の数値であることを確認（size + Unix timestamp > 0）
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
+        .collect();
+    for &v in &vals {
+        assert!(v > 0.0, "calc value should be > 0, got: {}", v);
+    }
+
+    // a.txt(size=5) と b.txt(size=7) は同時刻に作成されるため、
+    // 結果の中に差が正確に 2 となるペアが存在するはず
+    let has_pair_with_diff_2 = vals
+        .iter()
+        .any(|&vi| vals.iter().any(|&vj| (vj - vi - 2.0).abs() < 0.001));
+    assert!(
+        has_pair_with_diff_2,
+        "Expected a pair of results differing by exactly 2 (size diff: b.txt=7 vs a.txt=5). Got vals: {:?}",
+        vals
+    );
+
+    Ok(())
+}
+
+/// mtime: - size: が EAV 算術 Projection として正しく動作することを確認（減算）
+#[test]
+fn test_arithmetic_projection_eav_subtraction() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("a.txt"), b"hello")?; // size=5
+    std::fs::write(root.join("b.txt"), b"hello!!")?; // size=7
+
+    let fm = ttfm::FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // mtime: - size: は各アイテムの (mtime - size) を計算した Projection を返す
+    let result = fm.search("mtime: - size:", Default::default())?;
+
+    assert!(
+        result.results.len() >= 2,
+        "mtime: - size: should return at least 2 groups. Got: {:?}",
+        result.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    // 全結果が正の数値（Unix timestamp - small size > 0）
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
+        .collect();
+    for &v in &vals {
+        assert!(
+            v > 0.0,
+            "mtime - size should be > 0 (timestamp >> file size), got: {}",
+            v
+        );
+    }
+
+    // a.txt(size=5) と b.txt(size=7) が同時刻なら差は -2（mtime が同じで size が 2 違う）
+    // つまり b.txt の calc_value は a.txt より 2 小さい → 差が -2 のペアが存在する
+    let has_pair_with_diff_minus2 = vals
+        .iter()
+        .any(|&vi| vals.iter().any(|&vj| (vj - vi + 2.0).abs() < 0.001));
+    assert!(
+        has_pair_with_diff_minus2,
+        "Expected a pair differing by -2 (mtime same, b.txt size=7 vs a.txt size=5). Got vals: {:?}",
+        vals
+    );
+
+    Ok(())
+}
+
+/// size: / 1024 が EAV 算術 Projection として正しく動作することを確認（リテラルとの演算）
+#[test]
+fn test_arithmetic_projection_eav_with_literal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("a.txt"), b"hello")?; // size=5
+    std::fs::write(root.join("b.txt"), b"hello!!")?; // size=7
+
+    let fm = ttfm::FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // size: / 1024 は各アイテムの size をキロバイト換算した Projection を返す
+    let result = fm.search("size: / 1024", Default::default())?;
+
+    assert!(
+        result.results.len() >= 2,
+        "size: / 1024 should return at least 2 groups. Got: {:?}",
+        result.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+
+    // 全結果が数値
+    let vals: Vec<f64> = result
+        .results
+        .iter()
+        .map(|r| {
+            r.name.parse::<f64>().unwrap_or_else(|_| {
+                panic!("name should be numeric, got: {}", r.name)
+            })
+        })
+        .collect();
+
+    // a.txt(size=5) と b.txt(size=7) の結果は 5/1024 と 7/1024
+    // 差は 2/1024 ≈ 0.00195 のペアが存在するはず
+    let has_pair_with_diff = vals.iter().any(|&vi| {
+        vals.iter().any(|&vj| (vj - vi - 2.0 / 1024.0).abs() < 1e-6)
+    });
+    assert!(
+        has_pair_with_diff,
+        "Expected a pair differing by 2/1024 (size diff / 1024). Got vals: {:?}",
+        vals
+    );
+
+    Ok(())
+}

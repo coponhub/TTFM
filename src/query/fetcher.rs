@@ -263,18 +263,36 @@ impl<'a> Fetcher<'a> {
         let mut rows = stmt.query([])?;
         let mut results = Vec::new();
 
+        let operands = self
+            .resolver
+            .resolved_query
+            .get_projection_operands()
+            .unwrap();
+
         while let Some(row) = rows.next()? {
             // SQLから label_value, group_total, item_refs を取得
-            let label_val: Value = row.get("label_value")?;
+            // ラベル値を解決（複数キー対応）
+            let mut label_parts = Vec::new();
+            if operands.len() > 1 {
+                for i in 0..operands.len() {
+                    let col_name = format!("label_value_{}", i);
+                    let val: Value = row.get(col_name.as_str())?;
+                    label_parts.push(
+                        operands[i].resolve_label(self.resolver.lens(), &val),
+                    );
+                }
+            } else {
+                let label_val: Value = row.get("label_value")?;
+                label_parts.push(
+                    operands[0].resolve_label(self.resolver.lens(), &label_val),
+                );
+            }
+            let label_str = label_parts.join(" &: ");
+
             let total_count: i64 = row.get("group_total")?;
             let Value::List(item_refs_list) = row.get("item_refs")? else {
                 continue;
             };
-
-            // ラベル値を解決
-            let label =
-                self.resolver.lens().resolve_label(proj_type, &label_val);
-            let label_str = label.as_str();
 
             // Label volatile item を作成
             let label_id = ItemId::new_volatile();
@@ -298,6 +316,20 @@ impl<'a> Fetcher<'a> {
             // total_count を projected_label に保存
             label_item.projected_label =
                 Some(crate::types::Label::from(format!("{}", total_count)));
+
+            // nvalue カラムがある場合、タグとして格納
+            if let Ok(nv) = row.get::<_, Value>("nvalue") {
+                let nv_label = crate::types::LabelValue::from(nv);
+                if !matches!(nv_label, crate::types::LabelValue::Null) {
+                    label_item.apply_tag(
+                        crate::types::Label::resolve(
+                            crate::types::TagType::from("nvalue"),
+                            nv_label,
+                        ),
+                        crate::types::Origin::System,
+                    );
+                }
+            }
 
             results.push(label_item);
         }
@@ -613,5 +645,171 @@ mod tests {
         let res2 = fetcher.compute_boolean().unwrap();
         assert!(res2.id.is_volatile());
         assert_eq!(res2.name, "TRUE"); // TRUE
+    }
+
+    #[test]
+    fn test_fetch_nvalue_tags() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+
+        // item 1: parentdir=src, extension=jpg, name=photo1.jpg
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'parentdir', 'src', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'extension', 'jpg', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'name', 'photo1.jpg', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+
+        // item 2: parentdir=src, extension=png, name=image.png
+        conn.execute(
+            "INSERT INTO oneview VALUES (2, 5, 'file', 'user', 'parentdir', 'src', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (2, 5, 'file', 'user', 'extension', 'png', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (2, 5, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (2, 5, 'file', 'user', 'name', 'image.png', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+
+        // item 3: parentdir=docs, extension=jpg, name=photo2.jpg
+        conn.execute(
+            "INSERT INTO oneview VALUES (3, 3, 'file', 'user', 'parentdir', 'docs', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (3, 3, 'file', 'user', 'extension', 'jpg', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (3, 3, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (3, 3, 'file', 'user', 'name', 'photo2.jpg', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+
+        std::env::set_var("TTFM_DEBUG", "1");
+
+        // parentdir: &: count(extension:jpg) → src=1, docs=1
+        let resolver = crate::query::lens_resolver::Resolver::new(
+            "parentdir: &: count(extension:jpg)",
+        )
+        .unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        let results = fetcher.fetch_label_groups(&proj_type, 100, 0).unwrap();
+
+        // 2つの parentdir グループ: docs, src
+        assert_eq!(results.len(), 2, "Should have 2 parentdir groups");
+
+        // 各グループに nvalue タグがあることを確認
+        for item in &results {
+            let nvalue_tag = item.tags.entries.iter().find(|e| {
+                e.label.tag_type() == crate::types::TagType::from("nvalue")
+            });
+            assert!(
+                nvalue_tag.is_some(),
+                "Label '{}' should have nvalue tag",
+                item.name
+            );
+        }
+
+        // docs: jpg 1件, src: jpg 1件
+        let docs = results.iter().find(|r| r.name == "docs").unwrap();
+        let docs_nvalue = docs
+            .tags
+            .entries
+            .iter()
+            .find(|e| {
+                e.label.tag_type() == crate::types::TagType::from("nvalue")
+            })
+            .unwrap();
+        assert_eq!(
+            docs_nvalue.label.as_str(),
+            "1",
+            "docs should have 1 jpg file"
+        );
+
+        let src = results.iter().find(|r| r.name == "src").unwrap();
+        let src_nvalue = src
+            .tags
+            .entries
+            .iter()
+            .find(|e| {
+                e.label.tag_type() == crate::types::TagType::from("nvalue")
+            })
+            .unwrap();
+        assert_eq!(
+            src_nvalue.label.as_str(),
+            "1",
+            "src should have 1 jpg file"
+        );
+    }
+
+    #[test]
+    fn test_fetch_label_groups_no_nvalue_regression() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'extension', 'rs', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'name', 'main.rs', NULL, NULL, NULL)",
+            [],
+        ).unwrap();
+
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+        let proj_type =
+            resolver.get_projection().expect("Should have projection");
+
+        let results = fetcher.fetch_label_groups(&proj_type, 100, 0).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // nvalue タグがないことを確認
+        let has_nvalue = results[0].tags.entries.iter().any(|e| {
+            e.label.tag_type() == crate::types::TagType::from("nvalue")
+        });
+        assert!(!has_nvalue, "Normal projection should NOT have nvalue tag");
     }
 }
