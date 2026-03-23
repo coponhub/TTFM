@@ -91,6 +91,7 @@ impl FileManager {
                     is_done: true,
                 },
                 type_for_projection: None,
+                warnings: Vec::new(),
             });
         }
 
@@ -131,6 +132,7 @@ impl FileManager {
                 is_done: !has_more,
             },
             type_for_projection: None,
+            warnings: Vec::new(),
         })
     }
 
@@ -480,6 +482,7 @@ impl FileManager {
                 },
                 type_for_projection: projection
                     .map(|s| TagType::from(s.as_str())),
+                warnings: Vec::new(),
             })
         } else {
             Ok(SearchResponse {
@@ -495,6 +498,7 @@ impl FileManager {
                     is_done: !has_more,
                 },
                 type_for_projection: None,
+                warnings: Vec::new(),
             })
         }
     }

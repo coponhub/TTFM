@@ -117,6 +117,12 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         right: Label,
     },
+    /// ラベル集合演算（Projection / Nest 同士の And/Or/Difference）。
+    /// 例: `cat: & flavor:` → Intersect, `cat: | flavor:` → Union, `fruit: -: veggie:` → Except
+    LabelSetOp {
+        op: LabelSetOpKind,
+        operands: Vec<ResolvedNode>,
+    },
     /// nvalue 付き Nest への比較。フィルタされたラベル集合を返す。
     /// 例: `(parentdir: &: count(ext:jpg)) :> 10`
     NestMatch {
@@ -146,6 +152,14 @@ pub enum ResolvedNode {
         matches: Vec<NestMatchCondition>,
         is_or: bool,
     },
+}
+
+/// ラベル集合演算の種類。
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelSetOpKind {
+    Intersect,
+    Union,
+    Except,
 }
 
 /// nvalue 付き Nest 同士を結ぶ演算子。
@@ -330,7 +344,8 @@ impl ResolvedNode {
             ResolvedNode::Nest { .. }
             | ResolvedNode::NestMatch { .. }
             | ResolvedNode::NestNestMatch { .. }
-            | ResolvedNode::MergedNestMatch { .. } => true,
+            | ResolvedNode::MergedNestMatch { .. }
+            | ResolvedNode::LabelSetOp { .. } => true,
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().any(|n| n.is_projection_recursive())
             }
@@ -386,6 +401,11 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 for n in nodes {
                     n.inject_context(context.clone());
+                }
+            }
+            ResolvedNode::LabelSetOp { operands, .. } => {
+                for op in operands {
+                    op.inject_context(context.clone());
                 }
             }
             ResolvedNode::Difference(l, r) => {
@@ -454,7 +474,8 @@ impl ResolvedNode {
             | ResolvedNode::CalculationCalculationMatch { .. }
             | ResolvedNode::NestNestMatch { .. }
             | ResolvedNode::MergedNestMatch { .. }
-            | ResolvedNode::ScalarMatch { .. } => {
+            | ResolvedNode::ScalarMatch { .. }
+            | ResolvedNode::LabelSetOp { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
                 // 連結用には Condition::any() を返しておく。
@@ -667,6 +688,11 @@ impl ResolvedNode {
             }
             _ => None,
         }
+    }
+
+    /// このノードがラベル集合演算（LabelSetOp）かどうかを返します。
+    pub fn is_label_set_op(&self) -> bool {
+        matches!(self, ResolvedNode::LabelSetOp { .. })
     }
 
     /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
@@ -2070,6 +2096,11 @@ impl Resolver {
     /// 投影対象の型を返す
     pub fn get_projection(&self) -> Option<TagType> {
         self.resolved_query.get_projection()
+    }
+
+    /// ラベル集合演算クエリかどうかを返す
+    pub fn is_label_set_op(&self) -> bool {
+        self.resolved_query.is_label_set_op()
     }
 
     /// トップレベル集約を返す

@@ -126,6 +126,8 @@ pub struct SearchResponse {
     pub has_more: bool,
     /// キャッシュ生成等の進捗状況
     pub progress: crate::types::Progress,
+    /// クエリ実行時の警告メッセージ
+    pub warnings: Vec<String>,
 }
 
 /// 同一の属性（カラム）構成を持つアイテムのグループ。
@@ -253,6 +255,7 @@ impl SearchResponse {
                 total: Some(0),
                 is_done: true,
             },
+            warnings: Vec::new(),
         }
     }
 
@@ -267,6 +270,7 @@ impl SearchResponse {
             total_count: None,
             progress,
             type_for_projection: None,
+            warnings: Vec::new(),
         }
     }
 }
@@ -600,6 +604,7 @@ mod tests {
             total_count: None,
             has_more: false,
             progress: Progress::default(),
+            warnings: Vec::new(),
         };
 
         let groups = response.iter_type_groups();
@@ -685,6 +690,7 @@ mod tests {
             total_count: None,
             has_more: false,
             progress: Progress::default(),
+            warnings: Vec::new(),
         };
 
         let groups = response.iter_label_groups();

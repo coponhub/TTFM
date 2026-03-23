@@ -528,6 +528,9 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             stmt
         }
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
+        // LabelSetOp は build_fetch_label_set_op_sql で処理する（Phase 2-4 実装予定）。
+        // build_pick_sql が呼ばれる文脈（フィルタコンテキスト等）向けに空を返す。
+        ResolvedNode::LabelSetOp { .. } => Query::select().to_owned(),
     }
 }
 
