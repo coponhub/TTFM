@@ -1512,22 +1512,23 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         }),
         assert: |res, _dir| {
+            // 仕様: 共通プレフィックスなし → Lv.2 Projection (type_for_projection = Some)
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj & Proj should not set type_for_projection"
+                res.type_for_projection.is_some(),
+                "Proj & Proj (different keys) should set type_for_projection (Lv.2 by spec)"
             );
             assert_eq!(
-                res.label_results.len(),
+                res.results.len(),
                 1,
                 "Intersection should yield exactly 1 group ('one'), got {:?}",
-                res.label_results.iter().map(|g| g.label.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
-            assert_eq!(res.label_results[0].label.as_str(), "one");
-            assert!(res.label_results[0].results.iter().any(|r| r.name.contains("a.txt")));
-            let all_names: Vec<&str> = res
-                .label_results
+            assert_eq!(res.results[0].name.as_str(), "one");
+            assert!(res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")));
+            let all_names: Vec<String> = res
+                .results
                 .iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(!all_names.iter().any(|n| n.contains("b.txt")));
             assert!(!all_names.iter().any(|n| n.contains("c.txt")));
@@ -1562,19 +1563,19 @@ static CASES: &[NestTestCase] = &[
                 "Proj | Proj should not set type_for_projection"
             );
             assert_eq!(
-                res.label_results.len(),
+                res.results.len(),
                 2,
                 "Union should yield 2 groups ('alpha' and 'beta'), got {:?}",
-                res.label_results.iter().map(|g| g.label.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
-            let alpha = res.label_results.iter().find(|g| g.label.as_str() == "alpha")
+            let alpha = res.results.iter().find(|r| r.name.as_str() == "alpha")
                 .expect("Should have 'alpha' group");
-            let beta  = res.label_results.iter().find(|g| g.label.as_str() == "beta")
+            let beta  = res.results.iter().find(|r| r.name.as_str() == "beta")
                 .expect("Should have 'beta' group");
-            assert!(alpha.results.iter().any(|r| r.name.contains("a.txt")));
-            assert!(alpha.results.iter().any(|r| r.name.contains("c.txt")));
-            assert!(beta.results.iter().any(|r| r.name.contains("b.txt")));
-            assert!(beta.results.iter().any(|r| r.name.contains("c.txt")));
+            assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("a.txt")));
+            assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("c.txt")));
+            assert!(beta.tags.entries.iter().any(|e| e.label.as_str().contains("b.txt")));
+            assert!(beta.tags.entries.iter().any(|e| e.label.as_str().contains("c.txt")));
             Ok(())
         },
     },
@@ -1604,15 +1605,15 @@ static CASES: &[NestTestCase] = &[
                 "Proj -: Proj should not set type_for_projection"
             );
             assert_eq!(
-                res.label_results.len(),
+                res.results.len(),
                 2,
                 "Except should yield 2 groups ('banana' and 'cherry'), got {:?}",
-                res.label_results.iter().map(|g| g.label.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
-            assert!(!res.label_results.iter().any(|g| g.label.as_str() == "apple"),
+            assert!(!res.results.iter().any(|g| g.name.as_str() == "apple"),
                 "'apple' must be excluded");
-            assert!(res.label_results.iter().any(|g| g.label.as_str() == "banana"));
-            assert!(res.label_results.iter().any(|g| g.label.as_str() == "cherry"));
+            assert!(res.results.iter().any(|g| g.name.as_str() == "banana"));
+            assert!(res.results.iter().any(|g| g.name.as_str() == "cherry"));
             Ok(())
         },
     },
@@ -1746,10 +1747,6 @@ static CASES: &[NestTestCase] = &[
                 "Proj | TypedTag should return Lv.1 (flat list), not Lv.2 Projection"
             );
             assert!(
-                res.label_results.is_empty(),
-                "Proj | TypedTag should have no label_results"
-            );
-            assert!(
                 !res.results.is_empty(),
                 "Proj | TypedTag should have items in flat results"
             );
@@ -1812,20 +1809,20 @@ static CASES: &[NestTestCase] = &[
         assert: |res, _dir| {
             // grade:A で絞ると積集合のラベル "one" は a.txt のみになるべき
             assert_eq!(
-                res.label_results.len(),
+                res.results.len(),
                 1,
                 "LabelSetOp & TypedTag should return 1 group ('one'), got {:?}",
-                res.label_results.iter().map(|g| g.label.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
-            assert_eq!(res.label_results[0].label.as_str(), "one");
+            assert_eq!(res.results[0].name.as_str(), "one");
             // a.txt が含まれる（grade:A あり）
             assert!(
-                res.label_results[0].results.iter().any(|r| r.name.contains("a.txt")),
+                res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")),
                 "a.txt (grade:A) should be in the result"
             );
             // b.txt は除外される（grade:A なし）
             assert!(
-                !res.label_results[0].results.iter().any(|r| r.name.contains("b.txt")),
+                !res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("b.txt")),
                 "b.txt (no grade:A) must not appear"
             );
             Ok(())
@@ -1933,10 +1930,6 @@ static CASES: &[NestTestCase] = &[
                 "Nest | TypedTag should flatten to Lv.1"
             );
             assert!(
-                res.label_results.is_empty(),
-                "Nest | TypedTag should have no label_results"
-            );
-            assert!(
                 res.results.iter().any(|r| r.name.contains("a.txt")),
                 "a.txt (cat/flavor) should appear in flat results"
             );
@@ -2019,12 +2012,12 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         }),
         assert: |res, _dir| {
+            // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj & Nest should produce LabelSetOp (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Proj & Nest should produce LabelSetOp (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 !all_items.iter().any(|n| n.contains("b.txt")),
@@ -2059,12 +2052,12 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         }),
         assert: |res, _dir| {
+            // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
-                res.type_for_projection.is_none(),
-                "Nest & Nest should produce LabelSetOp (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Nest & Nest should produce LabelSetOp (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -2077,6 +2070,117 @@ static CASES: &[NestTestCase] = &[
             assert!(
                 !all_items.iter().any(|n| n.contains("c.txt")),
                 "c.txt (no tagB) must NOT appear"
+            );
+            Ok(())
+        },
+    },
+    // Nest{2keys} & Nest{3keys} → LabelSetOp Intersect
+    // (tagA:&:tagB:) & (tagA:&:tagC:&:tagD:): 深さの異なる Nest の積集合
+    NestTestCase {
+        name: "nest2_and_nest3_intersect",
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), "a")?;
+            std::fs::write(dir.join("b.txt"), "b")?;
+            std::fs::write(dir.join("c.txt"), "c")?;
+            Ok(())
+        },
+        query: "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
+        format_query: default_scope,
+        modify: Some(|fm, dir| {
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+            // a.txt: 両 Nest に存在 → 積集合に残る
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            // b.txt: tagC/tagD なし → 第2 Nest に非存在 → 除外
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            // c.txt: tagB なし → 第1 Nest に非存在 → 除外
+            Ok(())
+        }),
+        assert: |res, _dir| {
+            assert!(
+                res.type_for_projection.is_some(),
+                "Nest2 & Nest3 should produce LabelSetOp (with type_for_projection)"
+            );
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .collect();
+            assert!(
+                all_items.iter().any(|n| n.contains("a.txt")),
+                "a.txt (in both nests) should appear in intersection, got: {:?}", all_items
+            );
+            assert!(
+                !all_items.iter().any(|n| n.contains("b.txt")),
+                "b.txt (no tagC/tagD) must NOT appear"
+            );
+            assert!(
+                !all_items.iter().any(|n| n.contains("c.txt")),
+                "c.txt (no tagB) must NOT appear"
+            );
+            Ok(())
+        },
+    },
+    // extension: & size: → LabelSetOp Intersect（Phase 2 regression）
+    // extension: が And([is_dir:false, Nest{ext}]) に展開されても積集合になることを確認
+    // 仕様: extension ラベル値集合 {"rs","txt"} と size ラベル値集合 {100,200} は型違いで完全不一致
+    //       → ラベル値積集合 = 空 → 空 Projection
+    NestTestCase {
+        name: "extension_and_size_intersect",
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), vec![0u8; 100])?;
+            std::fs::write(dir.join("b.txt"), vec![0u8; 200])?;
+            Ok(())
+        },
+        query: "extension: & size:",
+        format_query: default_scope,
+        modify: None,
+        assert: |res, _dir| {
+            // 仕様: 共通プレフィックスなし、かつラベル値型不一致 → 空 Projection
+            assert!(
+                res.type_for_projection.is_some(),
+                "extension: & size: should produce LabelSetOp (with type_for_projection), got: {:?}",
+                res.type_for_projection
+            );
+            assert!(
+                res.results.is_empty(),
+                "extension: & size: label value sets are disjoint (string vs int) → empty Projection, got: {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            Ok(())
+        },
+    },
+    // size: & size: → 同一キー Lv.2 & Lv.2 積集合（同一集合との積 = 全体）
+    // 整数型ラベル (label_int) でも type_for_projection が Some になることを確認
+    NestTestCase {
+        name: "size_and_size_intersect",
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 10])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 200])?;
+            Ok(())
+        },
+        query: "size: & size:",
+        format_query: default_scope,
+        modify: None,
+        assert: |res, _dir| {
+            assert!(
+                res.type_for_projection.is_some(),
+                "size: & size: should produce Projection (type_for_projection = Some), got: {:?}",
+                res.type_for_projection
+            );
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .collect();
+            assert!(
+                all_items.iter().any(|n| n.contains("small.txt")),
+                "small.txt should appear in size: & size: result, got: {:?}", all_items
+            );
+            assert!(
+                all_items.iter().any(|n| n.contains("large.txt")),
+                "large.txt should appear in size: & size: result, got: {:?}", all_items
             );
             Ok(())
         },
@@ -2102,11 +2206,11 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj | Nest should produce LabelSetOp (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Proj | Nest should produce LabelSetOp (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -2151,10 +2255,6 @@ static CASES: &[NestTestCase] = &[
                 "Nest | Nest (different keys) should flatten to Lv.1"
             );
             assert!(
-                res.label_results.is_empty(),
-                "Nest | Nest flat should have no label_results"
-            );
-            assert!(
                 res.results.iter().any(|r| r.name.contains("a.txt")),
                 "a.txt should appear in flat results"
             );
@@ -2190,11 +2290,11 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj -: Nest should produce LabelSetOp Except (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Proj -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("b.txt")),
@@ -2230,11 +2330,11 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Nest -: Proj should produce LabelSetOp Except (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Nest -: Proj should produce LabelSetOp Except (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -2274,11 +2374,11 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Nest -: Nest should produce LabelSetOp Except (no type_for_projection)"
+                res.type_for_projection.is_some(),
+                "Nest -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
-            let all_items: Vec<&str> = res.label_results.iter()
-                .flat_map(|g| g.results.iter().map(|r| r.name.as_str()))
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("b.txt")),
@@ -2372,6 +2472,9 @@ static CASES: &[NestTestCase] = &[
 // Nest × Projection 集合演算（Phase 2-4）
 #[case::proj_and_nest_intersect("proj_and_nest_intersect")]
 #[case::nest_and_nest_intersect("nest_and_nest_intersect")]
+#[case::nest2_and_nest3_intersect("nest2_and_nest3_intersect")]
+#[case::extension_and_size_intersect("extension_and_size_intersect")]
+#[case::size_and_size_intersect("size_and_size_intersect")]
 #[case::proj_or_nest("proj_or_nest")]
 #[case::nest_or_nest_flat("nest_or_nest_flat")]
 #[case::proj_minus_nest_except("proj_minus_nest_except")]
