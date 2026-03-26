@@ -1559,8 +1559,8 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj | Proj should not set type_for_projection"
+                res.type_for_projection.is_some(),
+                "Proj | Proj (異なるキー) は Lv.2 混合 Projection → type_for_projection = Some"
             );
             assert_eq!(
                 res.results.len(),
@@ -1601,8 +1601,8 @@ static CASES: &[NestTestCase] = &[
         }),
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
-                "Proj -: Proj should not set type_for_projection"
+                res.type_for_projection.is_some(),
+                "Proj -: Proj (左辺 Lv.2) は Lv.2 Projection → type_for_projection = Some"
             );
             assert_eq!(
                 res.results.len(),
@@ -1648,13 +1648,14 @@ static CASES: &[NestTestCase] = &[
                 res.results.iter().any(|r| r.name.contains("dir_b")),
                 "Should have dir_b group"
             );
-            // dir_a の下に tagA:x と tagB:y 両方のサブラベルが存在するべき
-            let sub_x_y: Vec<_> = res.results.iter()
-                .filter(|r| r.name == "x" || r.name == "y")
+            // dir_a の下に tagA:x と tagB:y 両方の複合ラベルが存在するべき
+            // 複合ラベル形式: "parentdir_path &: tag_value" → dir_a が 2 グループ
+            let dir_a_items: Vec<_> = res.results.iter()
+                .filter(|r| r.name.contains("dir_a"))
                 .collect();
             assert!(
-                sub_x_y.len() >= 2,
-                "dir_a should have sub-label groups 'x' and 'y' from tagA|tagB union, \
+                dir_a_items.len() >= 2,
+                "dir_a should have at least 2 composite label groups (x and y from tagA|tagB union), \
                  got: {:?}",
                 res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
@@ -2063,13 +2064,15 @@ static CASES: &[NestTestCase] = &[
                 all_items.iter().any(|n| n.contains("a.txt")),
                 "a.txt (in both nests) should appear in intersection result"
             );
+            // b.txt は tagA:x を持ち、ラベル値 "x" は積集合に含まれる → 含まれる
             assert!(
-                !all_items.iter().any(|n| n.contains("b.txt")),
-                "b.txt (no tagC) must NOT appear"
+                all_items.iter().any(|n| n.contains("b.txt")),
+                "b.txt (has tagA:x in first Nest, label 'x' in intersection) should appear"
             );
+            // c.txt は tagA:y を持ち、ラベル値 "y" は積集合に含まれない → 除外
             assert!(
                 !all_items.iter().any(|n| n.contains("c.txt")),
-                "c.txt (no tagB) must NOT appear"
+                "c.txt (tagA:y not in label intersection) must NOT appear"
             );
             Ok(())
         },
@@ -2113,13 +2116,15 @@ static CASES: &[NestTestCase] = &[
                 all_items.iter().any(|n| n.contains("a.txt")),
                 "a.txt (in both nests) should appear in intersection, got: {:?}", all_items
             );
+            // b.txt は tagA:x を持ち、ラベル値 "x" は積集合に含まれる → 含まれる
             assert!(
-                !all_items.iter().any(|n| n.contains("b.txt")),
-                "b.txt (no tagC/tagD) must NOT appear"
+                all_items.iter().any(|n| n.contains("b.txt")),
+                "b.txt (has tagA:x, label 'x' in intersection) should appear, got: {:?}", all_items
             );
+            // c.txt は tagA:y を持ち、ラベル値 "y" は積集合に含まれない → 除外
             assert!(
                 !all_items.iter().any(|n| n.contains("c.txt")),
-                "c.txt (no tagB) must NOT appear"
+                "c.txt (tagA:y not in label intersection) must NOT appear"
             );
             Ok(())
         },
@@ -2252,19 +2257,24 @@ static CASES: &[NestTestCase] = &[
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_none(),
-                "Nest | Nest (different keys) should flatten to Lv.1"
+                "Nest | Nest (Lv.3 異なるキー、共通プレフィックスなし) → Lv.1 フラット"
+            );
+            // LabelSetOp SQL はラベル値グループを返すため r.name はラベル値
+            // ファイルパスは各グループの entries に格納される
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .collect();
+            assert!(
+                all_items.iter().any(|n| n.contains("a.txt")),
+                "a.txt should appear in label group entries, got: {:?}", all_items
             );
             assert!(
-                res.results.iter().any(|r| r.name.contains("a.txt")),
-                "a.txt should appear in flat results"
+                all_items.iter().any(|n| n.contains("b.txt")),
+                "b.txt should appear in label group entries, got: {:?}", all_items
             );
             assert!(
-                res.results.iter().any(|r| r.name.contains("b.txt")),
-                "b.txt should appear in flat results"
-            );
-            assert!(
-                res.results.iter().any(|r| r.name.contains("c.txt")),
-                "c.txt should appear in flat results"
+                all_items.iter().any(|n| n.contains("c.txt")),
+                "c.txt should appear in label group entries, got: {:?}", all_items
             );
             Ok(())
         },

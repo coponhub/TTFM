@@ -502,26 +502,25 @@ impl ResolvedNode {
             ResolvedNode::LabelSetOp { op: LabelSetOpKind::Intersect, operands } => {
                 operands.first().and_then(|n| n.get_projection())
             }
-            // Union: すべてのオペランドが同じルートタグを持つ場合のみ Some
+            // Union:
+            //   同一キー構造 → Lv.n（ラベル値の和集合）
+            //   Lv.2 | Lv.2（異なるキー）→ Lv.2（混合 Projection）
+            //   Lv.3+ | Lv.3+（共通プレフィックスなし）→ Lv.1（フラット、None）
             ResolvedNode::LabelSetOp { op: LabelSetOpKind::Union, operands } => {
                 let first = operands.first().and_then(|n| n.get_projection())?;
                 if operands.iter().all(|n| n.get_projection() == Some(first.clone())) {
                     Some(first)
                 } else {
-                    None
+                    // Lv.2 | Lv.2（異なるキー）→ Lv.2 混合 Projection
+                    let all_lv2 = operands.iter().all(|n| get_nest_keys_len(n) == Some(1));
+                    if all_lv2 { Some(first) } else { None }
                 }
             }
-            // Except: 右辺が 2 段以上の Nest の場合は先頭オペランドの投影型を返す
+            // Except: 左辺が Proj/Nest なら左辺の投影型を返す
+            //   仕様: Lv.n(Proj/Nest) -: Lv.m → Lv.n
+            //         TypedTag -: Proj → Lv.1 (左辺の get_projection が None → None)
             ResolvedNode::LabelSetOp { op: LabelSetOpKind::Except, operands } => {
-                let right_depth = operands.get(1).map(|n| match n {
-                    ResolvedNode::Nest { keys, .. } => keys.len(),
-                    _ => 1,
-                }).unwrap_or(1);
-                if right_depth >= 2 {
-                    operands.first().and_then(|n| n.get_projection())
-                } else {
-                    None
-                }
+                operands.first().and_then(|n| n.get_projection())
             }
             ResolvedNode::And(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection())
@@ -829,6 +828,16 @@ impl ResolvedNode {
             ResolvedNode::Complement(c) => c.is_boolean_result(),
             _ => false,
         }
+    }
+}
+
+/// ResolvedNode が Nest である場合の keys.len() を返す（And ラッパーを透過）
+/// Union の Lv 判定に使用: Lv.2 = Some(1), Lv.3+ = Some(n>=2), Proj/Nest 以外 = None
+fn get_nest_keys_len(node: &ResolvedNode) -> Option<usize> {
+    match node {
+        ResolvedNode::Nest { keys, .. } => Some(keys.len()),
+        ResolvedNode::And(nodes) => nodes.iter().find_map(|n| get_nest_keys_len(n)),
+        _ => None,
     }
 }
 
@@ -1367,6 +1376,56 @@ fn resolve_nest(
                         keys: merged_keys,
                         nvalue: inner_nvalue,
                         context: merged_ctx,
+                    })
+                }
+                // LabelSetOp{Union, [Nest{k1}, Nest{k2}, ...]} が右辺に来た場合:
+                // 左辺キーを各オペランドにマージして LabelSetOp に昇格させる。
+                // 例: `parentdir: &: (tagA: | tagB:)`
+                //     → LabelSetOp{Union, [Nest{parentdir+tagA}, Nest{parentdir+tagB}]}
+                ResolvedNode::LabelSetOp {
+                    op: LabelSetOpKind::Union,
+                    operands: right_operands,
+                }
+                if right_operands.iter().all(|n| matches!(n, ResolvedNode::Nest { .. } | ResolvedNode::And(_))) => {
+                    let merged_operands: Vec<ResolvedNode> = right_operands
+                        .into_iter()
+                        .map(|rn| {
+                            // 右辺の各 Nest のキー/コンテキストを取得し、左辺キーとマージ
+                            let (inner_keys, inner_nvalue, inner_ctx) = match rn {
+                                ResolvedNode::Nest { keys: k, nvalue: nv, context: c } => (k, nv, c),
+                                ResolvedNode::And(nodes) => {
+                                    let mut k = Vec::new();
+                                    let mut nv = None;
+                                    let mut c = None;
+                                    for n in nodes {
+                                        match n {
+                                            ResolvedNode::Nest { keys: ik, nvalue: inv, context: ic } => {
+                                                k = ik; nv = inv; c = ic;
+                                            }
+                                            other => {
+                                                c = Some(Box::new(match c {
+                                                    None => other,
+                                                    Some(ec) => ResolvedNode::And(vec![*ec, other]),
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    (k, nv, c)
+                                }
+                                other => (vec![], None, Some(Box::new(other))),
+                            };
+                            let merged_keys = merge_nest_keys(keys.clone(), inner_keys);
+                            let merged_ctx = match (context.clone(), inner_ctx) {
+                                (None, ic) => ic,
+                                (c, None) => c,
+                                (Some(c), Some(ic)) => Some(Box::new(ResolvedNode::And(vec![*c, *ic]))),
+                            };
+                            ResolvedNode::Nest { keys: merged_keys, nvalue: inner_nvalue, context: merged_ctx }
+                        })
+                        .collect();
+                    Ok(ResolvedNode::LabelSetOp {
+                        op: LabelSetOpKind::Union,
+                        operands: merged_operands,
                     })
                 }
                 filtered_node => {
@@ -3267,15 +3326,28 @@ mod tests_integration {
     }
 
     #[test]
-    fn test_label_set_op_union_get_projection_returns_none() {
-        // Union/Except は複数タグ型混在 → None
-        let node = ResolvedNode::LabelSetOp {
+    fn test_label_set_op_union_get_projection() {
+        // Lv.2 | Lv.2 (異なるキー) → Lv.2 混合 Projection → Some
+        let lv2_union = ResolvedNode::LabelSetOp {
             op: LabelSetOpKind::Union,
             operands: vec![make_nest("cat"), make_nest("flavor")],
         };
         assert!(
-            node.get_projection().is_none(),
-            "LabelSetOp{{Union}}.get_projection() should return None"
+            lv2_union.get_projection().is_some(),
+            "Lv.2 | Lv.2 (different keys): should return Some (mixed Projection)"
+        );
+
+        // Lv.3 | Lv.3 (異なるキー、共通プレフィックスなし) → Lv.1 フラット → None
+        let lv3_union = ResolvedNode::LabelSetOp {
+            op: LabelSetOpKind::Union,
+            operands: vec![
+                make_nest_with_keys("cat", 2),
+                make_nest_with_keys("shape", 2),
+            ],
+        };
+        assert!(
+            lv3_union.get_projection().is_none(),
+            "Lv.3 | Lv.3 (different keys, no common prefix): should return None (flat)"
         );
     }
 

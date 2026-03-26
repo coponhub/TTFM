@@ -539,9 +539,22 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             stmt
         }
         ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        // LabelSetOp は build_fetch_label_set_op_sql で処理する（Phase 2-4 実装予定）。
-        // build_pick_sql が呼ばれる文脈（フィルタコンテキスト等）向けに空を返す。
-        ResolvedNode::LabelSetOp { .. } => Query::select().to_owned(),
+        // LabelSetOp がフィルタコンテキスト（Nest の右辺等）で呼ばれる場合:
+        // item-level の集合演算として処理する（ラベル値集合演算ではなくアイテム ID 集合）
+        ResolvedNode::LabelSetOp { op, operands } => {
+            use crate::query::lens_resolver::LabelSetOpKind;
+            match op {
+                LabelSetOpKind::Union => build_resolved_or_sql(operands, view),
+                LabelSetOpKind::Intersect => build_resolved_and_sql(operands, view),
+                LabelSetOpKind::Except => {
+                    if let (Some(left), Some(right)) = (operands.first(), operands.get(1)) {
+                        build_resolved_diff_sql(left, right, view)
+                    } else {
+                        Query::select().to_owned()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2954,27 +2967,53 @@ pub fn build_fetch_label_set_op_sql(
     let cte_names: Vec<String> =
         (0..operands.len()).map(|i| format!("labels_{}", i)).collect();
     for (i, operand) in operands.iter().enumerate() {
-        let (label_tag_type, label_col) =
-            extract_primary_label_tag_type_from_node(operand).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "build_fetch_label_set_op_sql: cannot determine label type from operand {}", i
-                )
-            })?;
-
         let ids_sql = wrap_to_ids(build_pick_sql(operand, view));
 
-        let mut labels_sql = Query::select();
-        let cast_expr = Expr::cust_with_exprs(
-            "CAST($1 AS VARCHAR)",
-            vec![Expr::col(label_col).into()],
-        );
-        labels_sql
-            .expr_as(cast_expr, Alias::new("label_value_cast"))
-            .column(Col::ItemId)
-            .from(Alias::new(view))
-            .and_where(Expr::col(Col::Type).eq(label_tag_type.as_str()))
-            .and_where(Expr::col(label_col).is_not_null())
-            .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
+        // Union の場合のみ複合ラベルを生成（Intersect/Except は主キー値で比較する）
+        let labels_sql = if matches!(op, LabelSetOpKind::Union) {
+            if let Some(keys) = extract_multi_key_nest_operands(operand) {
+                // 多キー Nest: pivot + 複合ラベル ("key0 &: key1 &: ...")
+                build_multi_key_labels_sql(&keys, ids_sql, view)?
+            } else {
+                let (label_tag_type, label_col) =
+                    extract_primary_label_tag_type_from_node(operand).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "build_fetch_label_set_op_sql: cannot determine label type from operand {}", i
+                        )
+                    })?;
+                let cast_expr = Expr::cust_with_exprs(
+                    "CAST($1 AS VARCHAR)",
+                    vec![Expr::col(label_col).into()],
+                );
+                let mut s = Query::select();
+                s.expr_as(cast_expr, Alias::new("label_value_cast"))
+                    .column(Col::ItemId)
+                    .from(Alias::new(view))
+                    .and_where(Expr::col(Col::Type).eq(label_tag_type.as_str()))
+                    .and_where(Expr::col(label_col).is_not_null())
+                    .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
+                s
+            }
+        } else {
+            let (label_tag_type, label_col) =
+                extract_primary_label_tag_type_from_node(operand).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "build_fetch_label_set_op_sql: cannot determine label type from operand {}", i
+                    )
+                })?;
+            let cast_expr = Expr::cust_with_exprs(
+                "CAST($1 AS VARCHAR)",
+                vec![Expr::col(label_col).into()],
+            );
+            let mut s = Query::select();
+            s.expr_as(cast_expr, Alias::new("label_value_cast"))
+                .column(Col::ItemId)
+                .from(Alias::new(view))
+                .and_where(Expr::col(Col::Type).eq(label_tag_type.as_str()))
+                .and_where(Expr::col(label_col).is_not_null())
+                .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
+            s
+        };
 
         with_clause.cte(
             CommonTableExpression::new()
@@ -3009,6 +3048,7 @@ pub fn build_fetch_label_set_op_sql(
     );
 
     // CTE: all_op_items — 各オペランドからの `(label_value_cast, item_id)` をすべてプール
+    // ラベル値集合演算後のフィルタ (labels CTE) で絞り込むため、常に UNION (DISTINCT) を使用
     let mut all_op_items_sql = Query::select()
         .column(Alias::new("label_value_cast"))
         .column(Col::ItemId)
@@ -3160,6 +3200,88 @@ fn extract_primary_label_tag_type_from_node(
             .find_map(|n| extract_primary_label_tag_type_from_node(n)),
         _ => None,
     }
+}
+
+/// 多キー Nest ノードからキー列を抽出します。単一キーまたは非 Nest の場合は None を返します。
+fn extract_multi_key_nest_operands(
+    node: &crate::query::lens_resolver::ResolvedNode,
+) -> Option<Vec<crate::query::lens_resolver::ResolvedOperand>> {
+    use crate::query::lens_resolver::ResolvedNode;
+    match node {
+        ResolvedNode::Nest { keys, .. } if keys.len() > 1 => Some(keys.clone()),
+        ResolvedNode::And(nodes) => nodes.iter().find_map(|n| extract_multi_key_nest_operands(n)),
+        _ => None,
+    }
+}
+
+/// 多キー Nest の labels_i CTE 用 SQL を生成します。
+/// pivot 形式で key0, key1, ... を取り出し、複合ラベル "key0 &: key1 &: ..." として返します。
+fn build_multi_key_labels_sql(
+    keys: &[crate::query::lens_resolver::ResolvedOperand],
+    ids_sql: SelectStatement,
+    view: &str,
+) -> anyhow::Result<SelectStatement> {
+    use crate::query::lens_resolver::ResolvedOperand;
+    use crate::query::lens_schema::StorageMapping;
+    use std::collections::HashSet;
+
+    let mut pivot = Query::select();
+    pivot.column(Col::ItemId);
+
+    let mut type_filters: HashSet<String> = HashSet::new();
+    for (i, key) in keys.iter().enumerate() {
+        match key {
+            ResolvedOperand::TagRef {
+                storage: StorageMapping::RowTag { tag_type, column },
+                ..
+            } => {
+                type_filters.insert(tag_type.as_str().to_string());
+                let case_expr = Expr::case(
+                    Expr::col(Col::Type).eq(tag_type.as_str()),
+                    Expr::col(*column),
+                );
+                let max_expr = Expr::cust_with_exprs("MAX($1)", [case_expr.into()]);
+                pivot.expr_as(max_expr.clone(), Alias::new(&format!("key{}", i)));
+                pivot.and_having(max_expr.is_not_null());
+            }
+            ResolvedOperand::TagRef {
+                storage: StorageMapping::Column(col),
+                ..
+            } => {
+                let max_expr = Expr::col(*col).max();
+                pivot.expr_as(max_expr.clone(), Alias::new(&format!("key{}", i)));
+                pivot.and_having(max_expr.is_not_null());
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "build_multi_key_labels_sql: unsupported key type at index {}",
+                    i
+                ));
+            }
+        }
+    }
+
+    pivot.from(Alias::new(view));
+    if !type_filters.is_empty() {
+        pivot.and_where(Expr::col(Col::Type).is_in(type_filters));
+    }
+    pivot
+        .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql))
+        .group_by_col(Col::ItemId);
+
+    // 複合ラベル: CAST("key0" AS VARCHAR) || ' &: ' || CAST("key1" AS VARCHAR) || ...
+    let composite_str = (0..keys.len())
+        .map(|i| format!("CAST(\"key{}\" AS VARCHAR)", i))
+        .collect::<Vec<_>>()
+        .join(" || ' &: ' || ");
+
+    let mut outer = Query::select();
+    outer
+        .expr_as(Expr::cust(&composite_str), Alias::new("label_value_cast"))
+        .column(Col::ItemId)
+        .from_subquery(pivot, Alias::new("pivot_sub"));
+
+    Ok(outer)
 }
 
 fn wrap_to_ids(sql: SelectStatement) -> SelectStatement {
@@ -5240,10 +5362,10 @@ mod tests {
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
-        // CTE 名が含まれる
-        assert!(sql.contains("items_0"), "should have items_0 CTE, got: {}", sql);
-        assert!(sql.contains("items_1"), "should have items_1 CTE, got: {}", sql);
-        assert!(sql.contains("op_ids"), "should have op_ids CTE, got: {}", sql);
+        // CTE 名が含まれる（ラベル値積集合構造）
+        assert!(sql.contains("labels_0"), "should have labels_0 CTE, got: {}", sql);
+        assert!(sql.contains("labels_1"), "should have labels_1 CTE, got: {}", sql);
+        assert!(sql.contains("op_labels"), "should have op_labels CTE, got: {}", sql);
         // INTERSECT キーワード
         assert!(
             sql.to_uppercase().contains("INTERSECT"),
