@@ -1638,27 +1638,20 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
             Ok(())
         }),
-        assert: |res, _dir| {
+        assert: |res, dir| {
             assert!(res.type_for_projection.is_some(), "Should return Projection result");
-            assert!(
-                res.results.iter().any(|r| r.name.contains("dir_a")),
-                "Should have dir_a group"
-            );
-            assert!(
-                res.results.iter().any(|r| r.name.contains("dir_b")),
-                "Should have dir_b group"
-            );
-            // dir_a の下に tagA:x と tagB:y 両方の複合ラベルが存在するべき
-            // 複合ラベル形式: "parentdir_path &: tag_value" → dir_a が 2 グループ
-            let dir_a_items: Vec<_> = res.results.iter()
-                .filter(|r| r.name.contains("dir_a"))
-                .collect();
-            assert!(
-                dir_a_items.len() >= 2,
-                "dir_a should have at least 2 composite label groups (x and y from tagA|tagB union), \
-                 got: {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
-            );
+            // 複合ラベル形式: "parentdir_path &: tag_value"
+            let dir_a = dir.join("dir_a").to_string_lossy().into_owned();
+            let dir_b = dir.join("dir_b").to_string_lossy().into_owned();
+            let mut names: Vec<String> = res.results.iter().map(|r| r.name.clone()).collect();
+            names.sort_unstable();
+            let mut expected = vec![
+                format!("{dir_a} &: x"),
+                format!("{dir_a} &: y"),
+                format!("{dir_b} &: p"),
+            ];
+            expected.sort_unstable();
+            assert_eq!(names, expected);
             Ok(())
         },
     },
@@ -1747,9 +1740,15 @@ static CASES: &[NestTestCase] = &[
                 res.type_for_projection.is_none(),
                 "Proj | TypedTag should return Lv.1 (flat list), not Lv.2 Projection"
             );
-            assert!(
-                !res.results.is_empty(),
-                "Proj | TypedTag should have items in flat results"
+            // extension: が全3ファイルをカバーするため Union 結果は過不足なく3ファイル
+            let mut filenames: Vec<_> = res.results.iter()
+                .map(|r| std::path::Path::new(&r.name).file_name().unwrap_or_default().to_str().unwrap_or(""))
+                .collect();
+            filenames.sort_unstable();
+            assert_eq!(
+                filenames,
+                vec!["a.rs", "b.txt", "c.rs"],
+                "Proj | TypedTag flat results should contain exactly all 3 files"
             );
             Ok(())
         },
@@ -1777,8 +1776,22 @@ static CASES: &[NestTestCase] = &[
                 res.type_for_projection.is_some(),
                 "Proj - TypedTag should still return Projection (Lv.2)"
             );
-            assert!(res.results.iter().any(|r| r.name == "rs"), "Should have 'rs' group");
-            assert!(res.results.iter().any(|r| r.name == "txt"), "Should have 'txt' group");
+            // rs グループ: include/a.rs のみ（exclude/c.rs は除外済み）
+            let rs_group = res.results.iter().find(|r| r.name == "rs").expect("'rs' group");
+            assert!(
+                rs_group.tags.entries.len() == 1
+                    && rs_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("a.rs")),
+                "rs group must contain only a.rs, got: {:?}",
+                rs_group.tags.entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
+            );
+            // txt グループ: include/b.txt のみ（exclude/d.txt は除外済み）
+            let txt_group = res.results.iter().find(|r| r.name == "txt").expect("'txt' group");
+            assert!(
+                txt_group.tags.entries.len() == 1
+                    && txt_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("b.txt")),
+                "txt group must contain only b.txt, got: {:?}",
+                txt_group.tags.entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
+            );
             Ok(())
         },
     },
