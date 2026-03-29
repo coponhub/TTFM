@@ -2229,7 +2229,7 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // Nest | Nest（異なるキー）→ Lv.1 フラット（Phase 3）
-    // (cat:&:flavor:) | (shape:&:color:): キー構造が異なる → Lv.1 平坦化
+    // (cat: &: flavor:) | (shape: &: color:): キー構造が異なる → Lv.1 平坦化
     NestTestCase {
         name: "nest_or_nest_flat",
         setup: |dir| {
@@ -2303,22 +2303,31 @@ static CASES: &[NestTestCase] = &[
                 res.type_for_projection.is_some(),
                 "Proj -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
+            // ラベルの確認（メイン）: "y" グループのみ残り "x" は除外される
+            assert_eq!(
+                res.results.len(), 1,
+                "should have exactly 1 label group, got {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(
+                res.results.iter().any(|r| r.name == "y"),
+                "'y' label group must remain (b.txt has tagA:y, not in Nest)"
+            );
+            assert!(
+                !res.results.iter().any(|r| r.name == "x"),
+                "'x' label group must be excluded (a.txt has tagA:x and is in Nest)"
+            );
+            // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
-            assert!(
-                all_items.iter().any(|n| n.contains("b.txt")),
-                "b.txt (not in Nest) should remain in result"
-            );
-            assert!(
-                !all_items.iter().any(|n| n.contains("a.txt")),
-                "a.txt (in Nest) must be excluded from result"
-            );
+            assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
+            assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
             Ok(())
         },
     },
     // Nest -: Proj → LabelSetOp Except（Phase 4）
-    // (cat:&:flavor:) -: grade:: grade: を持つアイテムを Nest から除外
+    // (cat: &: flavor:) -: grade:: grade: を持つアイテムを Nest から除外
     NestTestCase {
         name: "nest_minus_proj_except",
         setup: |dir| {
@@ -2343,17 +2352,26 @@ static CASES: &[NestTestCase] = &[
                 res.type_for_projection.is_some(),
                 "Nest -: Proj should produce LabelSetOp Except (with type_for_projection)"
             );
+            // ラベルの確認（メイン）: "one" グループのみ残り "two" は除外される
+            assert_eq!(
+                res.results.len(), 1,
+                "should have exactly 1 label group, got {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(
+                res.results.iter().any(|r| r.name == "one"),
+                "'one' label group must remain (a.txt has no grade:)"
+            );
+            assert!(
+                !res.results.iter().any(|r| r.name == "two"),
+                "'two' label group must be excluded (b.txt has grade:A)"
+            );
+            // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
-            assert!(
-                all_items.iter().any(|n| n.contains("a.txt")),
-                "a.txt (no grade:) should remain in Nest result"
-            );
-            assert!(
-                !all_items.iter().any(|n| n.contains("b.txt")),
-                "b.txt (has grade:) must be excluded from Nest result"
-            );
+            assert!(all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be in result");
+            assert!(!all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be excluded");
             Ok(())
         },
     },
@@ -2387,17 +2405,122 @@ static CASES: &[NestTestCase] = &[
                 res.type_for_projection.is_some(),
                 "Nest -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
+            // ラベルの確認（メイン）: "x" グループのみ残る（a.txt が除外されても b.txt が "x" に残る）
+            assert_eq!(
+                res.results.len(), 1,
+                "should have exactly 1 label group, got {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(
+                res.results.iter().any(|r| r.name == "x"),
+                "'x' label group must remain (b.txt has tagA:x and is only in Nest1)"
+            );
+            // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
                 .collect();
+            assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
+            assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
+            Ok(())
+        },
+    },
+    // Lv.4 Nest -: Proj → LabelSetOp Except（Phase 4 深いネスト）
+    // (tagA: &: tagB: &: tagC:) -: grade:: grade: を持つアイテムを Lv.4 Nest から除外
+    NestTestCase {
+        name: "nest_lv4_minus_proj_except",
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), "a")?;
+            std::fs::write(dir.join("b.txt"), "b")?;
+            std::fs::write(dir.join("c.txt"), "c")?;
+            Ok(())
+        },
+        query: "(tagA: &: tagB: &: tagC:) -: grade:",
+        format_query: default_scope,
+        modify: Some(|fm, dir| {
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            // a.txt: grade: なし → 残る
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            // b.txt: grade: あり → 除外
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:green")?;
+            // c.txt: grade: なし → 残る
+            Ok(())
+        }),
+        assert: |res, _dir| {
             assert!(
-                all_items.iter().any(|n| n.contains("b.txt")),
-                "b.txt (in first Nest only) should remain"
+                res.type_for_projection.is_some(),
+                "Lv.4 Nest -: Proj should produce LabelSetOp Except (with type_for_projection)"
             );
+            // ラベルの確認（メイン）: "x"（a.txt のみ）と "y"（c.txt）が残る
+            assert_eq!(
+                res.results.len(), 2,
+                "should have 2 label groups ('x' and 'y'), got {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(res.results.iter().any(|r| r.name == "x"), "'x' group must remain");
+            assert!(res.results.iter().any(|r| r.name == "y"), "'y' group must remain");
+            // "x" グループに a.txt のみ（b.txt は grade: で除外）
+            let x_group = res.results.iter().find(|r| r.name == "x").unwrap();
+            let x_items: Vec<_> = x_group.tags.entries.iter()
+                .map(|e| e.label.as_str())
+                .collect();
+            assert!(x_items.iter().any(|n| n.contains("a.txt")), "a.txt must be in 'x' group");
+            assert!(!x_items.iter().any(|n| n.contains("b.txt")), "b.txt must not be in 'x' group");
+            Ok(())
+        },
+    },
+    // Lv.4 Nest -: Lv.4 Nest → LabelSetOp Except（Phase 4 深いネスト同士）
+    // (tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)
+    NestTestCase {
+        name: "nest_lv4_minus_nest_lv4_except",
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), "a")?;
+            std::fs::write(dir.join("b.txt"), "b")?;
+            std::fs::write(dir.join("c.txt"), "c")?;
+            Ok(())
+        },
+        query: "(tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)",
+        format_query: default_scope,
+        modify: Some(|fm, dir| {
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+            // a.txt: 両 Nest に存在 → 除外
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            // b.txt: tagD なし → 第2 Nest に非存在 → 残る
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            // c.txt: tagC なし → 第1 Nest に非存在 → 結果に影響なし
+            Ok(())
+        }),
+        assert: |res, _dir| {
             assert!(
-                !all_items.iter().any(|n| n.contains("a.txt")),
-                "a.txt (in both Nests) must be excluded"
+                res.type_for_projection.is_some(),
+                "Lv.4 Nest -: Lv.4 Nest should produce LabelSetOp Except (with type_for_projection)"
             );
+            // ラベルの確認（メイン）: "x" グループのみ（b.txt）
+            assert_eq!(
+                res.results.len(), 1,
+                "should have exactly 1 label group, got {:?}",
+                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            );
+            assert!(res.results.iter().any(|r| r.name == "x"), "'x' group must remain");
+            // アイテムの確認（サブ）
+            let all_items: Vec<String> = res.results.iter()
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .collect();
+            assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
+            assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
             Ok(())
         },
     },
@@ -2490,6 +2613,8 @@ static CASES: &[NestTestCase] = &[
 #[case::proj_minus_nest_except("proj_minus_nest_except")]
 #[case::nest_minus_proj_except("nest_minus_proj_except")]
 #[case::nest_minus_nest_except("nest_minus_nest_except")]
+#[case::nest_lv4_minus_proj_except("nest_lv4_minus_proj_except")]
+#[case::nest_lv4_minus_nest_lv4_except("nest_lv4_minus_nest_lv4_except")]
 fn test_nest_e2e(#[case] name: &'static str) -> anyhow::Result<()> {
     let fix = get_fixture();
     let fm = FileManager::new_with_db_dir(&fix.db_dir)?;

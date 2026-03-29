@@ -3023,73 +3023,100 @@ pub fn build_fetch_label_set_op_sql(
         );
     }
 
-    // CTE: op_labels — ラベル文字列値ベースの集合演算結果
-    let set_op_type = match op {
-        LabelSetOpKind::Intersect => sea_query::UnionType::Intersect,
-        LabelSetOpKind::Union => sea_query::UnionType::Distinct,
-        LabelSetOpKind::Except => sea_query::UnionType::Except,
-    };
-    let mut op_labels_sql = Query::select()
-        .column(Alias::new("label_value_cast"))
-        .from(Alias::new(&cte_names[0]))
-        .to_owned();
-    for name in &cte_names[1..] {
-        let other = Query::select()
-            .column(Alias::new("label_value_cast"))
-            .from(Alias::new(name))
-            .to_owned();
-        op_labels_sql.union(set_op_type, other);
-    }
-    with_clause.cte(
-        CommonTableExpression::new()
-            .query(op_labels_sql)
-            .table_name(Alias::new("op_labels"))
-            .to_owned(),
-    );
+    // Except かつ左辺が多キー Nest の場合はアイテムレベルの差分演算を使用する。
+    // ラベル値ベース EXCEPT は「左辺の label 値が右辺の label 値に存在するかどうか」で判定するため、
+    // 左右でキー型が異なる場合や同一 label 値のアイテムが片側にしかない場合に誤った結果になる。
+    let use_item_level_except = matches!(op, LabelSetOpKind::Except)
+        && extract_multi_key_nest_operands(operands.first().unwrap()).is_some();
 
-    // CTE: all_op_items — 各オペランドからの `(label_value_cast, item_id)` をすべてプール
-    // ラベル値集合演算後のフィルタ (labels CTE) で絞り込むため、常に UNION (DISTINCT) を使用
-    let mut all_op_items_sql = Query::select()
-        .column(Alias::new("label_value_cast"))
-        .column(Col::ItemId)
-        .from(Alias::new(&cte_names[0]))
-        .to_owned();
-    for name in &cte_names[1..] {
-        let other = Query::select()
+    if use_item_level_except {
+        // アイテムレベル Except:
+        //   labels = labels_0 (左辺の主キーラベル) WHERE item_id NOT IN (右辺の item_ids)
+        let right_ids_sql = wrap_to_ids(build_pick_sql(&operands[1], view));
+
+        let mut labels_sql = Query::select();
+        labels_sql
+            .expr_as(
+                Expr::col(Alias::new("label_value_cast")),
+                Alias::new("label_value"),
+            )
+            .column(Col::ItemId)
+            .from(Alias::new(&cte_names[0]))
+            .and_where(Expr::col(Col::ItemId).not_in_subquery(right_ids_sql));
+        with_clause.cte(
+            CommonTableExpression::new()
+                .query(labels_sql)
+                .table_name(Alias::new("labels"))
+                .to_owned(),
+        );
+    } else {
+        // CTE: op_labels — ラベル文字列値ベースの集合演算結果
+        let set_op_type = match op {
+            LabelSetOpKind::Intersect => sea_query::UnionType::Intersect,
+            LabelSetOpKind::Union => sea_query::UnionType::Distinct,
+            LabelSetOpKind::Except => sea_query::UnionType::Except,
+        };
+        let mut op_labels_sql = Query::select()
+            .column(Alias::new("label_value_cast"))
+            .from(Alias::new(&cte_names[0]))
+            .to_owned();
+        for name in &cte_names[1..] {
+            let other = Query::select()
+                .column(Alias::new("label_value_cast"))
+                .from(Alias::new(name))
+                .to_owned();
+            op_labels_sql.union(set_op_type, other);
+        }
+        with_clause.cte(
+            CommonTableExpression::new()
+                .query(op_labels_sql)
+                .table_name(Alias::new("op_labels"))
+                .to_owned(),
+        );
+
+        // CTE: all_op_items — 各オペランドからの `(label_value_cast, item_id)` をすべてプール
+        let mut all_op_items_sql = Query::select()
             .column(Alias::new("label_value_cast"))
             .column(Col::ItemId)
-            .from(Alias::new(name))
+            .from(Alias::new(&cte_names[0]))
             .to_owned();
-        all_op_items_sql.union(sea_query::UnionType::Distinct, other);
-    }
-    with_clause.cte(
-        CommonTableExpression::new()
-            .query(all_op_items_sql)
-            .table_name(Alias::new("all_op_items"))
-            .to_owned(),
-    );
-
-    // CTE: labels — op_labelsに合致するラベル値とアイテムIDをすべて集める
-    let mut labels_sql = Query::select();
-    labels_sql
-        .expr_as(
-            Expr::col(Alias::new("label_value_cast")),
-            Alias::new("label_value"),
-        )
-        .column(Col::ItemId)
-        .from(Alias::new("all_op_items"))
-        .and_where(Expr::col(Alias::new("label_value_cast")).in_subquery(
-            Query::select()
+        for name in &cte_names[1..] {
+            let other = Query::select()
                 .column(Alias::new("label_value_cast"))
-                .from(Alias::new("op_labels"))
+                .column(Col::ItemId)
+                .from(Alias::new(name))
+                .to_owned();
+            all_op_items_sql.union(sea_query::UnionType::Distinct, other);
+        }
+        with_clause.cte(
+            CommonTableExpression::new()
+                .query(all_op_items_sql)
+                .table_name(Alias::new("all_op_items"))
                 .to_owned(),
-        ));
-    with_clause.cte(
-        CommonTableExpression::new()
-            .query(labels_sql)
-            .table_name(Alias::new("labels"))
-            .to_owned(),
-    );
+        );
+
+        // CTE: labels — op_labelsに合致するラベル値とアイテムIDをすべて集める
+        let mut labels_sql = Query::select();
+        labels_sql
+            .expr_as(
+                Expr::col(Alias::new("label_value_cast")),
+                Alias::new("label_value"),
+            )
+            .column(Col::ItemId)
+            .from(Alias::new("all_op_items"))
+            .and_where(Expr::col(Alias::new("label_value_cast")).in_subquery(
+                Query::select()
+                    .column(Alias::new("label_value_cast"))
+                    .from(Alias::new("op_labels"))
+                    .to_owned(),
+            ));
+        with_clause.cte(
+            CommonTableExpression::new()
+                .query(labels_sql)
+                .table_name(Alias::new("labels"))
+                .to_owned(),
+        );
+    }
 
     // CTE: all_hits — Window 関数でページング情報を付与
     let all_hits_sql = Query::select()
