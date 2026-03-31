@@ -49,18 +49,33 @@ impl FileManager {
 
         // 2-A0. LabelSetOp ケース（Projection 集合演算: INTERSECT / UNION / EXCEPT）
         if resolver.is_label_set_op() {
-            let proj_type = resolver.get_projection().unwrap_or_else(|| TagType::from("dummy"));
+            let proj_type = resolver
+                .get_projection()
+                .unwrap_or_else(|| TagType::from("dummy"));
             let mut results =
                 fetcher.fetch_label_groups(&proj_type, n, offset)?;
             let has_more = n > 0 && results.len() > n;
             if has_more {
                 results.truncate(n);
             }
+            // Proj & Proj（Intersect）の場合は &: の使用を提案する警告を生成する
+            let warnings = if resolver.is_label_set_intersect() {
+                vec![
+                    "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+                ]
+            } else {
+                Vec::new()
+            };
             return Ok(SearchResponse {
                 results,
                 has_more,
+                warnings,
                 type_for_projection: resolver.get_projection(),
-                ..SearchResponse::new_empty(None, has_more, resolver.get_projection())
+                ..SearchResponse::new_empty(
+                    None,
+                    has_more,
+                    resolver.get_projection(),
+                )
             });
         }
 

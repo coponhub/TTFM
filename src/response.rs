@@ -137,7 +137,6 @@ pub struct TypeGroup<'a> {
     pub results: Vec<&'a SearchResult>,
 }
 
-
 /// ページングされた結果を保持する構造体。
 #[derive(Debug, Clone)]
 pub struct PagedResult<T> {
@@ -597,12 +596,6 @@ mod tests {
             .iter()
             .all(|r| r.item_kind == ItemKind::File));
     }
-
-
-
-
-
-
 
     #[test]
     fn test_search_result_new_empty_scalar() {

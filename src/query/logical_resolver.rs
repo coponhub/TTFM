@@ -68,6 +68,13 @@ pub(crate) fn expand_query_node(
             Ok(schema.expand_tag(&tt.label.tag_type(), &tt.label))
         }
         QueryNode::Projection(op) => {
+            // 括弧で囲まれた式 (sum > 10) などが Projection(Query(Comparison)) としてパースされる場合がある
+            // 中身がプロジェクションを返さない（アイテムセットを返すフィルター）なら、ラップを剥がす
+            if let Operand::Query(node) = &op {
+                if !returns_projection(node) {
+                    return expand_query_node(schema, *node.clone());
+                }
+            }
             // TypeRef の場合は schema による展開を適用
             if let Operand::TypeRef(tag_type) = &op {
                 Ok(schema.expand_projection(tag_type))
@@ -120,10 +127,14 @@ pub(crate) fn expand_query_node(
             expand_comparison_with_recursion(schema, cmp)
         }
         QueryNode::Aggregation(agg) => {
-            if is_unnestable_aggregation(&agg) {
-                expand_query_node(schema, unnest_aggregation(agg))
+            let expanded = expand_aggregation(schema, agg)?;
+            // Unnest 可能な集約（inner に Nest を含む）は Nest/Projection 形式に変換する。
+            // And/Or で包まれた内部の Nest も透過的に扱う（Issue #4 対応）。
+            if is_unnestable_aggregation(&expanded) {
+                let unnested = unnest_aggregation(expanded);
+                Ok(expand_query_node(schema, unnested)?)
             } else {
-                Ok(QueryNode::Aggregation(expand_aggregation(schema, agg)?))
+                Ok(QueryNode::Aggregation(expanded))
             }
         }
         QueryNode::Nest(nest) => Ok(expand_nest(schema, nest)?),
@@ -928,9 +939,28 @@ fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
     }
 }
 
-/// Nestの右辺がunnest対象（Projection または Nest）かを判定します。
+/// Nestの右辺がunnest対象かを判定します。
+/// Projection, Nest, または And/Or/Difference/Comparison の中に Projection/Nest を含む場合に true を返します。
 fn is_unnestable_right(right: &QueryNode) -> bool {
-    matches!(right, QueryNode::Projection(_) | QueryNode::Nest(_))
+    match right {
+        QueryNode::Nest(_) => true,
+        QueryNode::Projection(op) => {
+            match op {
+                Operand::TypeRef(_) => true,
+                Operand::Query(node) => is_unnestable_right(node),
+                _ => false,
+            }
+        }
+        QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+            nodes.iter().any(is_unnestable_right)
+        }
+        QueryNode::Difference(l, _) => is_unnestable_right(l),
+        QueryNode::Comparison(cmp) => {
+            operand_is_nest(&cmp.first)
+                || cmp.rest.iter().any(|(_, op)| operand_is_nest(op))
+        }
+        _ => false,
+    }
 }
 
 /// 集約の内部がNestで、かつ右辺がunnest可能かを判定します。
@@ -939,36 +969,94 @@ fn is_unnestable_aggregation(agg: &AggregationNode) -> bool {
         AggregationNode::Count(n) => n.as_ref(),
         AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
     };
-    matches!(inner, QueryNode::Nest(n) if is_unnestable_right(&n.right))
+    is_unnestable_inner(inner)
 }
 
+fn is_unnestable_inner(node: &QueryNode) -> bool {
+    match node {
+        QueryNode::Nest(n) => is_unnestable_right(&n.right),
+        QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+            nodes.iter().any(is_unnestable_inner)
+        }
+        QueryNode::Difference(l, _) => is_unnestable_inner(l),
+        // Comparison は NestMatch 比較として既に解決済みのため、アンネスト対象ではない
+        QueryNode::Projection(Operand::Query(node)) => is_unnestable_inner(node),
+        _ => false,
+    }
+}
+
+fn unnest_inner(
+    node: QueryNode,
+    wrap: &dyn Fn(Box<QueryNode>) -> AggregationNode,
+) -> QueryNode {
+    match node {
+        QueryNode::Nest(nest) if is_unnestable_right(&nest.right) => {
+            QueryNode::Nest(NestNode {
+                left: nest.left,
+                right: Box::new(QueryNode::Aggregation(wrap(nest.right))),
+            })
+        }
+        QueryNode::And(nodes) => {
+            let mut done = false;
+            let new_nodes = nodes
+                .into_iter()
+                .map(|n| {
+                    if !done && is_unnestable_inner(&n) {
+                        done = true;
+                        unnest_inner(n, wrap)
+                    } else {
+                        n
+                    }
+                })
+                .collect();
+            QueryNode::And(new_nodes)
+        }
+        QueryNode::Or(nodes) => {
+            let mut done = false;
+            let new_nodes = nodes
+                .into_iter()
+                .map(|n| {
+                    if !done && is_unnestable_inner(&n) {
+                        done = true;
+                        unnest_inner(n, wrap)
+                    } else {
+                        n
+                    }
+                })
+                .collect();
+            QueryNode::Or(new_nodes)
+        }
+        QueryNode::Difference(l, r) => {
+            if is_unnestable_inner(&l) {
+                QueryNode::Difference(Box::new(unnest_inner(*l, wrap)), r)
+            } else {
+                QueryNode::Difference(l, r)
+            }
+        }
+        other => QueryNode::Aggregation(wrap(Box::new(other))),
+    }
+}
+
+fn operand_is_nest(op: &Operand) -> bool {
+    match op {
+        Operand::Query(node) => matches!(node.as_ref(), QueryNode::Nest(_)),
+        _ => false,
+    }
+}
+
+
 /// agg(Nest(L, R)) → Nest(L, agg(R)) の書き換えを実行します。
+/// inner が And/Or/Difference([Nest(L,R), ...]) の場合は And/Or/Difference([Nest(L, agg(R)), ...]) に変換します。
 /// 呼び出し前に `is_unnestable_aggregation` で判定済みであること。
 fn unnest_aggregation(agg: AggregationNode) -> QueryNode {
     match agg {
         AggregationNode::Count(inner) => {
-            let QueryNode::Nest(nest) = *inner else {
-                unreachable!()
-            };
-            QueryNode::Nest(NestNode {
-                left: nest.left,
-                right: Box::new(QueryNode::Aggregation(
-                    AggregationNode::Count(nest.right),
-                )),
-            })
+            unnest_inner(*inner, &|r| AggregationNode::Count(r))
         }
         AggregationNode::Arithmetic { op, inner } => {
-            let QueryNode::Nest(nest) = *inner else {
-                unreachable!()
-            };
-            QueryNode::Nest(NestNode {
-                left: nest.left,
-                right: Box::new(QueryNode::Aggregation(
-                    AggregationNode::Arithmetic {
-                        op,
-                        inner: nest.right,
-                    },
-                )),
+            unnest_inner(*inner, &|r| AggregationNode::Arithmetic {
+                op,
+                inner: r,
             })
         }
     }
@@ -2013,5 +2101,126 @@ mod tests {
         };
 
         assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    // ── Phase 7: And/Or 透過テスト ────────────────────────────────────────
+
+    /// is_unnestable_right(And([Proj(size), TypedTag(path)])) → true
+    #[test]
+    fn test_is_unnestable_right_and_with_projection() {
+        let right = QueryNode::And(vec![
+            QueryNode::Projection(Operand::TypeRef(TagType::from("size"))),
+            QueryNode::TypedTag(TypedTag::new("path", "/tmp/test/*")),
+        ]);
+        assert!(is_unnestable_right(&right));
+    }
+
+    /// is_unnestable_right(And([TypedTag, TypedTag])) → false (Proj なし)
+    #[test]
+    fn test_is_unnestable_right_and_no_projection() {
+        let right = QueryNode::And(vec![
+            QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+            QueryNode::TypedTag(TypedTag::new("extension", "rs")),
+        ]);
+        assert!(!is_unnestable_right(&right));
+    }
+
+    /// is_unnestable_aggregation(Sum, And([Nest(parentdir, size), TypedTag(path)])) → true
+    #[test]
+    fn test_is_unnestable_agg_and_inner_with_nest() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::And(vec![
+                QueryNode::Nest(NestNode {
+                    left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("parentdir"),
+                    ))),
+                    right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("size"),
+                    ))),
+                }),
+                QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+            ])),
+        };
+        assert!(is_unnestable_aggregation(&agg));
+    }
+
+    /// is_unnestable_aggregation(Sum, And([TypedTag, TypedTag])) → false (Nest なし)
+    #[test]
+    fn test_is_unnestable_agg_and_inner_no_nest() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::And(vec![
+                QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+                QueryNode::TypedTag(TypedTag::new("extension", "rs")),
+            ])),
+        };
+        assert!(!is_unnestable_aggregation(&agg));
+    }
+
+    /// unnest_aggregation(Sum, And([Nest(parentdir, size), TypedTag(path)]))
+    ///   → And([Nest(parentdir, Sum(size)), TypedTag(path)])
+    #[test]
+    fn test_unnest_aggregation_and_inner() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::And(vec![
+                QueryNode::Nest(NestNode {
+                    left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("parentdir"),
+                    ))),
+                    right: Box::new(QueryNode::Projection(Operand::TypeRef(
+                        TagType::from("size"),
+                    ))),
+                }),
+                QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+            ])),
+        };
+
+        let result = unnest_aggregation(agg);
+
+        let QueryNode::And(nodes) = result else {
+            panic!("Expected And, got: {:?}", result);
+        };
+        assert_eq!(nodes.len(), 2);
+
+        // 最初の要素: Nest(parentdir, Sum(size))
+        let QueryNode::Nest(nest) = &nodes[0] else {
+            panic!("Expected Nest, got: {:?}", nodes[0]);
+        };
+        assert!(matches!(
+            nest.right.as_ref(),
+            QueryNode::Aggregation(AggregationNode::Arithmetic {
+                op: crate::query::ast::ArithmeticAggOp::Sum,
+                ..
+            })
+        ));
+
+        // 2番目の要素: TypedTag はそのまま
+        assert!(matches!(&nodes[1], QueryNode::TypedTag(_)));
+    }
+
+    /// is_unnestable_aggregation(Sum, Nest(And([Proj(parentdir), TypedTag]), And([Proj(size), TypedTag])))
+    ///   → true (right は And([Proj, TypedTag]))
+    #[test]
+    fn test_is_unnestable_agg_nest_with_and_right() {
+        let agg = AggregationNode::Arithmetic {
+            op: crate::query::ast::ArithmeticAggOp::Sum,
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: Box::new(QueryNode::And(vec![
+                    QueryNode::Projection(Operand::TypeRef(TagType::from(
+                        "parentdir",
+                    ))),
+                    QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+                ])),
+                right: Box::new(QueryNode::And(vec![
+                    QueryNode::Projection(Operand::TypeRef(TagType::from(
+                        "size",
+                    ))),
+                    QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
+                ])),
+            })),
+        };
+        assert!(is_unnestable_aggregation(&agg));
     }
 }

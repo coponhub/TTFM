@@ -79,7 +79,11 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::And(nodes) => build_resolved_and_sql(nodes, view),
         ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
         ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
-        ResolvedNode::Nest { keys, context, .. } => {
+        ResolvedNode::Nest {
+            keys,
+            nvalue: _,
+            context,
+        } => {
             let mut stmt =
                 build_resolved_projection_sql(keys.first().unwrap(), view);
             // 2番目以降のキーも AND 条件として追加（例: tagA: &: tagB: → tagA AND tagB）
@@ -545,9 +549,13 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
             use crate::query::lens_resolver::LabelSetOpKind;
             match op {
                 LabelSetOpKind::Union => build_resolved_or_sql(operands, view),
-                LabelSetOpKind::Intersect => build_resolved_and_sql(operands, view),
+                LabelSetOpKind::Intersect => {
+                    build_resolved_and_sql(operands, view)
+                }
                 LabelSetOpKind::Except => {
-                    if let (Some(left), Some(right)) = (operands.first(), operands.get(1)) {
+                    if let (Some(left), Some(right)) =
+                        (operands.first(), operands.get(1))
+                    {
                         build_resolved_diff_sql(left, right, view)
                     } else {
                         Query::select().to_owned()
@@ -2955,17 +2963,22 @@ pub fn build_fetch_label_set_op_sql(
 
     let (op, operands) = match label_set_op {
         ResolvedNode::LabelSetOp { op, operands } => (op, operands),
-        _ => anyhow::bail!("build_fetch_label_set_op_sql: expected LabelSetOp node"),
+        _ => anyhow::bail!(
+            "build_fetch_label_set_op_sql: expected LabelSetOp node"
+        ),
     };
     if operands.is_empty() {
-        anyhow::bail!("build_fetch_label_set_op_sql: LabelSetOp with no operands");
+        anyhow::bail!(
+            "build_fetch_label_set_op_sql: LabelSetOp with no operands"
+        );
     }
 
     let mut with_clause = WithClause::new();
 
     // CTE: labels_i — 各オペランドの (label_value_cast, item_id)
-    let cte_names: Vec<String> =
-        (0..operands.len()).map(|i| format!("labels_{}", i)).collect();
+    let cte_names: Vec<String> = (0..operands.len())
+        .map(|i| format!("labels_{}", i))
+        .collect();
     for (i, operand) in operands.iter().enumerate() {
         let ids_sql = wrap_to_ids(build_pick_sql(operand, view));
 
@@ -3104,12 +3117,14 @@ pub fn build_fetch_label_set_op_sql(
             )
             .column(Col::ItemId)
             .from(Alias::new("all_op_items"))
-            .and_where(Expr::col(Alias::new("label_value_cast")).in_subquery(
-                Query::select()
-                    .column(Alias::new("label_value_cast"))
-                    .from(Alias::new("op_labels"))
-                    .to_owned(),
-            ));
+            .and_where(
+                Expr::col(Alias::new("label_value_cast")).in_subquery(
+                    Query::select()
+                        .column(Alias::new("label_value_cast"))
+                        .from(Alias::new("op_labels"))
+                        .to_owned(),
+                ),
+            );
         with_clause.cte(
             CommonTableExpression::new()
                 .query(labels_sql)
@@ -3236,7 +3251,9 @@ fn extract_multi_key_nest_operands(
     use crate::query::lens_resolver::ResolvedNode;
     match node {
         ResolvedNode::Nest { keys, .. } if keys.len() > 1 => Some(keys.clone()),
-        ResolvedNode::And(nodes) => nodes.iter().find_map(|n| extract_multi_key_nest_operands(n)),
+        ResolvedNode::And(nodes) => nodes
+            .iter()
+            .find_map(|n| extract_multi_key_nest_operands(n)),
         _ => None,
     }
 }
@@ -3267,8 +3284,12 @@ fn build_multi_key_labels_sql(
                     Expr::col(Col::Type).eq(tag_type.as_str()),
                     Expr::col(*column),
                 );
-                let max_expr = Expr::cust_with_exprs("MAX($1)", [case_expr.into()]);
-                pivot.expr_as(max_expr.clone(), Alias::new(&format!("key{}", i)));
+                let max_expr =
+                    Expr::cust_with_exprs("MAX($1)", [case_expr.into()]);
+                pivot.expr_as(
+                    max_expr.clone(),
+                    Alias::new(&format!("key{}", i)),
+                );
                 pivot.and_having(max_expr.is_not_null());
             }
             ResolvedOperand::TagRef {
@@ -3276,7 +3297,10 @@ fn build_multi_key_labels_sql(
                 ..
             } => {
                 let max_expr = Expr::col(*col).max();
-                pivot.expr_as(max_expr.clone(), Alias::new(&format!("key{}", i)));
+                pivot.expr_as(
+                    max_expr.clone(),
+                    Alias::new(&format!("key{}", i)),
+                );
                 pivot.and_having(max_expr.is_not_null());
             }
             _ => {
@@ -5316,12 +5340,14 @@ mod tests {
         // tagA の条件が含まれる
         assert!(
             sql.contains("'tagA'"),
-            "SQL should filter on tagA, got: {}", sql
+            "SQL should filter on tagA, got: {}",
+            sql
         );
         // tagB の IN サブクエリも含まれる
         assert!(
             sql.contains("'tagB'"),
-            "SQL should also filter on tagB (multi-key), got: {}", sql
+            "SQL should also filter on tagB (multi-key), got: {}",
+            sql
         );
     }
 
@@ -5348,11 +5374,16 @@ mod tests {
         let sql = build_pick_sql(&nest_one_key, "oneview")
             .to_string(PostgresQueryBuilder);
 
-        assert!(sql.contains("'tagA'"), "SQL should filter on tagA, got: {}", sql);
+        assert!(
+            sql.contains("'tagA'"),
+            "SQL should filter on tagA, got: {}",
+            sql
+        );
         // 余分な IN サブクエリが生成されていないことを確認（tagB への参照なし）
         assert!(
             !sql.contains("'tagB'"),
-            "Single-key Nest should not reference tagB, got: {}", sql
+            "Single-key Nest should not reference tagB, got: {}",
+            sql
         );
     }
 
@@ -5390,21 +5421,54 @@ mod tests {
             .to_string(PostgresQueryBuilder);
 
         // CTE 名が含まれる（ラベル値積集合構造）
-        assert!(sql.contains("labels_0"), "should have labels_0 CTE, got: {}", sql);
-        assert!(sql.contains("labels_1"), "should have labels_1 CTE, got: {}", sql);
-        assert!(sql.contains("op_labels"), "should have op_labels CTE, got: {}", sql);
+        assert!(
+            sql.contains("labels_0"),
+            "should have labels_0 CTE, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("labels_1"),
+            "should have labels_1 CTE, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("op_labels"),
+            "should have op_labels CTE, got: {}",
+            sql
+        );
         // INTERSECT キーワード
         assert!(
             sql.to_uppercase().contains("INTERSECT"),
-            "should contain INTERSECT, got: {}", sql
+            "should contain INTERSECT, got: {}",
+            sql
         );
         // 各オペランドのタグ条件
-        assert!(sql.contains("'cat'"), "should reference 'cat', got: {}", sql);
-        assert!(sql.contains("'flavor'"), "should reference 'flavor', got: {}", sql);
+        assert!(
+            sql.contains("'cat'"),
+            "should reference 'cat', got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("'flavor'"),
+            "should reference 'flavor', got: {}",
+            sql
+        );
         // 結果カラム
-        assert!(sql.contains("label_value"), "should select label_value, got: {}", sql);
-        assert!(sql.contains("group_total"), "should select group_total, got: {}", sql);
-        assert!(sql.contains("item_refs"), "should select item_refs, got: {}", sql);
+        assert!(
+            sql.contains("label_value"),
+            "should select label_value, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("group_total"),
+            "should select group_total, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("item_refs"),
+            "should select item_refs, got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -5427,7 +5491,8 @@ mod tests {
         let after_labels = &sql[labels_cte_pos..];
         assert!(
             after_labels.contains("'cat'"),
-            "labels CTE should use first operand tag type 'cat', got: {}", sql
+            "labels CTE should use first operand tag type 'cat', got: {}",
+            sql
         );
     }
 }

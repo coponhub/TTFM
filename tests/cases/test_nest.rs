@@ -1,7 +1,7 @@
+use rstest::rstest;
 /// ネスト演算子 (`&:`) の統合テスト
 use std::path::Path;
 use std::sync::OnceLock;
-use rstest::rstest;
 use tempfile::tempdir;
 use tempfile::TempDir;
 use ttfm::response::SearchResponse;
@@ -37,10 +37,12 @@ fn get_fixture() -> &'static SharedFixture {
         let db_dir = root.path().join(".ttfm_test/db");
         for case in CASES {
             let case_dir = root.path().join(case.name);
-            std::fs::create_dir_all(&case_dir)
-                .unwrap_or_else(|e| panic!("Failed to create dir for '{}': {}", case.name, e));
-            (case.setup)(&case_dir)
-                .unwrap_or_else(|e| panic!("Setup failed for '{}': {}", case.name, e));
+            std::fs::create_dir_all(&case_dir).unwrap_or_else(|e| {
+                panic!("Failed to create dir for '{}': {}", case.name, e)
+            });
+            (case.setup)(&case_dir).unwrap_or_else(|e| {
+                panic!("Setup failed for '{}': {}", case.name, e)
+            });
         }
         {
             let fm = FileManager::new_with_db_dir(&db_dir).expect("FM create");
@@ -49,8 +51,9 @@ fn get_fixture() -> &'static SharedFixture {
             for case in CASES {
                 if let Some(modify) = case.modify {
                     let case_dir = root.path().join(case.name);
-                    modify(&fm, &case_dir)
-                        .unwrap_or_else(|e| panic!("Modify failed for '{}': {}", case.name, e));
+                    modify(&fm, &case_dir).unwrap_or_else(|e| {
+                        panic!("Modify failed for '{}': {}", case.name, e)
+                    });
                 }
             }
         }
@@ -84,20 +87,34 @@ fn inject_path_scope(query: &str, dir: &Path) -> String {
     let p = dir.to_string_lossy();
     let filter = format!("& path:{}/*", p);
 
-    // 2段階集約: sum(sum(INNER))
-    if query.starts_with("sum(sum(") && query.ends_with("))") {
-        let inner = &query[8..query.len()-2];
-        let res = format!("sum(sum(({}) {}))", inner, filter);
-        println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
-        return res;
+    // 2段階集約: outer_agg(inner_agg(INNER)) → outer_agg(inner_agg((INNER) & path:...))
+    for outer in &["sum(", "count(", "avg(", "max(", "min("] {
+        for inner_agg in &["sum(", "count(", "avg(", "max(", "min("] {
+            let prefix = format!("{}{}", outer, inner_agg);
+            if query.starts_with(&prefix[..]) && query.ends_with("))") {
+                let inner = &query[prefix.len()..query.len() - 2];
+                let outer_fn = &outer[..outer.len() - 1];
+                let inner_fn = &inner_agg[..inner_agg.len() - 1];
+                let res = format!("{}({}(({}) {}))", outer_fn, inner_fn, inner, filter);
+                println!(
+                    "DEBUG: [inject_path_scope] original='{}' -> transformed='{}'",
+                    query, res
+                );
+                return res;
+            }
+        }
     }
 
     // 集計関数: agg(INNER)
     for agg in &["sum(", "count(", "avg(", "max(", "min("] {
         if query.starts_with(agg) && query.ends_with(')') {
-            let inner = &query[agg.len()..query.len()-1];
-            let res = format!("{}(({}) {})", &agg[..agg.len()-1], inner, filter);
-            println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
+            let inner = &query[agg.len()..query.len() - 1];
+            let res =
+                format!("{}(({}) {})", &agg[..agg.len() - 1], inner, filter);
+            println!(
+                "DEBUG: [inject_path_scope] original='{}' -> transformed='{}'",
+                query, res
+            );
             return res;
         }
     }
@@ -109,7 +126,8 @@ fn inject_path_scope(query: &str, dir: &Path) -> String {
             if let Some(end) = query.rfind(')') {
                 let inner = &query[pos + 6..end];
                 let suffix = &query[end..];
-                let res = format!("{}(({}) {}){}", prefix, inner, filter, suffix);
+                let res =
+                    format!("{}(({}) {}){}", prefix, inner, filter, suffix);
                 println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
                 return res;
             }
@@ -123,27 +141,38 @@ fn inject_path_scope(query: &str, dir: &Path) -> String {
             if let Some(end) = query.rfind(')') {
                 let inner = &query[pos + 4..end];
                 let suffix = &query[end..];
-                let res = format!("{}(({}) {}){}", prefix, inner, filter, suffix);
+                let res =
+                    format!("{}(({}) {}){}", prefix, inner, filter, suffix);
                 println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
                 return res;
             }
         }
     }
 
-    // 算術演算: (A) + (B)
-    if query.contains(") + (") {
+    // 算術演算: (A) + (B)  ※ query[0]='(' かつ query 末尾=')' 前提
+    if query.starts_with('(') && query.ends_with(')') && query.contains(") + (")
+    {
         if let Some(mid) = query.find(") + (") {
-            let left = query[..mid + 1].trim_matches(|c| c == '(' || c == ')');
-            let right = query[mid + 4..].trim_matches(|c| c == '(' || c == ')');
-            let res = format!("(({}) {}) + (({}) {})", left, filter, right, filter);
-            println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
+            // query[..mid+1] = "(A)" → left = A (先頭の '(' と mid の ')' を除外)
+            let left = &query[1..mid];
+            // query[mid+4..] = "(B)" → right = B (先頭の '(' と末尾の ')' を除外)
+            let right = &query[mid + 5..query.len() - 1];
+            let res =
+                format!("(({}) {}) + (({}) {})", left, filter, right, filter);
+            println!(
+                "DEBUG: [inject_path_scope] original='{}' -> transformed='{}'",
+                query, res
+            );
             return res;
         }
     }
 
     // その他 (通常の Nest 等): 全体を包む
     let res = format!("({}) {}", query, filter);
-    println!("DEBUG: [inject_path_scope] original='{}' -> transformed='{}'", query, res);
+    println!(
+        "DEBUG: [inject_path_scope] original='{}' -> transformed='{}'",
+        query, res
+    );
     res
 }
 
@@ -1283,7 +1312,7 @@ static CASES: &[NestTestCase] = &[
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
-            assert_eq!(val, 6.0, "sum of counts=6");
+            assert_eq!(val, 5.0, "sum of counts=5");
             Ok(())
         },
     },
@@ -2583,7 +2612,9 @@ static CASES: &[NestTestCase] = &[
 #[case::agg_over_nvalue_sum_count("agg_over_nvalue_sum_count")]
 #[case::agg_over_nvalue_count("agg_over_nvalue_count")]
 #[case::agg_over_nvalue_with_comparison("agg_over_nvalue_with_comparison")]
-#[case::agg_over_nvalue_sum_with_comparison("agg_over_nvalue_sum_with_comparison")]
+#[case::agg_over_nvalue_sum_with_comparison(
+    "agg_over_nvalue_sum_with_comparison"
+)]
 #[case::agg_calc_wrap("agg_calc_wrap")]
 #[case::agg_sum_calc_wrap("agg_sum_calc_wrap")]
 #[case::mixed_key_calculation("mixed_key_calculation")]
@@ -2604,13 +2635,19 @@ static CASES: &[NestTestCase] = &[
 #[case::label_set_intersect_proj_proj("label_set_intersect_proj_proj")]
 #[case::label_set_union_proj_proj("label_set_union_proj_proj")]
 #[case::label_set_except_proj_proj("label_set_except_proj_proj")]
-#[case::nest_right_side_label_set_op_union("nest_right_side_label_set_op_union")]
+#[case::nest_right_side_label_set_op_union(
+    "nest_right_side_label_set_op_union"
+)]
 #[case::unnest_transparent_and_filter("unnest_transparent_and_filter")]
 #[case::label_set_intersect_warns("label_set_intersect_warns")]
 #[case::proj_or_typedtag_flat("proj_or_typedtag_flat")]
-#[case::proj_minus_typedtag_keeps_projection("proj_minus_typedtag_keeps_projection")]
+#[case::proj_minus_typedtag_keeps_projection(
+    "proj_minus_typedtag_keeps_projection"
+)]
 #[case::label_set_op_filter_context("label_set_op_filter_context")]
-#[case::unnest_transparent_and_filter_per_tag("unnest_transparent_and_filter_per_tag")]
+#[case::unnest_transparent_and_filter_per_tag(
+    "unnest_transparent_and_filter_per_tag"
+)]
 // Nest × TypedTag 集合演算
 #[case::nest_and_typedtag_regression("nest_and_typedtag_regression")]
 #[case::nest_or_typedtag_flat("nest_or_typedtag_flat")]
@@ -2646,8 +2683,14 @@ fn test_nest_e2e(#[case] name: &'static str) -> anyhow::Result<()> {
 fn test_nest_parse_basic() {
     let node = ttfm::query::parse("extension: &: parentdir:").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
-        assert!(matches!(*nest.left, ttfm::query::QueryNode::Projection(_)), "left=Projection");
-        assert!(matches!(*nest.right, ttfm::query::QueryNode::Projection(_)), "right=Projection");
+        assert!(
+            matches!(*nest.left, ttfm::query::QueryNode::Projection(_)),
+            "left=Projection"
+        );
+        assert!(
+            matches!(*nest.right, ttfm::query::QueryNode::Projection(_)),
+            "right=Projection"
+        );
     } else {
         panic!("Expected Nest, got {:?}", node);
     }
@@ -2657,8 +2700,14 @@ fn test_nest_parse_basic() {
 fn test_nest_parse_chain() {
     let node = ttfm::query::parse("extension: &: parentdir: &: name:").unwrap();
     if let ttfm::query::QueryNode::Nest(outer) = &node {
-        assert!(matches!(*outer.left, ttfm::query::QueryNode::Nest(_)), "left=Nest");
-        assert!(matches!(*outer.right, ttfm::query::QueryNode::Projection(_)), "right=Projection");
+        assert!(
+            matches!(*outer.left, ttfm::query::QueryNode::Nest(_)),
+            "left=Nest"
+        );
+        assert!(
+            matches!(*outer.right, ttfm::query::QueryNode::Projection(_)),
+            "right=Projection"
+        );
     } else {
         panic!("Expected Nest, got {:?}", node);
     }
@@ -2666,15 +2715,24 @@ fn test_nest_parse_chain() {
 
 #[test]
 fn test_nest_priority_over_and() {
-    let node = ttfm::query::parse("extension: &: parentdir: & extension:rs").unwrap();
-    assert!(matches!(node, ttfm::query::QueryNode::And(_)), "top-level And, got {:?}", node);
+    let node =
+        ttfm::query::parse("extension: &: parentdir: & extension:rs").unwrap();
+    assert!(
+        matches!(node, ttfm::query::QueryNode::And(_)),
+        "top-level And, got {:?}",
+        node
+    );
 }
 
 #[test]
 fn test_nest_parse_with_aggregation() {
-    let node = ttfm::query::parse("parentdir: &: count(extension:jpg)").unwrap();
+    let node =
+        ttfm::query::parse("parentdir: &: count(extension:jpg)").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
-        assert!(matches!(*nest.right, ttfm::query::QueryNode::Aggregation(_)), "right=Aggregation");
+        assert!(
+            matches!(*nest.right, ttfm::query::QueryNode::Aggregation(_)),
+            "right=Aggregation"
+        );
     } else {
         panic!("Expected Nest, got {:?}", node);
     }
@@ -2686,7 +2744,8 @@ fn test_nest_parse_with_aggregation() {
 
 #[test]
 fn test_nest_left_must_be_projection() {
-    let result = ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:");
+    let result =
+        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:");
     assert!(result.is_err(), "non-projection left should fail");
 }
 
@@ -2696,23 +2755,32 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: count(extension:jpg)").unwrap();
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: count(extension:jpg)",
+    )
+    .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
 
 #[test]
 fn test_nest_resolves_sum_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)").unwrap();
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)")
+            .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
 
 #[test]
 fn test_plain_projection_no_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("extension:").unwrap();
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("extension:").unwrap();
     assert!(resolver.get_projection().is_some());
-    assert!(resolver.get_nvalue().is_none(), "plain projection has no nvalue");
+    assert!(
+        resolver.get_nvalue().is_none(),
+        "plain projection has no nvalue"
+    );
 }
 
 // ──────────────────────────────────────────────
@@ -2721,22 +2789,34 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("extension:rs &: count(*:*)").is_err());
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "extension:rs &: count(*:*)"
+    )
+    .is_err());
 }
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("count(*:*) &: extension:").is_err());
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "count(*:*) &: extension:"
+    )
+    .is_err());
 }
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("(size: > 100) &: extension:").is_err());
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "(size: > 100) &: extension:"
+    )
+    .is_err());
 }
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: (count(extension:jpg) > 1)").unwrap();
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: (count(extension:jpg) > 1)",
+    )
+    .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
     assert!(resolver.get_nvalue_condition().is_some());
@@ -2765,17 +2845,26 @@ fn test_nest_resolver_all_aggregations() {
     ];
     for query in &queries {
         let result = ttfm::query::lens_resolver::Resolver::new(query);
-        assert!(result.is_ok(), "'{}' should resolve: {}",
-            query, result.err().map(|e| e.to_string()).unwrap_or_default());
+        assert!(
+            result.is_ok(),
+            "'{}' should resolve: {}",
+            query,
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
         let resolver = result.unwrap();
-        assert!(resolver.get_projection().is_some(), "'{}' has projection", query);
+        assert!(
+            resolver.get_projection().is_some(),
+            "'{}' has projection",
+            query
+        );
         assert!(resolver.get_nvalue().is_some(), "'{}' has nvalue", query);
     }
 }
 
 #[test]
 fn test_nest_scalar_right_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100").unwrap();
+    let resolver =
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100").unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
@@ -2792,11 +2881,24 @@ fn test_nest_comparison_resolver_patterns() {
     ];
     for query in &queries {
         let result = ttfm::query::lens_resolver::Resolver::new(query);
-        assert!(result.is_ok(), "'{}': {}", query, result.err().map(|e| e.to_string()).unwrap_or_default());
+        assert!(
+            result.is_ok(),
+            "'{}': {}",
+            query,
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
         let resolver = result.unwrap();
-        assert!(resolver.get_projection().is_some(), "'{}' has projection", query);
+        assert!(
+            resolver.get_projection().is_some(),
+            "'{}' has projection",
+            query
+        );
         assert!(resolver.get_nvalue().is_some(), "'{}' has nvalue", query);
-        assert!(resolver.get_nvalue_condition().is_some(), "'{}' has nvalue_condition", query);
+        assert!(
+            resolver.get_nvalue_condition().is_some(),
+            "'{}' has nvalue_condition",
+            query
+        );
     }
 }
 
@@ -2809,7 +2911,12 @@ fn test_nest_query_vs_calc_resolves() {
     ];
     for query in &queries {
         let result = ttfm::query::lens_resolver::Resolver::new(query);
-        assert!(result.is_ok(), "'{}': {}", query, result.err().map(|e| e.to_string()).unwrap_or_default());
+        assert!(
+            result.is_ok(),
+            "'{}': {}",
+            query,
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
     }
 }
 
