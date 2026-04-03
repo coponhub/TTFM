@@ -85,10 +85,7 @@ impl<'a> Fetcher<'a> {
 
         let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {
-            println!(
-                "--- COMPUTE AGGREGATION SQL ---\n{}\n----------------",
-                sql_str
-            );
+            eprintln!("DEBUG: COMPUTE AGGREGATION SQL: {}", sql_str);
         }
 
         let mut stmt = self.conn.prepare(&sql_str)?;
@@ -100,6 +97,9 @@ impl<'a> Fetcher<'a> {
             .map_err(|e| {
                 anyhow::anyhow!("Failed to compute aggregation: {}", e)
             })?;
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            eprintln!("DEBUG: compute_aggregation scalar result: {:?}", val_id);
+        }
         let duckdb_type_str = format!("{:?}", stmt.column_type(0));
         use crate::types::{Label, LabelValue, TagType};
 
@@ -243,51 +243,63 @@ impl<'a> Fetcher<'a> {
         use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
 
-        let select_sql = crate::query::sql::build_fetch_label_groups_sql(
-            self.resolver,
-            proj_type,
-            "oneview",
-            limit,
-            offset,
-        )?;
+        let select_sql =
+            if let Some(node) = self.resolver.get_label_set_op_node() {
+                crate::query::sql::build_fetch_label_set_op_sql(
+                    node, "oneview", limit, offset,
+                )?
+            } else {
+                crate::query::sql::build_fetch_label_groups_sql(
+                    self.resolver,
+                    proj_type,
+                    "oneview",
+                    limit,
+                    offset,
+                )?
+            };
 
         let sql_str = select_sql.to_string(PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {
-            println!(
-                "--- FETCH LABEL GROUPS SQL ---\n{}\n----------------",
-                sql_str
-            );
+            eprintln!("DEBUG: FETCH LABEL GROUPS SQL: {}", sql_str);
         }
 
         let mut stmt = self.conn.prepare(&sql_str)?;
         let mut rows = stmt.query([])?;
         let mut results = Vec::new();
 
-        let operands = self
-            .resolver
-            .resolved_query
-            .get_projection_operands()
-            .unwrap();
+        let operands = self.resolver.resolved_query.get_projection_operands();
 
         while let Some(row) = rows.next()? {
             // SQLから label_value, group_total, item_refs を取得
             // ラベル値を解決（複数キー対応）
-            let mut label_parts = Vec::new();
-            if operands.len() > 1 {
-                for i in 0..operands.len() {
-                    let col_name = format!("label_value_{}", i);
-                    let val: Value = row.get(col_name.as_str())?;
+            let label_str = if let Some(ops) = operands {
+                let mut label_parts = Vec::new();
+                if ops.len() > 1 {
+                    for i in 0..ops.len() {
+                        let col_name = format!("label_value_{}", i);
+                        let val: Value = row.get(col_name.as_str())?;
+                        label_parts.push(
+                            ops[i].resolve_label(self.resolver.lens(), &val),
+                        );
+                    }
+                } else {
+                    let label_val: Value = row.get("label_value")?;
                     label_parts.push(
-                        operands[i].resolve_label(self.resolver.lens(), &val),
+                        ops[0].resolve_label(self.resolver.lens(), &label_val),
                     );
                 }
+                label_parts.join(" &: ")
             } else {
+                // LabelSetOp path: operands not available, read label_value directly
                 let label_val: Value = row.get("label_value")?;
-                label_parts.push(
-                    operands[0].resolve_label(self.resolver.lens(), &label_val),
-                );
-            }
-            let label_str = label_parts.join(" &: ");
+                match &label_val {
+                    Value::Text(s) => s.clone(),
+                    Value::BigInt(i) => i.to_string(),
+                    Value::Double(d) => d.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    _ => "null".to_string(),
+                }
+            };
 
             let total_count: i64 = row.get("group_total")?;
             let Value::List(item_refs_list) = row.get("item_refs")? else {

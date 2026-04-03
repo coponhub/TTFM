@@ -19,7 +19,9 @@ pub use sql::*;
 // Restore impl QueryNode methods to maintain API compatibility
 impl QueryNode {
     pub fn expand(self, registry: &QueryFunctionRegistry) -> QueryNode {
-        functions::expand_query_node(self, registry)
+        let res = functions::expand_query_node(self, registry);
+        eprintln!("DEBUG: QueryNode::expand result: {:?}", res);
+        res
     }
 
     pub fn to_sql(&self, view_name: &str) -> sea_query::SelectStatement {

@@ -292,6 +292,12 @@ fn get_terminal_width() -> usize {
     100 // default fallback
 }
 
+fn print_warnings(warnings: &[String], writer: &mut dyn std::io::Write) {
+    for w in warnings {
+        writeln!(writer, "\x1b[1;33mWarning: {}\x1b[0m", w).unwrap_or(());
+    }
+}
+
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(
     fm: &FileManager,
@@ -299,6 +305,8 @@ fn print_results(
     query: &str,
     current_n: usize,
 ) {
+    print_warnings(&response.warnings, &mut std::io::stdout());
+
     // 続きがある場合のみ、進捗状況（キャッシュ生成待ち）をチェックして表示
     if response.has_more && !response.progress.is_finished() {
         safe_println!(
@@ -599,5 +607,17 @@ mod tests {
 
         let output = format_short_result(&res_without_nvalue);
         assert_eq!(output, "test_label_no_nv");
+    }
+
+    #[test]
+    fn test_print_warnings_outputs_warning_lines() {
+        let warnings = vec![
+            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+        ];
+        let mut out = Vec::<u8>::new();
+        print_warnings(&warnings, &mut out);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.is_empty(), "print_warnings should produce output");
+        assert!(text.contains("&:"), "output should contain '&:' suggestion");
     }
 }

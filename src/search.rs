@@ -47,6 +47,38 @@ impl FileManager {
         let fetcher =
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
+        // 2-A0. LabelSetOp ケース（Projection 集合演算: INTERSECT / UNION / EXCEPT）
+        if resolver.is_label_set_op() {
+            let proj_type = resolver
+                .get_projection()
+                .unwrap_or_else(|| TagType::from("dummy"));
+            let mut results =
+                fetcher.fetch_label_groups(&proj_type, n, offset)?;
+            let has_more = n > 0 && results.len() > n;
+            if has_more {
+                results.truncate(n);
+            }
+            // Proj & Proj（Intersect）の場合は &: の使用を提案する警告を生成する
+            let warnings = if resolver.is_label_set_intersect() {
+                vec![
+                    "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+                ]
+            } else {
+                Vec::new()
+            };
+            return Ok(SearchResponse {
+                results,
+                has_more,
+                warnings,
+                type_for_projection: resolver.get_projection(),
+                ..SearchResponse::new_empty(
+                    None,
+                    has_more,
+                    resolver.get_projection(),
+                )
+            });
+        }
+
         // 2-A. Projection ケース（転置: Label → Items）
         // QUERY.md L77: ラベル比較はアイテムリストを返すため、
         // nvalue_condition 付き（NestMatch/MergedNestMatch）
@@ -61,11 +93,17 @@ impl FileManager {
                     label_items.truncate(n);
                 }
 
+                // Or/Difference 混在クエリはフラットリストとして扱い type_for_projection を設定しない
+                let type_for_projection =
+                    if resolver.resolved_query.is_mixed_projection_query() {
+                        None
+                    } else {
+                        Some(tag)
+                    };
                 return Ok(SearchResponse {
                     results: label_items,
-                    label_results: Vec::new(),
                     has_more,
-                    type_for_projection: Some(tag),
+                    type_for_projection,
                     ..SearchResponse::new_empty(None, has_more, None)
                 });
             }
@@ -80,7 +118,6 @@ impl FileManager {
             let res = fetcher.fetch_computation()?;
             return Ok(SearchResponse {
                 results: vec![res],
-                label_results: Vec::new(),
                 scalar: None,
                 cid: None,
                 has_more: false,
@@ -91,6 +128,7 @@ impl FileManager {
                     is_done: true,
                 },
                 type_for_projection: None,
+                warnings: Vec::new(),
             });
         }
 
@@ -120,7 +158,6 @@ impl FileManager {
 
         Ok(SearchResponse {
             results,
-            label_results: Vec::new(),
             scalar: None,
             cid,
             has_more,
@@ -131,6 +168,7 @@ impl FileManager {
                 is_done: !has_more,
             },
             type_for_projection: None,
+            warnings: Vec::new(),
         })
     }
 
@@ -468,7 +506,6 @@ impl FileManager {
 
             Ok(SearchResponse {
                 results: transposed_results,
-                label_results: Vec::new(), // 新形式では使用しない
                 scalar: None,
                 cid,
                 has_more,
@@ -480,11 +517,11 @@ impl FileManager {
                 },
                 type_for_projection: projection
                     .map(|s| TagType::from(s.as_str())),
+                warnings: Vec::new(),
             })
         } else {
             Ok(SearchResponse {
                 results: final_results,
-                label_results: Vec::new(),
                 scalar: None,
                 cid,
                 has_more,
@@ -495,6 +532,7 @@ impl FileManager {
                     is_done: !has_more,
                 },
                 type_for_projection: None,
+                warnings: Vec::new(),
             })
         }
     }
