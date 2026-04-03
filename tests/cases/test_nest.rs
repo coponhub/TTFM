@@ -1,7 +1,6 @@
 /// ネスト演算子 (`&:`) の統合テスト
 use std::path::Path;
 use std::sync::OnceLock;
-use tempfile::tempdir;
 use tempfile::TempDir;
 use ttfm::response::SearchResponse;
 use ttfm::FileManager;
@@ -2513,6 +2512,27 @@ define_cases! {
             Ok(())
         },
     },
+    unnest_with_filter: {
+        setup: |dir| {
+            // a.rs(7), b.rs(10) → rs: sum=17
+            // c.txt(5) → txt: sum=5
+            std::fs::write(dir.join("a.rs"), "content")?;
+            std::fs::write(dir.join("b.rs"), "0123456789")?;
+            std::fs::write(dir.join("c.txt"), "abcde")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "sum(extension: &: size:)",
+        assert: |res, _dir| {
+            assert!(res.type_for_projection.is_some(), "Should return projection result");
+            let rs_group = res.results.iter().find(|r| r.name.contains("rs")).expect("rs group");
+            let txt_group = res.results.iter().find(|r| r.name.contains("txt")).expect("txt group");
+            assert_eq!(get_nvalue_f64(rs_group), Some(17.0));
+            assert_eq!(get_nvalue_f64(txt_group), Some(5.0));
+            Ok(())
+        },
+    },
 }
 
 // ──────────────────────────────────────────────
@@ -2758,58 +2778,4 @@ fn test_nest_query_vs_calc_resolves() {
             result.err().map(|e| e.to_string()).unwrap_or_default()
         );
     }
-}
-
-#[test]
-fn test_unnest_with_filter() -> anyhow::Result<()> {
-    let root = tempdir()?;
-    let root_path = root.path();
-    let db_dir = tempdir()?;
-
-    // a.rs(7), b.rs(10) → rs: sum=17
-    // c.txt(5) → txt: sum=5
-    std::fs::write(root_path.join("a.rs"), "content")?;
-    std::fs::write(root_path.join("b.rs"), "0123456789")?;
-    std::fs::write(root_path.join("c.txt"), "abcde")?;
-
-    let fm = FileManager::new_with_db_dir(db_dir.path())?;
-    fm.index_directory(root_path, None::<&fn(usize)>, false)?;
-
-    let res =
-        fm.search("sum(extension: &: size:)", SearchOptions::default())?;
-
-    assert!(
-        res.type_for_projection.is_some(),
-        "Should return projection result"
-    );
-
-    let get_nvalue = |group: &ttfm::response::SearchResult| -> f64 {
-        let nvalue = group
-            .tags
-            .entries
-            .iter()
-            .find(|e| e.label.tag_type().as_str() == "nvalue")
-            .expect("Should have nvalue tag");
-        match nvalue.label.value() {
-            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
-            ttfm::types::LabelValue::Integer(i) => i as f64,
-            _ => panic!("Unexpected nvalue type"),
-        }
-    };
-
-    let rs_group = res
-        .results
-        .iter()
-        .find(|r| r.name.contains("rs"))
-        .expect("Should have rs group");
-    assert_eq!(get_nvalue(rs_group), 17.0);
-
-    let txt_group = res
-        .results
-        .iter()
-        .find(|r| r.name.contains("txt"))
-        .expect("Should have txt group");
-    assert_eq!(get_nvalue(txt_group), 5.0);
-
-    Ok(())
 }
