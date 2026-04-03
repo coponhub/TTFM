@@ -1,4 +1,3 @@
-use rstest::rstest;
 /// ネスト演算子 (`&:`) の統合テスト
 use std::path::Path;
 use std::sync::OnceLock;
@@ -15,12 +14,12 @@ use ttfm::SearchOptions;
 struct NestTestCase {
     name: &'static str,
     setup: fn(&Path) -> anyhow::Result<()>,
-    query: &'static str,
+    /// DBのインデックス完了後に、ファイルに対してタグ付け等の操作を行うためのオプションのフック
+    modify: Option<fn(&FileManager, &Path) -> anyhow::Result<()>>,
     /// クエリを実行前に加工する関数。デフォルトは `default_scope`。
     /// outer-agg クエリ等、特殊なスコープ付与が必要なケースで上書きする。
     format_query: fn(&str, &Path) -> String,
-    /// DBのインデックス完了後に、ファイルに対してタグ付け等の操作を行うためのオプションのフック
-    modify: Option<fn(&FileManager, &Path) -> anyhow::Result<()>>,
+    query: &'static str,
     assert: fn(&SearchResponse, &Path) -> anyhow::Result<()>,
 }
 
@@ -201,13 +200,41 @@ fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
 }
 
 // ──────────────────────────────────────────────
+// マクロ: CASES定義 + テスト関数の自動生成
+// ──────────────────────────────────────────────
+
+macro_rules! define_cases {
+    ($( $name:ident: { $($field:tt)* } ),* $(,)?) => {
+        static CASES: &[NestTestCase] = &[
+            $(NestTestCase { name: stringify!($name), $($field)* }),*
+        ];
+
+        $(
+            #[test]
+            fn $name() -> anyhow::Result<()> {
+                run_case(stringify!($name))
+            }
+        )*
+    }
+}
+
+fn run_case(name: &'static str) -> anyhow::Result<()> {
+    let fix = get_fixture();
+    let fm = FileManager::new_with_db_dir(&fix.db_dir)?;
+    let case = CASES.iter().find(|c| c.name == name).unwrap();
+    let case_dir = fix.root.path().join(case.name);
+    let query = (case.format_query)(case.query, &case_dir);
+    let res = fm.search(&query, SearchOptions::default())?;
+    (case.assert)(&res, &case_dir)
+}
+
+// ──────────────────────────────────────────────
 // 全E2Eテストケースの定義
 // ──────────────────────────────────────────────
 
-static CASES: &[NestTestCase] = &[
+define_cases! {
     // ── 基本 nest クエリ（default_scope） ─────────────────────
-    NestTestCase {
-        name: "count_e2e",
+    count_e2e: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -219,9 +246,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("scan.jpg"), "jpg3")?;
             Ok(())
         },
-        query: "parentdir: &: count(extension:jpg)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: count(extension:jpg)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some(), "Should be projection");
             let src = res.results.iter().find(|r| r.name.contains("src")).expect("src");
@@ -231,8 +258,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "sum_e2e",
+    sum_e2e: {
         setup: |dir| {
             let sub = dir.join("sub");
             std::fs::create_dir_all(&sub)?;
@@ -240,9 +266,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(sub.join("b.txt"), vec![0u8; 200])?;
             Ok(())
         },
-        query: "parentdir: &: sum(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: sum(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
@@ -250,16 +276,15 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "no_regression_plain_projection",
+    no_regression_plain_projection: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "")?;
             std::fs::write(dir.join("b.txt"), "")?;
             Ok(())
         },
-        query: "extension:",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension:",
         assert: |res, _dir| {
             assert_eq!(res.type_for_projection, Some(ttfm::types::TagType::from("extension")));
             assert!(res.results.iter().any(|r| r.name == "rs"));
@@ -272,17 +297,16 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "extension_left_count",
+    extension_left_count: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "a")?;
             std::fs::write(dir.join("b.rs"), "bb")?;
             std::fs::write(dir.join("c.txt"), "ccc")?;
             Ok(())
         },
-        query: "extension: &: count(*:*)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension: &: count(*:*)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
@@ -292,17 +316,16 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "extension_left_sum_size",
+    extension_left_sum_size: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), vec![0u8; 100])?;
             std::fs::write(dir.join("b.rs"), vec![0u8; 200])?;
             std::fs::write(dir.join("c.txt"), vec![0u8; 50])?;
             Ok(())
         },
-        query: "extension: &: sum(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension: &: sum(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
@@ -312,8 +335,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "max_size",
+    max_size: {
         setup: |dir| {
             let sub = dir.join("sub");
             std::fs::create_dir_all(&sub)?;
@@ -321,9 +343,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(sub.join("large.txt"), vec![0u8; 500])?;
             Ok(())
         },
-        query: "parentdir: &: max(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: max(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
@@ -331,8 +353,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "min_size",
+    min_size: {
         setup: |dir| {
             let sub = dir.join("sub");
             std::fs::create_dir_all(&sub)?;
@@ -340,9 +361,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(sub.join("large.txt"), vec![0u8; 500])?;
             Ok(())
         },
-        query: "parentdir: &: min(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: min(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
@@ -350,8 +371,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "avg_size",
+    avg_size: {
         setup: |dir| {
             let sub = dir.join("sub");
             std::fs::create_dir_all(&sub)?;
@@ -359,9 +379,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(sub.join("b.txt"), vec![0u8; 200])?;
             Ok(())
         },
-        query: "parentdir: &: avg(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: avg(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
@@ -370,8 +390,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "count_all",
+    count_all: {
         setup: |dir| {
             let alpha = dir.join("alpha");
             let beta = dir.join("beta");
@@ -383,9 +402,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(beta.join("w.txt"), "w")?;
             Ok(())
         },
-        query: "parentdir: &: count(*:*)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: count(*:*)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let alpha = res.results.iter().find(|r| r.name.contains("alpha")).expect("alpha");
@@ -395,15 +414,14 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "filename_left",
+    filename_left: {
         setup: |dir| {
             std::fs::write(dir.join("hello.txt"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "filename: &: sum(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "filename: &: sum(size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let hello = res.results.iter().find(|r| r.name == "hello.txt").expect("hello.txt");
@@ -411,8 +429,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "comparison_count_gt",
+    comparison_count_gt: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -425,9 +442,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("e.txt"), "e")?;
             Ok(())
         },
-        query: "parentdir: &: (count(extension:jpg) > 1)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (count(extension:jpg) > 1)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
@@ -438,17 +455,16 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "comparison_sum_gt",
+    comparison_sum_gt: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), vec![0u8; 50])?;
             std::fs::write(dir.join("b.rs"), vec![0u8; 60])?;
             std::fs::write(dir.join("c.txt"), vec![0u8; 30])?;
             Ok(())
         },
-        query: "extension: &: (sum(size:) > 100)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension: &: (sum(size:) > 100)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
@@ -459,17 +475,16 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "context_propagation",
+    context_propagation: {
         setup: |dir| {
             std::fs::write(dir.join("a.html"), vec![0u8; 100])?;
             std::fs::write(dir.join("b.html"), vec![0u8; 200])?;
             std::fs::write(dir.join("c.txt"), vec![0u8; 50])?;
             Ok(())
         },
-        query: "stem:a & extension: &: sum(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "stem:a & extension: &: sum(size:)",
         assert: |res, _dir| {
             let html = res.results.iter().find(|r| r.name == "html").expect("html");
             assert_eq!(get_nvalue(html).as_deref(), Some("100"), "html=100");
@@ -477,8 +492,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "pick_filter",
+    pick_filter: {
         setup: |dir| {
             let dir_a = dir.join("dirA");
             let dir_b = dir.join("dirB");
@@ -491,9 +505,9 @@ static CASES: &[NestTestCase] = &[
             }
             Ok(())
         },
-        query: "parentdir: &: (count(extension:jpg) > 10)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (count(extension:jpg) > 10)",
         assert: |res, _dir| {
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(!names.iter().any(|&n| n == "f1.jpg" || n == "f2.jpg"),
@@ -503,8 +517,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "scenario_a",
+    scenario_a: {
         setup: |dir| {
             let dira = dir.join("dirA");
             let dirb = dir.join("dirB");
@@ -515,9 +528,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dirb.join("f3.html"), "html")?;
             Ok(())
         },
-        query: "extension:html & parentdir: &: count(extension:html) > 0",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension:html & parentdir: &: count(extension:html) > 0",
         assert: |res, _dir| {
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "f1.html" || n == "f3.html"),
@@ -525,8 +538,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "scenario_b",
+    scenario_b: {
         setup: |dir| {
             let dira = dir.join("dirA");
             let dirb = dir.join("dirB");
@@ -537,9 +549,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dirb.join("f3.txt"), vec![0u8; 200])?;
             Ok(())
         },
-        query: "parentdir: &: (avg(size:) == sum(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (avg(size:) == sum(size:))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             let parentdirs: Vec<String> = res.results.iter()
@@ -554,8 +566,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "scenario_stem_wildcard",
+    scenario_stem_wildcard: {
         setup: |dir| {
             let dira = dir.join("dirA");
             let dirb = dir.join("dirB");
@@ -569,9 +580,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dirb.join("berry.html"), "h")?;
             Ok(())
         },
-        query: "extension:html & parentdir: &: count(stem:*a*) == 2",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension:html & parentdir: &: count(stem:*a*) == 2",
         assert: |res, _dir| {
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "apple.html" || n == "banana.html"),
@@ -580,8 +591,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "chained_comparison",
+    chained_comparison: {
         setup: |dir| {
             let dira = dir.join("dirA");
             let dirb = dir.join("dirB");
@@ -597,9 +607,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dirc.join("f.txt"), vec![0u8; 20])?;
             Ok(())
         },
-        query: "parentdir: &: (200 > sum(size:) > 50)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (200 > sum(size:) > 50)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
@@ -609,8 +619,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_mul",
+    arithmetic_mul: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -621,9 +630,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (sum(size:) * count(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (sum(size:) * count(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("60"), "dir1: 30*2=60");
@@ -632,8 +641,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_add",
+    arithmetic_add: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -644,17 +652,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (sum(size:) + count(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (sum(size:) + count(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("32"), "dir1: 30+2=32");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_sub",
+    arithmetic_sub: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -665,17 +672,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (sum(size:) - count(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (sum(size:) - count(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("28"), "dir1: 30-2=28");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_div",
+    arithmetic_div: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -686,17 +692,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (sum(size:) / count(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (sum(size:) / count(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("15"), "dir1: 30/2=15");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_avg_sum",
+    arithmetic_avg_sum: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -707,17 +712,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (avg(size:) + sum(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (avg(size:) + sum(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("45"), "dir1: avg(15)+sum(30)=45");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_max_lit",
+    arithmetic_max_lit: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -728,17 +732,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (max(size:) * 2)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (max(size:) * 2)",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("40"), "dir1: max(20)*2=40");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_lit_min",
+    arithmetic_lit_min: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -749,17 +752,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: (1000 / min(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (1000 / min(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("100"), "dir1: 1000/min(10)=100");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_nested",
+    arithmetic_nested: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -770,17 +772,16 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("file3"), vec![0u8; 100])?;
             Ok(())
         },
-        query: "parentdir: &: ((sum(size:) + 10) * count(size:))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: ((sum(size:) + 10) * count(size:))",
         assert: |res, _dir| {
             let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("80"), "dir1: (30+10)*2=80");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "or_merged_projection",
+    or_merged_projection: {
         setup: |dir| {
             let dira = dir.join("dirA");
             let dirb = dir.join("dirB");
@@ -794,9 +795,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dirc.join("c.txt"), vec![0u8; 40])?;
             Ok(())
         },
-        query: "parentdir: &: (count(extension:rs) > 0) | parentdir: &: (count(*:*) > 1)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (count(extension:rs) > 0) | parentdir: &: (count(*:*) > 1)",
         assert: |res, _dir| {
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "main.rs"), "dirA included: {:?}", names);
@@ -805,8 +806,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "arithmetic_null_propagation",
+    arithmetic_null_propagation: {
         setup: |dir| {
             let dir_rs = dir.join("dir_rs");
             let dir_txt = dir.join("dir_txt");
@@ -816,9 +816,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir_txt.join("readme.txt"), vec![0u8; 50])?;
             Ok(())
         },
-        query: "parentdir: &: (sum(size:) + count(extension:rs))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (sum(size:) + count(extension:rs))",
         assert: |res, _dir| {
             let dir_rs = res.results.iter().find(|r| r.name.contains("dir_rs")).expect("dir_rs");
             assert_eq!(get_nvalue(dir_rs).as_deref(), Some("11"), "10+1=11");
@@ -827,8 +827,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "filter_empty_groups",
+    filter_empty_groups: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -838,9 +837,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("b.txt"), "text")?;
             Ok(())
         },
-        query: "parentdir: &: count(extension:rs)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: count(extension:rs)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some());
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
@@ -849,36 +848,33 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "dedup_keys",
+    dedup_keys: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "content")?;
             Ok(())
         },
-        query: "parentdir: &: parentdir: &: count()",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: parentdir: &: count()",
         assert: |_res, _dir| Ok(()),
     },
-    NestTestCase {
-        name: "level3_projection",
+    level3_projection: {
         setup: |dir| {
             let work = dir.join("work");
             std::fs::create_dir(&work)?;
             std::fs::write(work.join("a.rs"), "content")?;
             Ok(())
         },
-        query: "parentdir: &: filename:",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: filename:",
         assert: |res, _dir| {
             assert!(res.results.iter().any(|r| r.name.contains("work") && r.name.contains("a.rs")),
                 "work/a.rs expected: {:?}", res.results.iter().map(|r| &r.name).collect::<Vec<_>>());
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_projection_with_agg",
+    level3_projection_with_agg: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -891,9 +887,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("b.txt"), "ok")?;          // 2
             Ok(())
         },
-        query: "parentdir: &: extension: &: sum(size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: extension: &: sum(size:)",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 4, "4 groups: {:?}", res.results);
             let find_nv = |pdir: &str, ext: &str| -> f64 {
@@ -909,8 +905,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_projection_with_agg_filter",
+    level3_projection_with_agg_filter: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -923,9 +918,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("d.txt"), "z")?;        // 1
             Ok(())
         },
-        query: "parentdir: &: extension: &: (sum(size:) > 2)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: extension: &: (sum(size:) > 2)",
         assert: |res, _dir| {
             assert_eq!(res.type_for_projection, None);
             let files: Vec<_> = res.results.iter().filter(|r| {
@@ -942,8 +937,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level4_nest",
+    level4_nest: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -954,9 +948,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.txt"), "content2")?;
             Ok(())
         },
-        query: "parentdir: &: extension: &: size:",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: extension: &: size:",
         assert: |res, _dir| {
             let dir1_rs = res.results.iter().filter(|r| r.name.contains("dir1") && r.name.contains("rs")).count();
             let dir2_txt = res.results.iter().filter(|r| r.name.contains("dir2") && r.name.contains("txt")).count();
@@ -965,8 +959,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_agg_internal_filter",
+    level3_agg_internal_filter: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             std::fs::create_dir_all(&dir1)?;
@@ -974,9 +967,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir1.join("large.rs"), "0123456789ABCDE")?; // 15
             Ok(())
         },
-        query: "parentdir: &: extension: &: sum(size: :> 10 & size:)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: extension: &: sum(size: :> 10 & size:)",
         assert: |res, _dir| {
             let dir1_rs = res.results.iter()
                 .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
@@ -986,8 +979,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "query_vs_calc_e2e",
+    query_vs_calc_e2e: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), vec![0u8; 10])?;
             std::fs::write(dir.join("b.rs"), vec![0u8; 20])?;
@@ -995,9 +987,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir.join("d.txt"), vec![0u8; 5])?;
             Ok(())
         },
-        query: "extension: &: (sum(size:) > (sum(size:) / 2))",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension: &: (sum(size:) > (sum(size:) / 2))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "flat list");
             assert!(!res.results.is_empty(), "has results");
@@ -1005,8 +997,7 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // ── outer-agg クエリ（scope_with_sum / scope_with_count） ──
-    NestTestCase {
-        name: "agg_over_nvalue_sum_count",
+    agg_over_nvalue_sum_count: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1017,9 +1008,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("c.jpg"), "c")?;
             Ok(())
         },
-        query: "sum(parentdir: &: count(extension:jpg))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: count(extension:jpg))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1028,8 +1019,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "agg_over_nvalue_count",
+    agg_over_nvalue_count: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1040,9 +1030,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("c.jpg"), "c")?;
             Ok(())
         },
-        query: "count(parentdir: &: count(extension:jpg))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "count(parentdir: &: count(extension:jpg))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1051,8 +1041,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "agg_over_nvalue_with_comparison",
+    agg_over_nvalue_with_comparison: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1065,9 +1054,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("e.txt"), "e")?;
             Ok(())
         },
-        query: "count(parentdir: &: (count(extension:jpg) > 1))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "count(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1076,8 +1065,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "agg_over_nvalue_sum_with_comparison",
+    agg_over_nvalue_sum_with_comparison: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1090,9 +1078,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("e.txt"), "e")?;
             Ok(())
         },
-        query: "sum(parentdir: &: (count(extension:jpg) > 1))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1101,8 +1089,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "agg_calc_wrap",
+    agg_calc_wrap: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1115,9 +1102,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("e.txt"), "e")?;
             Ok(())
         },
-        query: "100 - count(parentdir: &: (count(extension:jpg) > 1))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "100 - count(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1126,8 +1113,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "agg_sum_calc_wrap",
+    agg_sum_calc_wrap: {
         setup: |dir| {
             let src = dir.join("src");
             let docs = dir.join("docs");
@@ -1139,9 +1125,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(docs.join("d.jpg"), "d")?;
             Ok(())
         },
-        query: "sum(parentdir: &: (count(extension:jpg) > 1)) * 2",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: (count(extension:jpg) > 1)) * 2",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none());
             assert_eq!(res.results.len(), 1);
@@ -1151,8 +1137,7 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // ── mixed-key（各オペランドに個別でpath注入） ──────────────
-    NestTestCase {
-        name: "mixed_key_calculation",
+    mixed_key_calculation: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1163,9 +1148,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "rust")?;
             Ok(())
         },
-        query: "(parentdir: &: count()) + (extension: &: count())",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "(parentdir: &: count()) + (extension: &: count())",
         assert: |res, _dir| {
             let dir1_group = res.results.iter()
                 .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
@@ -1178,17 +1163,16 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "mixed_key_arithmetic_deepens_nest",
+    mixed_key_arithmetic_deepens_nest: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             std::fs::create_dir_all(&dir1)?;
             std::fs::write(dir1.join("a.rs"), "a")?; // 1 byte
             Ok(())
         },
-        query: "(parentdir: &: sum(size:)) + (extension: &: sum(size:))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "(parentdir: &: sum(size:)) + (extension: &: sum(size:))",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1, "1 merged group");
             let group = &res.results[0];
@@ -1198,8 +1182,7 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // ── unnest クエリ（scope_with_sum / scope_with_count） ────────
-    NestTestCase {
-        name: "unnest_sum_basic",
+    unnest_sum_basic: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1210,9 +1193,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "abcde")?;      // 5
             Ok(())
         },
-        query: "sum(parentdir: &: size:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some(), "projection");
             let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
@@ -1222,8 +1205,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_count_basic",
+    unnest_count_basic: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1234,9 +1216,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "z")?;
             Ok(())
         },
-        query: "count(parentdir: &: extension:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "count(parentdir: &: extension:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some(), "projection");
             let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
@@ -1246,8 +1228,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_deep",
+    unnest_deep: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1259,9 +1240,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("d.txt"), "xyz")?;        // 3
             Ok(())
         },
-        query: "sum(parentdir: &: extension: &: size:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: extension: &: size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some(), "projection");
             assert_eq!(res.results.len(), 4, "4 groups");
@@ -1278,24 +1259,22 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_regression_plain_agg",
+    unnest_regression_plain_agg: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "content")?;    // 7
             std::fs::write(dir.join("b.rs"), "0123456789")?; // 10
             Ok(())
         },
-        query: "sum(extension:rs & size:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(extension:rs & size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             assert_eq!(res.results[0].name, "17", "sum=17");
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_regression_nvalue_agg",
+    unnest_regression_nvalue_agg: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1306,9 +1285,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "z")?;
             Ok(())
         },
-        query: "sum(parentdir: &: count())",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: count())",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
@@ -1316,8 +1295,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_depth4_to_3",
+    unnest_depth4_to_3: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1328,9 +1306,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.txt"), "abcde")?;     // 5
             Ok(())
         },
-        query: "sum(parentdir: &: extension: &: filename: &: size:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: extension: &: filename: &: size:)",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_some(), "projection");
             assert_eq!(res.results.len(), 3, "3 groups");
@@ -1346,8 +1324,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_multistage_4_to_0",
+    unnest_multistage_4_to_0: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1358,9 +1335,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "abcde")?;      // 5
             Ok(())
         },
-        query: "sum(sum(parentdir: &: extension: &: size:))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(sum(parentdir: &: extension: &: size:))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
@@ -1368,8 +1345,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_multistage_3_to_0",
+    unnest_multistage_3_to_0: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1380,9 +1356,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "z")?;
             Ok(())
         },
-        query: "sum(count(parentdir: &: extension:))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(count(parentdir: &: extension:))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
@@ -1390,16 +1366,15 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "unnest_multistage_with_context",
+    unnest_multistage_with_context: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "12345")?;            // 5
             std::fs::write(dir.join("b.txt"), "123456789012345")?; // 15
             Ok(())
         },
-        query: "count(extension: &: parentdir: &: (sum(size:) > 10))",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "count(extension: &: parentdir: &: (sum(size:) > 10))",
         assert: |res, _dir| {
             assert!(res.type_for_projection.is_none(), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
@@ -1407,8 +1382,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_arithmetic_add",
+    level3_arithmetic_add: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             std::fs::create_dir_all(&dir1)?;
@@ -1420,9 +1394,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        query: "parentdir: &: (size: + 1)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (size: + 1)",
         assert: |res, _dir| {
             res.results
                 .iter()
@@ -1440,8 +1414,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_arithmetic_mul_size",
+    level3_arithmetic_mul_size: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             std::fs::create_dir_all(&dir1)?;
@@ -1453,9 +1426,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        query: "parentdir: &: (size: * 2)",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: (size: * 2)",
         assert: |res, _dir| {
             res.results
                 .iter()
@@ -1472,8 +1445,7 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-    NestTestCase {
-        name: "level3_arithmetic_width_height",
+    level3_arithmetic_width_height: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             std::fs::create_dir_all(&dir1)?;
@@ -1485,8 +1457,6 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        query: "parentdir: &: (width: * height:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             let file_path = dir.join("dir1").join("a.rs");
             fm.tag_item(&file_path.to_string_lossy(), "width:10")?;
@@ -1501,6 +1471,8 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&file_path3.to_string_lossy(), "height:6")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "parentdir: &: (width: * height:)",
         assert: |res, _dir| {
             res.results
                 .iter()
@@ -1520,8 +1492,7 @@ static CASES: &[NestTestCase] = &[
     // ── Phase 0: ラベル集合演算 ───────────────────────────────────────────────
     // ケース① Proj & Proj → ラベル値積集合
     // 両タグに共通するラベル値 "one" のみが label_results に返る
-    NestTestCase {
-        name: "label_set_intersect_proj_proj",
+    label_set_intersect_proj_proj: {
         setup: |dir| {
             // a.txt : cat:one, flavor:one → 積集合に入る
             // b.txt : cat:two            → cat のみ
@@ -1531,8 +1502,6 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "cat: & flavor:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
@@ -1540,6 +1509,8 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:three")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "cat: & flavor:",
         assert: |res, _dir| {
             // 仕様: 共通プレフィックスなし → Lv.2 Projection (type_for_projection = Some)
             assert!(
@@ -1566,8 +1537,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース② Proj | Proj → ラベル値和集合
     // 異なるタグ型のラベル値が混合した Projection が返る
-    NestTestCase {
-        name: "label_set_union_proj_proj",
+    label_set_union_proj_proj: {
         setup: |dir| {
             // a.txt : tagX:alpha
             // b.txt : tagY:beta
@@ -1577,8 +1547,6 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "tagX: | tagY:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
             fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
@@ -1586,6 +1554,8 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "tagX: | tagY:",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1610,8 +1580,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース③ Proj -: Proj → ラベル値差集合
     // 右辺 veggie: に存在する "apple" が除かれ、"banana" と "cherry" のみ返る
-    NestTestCase {
-        name: "label_set_except_proj_proj",
+    label_set_except_proj_proj: {
         setup: |dir| {
             std::fs::write(dir.join("apple.txt"), "a")?;
             std::fs::write(dir.join("banana.txt"), "b")?;
@@ -1619,8 +1588,6 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir.join("also_apple.txt"), "d")?;
             Ok(())
         },
-        query: "fruit: -: veggie:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
             fm.tag_item(&dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
@@ -1628,6 +1595,8 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "fruit: -: veggie:",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1648,8 +1617,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース⑤ Nest 右辺への LabelSetOp 適用
     // parentdir: &: (tagA: | tagB:) → parentdir グループ内に tagA/tagB 混合サブラベル
-    NestTestCase {
-        name: "nest_right_side_label_set_op_union",
+    nest_right_side_label_set_op_union: {
         setup: |dir| {
             let dir_a = dir.join("dir_a");
             let dir_b = dir.join("dir_b");
@@ -1659,14 +1627,14 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir_b.join("file2.txt"), "content")?;
             Ok(())
         },
-        query: "parentdir: &: (tagA: | tagB:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
             fm.tag_item(&dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "parentdir: &: (tagA: | tagB:)",
         assert: |res, dir| {
             assert!(res.type_for_projection.is_some(), "Should return Projection result");
             // 複合ラベル形式: "parentdir_path &: tag_value"
@@ -1687,8 +1655,7 @@ static CASES: &[NestTestCase] = &[
     // ケース⑥-A Unnest の And 透過（Issue #4）
     // sum(parentdir: &: size:) に inject_path_scope が適用されると
     // sum((parentdir: &: size:) & path:dir/*) になり、Unnest が機能するべき
-    NestTestCase {
-        name: "unnest_transparent_and_filter",
+    unnest_transparent_and_filter: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1699,9 +1666,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.txt"), "01234")?;                 // 5 bytes
             Ok(())
         },
-        query: "sum(parentdir: &: size:)",
-        format_query: inject_path_scope,
         modify: None,
+        format_query: inject_path_scope,
+        query: "sum(parentdir: &: size:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1720,21 +1687,20 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース⑧ Proj & Proj → SearchResponse.warnings に警告を生成する
     // NOTE: warnings フィールドは Phase 1 で追加。Phase 0 ではコンパイルエラー（意図的 Red）。
-    NestTestCase {
-        name: "label_set_intersect_warns",
+    label_set_intersect_warns: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "cat: & flavor:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
             fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "cat: & flavor:",
         assert: |res, _dir| {
             assert!(
                 !res.warnings.is_empty(),
@@ -1749,8 +1715,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース④-A Proj | TypedTag → Lv.1 フラットリスト
     // format_query で "dir_a" を絶対パスに置換してから隔離フィルタを付ける
-    NestTestCase {
-        name: "proj_or_typedtag_flat",
+    proj_or_typedtag_flat: {
         setup: |dir| {
             let dir_a = dir.join("dir_a");
             let dir_b = dir.join("dir_b");
@@ -1761,9 +1726,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir_b.join("c.rs"), "z")?;
             Ok(())
         },
-        query: "extension: | path:dir_a/*",
-        format_query: scope_path_from_dir,
         modify: None,
+        format_query: scope_path_from_dir,
+        query: "extension: | path:dir_a/*",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_none(),
@@ -1784,8 +1749,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース④-B Proj - TypedTag → Projection（アイテム除外後も Lv.2 維持）
     // format_query で "exclude" を絶対パスに置換してから隔離フィルタを付ける
-    NestTestCase {
-        name: "proj_minus_typedtag_keeps_projection",
+    proj_minus_typedtag_keeps_projection: {
         setup: |dir| {
             let dir_include = dir.join("include");
             let dir_exclude = dir.join("exclude");
@@ -1797,9 +1761,9 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir_exclude.join("d.txt"), "w")?;
             Ok(())
         },
-        query: "extension: - path:exclude/*",
-        format_query: scope_path_from_dir,
         modify: None,
+        format_query: scope_path_from_dir,
+        query: "extension: - path:exclude/*",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1826,8 +1790,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース⑦ LabelSetOp と TypedTag フィルタの And（build_pick_sql 経由）
     // (tagA: & tagB:) & grade:A → grade:A を持つアイテムのみ積集合に含まれる
-    NestTestCase {
-        name: "label_set_op_filter_context",
+    label_set_op_filter_context: {
         setup: |dir| {
             // a.txt : tagA:one, tagB:one, grade:A → 積集合かつフィルタ通過
             // b.txt : tagA:one, tagB:one          → 積集合だが grade:A なし → 除外
@@ -1837,8 +1800,6 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: & tagB:) & grade:A",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:one")?;
@@ -1849,6 +1810,8 @@ static CASES: &[NestTestCase] = &[
             fm.tag_item(&dir.join("c.txt").to_string_lossy(), "grade:A")?;
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: & tagB:) & grade:A",
         assert: |res, _dir| {
             // grade:A で絞ると積集合のラベル "one" は a.txt のみになるべき
             assert_eq!(
@@ -1873,8 +1836,7 @@ static CASES: &[NestTestCase] = &[
     },
     // ケース⑥-B Unnest の And 透過（タグごとにフィルタ注入）
     // sum((parentdir: & path:filter) &: (size: & path:filter)) が Unnest される
-    NestTestCase {
-        name: "unnest_transparent_and_filter_per_tag",
+    unnest_transparent_and_filter_per_tag: {
         setup: |dir| {
             let dir1 = dir.join("dir1");
             let dir2 = dir.join("dir2");
@@ -1885,12 +1847,12 @@ static CASES: &[NestTestCase] = &[
             std::fs::write(dir2.join("c.txt"), "01234")?;                 // 5 bytes
             Ok(())
         },
-        query: "sum((parentdir: & path:dir/*) &: (size: & path:dir/*))",
+        modify: None,
         format_query: |_q, dir| {
             let p = dir.to_string_lossy();
             format!("sum((parentdir: & path:{p}/*) &: (size: & path:{p}/*))")
         },
-        modify: None,
+        query: "sum((parentdir: & path:dir/*) &: (size: & path:dir/*))",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1909,15 +1871,12 @@ static CASES: &[NestTestCase] = &[
     },
     // ── Nest × TypedTag 集合演算 ─────────────────────────────────────
     // Nest & TypedTag → Lv.3 維持（現状正しい、リグレッション確認）
-    NestTestCase {
-        name: "nest_and_typedtag_regression",
+    nest_and_typedtag_regression: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "(cat: &: flavor:) & grade:A",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
@@ -1928,6 +1887,8 @@ static CASES: &[NestTestCase] = &[
             // b.txt: grade:A なし → 除外される
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(cat: &: flavor:) & grade:A",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -1948,16 +1909,13 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // Nest | TypedTag → Lv.1 フラット（Phase 5）
-    NestTestCase {
-        name: "nest_or_typedtag_flat",
+    nest_or_typedtag_flat: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(cat: &: flavor:) | grade:A",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
@@ -1967,6 +1925,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: タグなし → どちらにも属さない
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(cat: &: flavor:) | grade:A",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_none(),
@@ -1988,16 +1948,13 @@ static CASES: &[NestTestCase] = &[
         },
     },
     // Nest - TypedTag → Lv.3 維持・grade:A アイテム除外（Phase 5）
-    NestTestCase {
-        name: "nest_minus_typedtag_filter",
+    nest_minus_typedtag_filter: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(cat: &: flavor:) - grade:A",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
@@ -2011,6 +1968,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: grade:A なし → 除外されない
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(cat: &: flavor:) - grade:A",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2037,15 +1996,12 @@ static CASES: &[NestTestCase] = &[
     // ── Nest × Projection 集合演算 ──────────────────────────────────
     // Proj & Nest → LabelSetOp Intersect（Phase 2）
     // tagA: と tagA:&:tagB: の積集合: tagB: を持つファイルのみ残る
-    NestTestCase {
-        name: "proj_and_nest_intersect",
+    proj_and_nest_intersect: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "tagA: & (tagA: &: tagB:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2054,6 +2010,8 @@ static CASES: &[NestTestCase] = &[
             // b.txt: tagA: のみ（tagB: なし）→ Nest に非存在 → 除外
             Ok(())
         }),
+        format_query: default_scope,
+        query: "tagA: & (tagA: &: tagB:)",
         assert: |res, _dir| {
             // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
@@ -2071,16 +2029,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Nest & Nest → LabelSetOp Intersect（Phase 2）
     // (tagA:&:tagB:) & (tagA:&:tagC:): 両 Nest に属すファイルのみ残る
-    NestTestCase {
-        name: "nest_and_nest_intersect",
+    nest_and_nest_intersect: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: &: tagB:) & (tagA: &: tagC:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2094,6 +2049,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: &: tagB:) & (tagA: &: tagC:)",
         assert: |res, _dir| {
             // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
@@ -2121,16 +2078,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Nest{2keys} & Nest{3keys} → LabelSetOp Intersect
     // (tagA:&:tagB:) & (tagA:&:tagC:&:tagD:): 深さの異なる Nest の積集合
-    NestTestCase {
-        name: "nest2_and_nest3_intersect",
+    nest2_and_nest3_intersect: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2146,6 +2100,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2175,16 +2131,15 @@ static CASES: &[NestTestCase] = &[
     // extension: が And([is_dir:false, Nest{ext}]) に展開されても積集合になることを確認
     // 仕様: extension ラベル値集合 {"rs","txt"} と size ラベル値集合 {100,200} は型違いで完全不一致
     //       → ラベル値積集合 = 空 → 空 Projection
-    NestTestCase {
-        name: "extension_and_size_intersect",
+    extension_and_size_intersect: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), vec![0u8; 100])?;
             std::fs::write(dir.join("b.txt"), vec![0u8; 200])?;
             Ok(())
         },
-        query: "extension: & size:",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "extension: & size:",
         assert: |res, _dir| {
             // 仕様: 共通プレフィックスなし、かつラベル値型不一致 → 空 Projection
             assert!(
@@ -2202,16 +2157,15 @@ static CASES: &[NestTestCase] = &[
     },
     // size: & size: → 同一キー Lv.2 & Lv.2 積集合（同一集合との積 = 全体）
     // 整数型ラベル (label_int) でも type_for_projection が Some になることを確認
-    NestTestCase {
-        name: "size_and_size_intersect",
+    size_and_size_intersect: {
         setup: |dir| {
             std::fs::write(dir.join("small.txt"), vec![0u8; 10])?;
             std::fs::write(dir.join("large.txt"), vec![0u8; 200])?;
             Ok(())
         },
-        query: "size: & size:",
-        format_query: default_scope,
         modify: None,
+        format_query: default_scope,
+        query: "size: & size:",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2234,15 +2188,12 @@ static CASES: &[NestTestCase] = &[
     },
     // Proj | Nest → LabelSetOp Union（Phase 3）
     // tagA: | (tagA:&:tagB:): 両方の結果を合わせた和集合
-    NestTestCase {
-        name: "proj_or_nest",
+    proj_or_nest: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "tagA: | (tagA: &: tagB:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             // a.txt: tagA のみ（tagB なし）→ tagA: に存在するが Nest には非存在
@@ -2251,6 +2202,8 @@ static CASES: &[NestTestCase] = &[
             // b.txt: tagA + tagB → 両方に存在
             Ok(())
         }),
+        format_query: default_scope,
+        query: "tagA: | (tagA: &: tagB:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2272,16 +2225,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Nest | Nest（異なるキー）→ Lv.1 フラット（Phase 3）
     // (cat: &: flavor:) | (shape: &: color:): キー構造が異なる → Lv.1 平坦化
-    NestTestCase {
-        name: "nest_or_nest_flat",
+    nest_or_nest_flat: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(cat: &: flavor:) | (shape: &: color:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
@@ -2296,6 +2246,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: 両 Nest に存在
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(cat: &: flavor:) | (shape: &: color:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_none(),
@@ -2323,15 +2275,12 @@ static CASES: &[NestTestCase] = &[
     },
     // Proj -: Nest → LabelSetOp Except（Phase 4）
     // tagA: -: (tagA:&:tagB:): Nest に属すアイテムを Proj 結果から除外
-    NestTestCase {
-        name: "proj_minus_nest_except",
+    proj_minus_nest_except: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "tagA: -: (tagA: &: tagB:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2340,6 +2289,8 @@ static CASES: &[NestTestCase] = &[
             // b.txt: tagB なし → Nest に非存在 → tagA: 結果に残る
             Ok(())
         }),
+        format_query: default_scope,
+        query: "tagA: -: (tagA: &: tagB:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2370,15 +2321,12 @@ static CASES: &[NestTestCase] = &[
     },
     // Nest -: Proj → LabelSetOp Except（Phase 4）
     // (cat: &: flavor:) -: grade:: grade: を持つアイテムを Nest から除外
-    NestTestCase {
-        name: "nest_minus_proj_except",
+    nest_minus_proj_except: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        query: "(cat: &: flavor:) -: grade:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
@@ -2389,6 +2337,8 @@ static CASES: &[NestTestCase] = &[
             // b.txt: grade: あり → grade: Proj に存在 → Nest から除外
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(cat: &: flavor:) -: grade:",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2419,16 +2369,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Nest -: Nest → LabelSetOp Except（Phase 4）
     // (tagA:&:tagB:) -: (tagA:&:tagC:): 第2 Nest に属すアイテムを第1 Nest から除外
-    NestTestCase {
-        name: "nest_minus_nest_except",
+    nest_minus_nest_except: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: &: tagB:) -: (tagA: &: tagC:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2442,6 +2389,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: tagB なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: &: tagB:) -: (tagA: &: tagC:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2468,16 +2417,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Lv.4 Nest -: Proj → LabelSetOp Except（Phase 4 深いネスト）
     // (tagA: &: tagB: &: tagC:) -: grade:: grade: を持つアイテムを Lv.4 Nest から除外
-    NestTestCase {
-        name: "nest_lv4_minus_proj_except",
+    nest_lv4_minus_proj_except: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: &: tagB: &: tagC:) -: grade:",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2494,6 +2440,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: grade: なし → 残る
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: &: tagB: &: tagC:) -: grade:",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2519,16 +2467,13 @@ static CASES: &[NestTestCase] = &[
     },
     // Lv.4 Nest -: Lv.4 Nest → LabelSetOp Except（Phase 4 深いネスト同士）
     // (tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)
-    NestTestCase {
-        name: "nest_lv4_minus_nest_lv4_except",
+    nest_lv4_minus_nest_lv4_except: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        query: "(tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)",
-        format_query: default_scope,
         modify: Some(|fm, dir| {
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
@@ -2545,6 +2490,8 @@ static CASES: &[NestTestCase] = &[
             // c.txt: tagC なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
+        format_query: default_scope,
+        query: "(tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)",
         assert: |res, _dir| {
             assert!(
                 res.type_for_projection.is_some(),
@@ -2566,113 +2513,6 @@ static CASES: &[NestTestCase] = &[
             Ok(())
         },
     },
-];
-
-// ──────────────────────────────────────────────
-// E2E ディスパッチャー
-// ──────────────────────────────────────────────
-
-#[rstest]
-#[case::count_e2e("count_e2e")]
-#[case::sum_e2e("sum_e2e")]
-#[case::no_regression_plain_projection("no_regression_plain_projection")]
-#[case::extension_left_count("extension_left_count")]
-#[case::extension_left_sum_size("extension_left_sum_size")]
-#[case::max_size("max_size")]
-#[case::min_size("min_size")]
-#[case::avg_size("avg_size")]
-#[case::count_all("count_all")]
-#[case::filename_left("filename_left")]
-#[case::comparison_count_gt("comparison_count_gt")]
-#[case::comparison_sum_gt("comparison_sum_gt")]
-#[case::context_propagation("context_propagation")]
-#[case::pick_filter("pick_filter")]
-#[case::scenario_a("scenario_a")]
-#[case::scenario_b("scenario_b")]
-#[case::scenario_stem_wildcard("scenario_stem_wildcard")]
-#[case::chained_comparison("chained_comparison")]
-#[case::arithmetic_mul("arithmetic_mul")]
-#[case::arithmetic_add("arithmetic_add")]
-#[case::arithmetic_sub("arithmetic_sub")]
-#[case::arithmetic_div("arithmetic_div")]
-#[case::arithmetic_avg_sum("arithmetic_avg_sum")]
-#[case::arithmetic_max_lit("arithmetic_max_lit")]
-#[case::arithmetic_lit_min("arithmetic_lit_min")]
-#[case::arithmetic_nested("arithmetic_nested")]
-#[case::or_merged_projection("or_merged_projection")]
-#[case::arithmetic_null_propagation("arithmetic_null_propagation")]
-#[case::filter_empty_groups("filter_empty_groups")]
-#[case::dedup_keys("dedup_keys")]
-#[case::level3_projection("level3_projection")]
-#[case::level3_projection_with_agg("level3_projection_with_agg")]
-#[case::level3_projection_with_agg_filter("level3_projection_with_agg_filter")]
-#[case::level4_nest("level4_nest")]
-#[case::level3_agg_internal_filter("level3_agg_internal_filter")]
-#[case::query_vs_calc_e2e("query_vs_calc_e2e")]
-#[case::agg_over_nvalue_sum_count("agg_over_nvalue_sum_count")]
-#[case::agg_over_nvalue_count("agg_over_nvalue_count")]
-#[case::agg_over_nvalue_with_comparison("agg_over_nvalue_with_comparison")]
-#[case::agg_over_nvalue_sum_with_comparison(
-    "agg_over_nvalue_sum_with_comparison"
-)]
-#[case::agg_calc_wrap("agg_calc_wrap")]
-#[case::agg_sum_calc_wrap("agg_sum_calc_wrap")]
-#[case::mixed_key_calculation("mixed_key_calculation")]
-#[case::mixed_key_arithmetic_deepens_nest("mixed_key_arithmetic_deepens_nest")]
-#[case::unnest_sum_basic("unnest_sum_basic")]
-#[case::unnest_count_basic("unnest_count_basic")]
-#[case::unnest_deep("unnest_deep")]
-#[case::unnest_regression_plain_agg("unnest_regression_plain_agg")]
-#[case::unnest_regression_nvalue_agg("unnest_regression_nvalue_agg")]
-#[case::unnest_depth4_to_3("unnest_depth4_to_3")]
-#[case::unnest_multistage_4_to_0("unnest_multistage_4_to_0")]
-#[case::unnest_multistage_3_to_0("unnest_multistage_3_to_0")]
-#[case::unnest_multistage_with_context("unnest_multistage_with_context")]
-#[case::level3_arithmetic_add("level3_arithmetic_add")]
-#[case::level3_arithmetic_mul_size("level3_arithmetic_mul_size")]
-#[case::level3_arithmetic_width_height("level3_arithmetic_width_height")]
-// Phase 0: ラベル集合演算（全て Red）
-#[case::label_set_intersect_proj_proj("label_set_intersect_proj_proj")]
-#[case::label_set_union_proj_proj("label_set_union_proj_proj")]
-#[case::label_set_except_proj_proj("label_set_except_proj_proj")]
-#[case::nest_right_side_label_set_op_union(
-    "nest_right_side_label_set_op_union"
-)]
-#[case::unnest_transparent_and_filter("unnest_transparent_and_filter")]
-#[case::label_set_intersect_warns("label_set_intersect_warns")]
-#[case::proj_or_typedtag_flat("proj_or_typedtag_flat")]
-#[case::proj_minus_typedtag_keeps_projection(
-    "proj_minus_typedtag_keeps_projection"
-)]
-#[case::label_set_op_filter_context("label_set_op_filter_context")]
-#[case::unnest_transparent_and_filter_per_tag(
-    "unnest_transparent_and_filter_per_tag"
-)]
-// Nest × TypedTag 集合演算
-#[case::nest_and_typedtag_regression("nest_and_typedtag_regression")]
-#[case::nest_or_typedtag_flat("nest_or_typedtag_flat")]
-#[case::nest_minus_typedtag_filter("nest_minus_typedtag_filter")]
-// Nest × Projection 集合演算（Phase 2-4）
-#[case::proj_and_nest_intersect("proj_and_nest_intersect")]
-#[case::nest_and_nest_intersect("nest_and_nest_intersect")]
-#[case::nest2_and_nest3_intersect("nest2_and_nest3_intersect")]
-#[case::extension_and_size_intersect("extension_and_size_intersect")]
-#[case::size_and_size_intersect("size_and_size_intersect")]
-#[case::proj_or_nest("proj_or_nest")]
-#[case::nest_or_nest_flat("nest_or_nest_flat")]
-#[case::proj_minus_nest_except("proj_minus_nest_except")]
-#[case::nest_minus_proj_except("nest_minus_proj_except")]
-#[case::nest_minus_nest_except("nest_minus_nest_except")]
-#[case::nest_lv4_minus_proj_except("nest_lv4_minus_proj_except")]
-#[case::nest_lv4_minus_nest_lv4_except("nest_lv4_minus_nest_lv4_except")]
-fn test_nest_e2e(#[case] name: &'static str) -> anyhow::Result<()> {
-    let fix = get_fixture();
-    let fm = FileManager::new_with_db_dir(&fix.db_dir)?;
-    let case = CASES.iter().find(|c| c.name == name).unwrap();
-    let case_dir = fix.root.path().join(case.name);
-    let query = (case.format_query)(case.query, &case_dir);
-    let res = fm.search(&query, SearchOptions::default())?;
-    (case.assert)(&res, &case_dir)
 }
 
 // ──────────────────────────────────────────────
