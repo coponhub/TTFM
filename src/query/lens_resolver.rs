@@ -1637,7 +1637,11 @@ fn resolve_projection_arithmetic(
 fn resolve_nest_operand_extract_key(
     lens: &Lens,
     operand: Operand,
-) -> Result<(Option<ResolvedOperand>, ResolvedOperand, Option<Box<ResolvedNode>>)> {
+) -> Result<(
+    Option<ResolvedOperand>,
+    ResolvedOperand,
+    Option<Box<ResolvedNode>>,
+)> {
     match operand {
         Operand::Query(node) => {
             let resolved = resolve_query_node(lens, *node)?;
@@ -1661,7 +1665,9 @@ fn resolve_nest_operand_extract_key(
             let merged_ctx = match (left_ctx, right_ctx) {
                 (None, None) => None,
                 (Some(c), None) | (None, Some(c)) => Some(c),
-                (Some(l), Some(r)) => Some(Box::new(ResolvedNode::And(vec![*l, *r]))),
+                (Some(l), Some(r)) => {
+                    Some(Box::new(ResolvedNode::And(vec![*l, *r])))
+                }
             };
 
             validate_calculation_types(&left_nv, &right_nv, arith_op)?;
@@ -2440,7 +2446,10 @@ impl Resolver {
     pub fn is_label_set_intersect(&self) -> bool {
         matches!(
             self.resolved_query.get_label_set_op(),
-            Some(ResolvedNode::LabelSetOp { op: LabelSetOpKind::Intersect, .. })
+            Some(ResolvedNode::LabelSetOp {
+                op: LabelSetOpKind::Intersect,
+                ..
+            })
         )
     }
 

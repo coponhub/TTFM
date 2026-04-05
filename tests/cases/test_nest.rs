@@ -1,5 +1,8 @@
 /// ネスト演算子 (`&:`) の統合テスト
-use super::{default_scope, get_nvalue, get_nvalue_f64, inject_path_scope, scope_path_from_dir};
+use super::{
+    default_scope, get_nvalue, get_nvalue_f64, inject_path_scope,
+    scope_path_from_dir,
+};
 
 // ──────────────────────────────────────────────
 // 全E2Eテストケースの定義

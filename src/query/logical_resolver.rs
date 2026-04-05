@@ -944,13 +944,11 @@ fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
 fn is_unnestable_right(right: &QueryNode) -> bool {
     match right {
         QueryNode::Nest(_) => true,
-        QueryNode::Projection(op) => {
-            match op {
-                Operand::TypeRef(_) => true,
-                Operand::Query(node) => is_unnestable_right(node),
-                _ => false,
-            }
-        }
+        QueryNode::Projection(op) => match op {
+            Operand::TypeRef(_) => true,
+            Operand::Query(node) => is_unnestable_right(node),
+            _ => false,
+        },
         QueryNode::And(nodes) | QueryNode::Or(nodes) => {
             nodes.iter().any(is_unnestable_right)
         }
@@ -980,7 +978,9 @@ fn is_unnestable_inner(node: &QueryNode) -> bool {
         }
         QueryNode::Difference(l, _) => is_unnestable_inner(l),
         // Comparison は NestMatch 比較として既に解決済みのため、アンネスト対象ではない
-        QueryNode::Projection(Operand::Query(node)) => is_unnestable_inner(node),
+        QueryNode::Projection(Operand::Query(node)) => {
+            is_unnestable_inner(node)
+        }
         _ => false,
     }
 }
@@ -1043,7 +1043,6 @@ fn operand_is_nest(op: &Operand) -> bool {
         _ => false,
     }
 }
-
 
 /// agg(Nest(L, R)) → Nest(L, agg(R)) の書き換えを実行します。
 /// inner が And/Or/Difference([Nest(L,R), ...]) の場合は And/Or/Difference([Nest(L, agg(R)), ...]) に変換します。

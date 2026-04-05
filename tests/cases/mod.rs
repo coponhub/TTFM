@@ -1,6 +1,6 @@
 use std::path::Path;
-use ttfm::FileManager;
 use ttfm::response::SearchResponse;
+use ttfm::FileManager;
 
 // ──────────────────────────────────────────────
 // 共通テストケース構造体
@@ -134,46 +134,107 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
                 let inner = &query[prefix.len()..query.len() - 2];
                 let outer_fn = &outer[..outer.len() - 1];
                 let inner_fn = &inner_agg[..inner_agg.len() - 1];
-                return format!("{}({}(({}) {}))", outer_fn, inner_fn, inner, filter);
+                return format!(
+                    "{}({}(({}) {}))",
+                    outer_fn, inner_fn, inner, filter
+                );
             }
         }
     }
 
     for agg in &["sum(", "count(", "avg(", "max(", "min("] {
-        if query.starts_with(agg) && query.ends_with(')') {
-            let inner = &query[agg.len()..query.len() - 1];
-            return format!("{}(({}) {})", &agg[..agg.len() - 1], inner, filter);
-        }
-    }
-
-    if query.contains(" - count(") {
-        if let Some(pos) = query.find("count(") {
-            let prefix = &query[..pos + 6];
-            if let Some(end) = query.rfind(')') {
-                let inner = &query[pos + 6..end];
-                let suffix = &query[end..];
-                return format!("{}(({}) {}){}", prefix, inner, filter, suffix);
+        if query.starts_with(agg) {
+            let bytes = query.as_bytes();
+            let mut depth = 1i32;
+            let mut i = agg.len();
+            while i < query.len() && depth > 0 {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 {
+                    i += 1;
+                }
+            }
+            if depth == 0 && i == query.len() - 1 {
+                let inner = &query[agg.len()..i];
+                return format!(
+                    "{}(({}) {})",
+                    &agg[..agg.len() - 1],
+                    inner,
+                    filter
+                );
             }
         }
     }
 
-    if query.contains("sum(") && query.contains(" * ") {
-        if let Some(pos) = query.find("sum(") {
-            let prefix = &query[..pos + 4];
-            if let Some(end) = query.rfind(')') {
-                let inner = &query[pos + 4..end];
-                let suffix = &query[end..];
-                return format!("{}(({}) {}){}", prefix, inner, filter, suffix);
-            }
-        }
-    }
-
-    if query.starts_with('(') && query.ends_with(')') && query.contains(") + (") {
+    if query.starts_with('(') && query.ends_with(')') && query.contains(") + (")
+    {
         if let Some(mid) = query.find(") + (") {
             let left = &query[1..mid];
             let right = &query[mid + 5..query.len() - 1];
-            return format!("(({}) {}) + (({}) {})", left, filter, right, filter);
+            return format!(
+                "(({}) {}) + (({}) {})",
+                left, filter, right, filter
+            );
         }
+    }
+
+    // 汎用: クエリ内の全アグリゲーション呼び出しにスコープを注入する。
+    // sum/count/avg/max/min を含む任意の式に対応:
+    //   agg(X) > N  →  agg((X) & path:dir/*) > N
+    //   agg(X) == agg(X)  →  agg((X) & path:dir/*) == agg((X) & path:dir/*)
+    //   (agg(X) + N) > M  →  (agg((X) & path:dir/*) + N) > M
+    //   count()  →  count(*:* & path:dir/*)
+    const AGGS: &[&str] = &["sum(", "count(", "avg(", "max(", "min("];
+    if AGGS.iter().any(|&a| query.contains(a)) {
+        let bytes = query.as_bytes();
+        let n = bytes.len();
+        let mut out = String::with_capacity(n + 64);
+        let mut i = 0;
+        while i < n {
+            let rest = &query[i..];
+            let mut matched = false;
+            for &agg in AGGS {
+                if rest.starts_with(agg) {
+                    out.push_str(agg);
+                    i += agg.len();
+                    let inner_start = i;
+                    let mut depth = 1i32;
+                    while i < n && depth > 0 {
+                        match bytes[i] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        if depth > 0 {
+                            i += 1;
+                        }
+                    }
+                    let inner = &query[inner_start..i];
+                    if inner.is_empty() {
+                        // count() → count(*:* & path:dir/*)
+                        out.push_str("*:*");
+                    } else {
+                        out.push('(');
+                        out.push_str(inner);
+                        out.push(')');
+                    }
+                    out.push(' ');
+                    out.push_str(&filter);
+                    out.push(')');
+                    i += 1; // skip ')'
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        return out;
     }
 
     format!("({}) {}", query, filter)

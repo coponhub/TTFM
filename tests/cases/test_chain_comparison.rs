@@ -1,66 +1,75 @@
 /// 連鎖比較の統合テスト
-use tempfile::tempdir;
-use ttfm::FileManager;
+use super::{default_scope, inject_path_scope};
 
-#[test]
-fn test_chain_comparison_logic() -> anyhow::Result<()> {
-    let dir = tempdir()?;
-    let root = dir.path();
-    let files_dir = root.join("files");
-    std::fs::create_dir(&files_dir)?;
-    let db_dir = root.join(".ttfm/db");
-
-    // テストファイル作成 (1KB, 50B, 200B)
-    std::fs::write(files_dir.join("small.txt"), vec![0u8; 50])?;
-    std::fs::write(files_dir.join("medium.txt"), vec![0u8; 200])?;
-    std::fs::write(files_dir.join("large.txt"), vec![0u8; 1000])?;
-
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&files_dir, None::<&fn(usize)>, false)?;
-
-    // クエリ: 100 :< size: :<= 500 (汎用ラベル比較)
-    // medium.txt (200B) のみがヒットすべき
-    let result = fm.search("100 :< size: :<= 500", Default::default())?;
-
-    let names: Vec<_> =
-        result.results.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"medium.txt"), "Should contain medium.txt");
-    assert!(
-        !names.contains(&"small.txt"),
-        "Should NOT contain small.txt"
-    );
-    assert!(
-        !names.contains(&"large.txt"),
-        "Should NOT contain large.txt"
-    );
-
-    // クエリ: 10 :<= size: :< 1001
-    // 全てヒットすべき
-    let result_all = fm.search("10 :<= size: :< 1001", Default::default())?;
-    let all_names: Vec<_> =
-        result_all.results.iter().map(|r| r.name.as_str()).collect();
-    assert!(all_names.contains(&"small.txt"));
-    assert!(all_names.contains(&"medium.txt"));
-    assert!(all_names.contains(&"large.txt"));
-
-    // 1. 逆方向の連鎖比較: 500 :>= size: :> 100
-    // medium.txt (200B) のみがヒットすべき
-    let result_rev = fm.search("500 :>= size: :> 100", Default::default())?;
-    let rev_names: Vec<_> =
-        result_rev.results.iter().map(|r| r.name.as_str()).collect();
-    assert!(rev_names.contains(&"medium.txt"));
-    assert!(!rev_names.contains(&"small.txt"));
-    assert!(!rev_names.contains(&"large.txt"));
-
-    // 2. 集約内でのネスト: sum((100 :< size: :<= 500) & size:)
-    // medium.txt (200B) の合計なので 200.0 が返るべき
-    let result_agg =
-        fm.search("sum((100 :< size: :<= 500) & size:)", Default::default())?;
-    assert!(!result_agg.results.is_empty());
-    assert_eq!(
-        result_agg.results[0].name, "200",
-        "Sum of medium file size should be 200"
-    );
-
-    Ok(())
+define_cases! {
+    chain_comparison_medium_only: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 50])?;
+            std::fs::write(dir.join("medium.txt"), vec![0u8; 200])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 1000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "100 :< size: :<= 500",
+        assert: |res, _dir| {
+            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
+            assert!(names.contains(&"medium.txt"), "medium.txt should match");
+            assert!(!names.contains(&"small.txt"), "small.txt should NOT match");
+            assert!(!names.contains(&"large.txt"), "large.txt should NOT match");
+            Ok(())
+        },
+    },
+    chain_comparison_all_sizes: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 50])?;
+            std::fs::write(dir.join("medium.txt"), vec![0u8; 200])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 1000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "10 :<= size: :< 1001",
+        assert: |res, _dir| {
+            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
+            assert!(names.contains(&"small.txt"));
+            assert!(names.contains(&"medium.txt"));
+            assert!(names.contains(&"large.txt"));
+            Ok(())
+        },
+    },
+    chain_comparison_reverse: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 50])?;
+            std::fs::write(dir.join("medium.txt"), vec![0u8; 200])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 1000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "500 :>= size: :> 100",
+        assert: |res, _dir| {
+            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
+            assert!(names.contains(&"medium.txt"));
+            assert!(!names.contains(&"small.txt"));
+            assert!(!names.contains(&"large.txt"));
+            Ok(())
+        },
+    },
+    chain_comparison_agg_sum: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 50])?;
+            std::fs::write(dir.join("medium.txt"), vec![0u8; 200])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 1000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "sum((100 :< size: :<= 500) & size:)",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty());
+            assert_eq!(res.results[0].name, "200", "Sum of medium file size should be 200");
+            Ok(())
+        },
+    },
 }
