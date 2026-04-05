@@ -280,6 +280,22 @@ impl FileManager {
         Self::new_with_db_dir(path)
     }
 
+    /// 同一インメモリDBを共有する新しい `FileManager` を作成します。
+    /// parquet の再読み込みを行わないため、テストの高速化に使用します。
+    pub fn try_clone(&self) -> Result<Self> {
+        let conn = self.conn.try_clone()
+            .context("Failed to clone DuckDB connection")?;
+        Ok(Self {
+            conn,
+            db_dir: self.db_dir.clone(),
+            registry: FunctionRegistry::with_standard(),
+            cache_manager: CacheManager::new(
+                self.db_dir.join("cache"),
+                3 * 1024 * 1024 * 1024,
+            ),
+        })
+    }
+
     /// データベースファイルを物理的に削除します。
     /// インスタンス化を行わずに実行できるため、データベース破損時の復旧に使用できます。
     pub fn delete_database() -> Result<()> {

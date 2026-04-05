@@ -20,7 +20,7 @@ pub(super) struct QueryTestCase {
 
 pub(super) struct SharedFixture {
     pub root: tempfile::TempDir,
-    pub db_dir: std::path::PathBuf,
+    pub fm: std::sync::Mutex<ttfm::FileManager>,
 }
 
 // ──────────────────────────────────────────────
@@ -49,26 +49,27 @@ macro_rules! define_cases {
                         panic!("Setup failed for '{}': {}", case.name, e)
                     });
                 }
-                {
-                    let fm = ttfm::FileManager::new_with_db_dir(&db_dir).expect("FM create");
-                    fm.index_directory(root.path(), None::<&fn(usize)>, false)
-                        .expect("index_directory");
-                    for case in CASES {
-                        if let Some(modify) = case.modify {
-                            let case_dir = root.path().join(case.name);
-                            modify(&fm, &case_dir).unwrap_or_else(|e| {
-                                panic!("Modify failed for '{}': {}", case.name, e)
-                            });
-                        }
+                let fm = ttfm::FileManager::new_with_db_dir(&db_dir).expect("FM create");
+                fm.index_directory(root.path(), None::<&fn(usize)>, false)
+                    .expect("index_directory");
+                for case in CASES {
+                    if let Some(modify) = case.modify {
+                        let case_dir = root.path().join(case.name);
+                        modify(&fm, &case_dir).unwrap_or_else(|e| {
+                            panic!("Modify failed for '{}': {}", case.name, e)
+                        });
                     }
                 }
-                crate::cases::SharedFixture { root, db_dir }
+                crate::cases::SharedFixture {
+                    root,
+                    fm: std::sync::Mutex::new(fm),
+                }
             })
         }
 
         fn run_case(name: &'static str) -> anyhow::Result<()> {
             let fix = get_fixture();
-            let fm = ttfm::FileManager::new_with_db_dir(&fix.db_dir)?;
+            let fm = fix.fm.lock().unwrap().try_clone()?;
             let case = CASES.iter().find(|c| c.name == name).unwrap();
             let case_dir = fix.root.path().join(case.name);
             let query = (case.format_query)(case.query, &case_dir);
