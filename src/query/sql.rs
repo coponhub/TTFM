@@ -14,7 +14,7 @@ use sea_query::{
 };
 
 /// CalculationNodeに含まれるRowTagのtypeフィルタをWHERE句に追加します。
-fn extract_and_add_row_tag_filters(
+fn add_type_filters(
     stmt: &mut SelectStatement,
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
 ) {
@@ -28,7 +28,7 @@ fn extract_and_add_row_tag_filters(
             }
         }
         ResolvedOperand::Calculation(nested) => {
-            extract_and_add_row_tag_filters(stmt, nested);
+            add_type_filters(stmt, nested);
         }
         _ => {}
     }
@@ -41,7 +41,7 @@ fn extract_and_add_row_tag_filters(
             }
         }
         ResolvedOperand::Calculation(nested) => {
-            extract_and_add_row_tag_filters(stmt, nested);
+            add_type_filters(stmt, nested);
         }
         _ => {}
     }
@@ -140,7 +140,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 stmt.cond_where(cond);
 
                 if !calc.contains_aggregation() {
-                    extract_and_add_row_tag_filters(&mut stmt, calc);
+                    add_type_filters(&mut stmt, calc);
                 }
                 stmt
             }
@@ -182,7 +182,7 @@ pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
                 // 集約関数が含まれていない場合のみ、
                 // calcに含まれるRowTagのtypeフィルタを追加
                 if !calc.contains_aggregation() {
-                    extract_and_add_row_tag_filters(&mut stmt, calc);
+                    add_type_filters(&mut stmt, calc);
                 }
 
                 stmt
