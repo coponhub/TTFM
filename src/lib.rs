@@ -180,18 +180,6 @@ impl FunctionRegistry {
         Ok(row)
     }
 
-    // --- Search Support ---
-
-    /// `all_tags` ビューに対する検索SQL（IDのリストを返すクエリ）を生成します。
-    pub fn generate_view_query(
-        &self,
-        node: &crate::query::QueryNode,
-        view_name: &str,
-    ) -> String {
-        let registry = crate::query::QueryFunctionRegistry::with_standard();
-        let select = node.clone().expand(&registry).to_sql(view_name);
-        select.to_string(PostgresQueryBuilder)
-    }
 }
 
 /// ファイル管理システムのメインインターフェース。
