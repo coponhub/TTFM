@@ -353,7 +353,7 @@ impl FileManager {
         n: usize,
         offset: usize,
     ) -> Result<Vec<(crate::types::Label, usize)>> {
-        let label_query = crate::query::sql::build_label_aggregation_sql(
+        let label_query = crate::cache_search_sql::build_label_counts(
             proj_type,
             from_table,
             path_str.as_deref(),
@@ -385,7 +385,7 @@ impl FileManager {
         let mut entries = Vec::new();
 
         for (label, count) in labels {
-            let id_query = crate::query::sql::build_label_expansion_sql(
+            let id_query = crate::cache_search_sql::build_label_expansion_sql(
                 proj_type,
                 label,
                 from_table,
