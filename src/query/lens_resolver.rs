@@ -311,6 +311,33 @@ impl ResolvedOperand {
     pub fn get_storage(&self) -> Option<&StorageMapping> {
         extract_storage_from_operand(self)
     }
+
+    /// 直接の子オペランドを返す（`Calculation` の left/right のみ）。
+    pub fn children(&self) -> Vec<&ResolvedOperand> {
+        match self {
+            ResolvedOperand::Calculation(calc) => vec![&calc.left, &calc.right],
+            _ => vec![],
+        }
+    }
+
+    /// ツリーを後順（post-order）で fold する。
+    /// 葉から順に `f(node, child_results)` が呼ばれる。
+    pub fn fold<T, F>(&self, f: &F) -> T
+    where
+        F: Fn(&ResolvedOperand, Vec<T>) -> T,
+    {
+        let child_results = self.children().into_iter().map(|c| c.fold(f)).collect();
+        f(self, child_results)
+    }
+
+    /// 深さ優先（前順）で全オペランドを列挙する。
+    pub fn walk(&self) -> Vec<&ResolvedOperand> {
+        let mut result = vec![self];
+        for child in self.children() {
+            result.extend(child.walk());
+        }
+        result
+    }
 }
 
 /// 算術演算の解決済みノード
@@ -338,6 +365,45 @@ impl ResolvedCalculationNode {
 }
 
 impl ResolvedNode {
+    /// 直接の子 `ResolvedNode` を返す。
+    /// `build_pick_sql` が再帰する対象のみを含む。
+    pub fn children(&self) -> Vec<&ResolvedNode> {
+        match self {
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                nodes.iter().collect()
+            }
+            ResolvedNode::LabelSetOp { operands, .. } => {
+                operands.iter().collect()
+            }
+            ResolvedNode::Difference(l, r) => vec![l.as_ref(), r.as_ref()],
+            ResolvedNode::Complement(c) => vec![c.as_ref()],
+            ResolvedNode::Nest { context: Some(ctx), .. }
+            | ResolvedNode::NestMatch { context: Some(ctx), .. } => {
+                vec![ctx.as_ref()]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// ツリーを後順（post-order）で fold する。
+    /// 葉から順に `f(node, child_results)` が呼ばれる。
+    pub fn fold<T, F>(&self, f: &F) -> T
+    where
+        F: Fn(&ResolvedNode, Vec<T>) -> T,
+    {
+        let child_results = self.children().into_iter().map(|c| c.fold(f)).collect();
+        f(self, child_results)
+    }
+
+    /// 深さ優先（前順）で全ノードを列挙する。
+    pub fn walk(&self) -> Vec<&ResolvedNode> {
+        let mut result = vec![self];
+        for child in self.children() {
+            result.extend(child.walk());
+        }
+        result
+    }
+
     /// 自身、または入れ子のいずれかに Projection / NestMatch を含むかチェックします。
     pub fn is_projection_recursive(&self) -> bool {
         match self {
@@ -3729,5 +3795,184 @@ mod tests_integration {
             "cat: should have context injected, got: {:?}",
             resolver.resolved_query
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_walk_fold {
+    use super::*;
+    use crate::query::ast::ArithmeticOp;
+    use crate::types::{Label, LabelValue, SType, TagType};
+
+    fn leaf(name: &str) -> ResolvedNode {
+        ResolvedNode::ColumnMatch {
+            tag: SType::Name,
+            label: Label::resolve(TagType::from(name), LabelValue::String(name.to_string())),
+        }
+    }
+
+    fn lit(n: i64) -> ResolvedOperand {
+        ResolvedOperand::Literal(Label::from(n))
+    }
+
+    fn calc(
+        left: ResolvedOperand,
+        right: ResolvedOperand,
+    ) -> ResolvedOperand {
+        ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
+            left,
+            op: ArithmeticOp::Add,
+            right,
+        }))
+    }
+
+    // ── ResolvedNode::walk ────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_walk_leaf() {
+        let n = leaf("a");
+        let got = n.walk();
+        assert_eq!(got.len(), 1);
+        assert!(std::ptr::eq(got[0], &n));
+    }
+
+    #[test]
+    fn test_node_walk_and() {
+        let a = leaf("a");
+        let b = leaf("b");
+        let root = ResolvedNode::And(vec![a, b]);
+        // 前順: root, child0, child1
+        let got = root.walk();
+        assert_eq!(got.len(), 3);
+        assert!(matches!(got[0], ResolvedNode::And(_)));
+        assert!(matches!(got[1], ResolvedNode::ColumnMatch { .. }));
+        assert!(matches!(got[2], ResolvedNode::ColumnMatch { .. }));
+    }
+
+    #[test]
+    fn test_node_walk_nested() {
+        // And([Or([a, b]), c])  → And + Or + a + b + c = 5 nodes
+        let inner = ResolvedNode::Or(vec![leaf("a"), leaf("b")]);
+        let root = ResolvedNode::And(vec![inner, leaf("c")]);
+        assert_eq!(root.walk().len(), 5);
+    }
+
+    #[test]
+    fn test_node_walk_complement() {
+        let root = ResolvedNode::Complement(Box::new(leaf("a")));
+        let got = root.walk();
+        assert_eq!(got.len(), 2);
+        assert!(matches!(got[0], ResolvedNode::Complement(_)));
+    }
+
+    // ── ResolvedNode::fold ────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_fold_count() {
+        // And([a, Or([b, c])]) = 5 nodes
+        let root = ResolvedNode::And(vec![
+            leaf("a"),
+            ResolvedNode::Or(vec![leaf("b"), leaf("c")]),
+        ]);
+        let count = root.fold(&|_node, child_counts: Vec<usize>| {
+            1 + child_counts.into_iter().sum::<usize>()
+        });
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_node_fold_depth() {
+        let root = ResolvedNode::And(vec![
+            leaf("a"),
+            ResolvedNode::Or(vec![leaf("b"), leaf("c")]),
+        ]);
+        // depth = max child depth + 1
+        let depth = root.fold(&|_node, child_depths: Vec<usize>| {
+            1 + child_depths.into_iter().max().unwrap_or(0)
+        });
+        // And depth=3: Or depth=2: leaves depth=1
+        assert_eq!(depth, 3);
+    }
+
+    #[test]
+    fn test_node_fold_postorder() {
+        // fold は後順（子が先に処理される）ことを確認
+        use std::cell::RefCell;
+        let order: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let root = ResolvedNode::And(vec![leaf("a"), leaf("b")]);
+        root.fold(&|node, _: Vec<()>| {
+            match node {
+                ResolvedNode::And(_) => order.borrow_mut().push("And".to_string()),
+                ResolvedNode::ColumnMatch { label, .. } => {
+                    order.borrow_mut().push(label.as_str().to_string())
+                }
+                _ => {}
+            }
+        });
+        // 後順なので "a", "b", "And" の順
+        assert_eq!(*order.borrow(), vec!["a", "b", "And"]);
+    }
+
+    // ── ResolvedOperand::walk ─────────────────────────────────────────────
+
+    #[test]
+    fn test_operand_walk_leaf() {
+        let op = lit(1);
+        let got = op.walk();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn test_operand_walk_calc() {
+        // (1 + 2)  → 3 nodes
+        let op = calc(lit(1), lit(2));
+        assert_eq!(op.walk().len(), 3);
+    }
+
+    #[test]
+    fn test_operand_walk_nested_calc() {
+        // ((1 + 2) + 3)  → 5 nodes
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        assert_eq!(op.walk().len(), 5);
+    }
+
+    // ── ResolvedOperand::fold ─────────────────────────────────────────────
+
+    #[test]
+    fn test_operand_fold_sum_literals() {
+        // fold で Literal の合計を計算
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        let sum = op.fold(&|node, child_sums: Vec<i64>| match node {
+            ResolvedOperand::Literal(label) => label.as_i64(),
+            _ => child_sums.into_iter().sum(),
+        });
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    fn test_operand_fold_count_leaves() {
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        let count = op.fold(&|node, child_counts: Vec<usize>| match node {
+            ResolvedOperand::Calculation(_) => child_counts.into_iter().sum(),
+            _ => 1,
+        });
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_operand_fold_postorder() {
+        use std::cell::RefCell;
+        let order: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let op = calc(lit(1), lit(2));
+        op.fold(&|node, _: Vec<()>| match node {
+            ResolvedOperand::Literal(label) => {
+                order.borrow_mut().push(label.as_i64().to_string())
+            }
+            ResolvedOperand::Calculation(_) => {
+                order.borrow_mut().push("calc".to_string())
+            }
+            _ => {}
+        });
+        assert_eq!(*order.borrow(), vec!["1", "2", "calc"]);
     }
 }
