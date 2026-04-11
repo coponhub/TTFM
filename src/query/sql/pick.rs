@@ -21,108 +21,102 @@ fn add_type_filters(
     stmt: &mut SelectStatement,
     calc: &ResolvedCalculationNode,
 ) {
-    // 左オペランドのチェック
-    match &calc.left {
-        ResolvedOperand::TagRef { storage, .. } => {
-            if let StorageMapping::RowTag { tag_type, .. } = storage {
-                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
-            }
+    for op in calc.left.walk().into_iter().chain(calc.right.walk()) {
+        if let ResolvedOperand::TagRef {
+            storage: StorageMapping::RowTag { tag_type, .. },
+            ..
+        } = op
+        {
+            stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
         }
-        ResolvedOperand::Calculation(nested) => {
-            add_type_filters(stmt, nested);
-        }
-        _ => {}
-    }
-
-    // 右オペランドのチェック
-    match &calc.right {
-        ResolvedOperand::TagRef { storage, .. } => {
-            if let StorageMapping::RowTag { tag_type, .. } = storage {
-                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
-            }
-        }
-        ResolvedOperand::Calculation(nested) => {
-            add_type_filters(stmt, nested);
-        }
-        _ => {}
     }
 }
 
 /// 物理マッピング解決済みの構造から SQL を生成します。
 pub fn build_pick_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
-    match node {
-        ResolvedNode::And(nodes) => build_resolved_and_sql(nodes, view),
-        ResolvedNode::Or(nodes) => build_resolved_or_sql(nodes, view),
-        ResolvedNode::Difference(l, r) => build_resolved_diff_sql(l, r, view),
-        ResolvedNode::Nest { keys, nvalue: _, context } => {
-            build_nest_sql(keys, context, view)
+    node.fold(&|node, child_sqls: Vec<SelectStatement>| {
+        match node {
+            // ── 集合演算（子SQLを fold で受け取る）────────────────────────
+            ResolvedNode::And(_) => build_resolved_and_sql(child_sqls, view),
+            ResolvedNode::Or(_) => build_resolved_or_sql(child_sqls, view),
+            ResolvedNode::Difference(_, _) => {
+                let [l, r]: [SelectStatement; 2] = child_sqls.try_into().unwrap();
+                build_resolved_diff_sql(l, r)
+            }
+            ResolvedNode::Complement(c) => {
+                let [c_sql]: [SelectStatement; 1] = child_sqls.try_into().unwrap();
+                build_resolved_comp_sql(c.is_boolean_result(), c_sql, view)
+            }
+            ResolvedNode::LabelSetOp { op, .. } => {
+                build_label_set_op_pick_sql(op, child_sqls)
+            }
+            // ── Nest（context SQL が child_sqls[0] に入る）───────────────
+            ResolvedNode::Nest { keys, .. } => {
+                build_nest_sql(keys, child_sqls.into_iter().next(), view)
+            }
+            // ── 葉ノード（child_sqls は常に空）───────────────────────────
+            ResolvedNode::MergedNestMatch { keys, matches, is_or } => {
+                build_merged_nest_match_sql(keys, matches, *is_or, view)
+            }
+            ResolvedNode::ColumnMatch { tag, label } => {
+                build_column_match_sql(*tag, label, view)
+            }
+            ResolvedNode::Match { storage, sql_type, op, label, .. } => {
+                build_resolved_match_sql(storage, *sql_type, *op, label, view)
+            }
+            ResolvedNode::Aggregation(agg) => build_agg(agg, view),
+            ResolvedNode::AggregationMatch { agg, op, label } => {
+                build_agg_match(agg, *op, label, view)
+            }
+            ResolvedNode::CalculationMatch { calc, op, label } => {
+                build_calculation_match_sql(calc, *op, label, view)
+            }
+            ResolvedNode::TagCalculationMatch { storage, sql_type, op, calc, .. } => {
+                build_tag_calculation_match_sql(storage, *sql_type, *op, calc, view)
+            }
+            ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
+                build_agg_calc_match(agg, *op, calc, view)
+            }
+            ResolvedNode::CalculationCalculationMatch { left_calc, op, right_calc } => {
+                build_calculation_calculation_match_sql(left_calc, *op, right_calc, view)
+            }
+            ResolvedNode::AggregationAggregationMatch { left, op, right } => {
+                build_agg_agg_match(left, *op, right, view)
+            }
+            ResolvedNode::TagTagMatch {
+                left_storage, left_sql_type, op, right_storage, right_sql_type,
+            } => build_resolved_tag_tag_match_sql(
+                left_storage, *left_sql_type, *op, right_storage, *right_sql_type, view,
+            ),
+            ResolvedNode::AggregationTagMatch { agg, op, storage, sql_type, .. } => {
+                build_agg_tag_match(agg, *op, storage, *sql_type, view)
+            }
+            ResolvedNode::NestMatch { keys, nvalue, op, label, context } => {
+                build_nest_match_sql(keys, nvalue, *op, label, context, view)
+            }
+            ResolvedNode::NestNestMatch {
+                left_keys, left_nvalue, left_context,
+                op,
+                right_keys, right_nvalue, right_context,
+            } => build_nest_nest_match_sql(
+                left_keys, left_nvalue, left_context,
+                op,
+                right_keys, right_nvalue, right_context,
+                view,
+            ),
+            ResolvedNode::ScalarMatch { left, op, right } => {
+                build_scalar_match_sql(left, *op, right, view)
+            }
         }
-        ResolvedNode::MergedNestMatch { keys, matches, is_or } => {
-            build_merged_nest_match_sql(keys, matches, *is_or, view)
-        }
-        ResolvedNode::ColumnMatch { tag, label } => {
-            build_column_match_sql(*tag, label, view)
-        }
-        ResolvedNode::Match { storage, sql_type, op, label, .. } => {
-            build_resolved_match_sql(storage, *sql_type, *op, label, view)
-        }
-        ResolvedNode::Aggregation(agg) => build_agg(agg, view),
-        ResolvedNode::AggregationMatch { agg, op, label } => {
-            build_agg_match(agg, *op, label, view)
-        }
-        ResolvedNode::CalculationMatch { calc, op, label } => {
-            build_calculation_match_sql(calc, *op, label, view)
-        }
-        ResolvedNode::TagCalculationMatch { storage, sql_type, op, calc, .. } => {
-            build_tag_calculation_match_sql(storage, *sql_type, *op, calc, view)
-        }
-        ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
-            build_agg_calc_match(agg, *op, calc, view)
-        }
-        ResolvedNode::CalculationCalculationMatch { left_calc, op, right_calc } => {
-            build_calculation_calculation_match_sql(left_calc, *op, right_calc, view)
-        }
-        ResolvedNode::AggregationAggregationMatch { left, op, right } => {
-            build_agg_agg_match(left, *op, right, view)
-        }
-        ResolvedNode::TagTagMatch {
-            left_storage, left_sql_type, op, right_storage, right_sql_type,
-        } => build_resolved_tag_tag_match_sql(
-            left_storage, *left_sql_type, *op, right_storage, *right_sql_type, view,
-        ),
-        ResolvedNode::AggregationTagMatch { agg, op, storage, sql_type, .. } => {
-            build_agg_tag_match(agg, *op, storage, *sql_type, view)
-        }
-        ResolvedNode::NestMatch { keys, nvalue, op, label, context } => {
-            build_nest_match_sql(keys, nvalue, *op, label, context, view)
-        }
-        ResolvedNode::NestNestMatch {
-            left_keys, left_nvalue, left_context,
-            op,
-            right_keys, right_nvalue, right_context,
-        } => build_nest_nest_match_sql(
-            left_keys, left_nvalue, left_context,
-            op,
-            right_keys, right_nvalue, right_context,
-            view,
-        ),
-        ResolvedNode::ScalarMatch { left, op, right } => {
-            build_scalar_match_sql(left, *op, right, view)
-        }
-        ResolvedNode::Complement(c) => build_resolved_comp_sql(c, view),
-        ResolvedNode::LabelSetOp { op, operands } => {
-            build_label_set_op_pick_sql(op, operands, view)
-        }
-    }
+    })
 }
 
 fn build_nest_sql(
     keys: &[ResolvedOperand],
-    context: &Option<Box<ResolvedNode>>,
+    ctx_sql: Option<SelectStatement>,
     view: &str,
 ) -> SelectStatement {
     let mut stmt = build_resolved_projection_sql(keys.first().unwrap(), view);
-    // 2番目以降のキーも AND 条件として追加（例: tagA: &: tagB: → tagA AND tagB）
     for key in keys.iter().skip(1) {
         let key_sub = Query::select()
             .column(Col::ItemId)
@@ -130,12 +124,10 @@ fn build_nest_sql(
             .to_owned();
         stmt.and_where(Expr::col(Col::ItemId).in_subquery(key_sub));
     }
-    if let Some(ctx) = context {
-        // build_pick_sql returns 3 columns (item_id, rank, item_kind);
-        // wrap it to select only item_id for use in IN subquery.
+    if let Some(ctx) = ctx_sql {
         let ctx_sub = Query::select()
             .column(Col::ItemId)
-            .from_subquery(build_pick_sql(ctx, view), Alias::new("_ctx"))
+            .from_subquery(ctx, Alias::new("_ctx"))
             .to_owned();
         stmt.and_where(Expr::col(Col::ItemId).in_subquery(ctx_sub));
     }
@@ -321,19 +313,18 @@ fn build_resolved_operand_eav_row_expr(
     operand: &ResolvedOperand,
     view: &str,
 ) -> SimpleExpr {
-    match operand {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef { storage, sql_type, .. } => {
             build_tag_value_eav_row_expr(storage, *sql_type)
         }
         ResolvedOperand::Calculation(calc) => {
-            let left = build_resolved_operand_eav_row_expr(&calc.left, view);
-            let right = build_resolved_operand_eav_row_expr(&calc.right, view);
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
             apply_arithmetic_op(&calc.op, left, right, is_string)
         }
         ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
-    }
+    })
 }
 
 fn decompose_agg(
@@ -637,17 +628,21 @@ fn build_scalar_match_sql(
 
 fn build_label_set_op_pick_sql(
     op: &LabelSetOpKind,
-    operands: &[ResolvedNode],
-    view: &str,
+    child_sqls: Vec<SelectStatement>,
 ) -> SelectStatement {
     // LabelSetOp がフィルタコンテキスト（Nest の右辺等）で呼ばれる場合:
     // item-level の集合演算として処理する（ラベル値集合演算ではなくアイテム ID 集合）
     match op {
-        LabelSetOpKind::Union => build_resolved_or_sql(operands, view),
-        LabelSetOpKind::Intersect => build_resolved_and_sql(operands, view),
+        LabelSetOpKind::Union => {
+            reduce_with_union(child_sqls, sea_query::UnionType::Distinct, Query::select().to_owned())
+        }
+        LabelSetOpKind::Intersect => {
+            reduce_with_union(child_sqls, sea_query::UnionType::Intersect, Query::select().to_owned())
+        }
         LabelSetOpKind::Except => {
-            if let (Some(left), Some(right)) = (operands.first(), operands.get(1)) {
-                build_resolved_diff_sql(left, right, view)
+            let mut it = child_sqls.into_iter();
+            if let (Some(l), Some(r)) = (it.next(), it.next()) {
+                build_resolved_diff_sql(l, r)
             } else {
                 Query::select().to_owned()
             }
@@ -658,38 +653,33 @@ fn build_label_set_op_pick_sql(
 // ========== Moved from mod.rs ==========
 
 fn get_required_row_tags(node: &ResolvedNode) -> Vec<String> {
-    match node {
-        ResolvedNode::Match {
-            storage: StorageMapping::RowTag { tag_type, .. },
-            ..
-        } => {
-            vec![tag_type.clone()]
+    node.walk().into_iter().filter_map(|n| {
+        if let ResolvedNode::Match {
+            storage: StorageMapping::RowTag { tag_type, .. }, ..
+        } = n {
+            Some(tag_type.clone())
+        } else {
+            None
         }
-        ResolvedNode::And(nodes) => {
-            nodes.iter().flat_map(get_required_row_tags).collect()
-        }
-        _ => vec![],
-    }
+    }).collect()
 }
 
 fn resolve_simple_filter_condition(
     node: &ResolvedNode,
     table: Alias,
 ) -> Option<Condition> {
-    match node {
+    node.fold(&|n, child_results: Vec<Option<Condition>>| match n {
         ResolvedNode::Match { storage, label, .. } => {
             if let StorageMapping::RowTag { tag_type, .. } = storage {
                 let s_val = label.as_str();
                 let mut cond = Condition::all();
                 if tag_type.as_str() != "*" {
                     cond = cond.add(
-                        Expr::col((table.clone(), Col::Type))
-                            .eq(tag_type.as_str()),
+                        Expr::col((table.clone(), Col::Type)).eq(tag_type.as_str()),
                     );
                 }
                 if s_val != "*" && s_val != "" {
-                    cond =
-                        cond.add(Expr::col((table, Col::LabelStr)).eq(s_val));
+                    cond = cond.add(Expr::col((table.clone(), Col::LabelStr)).eq(s_val));
                 }
                 Some(cond)
             } else {
@@ -698,30 +688,21 @@ fn resolve_simple_filter_condition(
         }
         ResolvedNode::ColumnMatch { tag, label } => {
             let s_val = label.as_str();
-            Some(Condition::all().add(Expr::col((table, *tag)).eq(s_val)))
+            Some(Condition::all().add(Expr::col((table.clone(), *tag)).eq(s_val)))
         }
-        ResolvedNode::And(nodes) => {
-            let mut required_tags = get_required_row_tags(node);
+        ResolvedNode::And(_) => {
+            let mut required_tags = get_required_row_tags(n);
             required_tags.sort();
             required_tags.dedup();
             if required_tags.len() > 1 {
                 return None;
             }
-
-            let mut all_cond = Condition::all();
-            for n in nodes {
-                if let Some(c) =
-                    resolve_simple_filter_condition(n, table.clone())
-                {
-                    all_cond = all_cond.add(c);
-                } else {
-                    return None;
-                }
-            }
-            Some(all_cond)
+            child_results
+                .into_iter()
+                .try_fold(Condition::all(), |acc, c| c.map(|cond| acc.add(cond)))
         }
         _ => None,
-    }
+    })
 }
 
 fn build_merged_nvalue_agg_expr(
@@ -729,64 +710,44 @@ fn build_merged_nvalue_agg_expr(
     tbl_alias: &str,
     view: &str,
 ) -> SimpleExpr {
-    match nvalue {
+    nvalue.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             let (inner_tag, inner_filter, _) = inner.extract_agg_parts();
             if let Some(filter_node) = inner_filter {
                 let case_expr: SimpleExpr = if let Some(cond) =
-                    resolve_simple_filter_condition(
-                        &filter_node,
-                        Alias::new(tbl_alias),
-                    ) {
+                    resolve_simple_filter_condition(&filter_node, Alias::new(tbl_alias))
+                {
                     if cond.is_empty() {
                         Expr::col((Alias::new(tbl_alias), Col::ItemId)).into()
                     } else {
-                        Expr::case(
-                            cond,
-                            Expr::col((Alias::new(tbl_alias), Col::ItemId)),
-                        )
-                        .finally(Expr::val(None::<i32>))
-                        .into()
+                        Expr::case(cond, Expr::col((Alias::new(tbl_alias), Col::ItemId)))
+                            .finally(Expr::val(None::<i32>))
+                            .into()
                     }
                 } else {
-                    let filter_pick = build_pick_sql(&filter_node, view);
                     let filter_sub = Query::select()
                         .column(Col::ItemId)
-                        .from_subquery(filter_pick, Alias::new("nv_filter"))
+                        .from_subquery(build_pick_sql(&filter_node, view), Alias::new("nv_filter"))
                         .to_owned();
-                    let in_expr =
-                        Expr::col((Alias::new(tbl_alias), Col::ItemId))
-                            .in_subquery(filter_sub);
-                    Expr::case(
-                        in_expr,
-                        Expr::col((Alias::new(tbl_alias), Col::ItemId)),
-                    )
-                    .finally(Expr::val(None::<i32>))
-                    .into()
+                    let in_expr = Expr::col((Alias::new(tbl_alias), Col::ItemId))
+                        .in_subquery(filter_sub);
+                    Expr::case(in_expr, Expr::col((Alias::new(tbl_alias), Col::ItemId)))
+                        .finally(Expr::val(None::<i32>))
+                        .into()
                 };
                 Expr::expr(case_expr).count_distinct().into()
-            } else if let Some(StorageMapping::RowTag { tag_type, .. }) =
-                inner_tag
-            {
+            } else if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
                 let cond = Condition::all().add(
-                    Expr::col((Alias::new(tbl_alias), Col::Type))
-                        .eq(tag_type.as_str()),
+                    Expr::col((Alias::new(tbl_alias), Col::Type)).eq(tag_type.as_str()),
                 );
-                let case_expr = Expr::case(
-                    cond,
-                    Expr::col((Alias::new(tbl_alias), Col::ItemId)),
-                )
-                .finally(Expr::val(None::<i32>));
+                let case_expr = Expr::case(cond, Expr::col((Alias::new(tbl_alias), Col::ItemId)))
+                    .finally(Expr::val(None::<i32>));
                 Expr::expr(case_expr).count_distinct().into()
             } else {
-                Expr::col((Alias::new(tbl_alias), Col::ItemId))
-                    .count_distinct()
-                    .into()
+                Expr::col((Alias::new(tbl_alias), Col::ItemId)).count_distinct().into()
             }
         }
-        ResolvedOperand::Aggregation(
-            agg @ ResolvedAggregationNode::Arithmetic { op, inner },
-        ) => {
+        ResolvedOperand::Aggregation(agg @ ResolvedAggregationNode::Arithmetic { op, inner }) => {
             let is_string = agg.is_string_type();
             let (inner_tag, inner_filter, _operand) = inner.extract_agg_parts();
 
@@ -796,34 +757,24 @@ fn build_merged_nvalue_agg_expr(
                 Expr::cust_with_exprs(
                     "COALESCE($1, $2, TRY_CAST($3 AS DOUBLE))",
                     [
-                        Expr::col((Alias::new(tbl_alias), Col::LabelInt))
-                            .into(),
-                        Expr::col((Alias::new(tbl_alias), Col::LabelDouble))
-                            .into(),
-                        Expr::col((Alias::new(tbl_alias), Col::LabelStr))
-                            .into(),
+                        Expr::col((Alias::new(tbl_alias), Col::LabelInt)).into(),
+                        Expr::col((Alias::new(tbl_alias), Col::LabelDouble)).into(),
+                        Expr::col((Alias::new(tbl_alias), Col::LabelStr)).into(),
                     ],
                 )
             };
 
             if let Some(filter_node) = inner_filter {
-                let filter_pick = build_pick_sql(&filter_node, view);
                 let filter_sub = Query::select()
                     .column(Col::ItemId)
-                    .from_subquery(filter_pick, Alias::new("nv_filter"))
+                    .from_subquery(build_pick_sql(&filter_node, view), Alias::new("nv_filter"))
                     .to_owned();
-                let in_expr = Expr::col((Alias::new(tbl_alias), Col::ItemId))
-                    .in_subquery(filter_sub);
-
+                let in_expr =
+                    Expr::col((Alias::new(tbl_alias), Col::ItemId)).in_subquery(filter_sub);
                 let case_expr: SimpleExpr =
-                    if let Some(StorageMapping::RowTag { tag_type, .. }) =
-                        inner_tag
-                    {
+                    if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
                         let combined_cond = Condition::all()
-                            .add(
-                                Expr::col((Alias::new(tbl_alias), Col::Type))
-                                    .eq(tag_type.as_str()),
-                            )
+                            .add(Expr::col((Alias::new(tbl_alias), Col::Type)).eq(tag_type.as_str()))
                             .add(in_expr);
                         Expr::case(combined_cond, val_expr.clone())
                             .finally(Expr::val(None::<f64>))
@@ -834,42 +785,25 @@ fn build_merged_nvalue_agg_expr(
                             .into()
                     };
                 apply_arithmetic_agg(op, case_expr, is_string)
-            } else if let Some(StorageMapping::RowTag { tag_type, .. }) =
-                inner_tag
-            {
+            } else if let Some(StorageMapping::RowTag { tag_type, .. }) = inner_tag {
                 let cond = Condition::all().add(
-                    Expr::col((Alias::new(tbl_alias), Col::Type))
-                        .eq(tag_type.as_str()),
+                    Expr::col((Alias::new(tbl_alias), Col::Type)).eq(tag_type.as_str()),
                 );
-                let case_expr =
-                    Expr::case(cond, val_expr).finally(Expr::val(None::<f64>));
-                apply_arithmetic_agg(
-                    op,
-                    Expr::expr(case_expr).into(),
-                    is_string,
-                )
+                let case_expr = Expr::case(cond, val_expr).finally(Expr::val(None::<f64>));
+                apply_arithmetic_agg(op, Expr::expr(case_expr).into(), is_string)
             } else {
                 apply_arithmetic_agg(op, Expr::expr(val_expr).into(), is_string)
             }
         }
         ResolvedOperand::Calculation(calc) => {
-            let left_expr =
-                build_merged_nvalue_agg_expr(&calc.left, tbl_alias, view);
-            let right_expr =
-                build_merged_nvalue_agg_expr(&calc.right, tbl_alias, view);
-
-            let left_val = Expr::expr(left_expr)
-                .cast_as(crate::db::SqlType::DOUBLE)
-                .into();
-            let right_val = Expr::expr(right_expr)
-                .cast_as(crate::db::SqlType::DOUBLE)
-                .into();
-
+            let [left_expr, right_expr]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let left_val = Expr::expr(left_expr).cast_as(crate::db::SqlType::DOUBLE).into();
+            let right_val = Expr::expr(right_expr).cast_as(crate::db::SqlType::DOUBLE).into();
             apply_arithmetic_op(&calc.op, left_val, right_val, false)
         }
         ResolvedOperand::Literal(l) => label_to_simple_expr(l),
         ResolvedOperand::TagRef { .. } => Expr::val(1i32).into(),
-    }
+    })
 }
 
 /// EAV 構造において、特定のタグの値を（集計せずに）行レベルで取得する式を構築します。
@@ -897,90 +831,76 @@ fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
         .to_owned()
 }
 
+/// `child_sqls` を `union_type` で結合します。空の場合は `empty_fallback` を返します。
+fn reduce_with_union(
+    child_sqls: Vec<SelectStatement>,
+    union_type: sea_query::UnionType,
+    empty_fallback: SelectStatement,
+) -> SelectStatement {
+    child_sqls.into_iter()
+        .map(wrap_in_subquery)
+        .reduce(|mut acc, next| { acc.union(union_type, next); acc })
+        .unwrap_or(empty_fallback)
+}
+
 fn build_resolved_and_sql(
-    nodes: &[ResolvedNode],
+    child_sqls: Vec<SelectStatement>,
     view: &str,
 ) -> SelectStatement {
-    let mut it = nodes.iter();
-    let Some(first) = it.next() else {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view));
-        return q;
-    };
-
-    let mut q = wrap_in_subquery(build_pick_sql(first, view));
-    for next in it {
-        q.union(
-            sea_query::UnionType::Intersect,
-            wrap_in_subquery(build_pick_sql(next, view)),
-        );
-    }
-    q
+    let fallback = Query::select()
+        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view))
+        .to_owned();
+    reduce_with_union(child_sqls, sea_query::UnionType::Intersect, fallback)
 }
 
 fn build_resolved_or_sql(
-    nodes: &[ResolvedNode],
+    child_sqls: Vec<SelectStatement>,
     view: &str,
 ) -> SelectStatement {
-    let mut it = nodes.iter();
-    let Some(first) = it.next() else {
-        let mut q = Query::select();
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .from(Alias::new(view))
-            .and_where(Expr::val(1).eq(0));
-        return q;
-    };
-
-    let mut q = wrap_in_subquery(build_pick_sql(first, view));
-    for next in it {
-        q.union(
-            sea_query::UnionType::Distinct,
-            wrap_in_subquery(build_pick_sql(next, view)),
-        );
-    }
-    q
+    let fallback = Query::select()
+        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .from(Alias::new(view))
+        .and_where(Expr::val(1).eq(0))
+        .to_owned();
+    reduce_with_union(child_sqls, sea_query::UnionType::Distinct, fallback)
 }
 
 fn build_resolved_diff_sql(
-    l: &ResolvedNode,
-    r: &ResolvedNode,
-    view: &str,
+    l: SelectStatement,
+    r: SelectStatement,
 ) -> SelectStatement {
-    let mut q = wrap_in_subquery(build_pick_sql(l, view));
-    q.union(
-        sea_query::UnionType::Except,
-        wrap_in_subquery(build_pick_sql(r, view)),
-    );
+    let mut q = wrap_in_subquery(l);
+    q.union(sea_query::UnionType::Except, wrap_in_subquery(r));
     q
 }
 
-fn build_resolved_comp_sql(c: &ResolvedNode, view: &str) -> SelectStatement {
-    let mut q = Query::select();
-    if c.is_boolean_result() {
-        let mut true_q = Query::select();
-        true_q
+fn build_resolved_comp_sql(
+    is_boolean: bool,
+    c_sql: SelectStatement,
+    view: &str,
+) -> SelectStatement {
+    let mut q = if is_boolean {
+        Query::select()
             .expr_as(Expr::val(1i64), Col::ItemId)
             .expr_as(Expr::val(0i64), Col::Rank)
             .expr_as(
-                Expr::val(<&'static str>::from(
-                    crate::types::ItemKind::Volatile,
-                )),
+                Expr::val(<&'static str>::from(ItemKind::Volatile)),
                 Col::ItemKind,
-            );
-
-        q = true_q;
+            )
+            .to_owned()
     } else {
-        q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        Query::select()
+            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
             .distinct()
             .from(Alias::new(view))
-            .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]));
-    }
-
+            .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]))
+            .to_owned()
+    };
     let mut eq = Query::select();
     eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from_subquery(build_pick_sql(c, view), crate::db::Tbl::NotSide);
+        .from_subquery(c_sql, crate::db::Tbl::NotSide);
     q.union(sea_query::UnionType::Except, eq);
     q
 }
@@ -1063,17 +983,12 @@ fn build_resolved_projection_sql(
     op: &ResolvedOperand,
     view: &str,
 ) -> SelectStatement {
-    match op {
-        ResolvedOperand::TagRef {
-            tag_type,
-            storage: _,
-            ..
-        } => {
+    op.fold(&|op, child_results: Vec<SelectStatement>| match op {
+        ResolvedOperand::TagRef { tag_type, .. } => {
             let mut q = Query::select();
             q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
                 .distinct()
                 .from(Alias::new(view));
-
             let cond = ResolvedNode::Nest {
                 keys: vec![op.clone()],
                 nvalue: None,
@@ -1081,29 +996,26 @@ fn build_resolved_projection_sql(
             }
             .to_condition();
             q.cond_where(cond);
-
             if let TagType::Base(SType::TypedTag) = tag_type {
                 q.and_where(Expr::col(Col::TypedTag).is_not_null());
             } else if let TagType::Base(SType::Origin) = tag_type {
                 q.and_where(Expr::col(Col::Origin).is_not_null());
             }
-
             q
         }
-        ResolvedOperand::Calculation(calc) => {
-            let mut l = build_resolved_projection_sql(&calc.left, view);
-            let r = build_resolved_projection_sql(&calc.right, view);
+        ResolvedOperand::Calculation(_) => {
+            let [mut l, r]: [SelectStatement; 2] = child_results.try_into().unwrap();
             l.union(sea_query::UnionType::Intersect, r);
             l
         }
         _ => {
-            let mut q = Query::select();
-            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+            Query::select()
+                .columns([Col::ItemId, Col::Rank, Col::ItemKind])
                 .distinct()
-                .from(Alias::new(view));
-            q
+                .from(Alias::new(view))
+                .to_owned()
         }
-    }
+    })
 }
 
 fn build_merged_nest_match_sql(

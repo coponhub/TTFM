@@ -312,10 +312,20 @@ impl ResolvedOperand {
         extract_storage_from_operand(self)
     }
 
-    /// 直接の子オペランドを返す（`Calculation` の left/right のみ）。
+    /// 直接の子オペランドを返す。
+    /// - `Calculation`: left / right
+    /// - `Aggregation`: 集約内部のプロジェクションオペランド（存在する場合）
     pub fn children(&self) -> Vec<&ResolvedOperand> {
         match self {
             ResolvedOperand::Calculation(calc) => vec![&calc.left, &calc.right],
+            ResolvedOperand::Aggregation(agg) => {
+                let inner = match agg {
+                    ResolvedAggregationNode::Count(node) => node,
+                    ResolvedAggregationNode::Arithmetic { inner, .. } => inner,
+                };
+                let (_, _, operand) = inner.extract_agg_parts();
+                operand.map(|op| vec![op]).unwrap_or_default()
+            }
             _ => vec![],
         }
     }
@@ -377,8 +387,7 @@ impl ResolvedNode {
             }
             ResolvedNode::Difference(l, r) => vec![l.as_ref(), r.as_ref()],
             ResolvedNode::Complement(c) => vec![c.as_ref()],
-            ResolvedNode::Nest { context: Some(ctx), .. }
-            | ResolvedNode::NestMatch { context: Some(ctx), .. } => {
+            ResolvedNode::Nest { context: Some(ctx), .. } => {
                 vec![ctx.as_ref()]
             }
             _ => vec![],

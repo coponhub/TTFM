@@ -293,50 +293,35 @@ fn build_nvalue_standalone_subquery(
     // 物理カラム情報の抽出
     let (proj_col, proj_tag_type) = match proj_operand {
         ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::RowTag {
-                column, tag_type, ..
-            } => (*column, Some(tag_type.as_str())),
+            StorageMapping::RowTag { column, tag_type, .. } => (*column, Some(tag_type.as_str())),
             StorageMapping::Column(col) => (*col, None),
             _ => return SelectStatement::default(),
         },
         _ => return SelectStatement::default(),
     };
 
-    match nvalue {
+    nvalue.fold(&|op, child_results: Vec<SelectStatement>| match op {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             build_count_nvalue_sql(
-                proj_col,
-                proj_tag_type,
-                inner,
-                context,
+                proj_col, proj_tag_type, inner, context,
                 None, // standalone: no item_scope
-                view,
-                include_item_id,
+                view, include_item_id,
             )
         }
-        ResolvedOperand::Aggregation(
-            agg @ ResolvedAggregationNode::Arithmetic { op, inner },
-        ) => {
+        ResolvedOperand::Aggregation(agg @ ResolvedAggregationNode::Arithmetic { op, inner }) => {
             let is_string = agg.is_string_type();
-            let (_, _, _operand) = inner.extract_agg_parts();
-
             let deduped = build_unique_agg(inner, view, context);
 
             let mut stmt = Query::select();
-            stmt.expr_as(
-                Expr::col((Alias::new("proj"), proj_col)),
-                Alias::new("group_label"),
-            );
+            stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
-                    Expr::col((Alias::new("deduped"), Alias::new("val")))
-                        .into(),
+                    Expr::col((Alias::new("deduped"), Alias::new("val"))).into(),
                     is_string,
                 ),
                 Alias::new("nvalue"),
             );
-
             stmt.from_as(Alias::new(view), Alias::new("proj"));
             stmt.join_subquery(
                 sea_query::JoinType::InnerJoin,
@@ -345,20 +330,12 @@ fn build_nvalue_standalone_subquery(
                 Expr::col((Alias::new("proj"), Col::ItemId))
                     .equals((Alias::new("deduped"), Col::ItemId)),
             );
-
             if let Some(tag_type) = proj_tag_type {
-                stmt.and_where(
-                    Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type),
-                );
+                stmt.and_where(Expr::col((Alias::new("proj"), Col::Type)).eq(tag_type));
             }
-
             stmt.group_by_col((Alias::new("proj"), proj_col));
 
-            if include_item_id {
-                wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
-            } else {
-                stmt
-            }
+            if include_item_id { wrap_with_item_id(stmt, proj_col, proj_tag_type, view) } else { stmt }
         }
         ResolvedOperand::Literal(label) => {
             let val = label_to_simple_expr(label);
@@ -366,60 +343,37 @@ fn build_nvalue_standalone_subquery(
             stmt.expr_as(Expr::col(proj_col), Alias::new("group_label"));
             stmt.expr_as(val, Alias::new("nvalue"));
             stmt.from(Alias::new(view));
-
             if let Some(tag_type) = proj_tag_type {
                 stmt.and_where(Expr::col(Col::Type).eq(tag_type));
             }
-
             if include_item_id {
                 stmt.column(Col::ItemId);
                 stmt.group_by_col(proj_col);
                 stmt.group_by_col(Col::ItemId);
-                stmt
             } else {
                 stmt.group_by_col(proj_col);
-                stmt
             }
+            stmt
         }
         ResolvedOperand::Calculation(calc) => {
-            let sub_l = build_nvalue_standalone_subquery(
-                proj_operand,
-                &calc.left,
-                context,
-                view,
-                include_item_id,
-            );
-            let sub_r = build_nvalue_standalone_subquery(
-                proj_operand,
-                &calc.right,
-                context,
-                view,
-                include_item_id,
-            );
-
-            let is_string =
-                calc.left.is_string_type() && calc.right.is_string_type();
+            let [sub_l, sub_r]: [SelectStatement; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
 
             // NULL 伝播防止のため RIGHT 側の nvalue を COALESCE で補完する。
             let r_nvalue_expr: SimpleExpr = if is_string {
                 Func::coalesce([
                     Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
                     Expr::val("").into(),
-                ])
-                .into()
+                ]).into()
             } else {
                 Func::coalesce([
                     Expr::col((Alias::new("R"), Alias::new("nvalue"))).into(),
                     Expr::val(0.0f64).into(),
-                ])
-                .into()
+                ]).into()
             };
 
             let mut stmt = Query::select();
-            stmt.expr_as(
-                Expr::col((Alias::new("L"), Alias::new("group_label"))),
-                Alias::new("group_label"),
-            );
+            stmt.expr_as(Expr::col((Alias::new("L"), Alias::new("group_label"))), Alias::new("group_label"));
             stmt.expr_as(
                 apply_arithmetic_op(
                     &calc.op,
@@ -429,129 +383,81 @@ fn build_nvalue_standalone_subquery(
                 ),
                 Alias::new("nvalue"),
             );
-
             if include_item_id {
                 stmt.column((Alias::new("L"), Col::ItemId));
             }
-
             stmt.from_subquery(sub_l, Alias::new("L"));
-
             if include_item_id {
                 stmt.join_subquery(
-                    sea_query::JoinType::LeftJoin,
-                    sub_r,
-                    Alias::new("R"),
+                    sea_query::JoinType::LeftJoin, sub_r, Alias::new("R"),
                     Expr::col((Alias::new("L"), Col::ItemId))
                         .eq(Expr::col((Alias::new("R"), Col::ItemId))),
                 );
             } else {
                 stmt.join_subquery(
-                    sea_query::JoinType::LeftJoin,
-                    sub_r,
-                    Alias::new("R"),
-                    Expr::col((Alias::new("L"), Alias::new("group_label"))).eq(
-                        Expr::col((Alias::new("R"), Alias::new("group_label"))),
-                    ),
+                    sea_query::JoinType::LeftJoin, sub_r, Alias::new("R"),
+                    Expr::col((Alias::new("L"), Alias::new("group_label")))
+                        .eq(Expr::col((Alias::new("R"), Alias::new("group_label")))),
                 );
             }
 
             // JOIN された L/R どちらの nvalue かが曖昧になるため、
             // include_item_id に関わらず calc_sub でラップして曖昧性を排除する。
-            let sub = stmt.to_owned();
             let mut outer = Query::select();
-            outer
-                .column(Alias::new("group_label"))
-                .column(Alias::new("nvalue"));
-            if include_item_id {
-                outer.column(Col::ItemId);
-            }
-            outer.from_subquery(sub, Alias::new("calc_sub")).to_owned()
+            outer.column(Alias::new("group_label")).column(Alias::new("nvalue"));
+            if include_item_id { outer.column(Col::ItemId); }
+            outer.from_subquery(stmt, Alias::new("calc_sub")).to_owned()
         }
-        ResolvedOperand::TagRef {
-            storage: nval_storage,
-            ..
-        } => {
+        ResolvedOperand::TagRef { storage: nval_storage, .. } => {
             use crate::db::CustomFunc;
             let mut stmt = Query::select();
             stmt.from_as(Alias::new(view), Alias::new("proj"));
-
             match nval_storage {
                 StorageMapping::Column(nv_col) => {
                     // Column タグ: proj の同一行にカラムとして存在するため結合不要。
+                    stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
                     stmt.expr_as(
-                        Expr::col((Alias::new("proj"), proj_col)),
-                        Alias::new("group_label"),
-                    );
-                    stmt.expr_as(
-                        CustomFunc::any_value(Expr::col((
-                            Alias::new("proj"),
-                            *nv_col,
-                        ))),
+                        CustomFunc::any_value(Expr::col((Alias::new("proj"), *nv_col))),
                         Alias::new("nvalue"),
                     );
                 }
-                StorageMapping::RowTag {
-                    column: nv_col,
-                    tag_type: nv_tag_type,
-                } => {
+                StorageMapping::RowTag { column: nv_col, tag_type: nv_tag_type } => {
                     // RowTag タグ: proj とは別 type の行を LEFT JOIN で取得する。
                     let nv_sub = Query::select()
                         .column(Col::ItemId)
                         .expr_as(
-                            Expr::cust_with_exprs(
-                                "TRY_CAST($1 AS DOUBLE)",
-                                [Expr::col(*nv_col).into()],
-                            ),
+                            Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [Expr::col(*nv_col).into()]),
                             Alias::new("nval"),
                         )
                         .from(Alias::new(view))
-                        .and_where(
-                            Expr::col(Col::Type).eq(nv_tag_type.as_str()),
-                        )
+                        .and_where(Expr::col(Col::Type).eq(nv_tag_type.as_str()))
                         .to_owned();
                     stmt.join_subquery(
-                        sea_query::JoinType::LeftJoin,
-                        nv_sub,
-                        Alias::new("nv"),
+                        sea_query::JoinType::LeftJoin, nv_sub, Alias::new("nv"),
                         Expr::col((Alias::new("proj"), Col::ItemId))
                             .equals((Alias::new("nv"), Col::ItemId)),
                     );
-                    stmt.expr_as(
-                        Expr::col((Alias::new("proj"), proj_col)),
-                        Alias::new("group_label"),
-                    );
+                    stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
                     stmt.expr_as(
                         CustomFunc::any_value(Func::coalesce([
-                            Expr::col((Alias::new("nv"), Alias::new("nval")))
-                                .into(),
+                            Expr::col((Alias::new("nv"), Alias::new("nval"))).into(),
                             Expr::val(0.0f64).into(),
                         ])),
                         Alias::new("nvalue"),
                     );
                 }
                 StorageMapping::Virtual => {
-                    stmt.expr_as(
-                        Expr::col((Alias::new("proj"), proj_col)),
-                        Alias::new("group_label"),
-                    );
+                    stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
                     stmt.expr_as(Expr::val(0.0f64), Alias::new("nvalue"));
                 }
             }
-
             if let Some(tt) = proj_tag_type {
-                stmt.and_where(
-                    Expr::col((Alias::new("proj"), Col::Type)).eq(tt),
-                );
+                stmt.and_where(Expr::col((Alias::new("proj"), Col::Type)).eq(tt));
             }
             stmt.group_by_col((Alias::new("proj"), proj_col));
-
-            if include_item_id {
-                wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
-            } else {
-                stmt
-            }
+            if include_item_id { wrap_with_item_id(stmt, proj_col, proj_tag_type, view) } else { stmt }
         }
-    }
+    })
 }
 
 pub fn build_agg(
@@ -710,50 +616,39 @@ pub(super) fn build_tag_value_agg_expr(
 }
 
 /// EAV 構造用の計算式を集約式として構築します。
-fn build_calculation_eav_expr(
-    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
-    view: &str,
-) -> SimpleExpr {
-    let left_expr = build_resolved_operand_eav_expr(&calc.left, view);
-    let right_expr = build_resolved_operand_eav_expr(&calc.right, view);
-    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
-    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
-}
-
 /// EAV 構造用のオペランドを集約式として構築します。
 fn build_resolved_operand_eav_expr(
     operand: &crate::query::lens_resolver::ResolvedOperand,
     view: &str,
 ) -> SimpleExpr {
-    use crate::query::lens_resolver::ResolvedOperand;
+    use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedOperand};
 
-    match operand {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_tag_value_agg_expr(storage, *sql_type),
+        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+            build_tag_value_agg_expr(storage, *sql_type)
+        }
         ResolvedOperand::Calculation(calc) => {
-            build_calculation_eav_expr(calc, view)
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
         }
         ResolvedOperand::Aggregation(agg) => {
-            use crate::query::lens_resolver::ResolvedAggregationNode;
             // Pivot CTE コンテキストでは、外部集計（SUM/AVG等）はウィンドウ関数で適用される。
             // ここでは内側オペランドのタイプフィルタ済み per-item 値を返す。
             // 例: sum(size:) → MAX(CASE WHEN type='size' THEN label_int END)
             match agg {
                 ResolvedAggregationNode::Arithmetic { inner, .. } => {
                     let (_, cond, operand) = inner.extract_agg_parts();
-                    if let Some(op) = operand {
-                        let base_expr =
-                            build_resolved_operand_eav_expr(op, view);
+                    if operand.is_some() {
+                        // children() 経由で fold 済みの内部オペランド式を使う
+                        let base_expr = child_results.into_iter().next().unwrap();
                         if let Some(filter) = cond {
                             // 集約の中にフィルタがある場合、そのフィルタを満たすアイテムのみを集計対象にする。
                             // Pivot CTE は GROUP BY item_id であるため、CASE WHEN item_id IN (...) THEN ... END でラップする。
                             let pick_sql = build_pick_sql(&filter, view);
                             let mut sub = Query::select();
-                            sub.column(Col::ItemId)
-                                .from_subquery(pick_sql, Alias::new("f"));
-
+                            sub.column(Col::ItemId).from_subquery(pick_sql, Alias::new("f"));
                             Expr::cust_with_exprs(
                                 "CASE WHEN item_id IN ($1) THEN $2 END",
                                 [subquery(sub), base_expr],
@@ -768,7 +663,17 @@ fn build_resolved_operand_eav_expr(
                 _ => agg_expr(agg, view),
             }
         }
-    }
+    })
+}
+
+fn build_calculation_eav_expr(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+    view: &str,
+) -> SimpleExpr {
+    let left = build_resolved_operand_eav_expr(&calc.left, view);
+    let right = build_resolved_operand_eav_expr(&calc.right, view);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left, right, is_string)
 }
 
 /// リテラル（定数）を SQL 式に変換します。
@@ -864,16 +769,18 @@ fn build_resolved_operand_expr(
 ) -> SimpleExpr {
     use crate::query::lens_resolver::ResolvedOperand;
 
-    match operand {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_storage_column_expr(storage, *sql_type),
+        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+            build_storage_column_expr(storage, *sql_type)
+        }
         ResolvedOperand::Calculation(calc) => {
-            build_calculation_expr(calc, view)
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
         }
         ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
-    }
+    })
 }
 
 /// EAV 構造用のオペランドを集計なしの行レベル式として構築します。
@@ -972,16 +879,6 @@ fn build_calculation_expr(
     apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
 }
 
-fn build_calculation_subquery(
-    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
-    view: &str,
-) -> SimpleExpr {
-    let left_expr = build_resolved_operand_subquery(&calc.left, view);
-    let right_expr = build_resolved_operand_subquery(&calc.right, view);
-    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
-    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
-}
-
 /// オペランドをサブクエリ形式で構築します。
 fn build_resolved_operand_subquery(
     operand: &crate::query::lens_resolver::ResolvedOperand,
@@ -989,7 +886,7 @@ fn build_resolved_operand_subquery(
 ) -> SimpleExpr {
     use crate::query::lens_resolver::ResolvedOperand;
 
-    match operand {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => {
             if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
                 Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
@@ -1006,20 +903,28 @@ fn build_resolved_operand_subquery(
                     crate::types::LabelValue::Double(bits) => {
                         Expr::val(f64::from_bits(bits)).into()
                     }
-                    crate::types::LabelValue::Null => {
-                        Expr::val(None::<i32>).into()
-                    }
+                    crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
                 }
             }
         }
         ResolvedOperand::TagRef { .. } => Expr::val(0).into(),
         ResolvedOperand::Calculation(calc) => {
-            build_calculation_subquery(calc, view)
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
         }
-        ResolvedOperand::Aggregation(agg) => {
-            subquery(build_agg(agg, view))
-        }
-    }
+        ResolvedOperand::Aggregation(agg) => subquery(build_agg(agg, view)),
+    })
+}
+
+fn build_calculation_subquery(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+    view: &str,
+) -> SimpleExpr {
+    let left = build_resolved_operand_subquery(&calc.left, view);
+    let right = build_resolved_operand_subquery(&calc.right, view);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left, right, is_string)
 }
 
 /// SelectStatement をスカラーサブクエリ式に変換します。
@@ -1035,58 +940,46 @@ fn build_resolved_operand_expr_for_arithmetic(
 ) -> SimpleExpr {
     use crate::query::lens_resolver::ResolvedOperand;
 
-    // 文字列型の場合は数値キャストを行わず、通常の式構築を行う
-    if operand.is_string_type() {
-        return build_resolved_operand_expr(operand, view);
-    }
-
-    match operand {
-        ResolvedOperand::Literal(lab) => {
-            let expr = build_resolved_literal_expr(lab);
-            if matches!(lab.value(), crate::types::LabelValue::Boolean(_)) {
-                // Boolean リテラルを数値演算用にキャスト
-                expr.cast_as(crate::db::SqlType::BIGINT).into()
-            } else {
-                expr
-            }
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| {
+        // 文字列型の場合は数値キャストを行わず、通常の式構築を行う
+        if op.is_string_type() {
+            return build_resolved_operand_expr(op, view);
         }
-        ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => {
-            if *sql_type == crate::db::SqlType::BOOLEAN {
-                let col_expr = build_storage_column_expr(storage, *sql_type);
-                return col_expr.cast_as(crate::db::SqlType::BIGINT).into();
-            }
-
-            // 算術演算コンテキストでは、RowTag の LabelStr に TRY_CAST を適用
-            match storage {
-                StorageMapping::RowTag { column, .. }
-                    if *column == Col::LabelStr =>
-                {
-                    Expr::cust_with_exprs(
-                        "TRY_CAST($1 AS DOUBLE)",
-                        [Expr::col(*column).into()],
-                    )
+        match op {
+            ResolvedOperand::Literal(lab) => {
+                let expr = build_resolved_literal_expr(lab);
+                if matches!(lab.value(), crate::types::LabelValue::Boolean(_)) {
+                    // Boolean リテラルを数値演算用にキャスト
+                    expr.cast_as(crate::db::SqlType::BIGINT).into()
+                } else {
+                    expr
                 }
-                StorageMapping::RowTag { column, .. } => {
-                    Expr::col(*column).into()
-                }
-                StorageMapping::Column(col) => Expr::col(*col).into(),
-                StorageMapping::Virtual => Expr::col(Col::LabelStr).into(),
             }
+            ResolvedOperand::TagRef { storage, sql_type, .. } => {
+                if *sql_type == crate::db::SqlType::BOOLEAN {
+                    return build_storage_column_expr(storage, *sql_type)
+                        .cast_as(crate::db::SqlType::BIGINT)
+                        .into();
+                }
+                // 算術演算コンテキストでは、RowTag の LabelStr に TRY_CAST を適用
+                match storage {
+                    StorageMapping::RowTag { column, .. } if *column == Col::LabelStr => {
+                        Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [Expr::col(*column).into()])
+                    }
+                    StorageMapping::RowTag { column, .. } => Expr::col(*column).into(),
+                    StorageMapping::Column(col) => Expr::col(*col).into(),
+                    StorageMapping::Virtual => Expr::col(Col::LabelStr).into(),
+                }
+            }
+            ResolvedOperand::Calculation(calc) => {
+                // child_results には _for_arithmetic で構築済みの左右の式が入る
+                let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+                let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+                apply_arithmetic_op(&calc.op, left, right, is_string)
+            }
+            ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
         }
-        ResolvedOperand::Calculation(calc) => {
-            // 再帰的に _for_arithmetic を使うことで、ネストされた boolean/string タグも正しくキャストされる
-            let left_expr =
-                build_resolved_operand_expr_for_arithmetic(&calc.left, view);
-            let right_expr =
-                build_resolved_operand_expr_for_arithmetic(&calc.right, view);
-            let is_string =
-                calc.left.is_string_type() && calc.right.is_string_type();
-            apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
-        }
-        ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
-    }
+    })
 }
 
 /// 算術演算子を適用します。
@@ -2144,7 +2037,7 @@ fn extract_primary_label_tag_type_from_node(
 ) -> Option<(String, Col)> {
     use crate::query::lens_resolver::{ResolvedNode, ResolvedOperand};
     use crate::query::lens_schema::StorageMapping;
-    match node {
+    node.walk().into_iter().find_map(|n| match n {
         ResolvedNode::Nest { keys, .. } => match keys.first()? {
             ResolvedOperand::TagRef {
                 storage: StorageMapping::RowTag { tag_type, column },
@@ -2152,11 +2045,8 @@ fn extract_primary_label_tag_type_from_node(
             } => Some((tag_type.clone(), *column)),
             _ => None,
         },
-        ResolvedNode::And(nodes) => nodes
-            .iter()
-            .find_map(|n| extract_primary_label_tag_type_from_node(n)),
         _ => None,
-    }
+    })
 }
 
 /// 多キー Nest ノードからキー列を抽出します。単一キーまたは非 Nest の場合は None を返します。
@@ -2164,13 +2054,10 @@ fn extract_multi_key_nest_operands(
     node: &crate::query::lens_resolver::ResolvedNode,
 ) -> Option<Vec<crate::query::lens_resolver::ResolvedOperand>> {
     use crate::query::lens_resolver::ResolvedNode;
-    match node {
+    node.walk().into_iter().find_map(|n| match n {
         ResolvedNode::Nest { keys, .. } if keys.len() > 1 => Some(keys.clone()),
-        ResolvedNode::And(nodes) => nodes
-            .iter()
-            .find_map(|n| extract_multi_key_nest_operands(n)),
         _ => None,
-    }
+    })
 }
 
 /// 多キー Nest の labels_i CTE 用 SQL を生成します。
@@ -2340,38 +2227,31 @@ fn collect_tag_types(
     operand: &crate::query::lens_resolver::ResolvedOperand,
     keys: &mut Vec<String>,
 ) {
-    use crate::query::lens_resolver::{
-        ResolvedAggregationNode, ResolvedOperand,
-    };
-    match operand {
-        ResolvedOperand::TagRef {
-            storage: StorageMapping::RowTag { tag_type, .. },
-            ..
-        } => {
-            keys.push(tag_type.clone());
-        }
-        ResolvedOperand::Calculation(calc) => {
-            collect_tag_types(&calc.left, keys);
-            collect_tag_types(&calc.right, keys);
-        }
-        ResolvedOperand::Aggregation(agg) => match agg {
-            ResolvedAggregationNode::Count(inner) => {
-                let (storage, _, _) = inner.extract_agg_parts();
-                if let Some(StorageMapping::RowTag { tag_type, .. }) = storage {
-                    keys.push(tag_type.clone());
-                }
+    use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedOperand};
+    for op in operand.walk() {
+        match op {
+            ResolvedOperand::TagRef {
+                storage: StorageMapping::RowTag { tag_type, .. }, ..
+            } => {
+                keys.push(tag_type.clone());
             }
-            ResolvedAggregationNode::Arithmetic { inner, .. } => {
-                let (storage, _, operand) = inner.extract_agg_parts();
-                if let Some(StorageMapping::RowTag { tag_type, .. }) = storage {
-                    keys.push(tag_type.clone());
+            ResolvedOperand::Aggregation(agg) => match agg {
+                ResolvedAggregationNode::Count(inner) => {
+                    let (storage, _, _) = inner.extract_agg_parts();
+                    if let Some(StorageMapping::RowTag { tag_type, .. }) = storage {
+                        keys.push(tag_type.clone());
+                    }
                 }
-                if let Some(op) = operand {
-                    collect_tag_types(op, keys);
+                ResolvedAggregationNode::Arithmetic { inner, .. } => {
+                    let (storage, _, _) = inner.extract_agg_parts();
+                    if let Some(StorageMapping::RowTag { tag_type, .. }) = storage {
+                        keys.push(tag_type.clone());
+                    }
+                    // children() 経由で walk() が内部オペランドを訪問するため再帰不要
                 }
-            }
-        },
-        _ => {}
+            },
+            _ => {}
+        }
     }
 }
 
@@ -3288,37 +3168,15 @@ fn collect_tag_types_from_operand(
     operand: &ResolvedOperand,
     set: &mut std::collections::HashSet<String>,
 ) {
-    match operand {
-        ResolvedOperand::TagRef {
-            storage: StorageMapping::RowTag { tag_type, .. },
-            ..
-        } => {
+    // children() により walk() が Aggregation の内部オペランドも訪問するため、
+    // TagRef アームのみで全 RowTag を収集できる
+    for op in operand.walk() {
+        if let ResolvedOperand::TagRef {
+            storage: StorageMapping::RowTag { tag_type, .. }, ..
+        } = op {
             set.insert(tag_type.clone());
         }
-        ResolvedOperand::Calculation(calc) => {
-            collect_tag_types_from_calc(calc, set);
-        }
-        ResolvedOperand::Aggregation(agg) => {
-            use crate::query::lens_resolver::ResolvedAggregationNode;
-            let inner = match agg {
-                ResolvedAggregationNode::Count(node) => node,
-                ResolvedAggregationNode::Arithmetic { inner, .. } => inner,
-            };
-            let (_, _, operand) = inner.extract_agg_parts();
-            if let Some(op) = operand {
-                collect_tag_types_from_operand(op, set);
-            }
-        }
-        _ => {}
     }
-}
-
-fn collect_tag_types_from_calc(
-    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
-    set: &mut std::collections::HashSet<String>,
-) {
-    collect_tag_types_from_operand(&calc.left, set);
-    collect_tag_types_from_operand(&calc.right, set);
 }
 
 fn build_nest_pivot_cte(
@@ -3369,7 +3227,8 @@ fn build_nest_pivot_cte(
             },
             ResolvedOperand::Calculation(calc) => {
                 // Calculation が参照する全ての RowTag 型をフィルタに追加
-                collect_tag_types_from_calc(calc, &mut type_filters);
+                collect_tag_types_from_operand(&calc.left, &mut type_filters);
+                collect_tag_types_from_operand(&calc.right, &mut type_filters);
                 let calc_expr = build_calculation_eav_expr(calc, view);
                 stmt.expr_as(
                     calc_expr.clone(),
@@ -3556,11 +3415,9 @@ fn build_mixed_key_calc_nvalue_sql(
 /// ResolvedOperand が対応するキー数を返します。
 /// Calculation の場合は左右の再帰的な合計。
 fn count_nvalue_keys(nvalue: &ResolvedOperand) -> usize {
-    match nvalue {
-        ResolvedOperand::Calculation(calc) => {
-            count_nvalue_keys(&calc.left) + count_nvalue_keys(&calc.right)
-        }
+    nvalue.fold(&|op, child_results: Vec<usize>| match op {
+        ResolvedOperand::Calculation(_) => child_results.into_iter().sum(),
         ResolvedOperand::Literal(_) => 0,
         _ => 1,
-    }
+    })
 }
