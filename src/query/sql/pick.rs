@@ -13,7 +13,7 @@ use super::{
     build_calculation_subquery, build_nest_pivot_cte, build_nvalue_standalone_subquery,
     build_agg, build_resolved_literal_expr, build_resolved_operand_eav_expr,
     build_storage_column_expr, build_tag_value_agg_expr,
-    label_to_simple_expr, label_to_unit_aware_expr, subquery,
+    label_to_simple_expr, label_to_unit_aware_expr, subquery, wrap_in_subquery,
 };
 
 /// CalculationNodeに含まれるRowTagのtypeフィルタをWHERE句に追加します。
@@ -821,14 +821,6 @@ fn build_tag_value_eav_row_expr(
         StorageMapping::Column(col) => Expr::col(*col).into(),
         StorageMapping::Virtual => Expr::val(None::<f64>).into(),
     }
-}
-
-fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
-    use crate::db::Tbl;
-    Query::select()
-        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from_subquery(q, Tbl::Sub)
-        .to_owned()
 }
 
 /// `child_sqls` を `union_type` で結合します。空の場合は `empty_fallback` を返します。
