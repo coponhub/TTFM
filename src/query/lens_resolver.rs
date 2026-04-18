@@ -187,6 +187,14 @@ pub enum ResolvedAggregationNode {
 }
 
 impl ResolvedAggregationNode {
+    /// 集約ノードの内部 ResolvedNode を返します。
+    pub fn inner_node(&self) -> &ResolvedNode {
+        match self {
+            ResolvedAggregationNode::Count(inner) => inner,
+            ResolvedAggregationNode::Arithmetic { inner, .. } => inner,
+        }
+    }
+
     pub fn is_string_type(&self) -> bool {
         match self {
             ResolvedAggregationNode::Count(_) => false,
@@ -405,10 +413,26 @@ impl ResolvedNode {
     }
 
     /// 深さ優先（前順）で全ノードを列挙する。
+    /// Aggregation 系ノードの inner_node にも降りる。
+    /// fold() は children() ベースのまま変更しない。
     pub fn walk(&self) -> Vec<&ResolvedNode> {
         let mut result = vec![self];
         for child in self.children() {
             result.extend(child.walk());
+        }
+        // children() に含まれない Aggregation の inner_node にも降りる
+        match self {
+            ResolvedNode::Aggregation(agg)
+            | ResolvedNode::AggregationMatch { agg, .. }
+            | ResolvedNode::AggregationTagMatch { agg, .. }
+            | ResolvedNode::AggregationCalculationMatch { agg, .. } => {
+                result.extend(agg.inner_node().walk());
+            }
+            ResolvedNode::AggregationAggregationMatch { left, right, .. } => {
+                result.extend(left.inner_node().walk());
+                result.extend(right.inner_node().walk());
+            }
+            _ => {}
         }
         result
     }
@@ -714,7 +738,9 @@ impl ResolvedNode {
 
     pub fn get_projection_operands(&self) -> Option<&[ResolvedOperand]> {
         match self {
-            ResolvedNode::Nest { keys, .. } => Some(keys.as_slice()),
+            ResolvedNode::Nest { keys, .. }
+            | ResolvedNode::NestMatch { keys, .. }
+            | ResolvedNode::MergedNestMatch { keys, .. } => Some(keys.as_slice()),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operands())
             }
@@ -740,6 +766,21 @@ impl ResolvedNode {
                 // ※現在は簡略化のため、最初のノードを返すか、さらなるロジックが必要
                 // issue #4 の解決のためには、ここを適切に処理する必要がある
                 nodes.iter().find_map(|n| n.get_context())
+            }
+            _ => None,
+        }
+    }
+
+    /// 集約 inner ノードとして見たときのフィルタコンテキストを返します。
+    /// `And([filter, Nest])` ラッパーでは And の filter 側ノードを返します。
+    /// 通常の Nest / NestMatch では .context フィールドを返します。
+    pub fn get_agg_context(&self) -> Option<&ResolvedNode> {
+        match self {
+            ResolvedNode::Nest { context, .. } | ResolvedNode::NestMatch { context, .. } => {
+                context.as_deref()
+            }
+            ResolvedNode::And(nodes) => {
+                nodes.iter().find_map(|n| n.get_agg_context())
             }
             _ => None,
         }

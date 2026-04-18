@@ -1,4 +1,5 @@
 use crate::query::lens_resolver::Resolver;
+use crate::query::sql::{BuildPick, PickNode};
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::{ItemId, ItemKind, SType, TagType};
 use anyhow::Result;
@@ -36,8 +37,8 @@ impl<'a> Fetcher<'a> {
         let resolved = &self.resolver.resolved_query;
 
         // 1. SQL 構築
-        let mut select_sql =
-            crate::query::sql::build_pick_sql(resolved, "oneview");
+        let pick_node = crate::query::sql::PickNode::new(resolved, "oneview");
+        let mut select_sql = pick_node.build_pick();
 
         // 検索仕様に基づき Rank と ItemId で降順ソート
         let rank_col = self.resolver.lens().resolve_col(SType::Rank)?;
@@ -201,9 +202,9 @@ impl<'a> Fetcher<'a> {
     ) -> Result<Vec<SearchResult>> {
         use sea_query::PostgresQueryBuilder;
 
+        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
         let select_sql = crate::query::sql::build_fetch_items_sql(
-            &self.resolver.resolved_query,
-            "oneview",
+            &pick,
             limit,
             offset,
         );
@@ -243,6 +244,7 @@ impl<'a> Fetcher<'a> {
         use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
 
+        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
         let select_sql =
             if let Some(node) = self.resolver.get_label_set_op_node() {
                 crate::query::sql::build_fetch_label_set_op_sql(
@@ -250,9 +252,9 @@ impl<'a> Fetcher<'a> {
                 )?
             } else {
                 crate::query::sql::build_fetch_label_groups_sql(
+                    &pick,
                     self.resolver,
                     proj_type,
-                    "oneview",
                     limit,
                     offset,
                 )?
@@ -356,10 +358,10 @@ impl<'a> Fetcher<'a> {
         offset: Option<usize>,
     ) -> Result<Vec<RawTagRow>> {
         use sea_query::PostgresQueryBuilder;
+        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
         let select_sql = crate::query::sql::build_flat_table_sql(
-            &self.resolver.resolved_query,
+            &pick,
             &self.resolver.expanded_query,
-            "oneview",
             limit,
             offset,
         );
@@ -381,10 +383,10 @@ impl<'a> Fetcher<'a> {
         path: &Path,
         metadata: Option<&HashMap<String, String>>,
     ) -> Result<()> {
+        let pick = PickNode::new(&self.resolver.resolved_query, "oneview");
         let select_sql = crate::query::sql::build_flat_table_sql(
-            &self.resolver.resolved_query,
+            &pick,
             &self.resolver.expanded_query,
-            "oneview",
             None,
             None,
         );

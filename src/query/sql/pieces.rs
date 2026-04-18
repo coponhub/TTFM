@@ -1,16 +1,14 @@
 use crate::db::{Col, CustomFunc, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp, QueryNode};
-use crate::query::lens_resolver::{
-    extract_nvalue_projection_parts, ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
-};
+use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode, ResolvedOperand};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use sea_query::{Alias, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr};
 use super::{
-    build_pick_sql,
     subquery, wrap_to_item_ids,
     label_to_simple_expr,
     build_resolved_literal_expr, build_storage_column_expr,
     apply_arithmetic_op, apply_arithmetic_agg,
+    AggregationContext, NestContext,
 };
 
 // ── 低レベルユーティリティ ──────────────────────────────────────────────────
@@ -86,7 +84,7 @@ pub(super) fn build_tag_value_agg_expr(
 /// 集約関数をSQL式に変換します（算術演算内で使用）。
 pub(super) fn agg_expr(
     agg: &ResolvedAggregationNode,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
     match agg {
         ResolvedAggregationNode::Count(inner) => {
@@ -100,8 +98,11 @@ pub(super) fn agg_expr(
             } else {
                 Col::ItemId
             };
-            let base_expr: SimpleExpr = if let Some(c) = cond {
-                let pick_q = build_pick_sql(&c, view);
+            let base_expr: SimpleExpr = if cond.is_some() {
+                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
+                let pick_q = agg_ctx.agg_filters.get(&inner_ptr)
+                    .expect("filter SQL must be pre-computed")
+                    .clone();
                 let mut pick_ids = Query::select();
                 pick_ids.column(Col::ItemId).from_subquery(pick_q, Alias::new("ctx_agg"));
                 Expr::case(Expr::col(Col::ItemId).in_subquery(pick_ids), Expr::col(col)).into()
@@ -121,8 +122,11 @@ pub(super) fn agg_expr(
             } else {
                 Col::LabelInt
             };
-            let base_expr: SimpleExpr = if let Some(c) = cond {
-                let pick_q = build_pick_sql(&c, view);
+            let base_expr: SimpleExpr = if cond.is_some() {
+                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
+                let pick_q = agg_ctx.agg_filters.get(&inner_ptr)
+                    .expect("filter SQL must be pre-computed")
+                    .clone();
                 let mut pick_ids = Query::select();
                 pick_ids.column(Col::ItemId).from_subquery(pick_q, Alias::new("ctx_agg"));
                 Expr::case(Expr::col(Col::ItemId).in_subquery(pick_ids), Expr::col(col)).into()
@@ -142,7 +146,7 @@ pub(super) fn agg_expr(
 /// 算術演算のオペランドをSQL式に変換します。
 pub(super) fn build_resolved_operand_expr(
     operand: &ResolvedOperand,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
@@ -154,25 +158,52 @@ pub(super) fn build_resolved_operand_expr(
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
             apply_arithmetic_op(&calc.op, left, right, is_string)
         }
-        ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
+        ResolvedOperand::Aggregation(agg) => agg_expr(agg, agg_ctx),
     })
 }
 
 /// 算術演算ノードをSQL式に変換します。
 pub(super) fn build_calculation_expr(
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
-    let left_expr = build_resolved_operand_expr(&calc.left, view);
-    let right_expr = build_resolved_operand_expr(&calc.right, view);
+    let left_expr = build_resolved_operand_expr(&calc.left, agg_ctx);
+    let right_expr = build_resolved_operand_expr(&calc.right, agg_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
+}
+
+/// 集約を含まない純粋な算術演算ノードをカラム参照式に変換します（agg_ctx 不要）。
+pub(super) fn build_calculation_expr_pure(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+) -> SimpleExpr {
+    let left_expr = build_resolved_operand_expr_pure(&calc.left);
+    let right_expr = build_resolved_operand_expr_pure(&calc.right);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left_expr, right_expr, is_string)
+}
+
+fn build_resolved_operand_expr_pure(operand: &ResolvedOperand) -> SimpleExpr {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
+        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+            build_storage_column_expr(storage, *sql_type)
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
+        }
+        ResolvedOperand::Aggregation(_) => {
+            panic!("build_calculation_expr_pure called with aggregation operand; use build_calculation_expr instead")
+        }
+    })
 }
 
 /// EAV 構造用のオペランドを集約式として構築します。
 pub(super) fn build_resolved_operand_eav_expr(
     operand: &ResolvedOperand,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
@@ -190,8 +221,11 @@ pub(super) fn build_resolved_operand_eav_expr(
                     let (_, cond, operand) = inner.extract_agg_parts();
                     if operand.is_some() {
                         let base_expr = child_results.into_iter().next().unwrap();
-                        if let Some(filter) = cond {
-                            let pick_sql = build_pick_sql(&filter, view);
+                        if cond.is_some() {
+                            let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
+                            let pick_sql = agg_ctx.agg_filters.get(&inner_ptr)
+                                .expect("filter SQL must be pre-computed")
+                                .clone();
                             let mut sub = Query::select();
                             sub.column(Col::ItemId).from_subquery(pick_sql, Alias::new("f"));
                             Expr::cust_with_exprs(
@@ -202,10 +236,10 @@ pub(super) fn build_resolved_operand_eav_expr(
                             base_expr
                         }
                     } else {
-                        agg_expr(agg, view)
+                        agg_expr(agg, agg_ctx)
                     }
                 }
-                _ => agg_expr(agg, view),
+                _ => agg_expr(agg, agg_ctx),
             }
         }
     })
@@ -214,22 +248,47 @@ pub(super) fn build_resolved_operand_eav_expr(
 /// EAV 構造用の算術演算ノードを集約式に変換します。
 pub(super) fn build_calculation_eav_expr(
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
-    let left = build_resolved_operand_eav_expr(&calc.left, view);
-    let right = build_resolved_operand_eav_expr(&calc.right, view);
+    let left = build_resolved_operand_eav_expr(&calc.left, agg_ctx);
+    let right = build_resolved_operand_eav_expr(&calc.right, agg_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
 
-/// オペランドをサブクエリ形式で構築します。
-pub(super) fn build_resolved_operand_subquery(
-    operand: &ResolvedOperand,
-    view: &str,
+/// 集約を含まない純粋な EAV 算術演算ノードを集約式に変換します（agg_ctx 不要）。
+pub(super) fn build_calculation_eav_expr_pure(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
 ) -> SimpleExpr {
+    let left = build_resolved_operand_eav_expr_pure(&calc.left);
+    let right = build_resolved_operand_eav_expr_pure(&calc.right);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left, right, is_string)
+}
+
+fn build_resolved_operand_eav_expr_pure(operand: &ResolvedOperand) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
+        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+            build_tag_value_agg_expr(storage, *sql_type)
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
+            let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
+        }
+        ResolvedOperand::Aggregation(_) => {
+            panic!("build_calculation_eav_expr_pure called with aggregation operand; use build_calculation_eav_expr instead")
+        }
+    })
+}
+
+/// Literal / TagRef / Calculation の各アームを処理します。
+/// Aggregation は呼び出し元が個別に処理するため None を返します。
+fn fold_simple_operand(op: &ResolvedOperand, child_results: Vec<SimpleExpr>) -> Option<SimpleExpr> {
+    match op {
         ResolvedOperand::Literal(lab) => {
-            if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
+            let expr = if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
                 Expr::val(bytes).cast_as(crate::db::SqlType::DOUBLE).into()
             } else {
                 match lab.value() {
@@ -244,15 +303,47 @@ pub(super) fn build_resolved_operand_subquery(
                     }
                     crate::types::LabelValue::Null => Expr::val(None::<i32>).into(),
                 }
-            }
+            };
+            Some(expr)
         }
-        ResolvedOperand::TagRef { .. } => Expr::val(0).into(),
+        ResolvedOperand::TagRef { .. } => Some(Expr::val(0).into()),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
-            apply_arithmetic_op(&calc.op, left, right, is_string)
+            Some(apply_arithmetic_op(&calc.op, left, right, is_string))
         }
-        ResolvedOperand::Aggregation(agg) => subquery(build_agg(agg, view)),
+        ResolvedOperand::Aggregation(_) => None,
+    }
+}
+
+/// オペランドをサブクエリ形式で構築します。
+pub(super) fn build_resolved_operand_subquery(
+    operand: &ResolvedOperand,
+    view: &str,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| {
+        if let Some(expr) = fold_simple_operand(op, child_results) {
+            return expr;
+        }
+        let ResolvedOperand::Aggregation(agg) = op else { unreachable!() };
+        subquery(build_agg(agg, view, agg_ctx))
+    })
+}
+
+/// Nest コンテキストを参照する集約を含むオペランドをサブクエリ形式で構築します。
+pub(super) fn build_resolved_operand_subquery_nest(
+    operand: &ResolvedOperand,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: &NestContext,
+) -> SimpleExpr {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| {
+        if let Some(expr) = fold_simple_operand(op, child_results) {
+            return expr;
+        }
+        let ResolvedOperand::Aggregation(agg) = op else { unreachable!() };
+        subquery(build_agg_nest(agg, view, agg_ctx, nest_ctx))
     })
 }
 
@@ -260,9 +351,23 @@ pub(super) fn build_resolved_operand_subquery(
 pub(super) fn build_calculation_subquery(
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
-    let left = build_resolved_operand_subquery(&calc.left, view);
-    let right = build_resolved_operand_subquery(&calc.right, view);
+    let left = build_resolved_operand_subquery(&calc.left, view, agg_ctx);
+    let right = build_resolved_operand_subquery(&calc.right, view, agg_ctx);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left, right, is_string)
+}
+
+/// Nest コンテキストを参照する集約を含む算術演算ノードをサブクエリ形式で構築します。
+pub(super) fn build_calculation_subquery_nest(
+    calc: &crate::query::lens_resolver::ResolvedCalculationNode,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: &NestContext,
+) -> SimpleExpr {
+    let left = build_resolved_operand_subquery_nest(&calc.left, view, agg_ctx, nest_ctx);
+    let right = build_resolved_operand_subquery_nest(&calc.right, view, agg_ctx, nest_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
@@ -271,11 +376,11 @@ pub(super) fn build_calculation_subquery(
 /// RowTag の LabelStr (VARCHAR) は TRY_CAST で DOUBLE に変換されます。
 pub(super) fn build_resolved_operand_expr_for_arithmetic(
     operand: &ResolvedOperand,
-    view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| {
         if op.is_string_type() {
-            return build_resolved_operand_expr(op, view);
+            return build_resolved_operand_expr(op, agg_ctx);
         }
         match op {
             ResolvedOperand::Literal(lab) => {
@@ -306,7 +411,7 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                 let is_string = calc.left.is_string_type() && calc.right.is_string_type();
                 apply_arithmetic_op(&calc.op, left, right, is_string)
             }
-            ResolvedOperand::Aggregation(agg) => agg_expr(agg, view),
+            ResolvedOperand::Aggregation(agg) => agg_expr(agg, agg_ctx),
         }
     })
 }
@@ -422,6 +527,8 @@ pub(super) fn build_count_nvalue_sql(
     item_scope: Option<SelectStatement>,
     view: &str,
     include_item_id: bool,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     let (count_col, inner_tag_type) = resolve_count_target(inner);
     let mut stmt = Query::select();
@@ -453,8 +560,13 @@ pub(super) fn build_count_nvalue_sql(
             );
         }
         let (_storage, inner_filter, _operand) = inner.extract_agg_parts();
-        if let Some(filter_node) = inner_filter {
-            let filter_pick = build_pick_sql(&filter_node, view);
+        if inner_filter.is_some() {
+            let inner_ptr = inner as *const ResolvedNode as usize;
+            let filter_pick = agg_ctx
+                .agg_filters
+                .get(&inner_ptr)
+                .expect("filter SQL must be pre-computed")
+                .clone();
             stmt.and_where(
                 Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(
                     Query::select()
@@ -465,7 +577,13 @@ pub(super) fn build_count_nvalue_sql(
             );
         }
         if let Some(ctx) = context {
-            let context_pick = build_pick_sql(ctx, view);
+            let ctx_ptr = ctx as *const ResolvedNode as usize;
+            let context_pick = nest_ctx
+                .expect("NestContext required for context lookup")
+                .contexts
+                .get(&ctx_ptr)
+                .expect("context SQL must be pre-computed")
+                .clone();
             stmt.and_where(
                 Expr::col((Alias::new("proj"), Col::ItemId)).in_subquery(
                     Query::select()
@@ -486,7 +604,12 @@ pub(super) fn build_count_nvalue_sql(
         if let Some(scope) = item_scope {
             stmt.and_where(Expr::col(Col::ItemId).in_subquery(scope));
         }
-        let inner_pick = build_pick_sql(inner, view);
+        let inner_ptr = inner as *const ResolvedNode as usize;
+        let inner_pick = agg_ctx
+            .agg_inner_sqls
+            .get(&inner_ptr)
+            .expect("inner SQL must be pre-computed")
+            .clone();
         stmt.and_where(
             Expr::col(Col::ItemId).in_subquery(
                 Query::select()
@@ -496,7 +619,13 @@ pub(super) fn build_count_nvalue_sql(
             ),
         );
         if let Some(ctx) = context {
-            let context_pick = build_pick_sql(ctx, view);
+            let ctx_ptr = ctx as *const ResolvedNode as usize;
+            let context_pick = nest_ctx
+                .expect("NestContext required for context lookup")
+                .contexts
+                .get(&ctx_ptr)
+                .expect("context SQL must be pre-computed")
+                .clone();
             stmt.and_where(
                 Expr::col(Col::ItemId).in_subquery(
                     Query::select()
@@ -521,10 +650,12 @@ pub(super) fn build_unique_agg(
     inner: &ResolvedNode,
     view: &str,
     context: Option<&ResolvedNode>,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     let (_storage, cond, operand) = inner.extract_agg_parts();
     let operand_expr = if let Some(op_node) = operand {
-        build_resolved_operand_expr_for_arithmetic(op_node, view)
+        build_resolved_operand_expr_for_arithmetic(op_node, agg_ctx)
     } else {
         Expr::val(0).into()
     };
@@ -540,14 +671,28 @@ pub(super) fn build_unique_agg(
         }
     }
     if let Some(ctx) = context {
+        let ctx_ptr = ctx as *const ResolvedNode as usize;
         sub.and_where(
-            Expr::col(Col::ItemId).in_subquery(wrap_to_item_ids(build_pick_sql(ctx, view))),
+            Expr::col(Col::ItemId).in_subquery(wrap_to_item_ids(
+                nest_ctx
+                    .expect("NestContext required for context lookup")
+                    .contexts
+                    .get(&ctx_ptr)
+                    .expect("context SQL must be pre-computed")
+                    .clone(),
+            )),
         );
     }
-    if let Some(filter_node) = cond {
+    if let Some(_filter_node) = cond {
+        let inner_ptr = inner as *const ResolvedNode as usize;
         sub.and_where(
-            Expr::col(Col::ItemId)
-                .in_subquery(wrap_to_item_ids(build_pick_sql(&filter_node, view))),
+            Expr::col(Col::ItemId).in_subquery(wrap_to_item_ids(
+                agg_ctx
+                    .agg_filters
+                    .get(&inner_ptr)
+                    .expect("filter SQL must be pre-computed")
+                    .clone(),
+            )),
         );
     }
     sub.group_by_col(Col::ItemId);
@@ -561,6 +706,8 @@ pub(super) fn build_nvalue_standalone_subquery(
     context: Option<&ResolvedNode>,
     view: &str,
     include_item_id: bool,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     let (proj_col, proj_tag_type) = match proj_operand {
         ResolvedOperand::TagRef { storage, .. } => match storage {
@@ -573,11 +720,11 @@ pub(super) fn build_nvalue_standalone_subquery(
 
     nvalue.fold(&|op, child_results: Vec<SelectStatement>| match op {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
-            build_count_nvalue_sql(proj_col, proj_tag_type, inner, context, None, view, include_item_id)
+            build_count_nvalue_sql(proj_col, proj_tag_type, inner, context, None, view, include_item_id, agg_ctx, nest_ctx)
         }
         ResolvedOperand::Aggregation(agg @ ResolvedAggregationNode::Arithmetic { op, inner }) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(inner, view, context);
+            let deduped = build_unique_agg(inner, view, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
             stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
             stmt.expr_as(
@@ -714,12 +861,32 @@ pub(super) fn build_nvalue_standalone_subquery(
     })
 }
 
-/// nvalue 付き Nest に対する集約 SQL を生成します。
+/// nvalue 付き Nest に対する集約 SQL を生成します（コンテキストなし）。
 pub(super) fn build_agg(
     agg: &ResolvedAggregationNode,
     view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(agg, view) {
+    build_agg_inner(agg, view, agg_ctx, None)
+}
+
+/// nvalue 付き Nest に対する集約 SQL を生成します（Nest コンテキストあり）。
+pub(super) fn build_agg_nest(
+    agg: &ResolvedAggregationNode,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: &NestContext,
+) -> SelectStatement {
+    build_agg_inner(agg, view, agg_ctx, Some(nest_ctx))
+}
+
+fn build_agg_inner(
+    agg: &ResolvedAggregationNode,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
+) -> SelectStatement {
+    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(agg, view, agg_ctx, nest_ctx) {
         return nvalue_agg_sql;
     }
     let mut stmt = Query::select();
@@ -732,8 +899,13 @@ pub(super) fn build_agg(
             if let Some(key) = inner_tag_type {
                 final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
             }
-            if let Some(filter_node) = cond {
-                let pick_sql = build_pick_sql(&filter_node, view);
+            if let Some(_filter_node) = cond {
+                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
+                let pick_sql = agg_ctx
+                    .agg_filters
+                    .get(&inner_ptr)
+                    .expect("filter SQL must be pre-computed")
+                    .clone();
                 let mut sub = Query::select();
                 sub.column(Col::ItemId).from_subquery(pick_sql, Alias::new("sub"));
                 final_cond = final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
@@ -743,7 +915,7 @@ pub(super) fn build_agg(
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let is_string = agg.is_string_type();
-            let sub = build_unique_agg(inner, view, None);
+            let sub = build_unique_agg(inner, view, None, agg_ctx, nest_ctx);
             stmt.expr_as(
                 apply_arithmetic_agg(op, Expr::col(Alias::new("val")).into(), is_string),
                 Alias::new("scalar_value"),
@@ -755,24 +927,24 @@ pub(super) fn build_agg(
 }
 
 /// nvalue 付き Nest に対する集約 SQL を生成する内部ヘルパー。
+/// agg_ctx / nest_ctx は呼び出し元が事前計算済みのものを渡す。
 fn build_agg_over_nvalue(
     agg: &ResolvedAggregationNode,
     view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> Option<SelectStatement> {
     let (outer_agg_op, inner) = match agg {
         ResolvedAggregationNode::Count(inner) => (None, inner.as_ref()),
         ResolvedAggregationNode::Arithmetic { op, inner } => (Some(op), inner.as_ref()),
     };
-    let (proj_operand, nvalue, merged_context) =
-        match extract_nvalue_projection_parts(inner.clone()) {
-            Ok(parts) => parts,
-            Err(_) => return None,
-        };
+    let proj_operand = inner.get_projection_operands()?;
+    let nvalue = inner.get_nvalue()?;
+    let context = inner.get_agg_context();
     let nvalue_condition = inner.get_nvalue_condition();
-    let context = merged_context.as_deref();
 
     let source = if proj_operand.len() > 1 {
-        let pivot_agg = build_nvalue_pivot_aggregate_sql(&proj_operand, &nvalue, context, view);
+        let pivot_agg = build_nvalue_pivot_aggregate_sql(proj_operand, nvalue, context, view, agg_ctx, nest_ctx);
         if let Some((op, value)) = nvalue_condition {
             let bin_op = to_bin_op(*op);
             let val = label_to_simple_expr(value);
@@ -786,7 +958,7 @@ fn build_agg_over_nvalue(
         }
     } else {
         let mut nvalue_sub = build_nvalue_standalone_subquery(
-            &proj_operand[0], &nvalue, context, view, true,
+            &proj_operand[0], nvalue, context, view, true, agg_ctx, nest_ctx,
         );
         if let Some((op, value)) = nvalue_condition {
             let bin_op = to_bin_op(*op);
@@ -817,15 +989,39 @@ fn build_agg_over_nvalue(
     Some(stmt)
 }
 
-/// nvalue集計用CTE（picked_ids 参照版）を構築します。
+/// nvalue集計用CTE（picked_ids 参照版）を構築します（コンテキストなし）。
 pub(super) fn build_nvalue_cte(
     proj_operands: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
     view: &str,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    build_nvalue_cte_inner(proj_operands, nvalue, context, view, agg_ctx, None)
+}
+
+/// nvalue集計用CTE（picked_ids 参照版）を構築します（Nest コンテキストあり）。
+pub(super) fn build_nvalue_cte_nest(
+    proj_operands: &[ResolvedOperand],
+    nvalue: &ResolvedOperand,
+    context: Option<&ResolvedNode>,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: &NestContext,
+) -> SelectStatement {
+    build_nvalue_cte_inner(proj_operands, nvalue, context, view, agg_ctx, Some(nest_ctx))
+}
+
+fn build_nvalue_cte_inner(
+    proj_operands: &[ResolvedOperand],
+    nvalue: &ResolvedOperand,
+    context: Option<&ResolvedNode>,
+    view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     if proj_operands.len() > 1 {
-        return build_nvalue_pivot_aggregate_sql(proj_operands, nvalue, context, view);
+        return build_nvalue_pivot_aggregate_sql(proj_operands, nvalue, context, view, agg_ctx, nest_ctx);
     }
     let proj_operand = &proj_operands[0];
     let (proj_col, proj_storage) = match proj_operand {
@@ -847,12 +1043,12 @@ pub(super) fn build_nvalue_cte(
             build_count_nvalue_sql(
                 proj_col, proj_tag_type, inner, context,
                 Some(Query::select().column(Col::ItemId).from(Tbl::PickedIds).to_owned()),
-                view, true,
+                view, true, agg_ctx, nest_ctx,
             )
         }
         ResolvedOperand::Aggregation(agg @ ResolvedAggregationNode::Arithmetic { op, inner }) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(inner, view, context);
+            let deduped = build_unique_agg(inner, view, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
             stmt.expr_as(Expr::col((Alias::new("proj"), proj_col)), Alias::new("group_label"));
             stmt.expr_as(
@@ -880,7 +1076,7 @@ pub(super) fn build_nvalue_cte(
             stmt.group_by_col((Alias::new("proj"), proj_col));
             wrap_with_item_id(stmt, proj_col, proj_tag_type, view)
         }
-        _ => build_nvalue_standalone_subquery(proj_operand, nvalue, context, view, true),
+        _ => build_nvalue_standalone_subquery(proj_operand, nvalue, context, view, true, agg_ctx, nest_ctx),
     };
 
     Query::select()
@@ -899,6 +1095,7 @@ pub(super) fn build_nest_pivot_cte(
     keys: &[ResolvedOperand],
     nvalue: Option<&ResolvedOperand>,
     view: &str,
+    agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
     stmt.column(Col::ItemId);
@@ -928,7 +1125,7 @@ pub(super) fn build_nest_pivot_cte(
             ResolvedOperand::Calculation(calc) => {
                 collect_tag_types_from_operand(&calc.left, &mut type_filters);
                 collect_tag_types_from_operand(&calc.right, &mut type_filters);
-                let calc_expr = build_calculation_eav_expr(calc, view);
+                let calc_expr = build_calculation_eav_expr(calc, agg_ctx);
                 stmt.expr_as(calc_expr.clone(), Alias::new(&format!("key{}", i)));
                 stmt.and_having(calc_expr.is_not_null());
             }
@@ -937,7 +1134,7 @@ pub(super) fn build_nest_pivot_cte(
     }
 
     if let Some(nv) = nvalue {
-        let nv_expr = build_resolved_operand_eav_expr(nv, view);
+        let nv_expr = build_resolved_operand_eav_expr(nv, agg_ctx);
         stmt.expr_as(nv_expr, Alias::new("nvalue"));
     } else if !type_filters.is_empty() {
         stmt.and_where(Expr::col(Col::Type).is_in(type_filters.clone()));
@@ -953,12 +1150,14 @@ pub(super) fn build_nvalue_pivot_aggregate_sql(
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
     view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     if let ResolvedOperand::Calculation(calc) = nvalue {
-        return build_mixed_key_calc_nvalue_sql(keys, calc, context, view);
+        return build_mixed_key_calc_nvalue_sql(keys, calc, context, view, agg_ctx, nest_ctx);
     }
 
-    let pivot_q = build_nest_pivot_cte(keys, Some(nvalue), view);
+    let pivot_q = build_nest_pivot_cte(keys, Some(nvalue), view, agg_ctx);
     let mut stmt = Query::select();
     for i in 0..keys.len() {
         stmt.column(Alias::new(&format!("key{}", i)));
@@ -982,9 +1181,18 @@ pub(super) fn build_nvalue_pivot_aggregate_sql(
     }
 
     if let Some(ctx) = context {
+        let ctx_ptr = ctx as *const ResolvedNode as usize;
         let ctx_sub = Query::select()
             .column(Col::ItemId)
-            .from_subquery(build_pick_sql(ctx, view), Alias::new("_ctx"))
+            .from_subquery(
+                nest_ctx
+                    .expect("NestContext required for context lookup")
+                    .contexts
+                    .get(&ctx_ptr)
+                    .expect("context SQL must be pre-computed")
+                    .clone(),
+                Alias::new("_ctx"),
+            )
             .to_owned();
         stmt.and_where(Expr::col(Col::ItemId).in_subquery(ctx_sub));
     }
@@ -1007,11 +1215,13 @@ fn build_mixed_key_calc_nvalue_sql(
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     context: Option<&ResolvedNode>,
     view: &str,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
     let n_left = count_nvalue_keys(&calc.left).max(1).min(keys.len() - 1);
-    let left_sub = build_nvalue_standalone_subquery(&keys[0], &calc.left, context, view, false);
-    let right_sub = build_nvalue_standalone_subquery(&keys[n_left], &calc.right, context, view, false);
-    let pivot_sub = build_nest_pivot_cte(keys, None, view);
+    let left_sub = build_nvalue_standalone_subquery(&keys[0], &calc.left, context, view, false, agg_ctx, nest_ctx);
+    let right_sub = build_nvalue_standalone_subquery(&keys[n_left], &calc.right, context, view, false, agg_ctx, nest_ctx);
+    let pivot_sub = build_nest_pivot_cte(keys, None, view, agg_ctx);
 
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     let l_nvalue: SimpleExpr = Func::coalesce([
@@ -1049,9 +1259,18 @@ fn build_mixed_key_calc_nvalue_sql(
         );
     }
     if let Some(ctx) = context {
+        let ctx_ptr = ctx as *const ResolvedNode as usize;
         let ctx_sub = Query::select()
             .column(Col::ItemId)
-            .from_subquery(build_pick_sql(ctx, view), Alias::new("_ctx"))
+            .from_subquery(
+                nest_ctx
+                    .expect("NestContext required for context lookup")
+                    .contexts
+                    .get(&ctx_ptr)
+                    .expect("context SQL must be pre-computed")
+                    .clone(),
+                Alias::new("_ctx"),
+            )
             .to_owned();
         stmt.and_where(Expr::col((Alias::new("pivot"), Col::ItemId)).in_subquery(ctx_sub));
     }

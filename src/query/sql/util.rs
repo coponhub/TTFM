@@ -3,6 +3,7 @@ use crate::query::ast::{ArithmeticAggOp, ArithmeticOp};
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
 use sea_query::{Alias, BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
+use std::collections::HashMap;
 
 /// `SelectStatement` をインライン副問合せ式 (`SimpleExpr`) に変換します。
 pub(super) fn subquery(stmt: SelectStatement) -> SimpleExpr {
@@ -118,6 +119,45 @@ pub(super) fn build_storage_column_expr(
         }
         StorageMapping::Virtual => {
             CustomFunc::any_value(Expr::col(Col::LabelStr)).into()
+        }
+    }
+}
+
+// ── AggregationContext / NestContext ───────────────────────────────────────
+
+/// 集約ノードのフィルタ/内部SQL を事前計算した結果を保持します。
+///
+/// `build_pick_sql` に渡すことで fold 内での再帰呼び出しを排除します。
+/// `needs_aggregation_context` で必要性を判定し、`build_aggregation_context` で構築します。
+pub struct AggregationContext {
+    /// inner_node ポインタ → フィルタ SQL (inner.extract_agg_parts() のフィルタ条件)
+    pub agg_filters: HashMap<usize, SelectStatement>,
+    /// Count(inner) かつ inner_tag_type が None の場合の inner 全体 SQL
+    pub agg_inner_sqls: HashMap<usize, SelectStatement>,
+}
+
+impl AggregationContext {
+    pub fn new() -> Self {
+        Self {
+            agg_filters: HashMap::new(),
+            agg_inner_sqls: HashMap::new(),
+        }
+    }
+}
+
+/// Nest コンテキストノードの SQL を事前計算した結果を保持します。
+///
+/// `build_pick_sql` に渡すことで fold 内での再帰呼び出しを排除します。
+/// `needs_nest_context` で必要性を判定し、`build_nest_context` で構築します。
+pub struct NestContext {
+    /// コンテキスト ResolvedNode ポインタ → コンテキスト SQL
+    pub contexts: HashMap<usize, SelectStatement>,
+}
+
+impl NestContext {
+    pub fn new() -> Self {
+        Self {
+            contexts: HashMap::new(),
         }
     }
 }

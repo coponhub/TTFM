@@ -1,9 +1,15 @@
 mod pick;
 mod pieces;
 mod util;
-pub use pick::build_pick_sql;
+pub use pick::{
+    build_pick, build_pick_agg, build_pick_nest,
+    needs_aggregation_context, build_aggregation_context, build_aggregation_context_for_operand, build_aggregation_context_for_agg,
+    needs_nest_context, build_nest_context, build_nest_context_for_operand,
+    BuildPick, SimplePickNode, AggPickNode, NestPickNode, PickNode,
+};
+pub use util::{AggregationContext, NestContext};
 pub use pieces::to_tag_condition;
-use pieces::*;
+use pieces::{*, build_nvalue_cte, build_nvalue_cte_nest};
 use util::*;
 
 use crate::db::{Col, Tbl};
@@ -19,17 +25,33 @@ pub fn build_resolved_scalar_sql(
     view: &str,
 ) -> SelectStatement {
     use crate::query::lens_resolver::ResolvedOperand;
+    let agg_ctx = build_aggregation_context_for_operand(op, view);
     match op {
         ResolvedOperand::Aggregation(agg) => {
-            build_agg(agg, view)
+            if needs_nest_context(agg.inner_node()) {
+                let nest_ctx = build_nest_context(agg.inner_node(), view);
+                build_agg_nest(agg, view, &agg_ctx, &nest_ctx)
+            } else {
+                build_agg(agg, view, &agg_ctx)
+            }
         }
         _ => {
+            let needs_nest = op.walk().into_iter().any(|o| {
+                if let ResolvedOperand::Aggregation(agg) = o {
+                    needs_nest_context(agg.inner_node())
+                } else {
+                    false
+                }
+            });
+            let scalar_expr = if needs_nest {
+                let nest_ctx = build_nest_context_for_operand(op, view);
+                build_resolved_operand_subquery_nest(op, view, &agg_ctx, &nest_ctx)
+            } else {
+                build_resolved_operand_subquery(op, view, &agg_ctx)
+            };
             let mut stmt = Query::select();
             stmt.from(Alias::new(view));
-            stmt.expr_as(
-                build_resolved_operand_subquery(op, view),
-                Alias::new("scalar_value"),
-            );
+            stmt.expr_as(scalar_expr, Alias::new("scalar_value"));
             stmt.limit(1);
             stmt
         }
@@ -39,10 +61,11 @@ pub fn build_resolved_scalar_sql(
 pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
     // 比較系ノードの場合は直接 SELECT で比較結果を計算
     // これによりFALSEとNULLを区別できる
+    let agg_ctx = build_aggregation_context(node, view);
     match node {
         ResolvedNode::AggregationMatch { agg, op, label } => {
             build_direct_boolean_select(
-                subquery(build_agg(agg, view)),
+                subquery(build_agg(agg, view, &agg_ctx)),
                 *op,
                 label_to_unit_aware_expr(label),
                 view,
@@ -50,20 +73,20 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         }
         ResolvedNode::AggregationAggregationMatch { left, op, right } => {
             build_direct_boolean_select(
-                subquery(build_agg(left, view)),
+                subquery(build_agg(left, view, &agg_ctx)),
                 *op,
-                subquery(build_agg(right, view)),
+                subquery(build_agg(right, view, &agg_ctx)),
                 view,
             )
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
             let calc_expr = if calc.contains_aggregation() {
-                build_calculation_subquery(calc, view)
+                build_calculation_subquery(calc, view, &agg_ctx)
             } else {
-                build_calculation_expr(calc, view)
+                build_calculation_expr(calc, &agg_ctx)
             };
             build_direct_boolean_select(
-                subquery(build_agg(agg, view)),
+                subquery(build_agg(agg, view, &agg_ctx)),
                 *op,
                 calc_expr,
                 view,
@@ -72,7 +95,7 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         ResolvedNode::AggregationTagMatch { .. } => {
             // タグ側は行ごとに異なる可能性があるのでWHERE方式を使用
             // （将来的に改善の余地があるが、一旦現状維持）
-            let pick_sql = build_pick_sql(node, view);
+            let pick_sql = PickNode::new(node, view).build_pick();
             wrap_boolean_collider(pick_sql)
         }
         ResolvedNode::ScalarMatch { left, op, right } => {
@@ -85,18 +108,19 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         }
         _ => {
             // その他のノード（TagMatch等）は従来のWHERE方式
-            let pick_sql = build_pick_sql(node, view);
+            let pick_sql = PickNode::new(node, view).build_pick();
             wrap_boolean_collider(pick_sql)
         }
     }
 }
 
 pub fn build_fetch_items_sql(
-    node: &ResolvedNode,
-    view: &str,
+    pick: &PickNode<'_>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> SelectStatement {
+    let node = pick.node();
+    let view = pick.view();
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
     // oneview との結合を行わず、集約計算結果だけをそのまま返す。
     // NestMatch / NestNestMatch は tags カラムが必要なため
@@ -104,12 +128,12 @@ pub fn build_fetch_items_sql(
     match node {
         ResolvedNode::Aggregation(_)
         | ResolvedNode::AggregationMatch { .. } => {
-            return build_pick_sql(node, view);
+            return pick.build_pick();
         }
         _ => {}
     }
 
-    let pick_sql = build_pick_sql(node, view);
+    let pick_sql = pick.build_pick();
     let columns = Col::raw_tag_row_columns();
 
     // 1. まず ID を絞り込むためのサブクエリを構築
@@ -163,13 +187,13 @@ pub fn build_fetch_items_sql(
 }
 
 pub fn build_flat_table_sql(
-    resolved: &ResolvedNode,
+    pick: &PickNode<'_>,
     query_node: &QueryNode,
-    view: &str,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> SelectStatement {
-    let pick_sql = build_pick_sql(resolved, view);
+    let view = pick.view();
+    let pick_sql = pick.build_pick();
     let tagcond = to_tag_condition(query_node);
 
     // 1. まず ID を絞り込むためのサブクエリを構築
@@ -200,16 +224,17 @@ pub fn build_flat_table_sql(
 }
 
 pub fn build_fetch_label_groups_sql(
+    pick: &PickNode<'_>,
     resolver: &crate::query::lens_resolver::Resolver,
     proj_type: &TagType,
-    view: &str,
     limit: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
     use sea_query::{CommonTableExpression, Iden, WithClause};
 
-    let pick_sql = build_pick_sql(&resolver.resolved_query, view);
+    let view = pick.view();
+    let pick_sql = pick.build_pick();
 
     // 1. プロジェクション対象の物理カラムを特定
     let desc = resolver.lens().look_up_or_default(proj_type);
@@ -242,20 +267,23 @@ pub fn build_fetch_label_groups_sql(
     let is_or_query = matches!(&resolver.resolved_query, ResolvedNode::Or(_));
     let nvalue_condition = resolver.get_nvalue_condition();
     let has_nvalue = if !is_or_query {
-        if let Some(nv) = resolver.get_nvalue_combined() {
-            let mut nvalue_sql = build_nvalue_cte(
-                resolver.resolved_query.get_projection_operands().unwrap(),
-                &nv,
-                resolver.resolved_query.get_context(),
-                view,
-            );
+        if let Some(nv) = resolver.get_nvalue() {
+            let proj_operands = resolver.resolved_query.get_projection_operands().unwrap();
+            let context = resolver.resolved_query.get_context();
+            let computed_agg_ctx;
+            let mut nvalue_sql = if let (Some(agg_ctx), Some(nest_ctx)) = (pick.agg_ctx(), pick.nest_ctx()) {
+                build_nvalue_cte_nest(proj_operands, nv, context, view, agg_ctx, nest_ctx)
+            } else {
+                computed_agg_ctx = build_aggregation_context_for_operand(nv, view);
+                build_nvalue_cte(proj_operands, nv, context, view, &computed_agg_ctx)
+            };
             // nvalue_condition がある場合、フィルタ条件を追加
             // Calculation の nvalue は GROUP BY なしのため HAVING ではなく WHERE を使用
             if let Some((op, value)) = nvalue_condition {
                 let bin_op = to_bin_op(*op);
                 let val = label_to_simple_expr(value);
                 let cond = Expr::col(Alias::new("nvalue")).binary(bin_op, val);
-                if matches!(&nv, ResolvedOperand::Calculation(_)) {
+                if matches!(nv, ResolvedOperand::Calculation(_)) {
                     nvalue_sql.and_where(cond);
                 } else {
                     nvalue_sql.and_having(cond);
@@ -294,7 +322,8 @@ pub fn build_fetch_label_groups_sql(
     let (label_col_name, all_hits_source, need_extra_filter) =
         if proj_operands.len() > 1 {
             // 深い Nest: pivot CTE を使用
-            let pivot_q = build_nest_pivot_cte(proj_operands, None, view);
+            let agg_ctx = pick.agg_ctx().expect("AggregationContext required for pivot CTE");
+            let pivot_q = build_nest_pivot_cte(proj_operands, None, view, agg_ctx);
             let pivot_cte = CommonTableExpression::new()
                 .query(pivot_q)
                 .table_name(Alias::new("pivot"))
@@ -305,7 +334,12 @@ pub fn build_fetch_label_groups_sql(
             if calc.contains_row_tag() {
                 // EAV 算術: 条件集計で item_id ごとに計算値を集約
                 // (例: size: + mtime: → SUM(CASE WHEN type='size' ...) + SUM(CASE WHEN type='mtime' ...))
-                let calc_expr = build_calculation_eav_expr(&calc, view);
+                let calc_expr = if calc.contains_aggregation() {
+                    let agg_ctx = pick.agg_ctx().expect("AggregationContext required for EAV+agg calculation CTE");
+                    build_calculation_eav_expr(&calc, agg_ctx)
+                } else {
+                    build_calculation_eav_expr_pure(&calc)
+                };
                 let mut computed_q = Query::select();
                 computed_q
                     .column(Col::ItemId)
@@ -331,8 +365,13 @@ pub fn build_fetch_label_groups_sql(
                 with_clause.cte(computed_cte);
                 ("calc_value".to_string(), "computed".to_string(), false)
             } else {
-                // 既存: カラムベース算術（RowTag なし）
-                let calc_expr = build_calculation_expr(&calc, view);
+                // カラムベース算術（RowTag なし）
+                let calc_expr = if calc.contains_aggregation() {
+                    let agg_ctx = pick.agg_ctx().expect("AggregationContext required for calculation CTE");
+                    build_calculation_expr(&calc, agg_ctx)
+                } else {
+                    build_calculation_expr_pure(&calc)
+                };
                 let mut computed_q = Query::select();
                 computed_q
                     .column(Col::ItemId)
@@ -603,7 +642,7 @@ pub fn build_fetch_label_set_op_sql(
         .map(|i| format!("labels_{}", i))
         .collect();
     for (i, operand) in operands.iter().enumerate() {
-        let ids_sql = wrap_to_item_ids(build_pick_sql(operand, view));
+        let ids_sql = wrap_to_item_ids(build_pick(operand, view));
 
         // Union の場合のみ複合ラベルを生成（Intersect/Except は主キー値で比較する）
         let labels_sql = if matches!(op, LabelSetOpKind::Union) {
@@ -668,7 +707,7 @@ pub fn build_fetch_label_set_op_sql(
     if use_item_level_except {
         // アイテムレベル Except:
         //   labels = labels_0 (左辺の主キーラベル) WHERE item_id NOT IN (右辺の item_ids)
-        let right_ids_sql = wrap_to_item_ids(build_pick_sql(&operands[1], view));
+        let right_ids_sql = wrap_to_item_ids(build_pick(&operands[1], view));
 
         let mut labels_sql = Query::select();
         labels_sql
@@ -905,7 +944,7 @@ mod tests {
         };
         let query_node = QueryNode::And(vec![]);
         let sql =
-            build_flat_table_sql(&node, &query_node, "oneview", Some(10), None);
+            build_flat_table_sql(&PickNode::new(&node, "oneview"), &query_node, Some(10), None);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 基本構造の検証
@@ -955,7 +994,8 @@ mod tests {
                 },
             ])));
 
-        let sql = build_agg(&agg, "oneview");
+        let agg_ctx = build_aggregation_context_for_agg(&agg, "oneview");
+        let sql = build_agg(&agg, "oneview", &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // アイテム数を数えるので COUNT(DISTINCT "item_id")
@@ -987,7 +1027,7 @@ mod tests {
             }),
         };
 
-        let sql = build_agg(&agg, "oneview");
+        let sql = build_agg(&agg, "oneview", &AggregationContext::new());
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -1048,7 +1088,8 @@ mod tests {
             ])),
         };
 
-        let sql = build_agg(&agg, "oneview");
+        let agg_ctx = build_aggregation_context_for_agg(&agg, "oneview");
+        let sql = build_agg(&agg, "oneview", &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -1075,7 +1116,7 @@ mod tests {
             right: ResolvedOperand::Literal(Label::from(2)),
         };
 
-        let expr = build_calculation_expr(&calc, "oneview");
+        let expr = build_calculation_expr(&calc, &AggregationContext::new());
         let sql_str = format!("{:?}", expr);
 
         // SQL式に加算演算が含まれていることを確認
@@ -1091,7 +1132,7 @@ mod tests {
         use crate::types::Label;
 
         let operand = ResolvedOperand::Literal(Label::from(42));
-        let expr = build_resolved_operand_expr(&operand, "oneview");
+        let expr = build_resolved_operand_expr(&operand, &AggregationContext::new());
         let sql_str = format!("{:?}", expr);
 
         // 数値リテラルが含まれていることを確認
@@ -1145,7 +1186,8 @@ mod tests {
 
         // SQL生成
         let sql = build_fetch_label_groups_sql(
-            &resolver, &proj_type, "oneview", 100, 0,
+            &PickNode::new(&resolver.resolved_query, "oneview"),
+            &resolver, &proj_type, 100, 0,
         )
         .expect("Failed to build SQL");
         let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1187,7 +1229,7 @@ mod tests {
             crate::types::LabelValue::Boolean(true),
         ));
         let expr_lit =
-            build_resolved_operand_expr_for_arithmetic(&lit_bool, "oneview");
+            build_resolved_operand_expr_for_arithmetic(&lit_bool, &AggregationContext::new());
         let sql_lit = sea_query::Query::select()
             .expr(expr_lit)
             .to_string(sea_query::PostgresQueryBuilder);
@@ -1211,7 +1253,7 @@ mod tests {
             sql_type: SqlType::BOOLEAN,
         };
         let expr_tag =
-            build_resolved_operand_expr_for_arithmetic(&tag_bool, "oneview");
+            build_resolved_operand_expr_for_arithmetic(&tag_bool, &AggregationContext::new());
         let sql_tag = sea_query::Query::select()
             .expr(expr_tag)
             .to_string(sea_query::PostgresQueryBuilder);
@@ -1244,7 +1286,8 @@ mod tests {
         );
 
         let sql = build_fetch_label_groups_sql(
-            &resolver, &proj_type, "oneview", 100, 0,
+            &PickNode::new(&resolver.resolved_query, "oneview"),
+            &resolver, &proj_type, 100, 0,
         )
         .unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1289,7 +1332,8 @@ mod tests {
         );
 
         let sql = build_fetch_label_groups_sql(
-            &resolver, &proj_type, "oneview", 100, 0,
+            &PickNode::new(&resolver.resolved_query, "oneview"),
+            &resolver, &proj_type, 100, 0,
         )
         .unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1327,7 +1371,8 @@ mod tests {
         );
 
         let sql = build_fetch_label_groups_sql(
-            &resolver, &proj_type, "oneview", 100, 0,
+            &PickNode::new(&resolver.resolved_query, "oneview"),
+            &resolver, &proj_type, 100, 0,
         )
         .unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1354,7 +1399,8 @@ mod tests {
         assert!(resolver.get_nvalue_condition().is_some());
 
         let sql = build_fetch_label_groups_sql(
-            &resolver, &proj_type, "oneview", 100, 0,
+            &PickNode::new(&resolver.resolved_query, "oneview"),
+            &resolver, &proj_type, 100, 0,
         )
         .unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1405,6 +1451,8 @@ mod tests {
                 resolver.resolved_query.get_context(),
                 "oneview",
                 false,
+                &AggregationContext::new(),
+                None,
             );
             let sql_str = sql.to_string(PostgresQueryBuilder);
 
@@ -1453,7 +1501,8 @@ mod tests {
                 resolver.get_projection().expect("Should have projection");
 
             let sql = build_fetch_label_groups_sql(
-                &resolver, &proj_type, "oneview", 100, 0,
+                &PickNode::new(&resolver.resolved_query, "oneview"),
+                &resolver, &proj_type, 100, 0,
             )
             .unwrap();
             let sql_str = sql.to_string(PostgresQueryBuilder);
@@ -1515,6 +1564,8 @@ mod tests {
                 resolver.resolved_query.get_context(),
                 "oneview",
                 false,
+                &AggregationContext::new(),
+                None,
             );
             let sql_str = sql.to_string(PostgresQueryBuilder);
 
@@ -1544,7 +1595,7 @@ mod tests {
             crate::query::lens_resolver::Resolver::new(query_str).unwrap();
         let optimized =
             crate::query::lens_optimizer::optimize(resolver.resolved_query);
-        let sql = crate::query::sql::build_pick_sql(&optimized, "oneview");
+        let sql = PickNode::new(&optimized, "oneview").build_pick();
         println!(
             "Generated FETCH ITEMS SQL: {}",
             sql.to_string(sea_query::PostgresQueryBuilder)
@@ -1554,9 +1605,9 @@ mod tests {
             let resolver2 =
                 crate::query::lens_resolver::Resolver::new(query_str).unwrap();
             let label_sql = crate::query::sql::build_fetch_label_groups_sql(
+                &crate::query::sql::PickNode::new(&resolver2.resolved_query, "oneview"),
                 &resolver2,
                 &crate::types::TagType::from("parentdir"),
-                "oneview",
                 100,
                 0,
             )
@@ -1593,7 +1644,7 @@ mod tests {
             context: None,
         };
 
-        let sql = build_pick_sql(&nest_two_keys, "oneview")
+        let sql = build_pick(&nest_two_keys, "oneview")
             .to_string(PostgresQueryBuilder);
 
         // tagA の条件が含まれる
@@ -1630,7 +1681,7 @@ mod tests {
             context: None,
         };
 
-        let sql = build_pick_sql(&nest_one_key, "oneview")
+        let sql = build_pick(&nest_one_key, "oneview")
             .to_string(PostgresQueryBuilder);
 
         assert!(
