@@ -1,15 +1,50 @@
 mod pick;
-mod pieces;
 mod util;
+mod agg_pieces;
+mod calc_pieces;
+mod boolean;
+mod scalar;
+mod nest;
+mod low_dispatcher;
+mod precompute;
 pub use pick::{
     build_pick, build_pick_agg, build_pick_nest,
-    needs_aggregation_context, build_aggregation_context, build_aggregation_context_for_operand, build_aggregation_context_for_agg,
-    needs_nest_context, build_nest_context, build_nest_context_for_operand,
     BuildPick, SimplePickNode, AggPickNode, NestPickNode, PickNode,
 };
-pub use util::{AggregationContext, NestContext};
-pub use pieces::to_tag_condition;
-use pieces::{*, build_nvalue_cte, build_nvalue_cte_nest};
+pub use util::{AggregationContext, NestContext, to_tag_condition};
+pub use precompute::{
+    needs_aggregation_context, build_aggregation_context, build_aggregation_context_for_operand, build_aggregation_context_for_agg,
+    needs_nest_context, build_nest_context, build_nest_context_for_operand,
+};
+use agg_pieces::{
+    agg_expr, resolve_count_target,
+    build_agg, build_agg_nest,
+    build_agg_calc_expr, build_agg_calc_eav_expr,
+    build_agg_calc_subquery, build_agg_calc_subquery_nest,
+    build_agg_operand_eav_expr,
+    build_agg_operand_subquery, build_agg_operand_subquery_nest,
+    build_nvalue_standalone_subquery, build_nvalue_cte, build_nvalue_cte_nest,
+    build_nest_pivot_cte,
+};
+#[cfg(test)]
+use agg_pieces::{build_agg_operand_expr, build_resolved_operand_expr_for_arithmetic};
+use calc_pieces::{build_calculation_expr, build_calculation_eav_expr, fold_simple_operand};
+use boolean::{
+    build_direct_boolean_select, wrap_boolean_collider,
+    build_resolved_and_sql, build_resolved_or_sql, build_resolved_diff_sql,
+    build_resolved_comp_sql, build_label_set_op_pick_sql,
+};
+use scalar::{
+    build_resolved_match_sql, build_column_match_sql,
+    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
+};
+use nest::{
+    build_nest_sql,
+    extract_primary_label_tag_type_from_node, extract_multi_key_nest_operands,
+    build_multi_key_labels_sql,
+    build_nest_match_sql, build_nest_nest_match_sql, build_merged_nest_match_sql,
+};
+use low_dispatcher::try_dispatch_common;
 use util::*;
 
 use crate::db::{Col, Tbl};
@@ -45,9 +80,9 @@ pub fn build_resolved_scalar_sql(
             });
             let scalar_expr = if needs_nest {
                 let nest_ctx = build_nest_context_for_operand(op, view);
-                build_resolved_operand_subquery_nest(op, view, &agg_ctx, &nest_ctx)
+                build_agg_operand_subquery_nest(op, view, &agg_ctx, &nest_ctx)
             } else {
-                build_resolved_operand_subquery(op, view, &agg_ctx)
+                build_agg_operand_subquery(op, view, &agg_ctx)
             };
             let mut stmt = Query::select();
             stmt.from(Alias::new(view));
@@ -81,9 +116,9 @@ pub fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
             let calc_expr = if calc.contains_aggregation() {
-                build_calculation_subquery(calc, view, &agg_ctx)
+                build_agg_calc_subquery(calc, view, &agg_ctx)
             } else {
-                build_calculation_expr(calc, &agg_ctx)
+                build_agg_calc_expr(calc, &agg_ctx)
             };
             build_direct_boolean_select(
                 subquery(build_agg(agg, view, &agg_ctx)),
@@ -336,9 +371,9 @@ pub fn build_fetch_label_groups_sql(
                 // (例: size: + mtime: → SUM(CASE WHEN type='size' ...) + SUM(CASE WHEN type='mtime' ...))
                 let calc_expr = if calc.contains_aggregation() {
                     let agg_ctx = pick.agg_ctx().expect("AggregationContext required for EAV+agg calculation CTE");
-                    build_calculation_eav_expr(&calc, agg_ctx)
+                    build_agg_calc_eav_expr(&calc, agg_ctx)
                 } else {
-                    build_calculation_eav_expr_pure(&calc)
+                    build_calculation_eav_expr(&calc)
                 };
                 let mut computed_q = Query::select();
                 computed_q
@@ -368,9 +403,9 @@ pub fn build_fetch_label_groups_sql(
                 // カラムベース算術（RowTag なし）
                 let calc_expr = if calc.contains_aggregation() {
                     let agg_ctx = pick.agg_ctx().expect("AggregationContext required for calculation CTE");
-                    build_calculation_expr(&calc, agg_ctx)
+                    build_agg_calc_expr(&calc, agg_ctx)
                 } else {
-                    build_calculation_expr_pure(&calc)
+                    build_calculation_expr(&calc)
                 };
                 let mut computed_q = Query::select();
                 computed_q
@@ -1116,7 +1151,7 @@ mod tests {
             right: ResolvedOperand::Literal(Label::from(2)),
         };
 
-        let expr = build_calculation_expr(&calc, &AggregationContext::new());
+        let expr = build_agg_calc_expr(&calc, &AggregationContext::new());
         let sql_str = format!("{:?}", expr);
 
         // SQL式に加算演算が含まれていることを確認
@@ -1132,7 +1167,7 @@ mod tests {
         use crate::types::Label;
 
         let operand = ResolvedOperand::Literal(Label::from(42));
-        let expr = build_resolved_operand_expr(&operand, &AggregationContext::new());
+        let expr = build_agg_operand_expr(&operand, &AggregationContext::new());
         let sql_str = format!("{:?}", expr);
 
         // 数値リテラルが含まれていることを確認

@@ -1,5 +1,5 @@
 use crate::db::{Col, CustomFunc, SqlType, Tbl};
-use crate::query::ast::{ArithmeticAggOp, ArithmeticOp};
+use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
@@ -170,6 +170,65 @@ impl NestContext {
             context_nodes: HashMap::new(),
         }
     }
+}
+
+/// StorageMapping から集計式を生成します（EAV 構造用の MAX CASE WHEN 形式）。
+pub(super) fn build_tag_value_agg_expr(
+    storage: &StorageMapping,
+    _sql_type: SqlType,
+) -> SimpleExpr {
+    match storage {
+        StorageMapping::Column(col) => CustomFunc::any_value(Expr::col(*col)).into(),
+        StorageMapping::RowTag { column, tag_type } => {
+            let cast_expr = Expr::cust_with_exprs(
+                "TRY_CAST($1 AS DOUBLE)",
+                [Expr::col(*column).into()],
+            );
+            Expr::cust_with_exprs(
+                "MAX(CASE WHEN $1 = $2 THEN $3 END)",
+                [
+                    Expr::col(Col::Type).into(),
+                    Expr::val(tag_type.as_str()).into(),
+                    cast_expr.into(),
+                ],
+            )
+        }
+        StorageMapping::Virtual => CustomFunc::any_value(Expr::val(0)).into(),
+    }
+}
+
+/// クエリに使用されている型のリストを元に OneView から特定のタグ行のみを抽出する Condition を生成します。
+pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
+    let mut types = node.get_all_types();
+    if types.iter().any(|t| t == "*") {
+        return sea_query::Condition::all();
+    }
+    let defaults = [
+        "name", "path", "size", "mtime", "rank", "item_kind",
+        "content", "value", "tag", "filename", "is_dir",
+    ];
+    for def in defaults {
+        if !types.iter().any(|t| t == def) {
+            types.push(def.to_string());
+        }
+    }
+    if types.iter().any(|t| t == "*" || t == "tag") {
+        return sea_query::Condition::all();
+    }
+    let mut cond = sea_query::Condition::any();
+    let mut fixed_types = Vec::new();
+    let glob_op = sea_query::BinOper::Custom("GLOB");
+    for t in types {
+        if t.contains('*') || t.contains('?') || t.contains('[') {
+            cond = cond.add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
+        } else {
+            fixed_types.push(t);
+        }
+    }
+    if !fixed_types.is_empty() {
+        cond = cond.add(Expr::col(Col::Type).is_in(fixed_types));
+    }
+    cond
 }
 
 /// `ArithmeticOp` を二項演算 SQL 式に適用します。
