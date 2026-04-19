@@ -1,5 +1,6 @@
 use crate::db::{Col, CustomFunc, SqlType, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp};
+use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
 use sea_query::{Alias, BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
@@ -130,10 +131,14 @@ pub(super) fn build_storage_column_expr(
 /// `build_pick_sql` に渡すことで fold 内での再帰呼び出しを排除します。
 /// `needs_aggregation_context` で必要性を判定し、`build_aggregation_context` で構築します。
 pub struct AggregationContext {
-    /// inner_node ポインタ → フィルタ SQL (inner.extract_agg_parts() のフィルタ条件)
+    /// inner_node ポインタ → フィルタ SQL (Phase 3 で参照)
     pub agg_filters: HashMap<usize, SelectStatement>,
-    /// Count(inner) かつ inner_tag_type が None の場合の inner 全体 SQL
+    /// Count(inner) かつ inner_tag_type が None の場合の inner 全体 SQL (Phase 3 で参照)
     pub agg_inner_sqls: HashMap<usize, SelectStatement>,
+    /// Phase 1 収集: フィルタノード (Phase 2 で SQL 化して agg_filters へ移動)
+    pub filter_nodes: HashMap<usize, ResolvedNode>,
+    /// Phase 1 収集: Count inner ノード (Phase 2 で SQL 化して agg_inner_sqls へ移動)
+    pub inner_nodes: HashMap<usize, ResolvedNode>,
 }
 
 impl AggregationContext {
@@ -141,6 +146,8 @@ impl AggregationContext {
         Self {
             agg_filters: HashMap::new(),
             agg_inner_sqls: HashMap::new(),
+            filter_nodes: HashMap::new(),
+            inner_nodes: HashMap::new(),
         }
     }
 }
@@ -150,14 +157,17 @@ impl AggregationContext {
 /// `build_pick_sql` に渡すことで fold 内での再帰呼び出しを排除します。
 /// `needs_nest_context` で必要性を判定し、`build_nest_context` で構築します。
 pub struct NestContext {
-    /// コンテキスト ResolvedNode ポインタ → コンテキスト SQL
+    /// コンテキスト ResolvedNode ポインタ → コンテキスト SQL (Phase 3 で参照)
     pub contexts: HashMap<usize, SelectStatement>,
+    /// Phase 1 収集: コンテキストノード (Phase 2 で SQL 化して contexts へ移動)
+    pub context_nodes: HashMap<usize, ResolvedNode>,
 }
 
 impl NestContext {
     pub fn new() -> Self {
         Self {
             contexts: HashMap::new(),
+            context_nodes: HashMap::new(),
         }
     }
 }

@@ -1,11 +1,12 @@
-use crate::db::{Col, CustomFunc, Tbl};
+use crate::db::{Col, CustomFunc, SqlType, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp, QueryNode};
-use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode, ResolvedOperand};
+use crate::query::lens_resolver::{LabelSetOpKind, ResolvedAggregationNode, ResolvedNode, ResolvedOperand};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use sea_query::{Alias, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr};
+use crate::types::{ItemKind, Label, SType, TagType};
+use sea_query::{Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr};
 use super::{
-    subquery, wrap_to_item_ids,
-    label_to_simple_expr,
+    subquery, wrap_in_subquery, wrap_to_item_ids,
+    label_to_simple_expr, label_to_unit_aware_expr,
     build_resolved_literal_expr, build_storage_column_expr,
     apply_arithmetic_op, apply_arithmetic_agg,
     AggregationContext, NestContext,
@@ -1391,4 +1392,283 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
         cond = cond.add(Expr::col(Col::Type).is_in(fixed_types));
     }
     cond
+}
+
+// ── pick/filter 共通 SQL ビルダー ──────────────────────────────────────────
+
+/// `child_sqls` を `union_type` で結合します。空の場合は `empty_fallback` を返します。
+pub(super) fn reduce_with_union(
+    child_sqls: Vec<SelectStatement>,
+    union_type: sea_query::UnionType,
+    empty_fallback: SelectStatement,
+) -> SelectStatement {
+    child_sqls.into_iter()
+        .map(wrap_in_subquery)
+        .reduce(|mut acc, next| { acc.union(union_type, next); acc })
+        .unwrap_or(empty_fallback)
+}
+
+pub(super) fn build_resolved_and_sql(
+    child_sqls: Vec<SelectStatement>,
+    view: &str,
+) -> SelectStatement {
+    let fallback = Query::select()
+        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view))
+        .to_owned();
+    reduce_with_union(child_sqls, sea_query::UnionType::Intersect, fallback)
+}
+
+pub(super) fn build_resolved_or_sql(
+    child_sqls: Vec<SelectStatement>,
+    view: &str,
+) -> SelectStatement {
+    let fallback = Query::select()
+        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .from(Alias::new(view))
+        .and_where(Expr::val(1).eq(0))
+        .to_owned();
+    reduce_with_union(child_sqls, sea_query::UnionType::Distinct, fallback)
+}
+
+pub(super) fn build_resolved_diff_sql(
+    l: SelectStatement,
+    r: SelectStatement,
+) -> SelectStatement {
+    let mut q = wrap_in_subquery(l);
+    q.union(sea_query::UnionType::Except, wrap_in_subquery(r));
+    q
+}
+
+pub(super) fn build_resolved_comp_sql(
+    is_boolean: bool,
+    c_sql: SelectStatement,
+    view: &str,
+) -> SelectStatement {
+    let mut q = if is_boolean {
+        Query::select()
+            .expr_as(Expr::val(1i64), Col::ItemId)
+            .expr_as(Expr::val(0i64), Col::Rank)
+            .expr_as(
+                Expr::val(<&'static str>::from(ItemKind::Volatile)),
+                Col::ItemKind,
+            )
+            .to_owned()
+    } else {
+        Query::select()
+            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+            .distinct()
+            .from(Alias::new(view))
+            .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]))
+            .to_owned()
+    };
+    let mut eq = Query::select();
+    eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .from_subquery(c_sql, Tbl::NotSide);
+    q.union(sea_query::UnionType::Except, eq);
+    q
+}
+
+pub(super) fn build_resolved_match_sql(
+    storage: &StorageMapping,
+    sql_type: SqlType,
+    op: ComparisonOp,
+    label: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+    q.cond_where(storage.to_condition(op, label, sql_type));
+    q
+}
+
+pub(super) fn build_column_match_sql(
+    tag: SType,
+    label: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(Alias::new(view));
+    match label.value() {
+        crate::types::LabelValue::Integer(i) => {
+            let t = if matches!(tag, SType::Label) { Col::LabelInt.into() } else { tag };
+            q.and_where(Expr::col(t).eq(i));
+        }
+        crate::types::LabelValue::String(s) => {
+            let t = if matches!(tag, SType::Label) { Col::LabelStr.into() } else { tag };
+            let val_str = if s.starts_with('^') { format!("{}*", &s[1..]) } else { s.clone() };
+            q.and_where(Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(val_str)));
+        }
+        crate::types::LabelValue::Literal(s) => {
+            let t = if matches!(tag, SType::Label) { Col::LabelStr.into() } else { tag };
+            q.and_where(Expr::col(t).eq(s.as_str()));
+        }
+        crate::types::LabelValue::Boolean(b) => {
+            q.and_where(Expr::col(Col::LabelBool).eq(b));
+        }
+        crate::types::LabelValue::Double(bits) => {
+            q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
+        }
+        crate::types::LabelValue::Null => {
+            q.and_where(Expr::col(Col::LabelStr).is_null());
+        }
+    }
+    q
+}
+
+pub(super) fn build_resolved_tag_tag_match_sql(
+    left_storage: &StorageMapping,
+    left_sql_type: SqlType,
+    op: ComparisonOp,
+    right_storage: &StorageMapping,
+    right_sql_type: SqlType,
+    view: &str,
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.column(Col::ItemId)
+        .from(Alias::new(view))
+        .group_by_col(Col::ItemId);
+    let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
+    let right_expr = build_tag_value_agg_expr(right_storage, right_sql_type);
+    q.and_having(left_expr.binary(to_bin_op(op), right_expr));
+    q
+}
+
+pub(super) fn build_scalar_match_sql(
+    left: &Label,
+    op: ComparisonOp,
+    right: &Label,
+    view: &str,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.from(Alias::new(view));
+    stmt.column(Col::ItemId);
+    let cond = Expr::expr(label_to_unit_aware_expr(left))
+        .binary(to_bin_op(op), label_to_unit_aware_expr(right));
+    stmt.cond_where(cond);
+    stmt.limit(1);
+    stmt
+}
+
+pub(super) fn build_label_set_op_pick_sql(
+    op: &LabelSetOpKind,
+    child_sqls: Vec<SelectStatement>,
+) -> SelectStatement {
+    match op {
+        LabelSetOpKind::Union => {
+            reduce_with_union(child_sqls, sea_query::UnionType::Distinct, Query::select().to_owned())
+        }
+        LabelSetOpKind::Intersect => {
+            reduce_with_union(child_sqls, sea_query::UnionType::Intersect, Query::select().to_owned())
+        }
+        LabelSetOpKind::Except => {
+            let mut it = child_sqls.into_iter();
+            if let (Some(l), Some(r)) = (it.next(), it.next()) {
+                build_resolved_diff_sql(l, r)
+            } else {
+                Query::select().to_owned()
+            }
+        }
+    }
+}
+
+pub(super) fn build_resolved_projection_sql(
+    op: &ResolvedOperand,
+    view: &str,
+) -> SelectStatement {
+    op.fold(&|op, child_results: Vec<SelectStatement>| match op {
+        ResolvedOperand::TagRef { tag_type, .. } => {
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view));
+            let cond = ResolvedNode::Nest {
+                keys: vec![op.clone()],
+                nvalue: None,
+                context: None,
+            }
+            .to_condition();
+            q.cond_where(cond);
+            if let TagType::Base(SType::TypedTag) = tag_type {
+                q.and_where(Expr::col(Col::TypedTag).is_not_null());
+            } else if let TagType::Base(SType::Origin) = tag_type {
+                q.and_where(Expr::col(Col::Origin).is_not_null());
+            }
+            q
+        }
+        ResolvedOperand::Calculation(_) => {
+            let [mut l, r]: [SelectStatement; 2] = child_results.try_into().unwrap();
+            l.union(sea_query::UnionType::Intersect, r);
+            l
+        }
+        _ => {
+            Query::select()
+                .columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(Alias::new(view))
+                .to_owned()
+        }
+    })
+}
+
+pub(super) fn build_nest_sql(
+    keys: &[ResolvedOperand],
+    ctx_sql: Option<SelectStatement>,
+    view: &str,
+) -> SelectStatement {
+    let mut stmt = build_resolved_projection_sql(keys.first().unwrap(), view);
+    for key in keys.iter().skip(1) {
+        let key_sub = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(build_resolved_projection_sql(key, view), Alias::new("_key"))
+            .to_owned();
+        stmt.and_where(Expr::col(Col::ItemId).in_subquery(key_sub));
+    }
+    if let Some(ctx) = ctx_sql {
+        let ctx_sub = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(ctx, Alias::new("_ctx"))
+            .to_owned();
+        stmt.and_where(Expr::col(Col::ItemId).in_subquery(ctx_sub));
+    }
+    stmt
+}
+
+pub(super) fn try_dispatch_common(
+    node: &ResolvedNode,
+    child_sqls: Vec<SelectStatement>,
+    view: &str,
+) -> Result<SelectStatement, Vec<SelectStatement>> {
+    match node {
+        ResolvedNode::And(_) => Ok(build_resolved_and_sql(child_sqls, view)),
+        ResolvedNode::Or(_) => Ok(build_resolved_or_sql(child_sqls, view)),
+        ResolvedNode::Difference(_, _) => {
+            let [l, r]: [SelectStatement; 2] = child_sqls.try_into().unwrap();
+            Ok(build_resolved_diff_sql(l, r))
+        }
+        ResolvedNode::Complement(c) => {
+            let [c_sql]: [SelectStatement; 1] = child_sqls.try_into().unwrap();
+            Ok(build_resolved_comp_sql(c.is_boolean_result(), c_sql, view))
+        }
+        ResolvedNode::LabelSetOp { op, .. } => Ok(build_label_set_op_pick_sql(op, child_sqls)),
+        ResolvedNode::Nest { keys, .. } => {
+            Ok(build_nest_sql(keys, child_sqls.into_iter().next(), view))
+        }
+        ResolvedNode::ColumnMatch { tag, label } => Ok(build_column_match_sql(*tag, label, view)),
+        ResolvedNode::Match { storage, sql_type, op, label, .. } => {
+            Ok(build_resolved_match_sql(storage, *sql_type, *op, label, view))
+        }
+        ResolvedNode::TagTagMatch {
+            left_storage, left_sql_type, op, right_storage, right_sql_type,
+        } => Ok(build_resolved_tag_tag_match_sql(
+            left_storage, *left_sql_type, *op, right_storage, *right_sql_type, view,
+        )),
+        ResolvedNode::ScalarMatch { left, op, right } => Ok(build_scalar_match_sql(left, *op, right, view)),
+        _ => Err(child_sqls),
+    }
 }

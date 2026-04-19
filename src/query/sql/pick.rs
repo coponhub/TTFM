@@ -1,20 +1,21 @@
 use crate::db::{Col, QueryResultCol, SqlType};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
-    LabelSetOpKind, NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
+    NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
     ResolvedCalculationNode, ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use crate::types::{ItemKind, Label, SType, TagType};
-use sea_query::{Alias, BinOper, Condition, Expr, Func, IntoIden, Query, SelectStatement, SimpleExpr};
+use crate::types::{ItemKind, Label};
+use sea_query::{Alias, Condition, Expr, Func, IntoIden, Query, SelectStatement, SimpleExpr};
 use super::{
     apply_arithmetic_agg, apply_arithmetic_op, agg_expr,
     build_calculation_eav_expr, build_calculation_expr,
     build_calculation_subquery, build_calculation_subquery_nest, build_nest_pivot_cte, build_nvalue_standalone_subquery,
     build_agg, build_agg_nest, build_resolved_literal_expr, build_resolved_operand_eav_expr,
     build_storage_column_expr, build_tag_value_agg_expr,
-    label_to_simple_expr, label_to_unit_aware_expr, subquery, wrap_in_subquery,
+    label_to_simple_expr, label_to_unit_aware_expr, subquery,
     resolve_count_target,
+    try_dispatch_common, build_resolved_projection_sql,
     AggregationContext, NestContext,
 };
 
@@ -146,40 +147,6 @@ fn add_type_filters(
 
 /// コンテキスト不要なアームを処理します。
 /// 処理できた場合 Ok(sql)、できない場合は child_sqls を Err で返します。
-fn try_dispatch_common(
-    node: &ResolvedNode,
-    child_sqls: Vec<SelectStatement>,
-    view: &str,
-) -> Result<SelectStatement, Vec<SelectStatement>> {
-    match node {
-        ResolvedNode::And(_) => Ok(build_resolved_and_sql(child_sqls, view)),
-        ResolvedNode::Or(_) => Ok(build_resolved_or_sql(child_sqls, view)),
-        ResolvedNode::Difference(_, _) => {
-            let [l, r]: [SelectStatement; 2] = child_sqls.try_into().unwrap();
-            Ok(build_resolved_diff_sql(l, r))
-        }
-        ResolvedNode::Complement(c) => {
-            let [c_sql]: [SelectStatement; 1] = child_sqls.try_into().unwrap();
-            Ok(build_resolved_comp_sql(c.is_boolean_result(), c_sql, view))
-        }
-        ResolvedNode::LabelSetOp { op, .. } => Ok(build_label_set_op_pick_sql(op, child_sqls)),
-        ResolvedNode::Nest { keys, .. } => {
-            Ok(build_nest_sql(keys, child_sqls.into_iter().next(), view))
-        }
-        ResolvedNode::ColumnMatch { tag, label } => Ok(build_column_match_sql(*tag, label, view)),
-        ResolvedNode::Match { storage, sql_type, op, label, .. } => {
-            Ok(build_resolved_match_sql(storage, *sql_type, *op, label, view))
-        }
-        ResolvedNode::TagTagMatch {
-            left_storage, left_sql_type, op, right_storage, right_sql_type,
-        } => Ok(build_resolved_tag_tag_match_sql(
-            left_storage, *left_sql_type, *op, right_storage, *right_sql_type, view,
-        )),
-        ResolvedNode::ScalarMatch { left, op, right } => Ok(build_scalar_match_sql(left, *op, right, view)),
-        _ => Err(child_sqls),
-    }
-}
-
 /// コンテキストなしで SQL を生成します（集約・Nest ノードを含まないクエリ向け）。
 pub fn build_pick(node: &ResolvedNode, view: &str) -> SelectStatement {
     node.fold(&|node, child_sqls: Vec<SelectStatement>| {
@@ -310,52 +277,53 @@ pub fn needs_aggregation_context(node: &ResolvedNode) -> bool {
 /// ノードツリーを走査し、集約フィルタ SQL を事前計算した AggregationContext を返します。
 pub fn build_aggregation_context(node: &ResolvedNode, view: &str) -> AggregationContext {
     let mut ctx = AggregationContext::new();
-    build_agg_context_into(node, view, &mut ctx);
+    build_agg_context_into(node, &mut ctx);  // Phase 1: collect
+    materialize_agg_context(&mut ctx, view); // Phase 2: materialize
     ctx
 }
 
-fn build_agg_context_into(node: &ResolvedNode, view: &str, ctx: &mut AggregationContext) {
+fn build_agg_context_into(node: &ResolvedNode, ctx: &mut AggregationContext) {
     for n in node.walk() {
         match n {
             ResolvedNode::Aggregation(agg)
             | ResolvedNode::AggregationMatch { agg, .. }
             | ResolvedNode::AggregationTagMatch { agg, .. } => {
-                precompute_agg_into(agg, view, ctx);
+                precompute_agg_into(agg, ctx);
             }
             ResolvedNode::AggregationCalculationMatch { agg, calc, .. } => {
-                precompute_agg_into(agg, view, ctx);
-                precompute_operand_aggs_into(&calc.left, view, ctx);
-                precompute_operand_aggs_into(&calc.right, view, ctx);
+                precompute_agg_into(agg, ctx);
+                precompute_operand_aggs_into(&calc.left, ctx);
+                precompute_operand_aggs_into(&calc.right, ctx);
             }
             ResolvedNode::AggregationAggregationMatch { left, right, .. } => {
-                precompute_agg_into(left, view, ctx);
-                precompute_agg_into(right, view, ctx);
+                precompute_agg_into(left, ctx);
+                precompute_agg_into(right, ctx);
             }
             ResolvedNode::NestMatch { nvalue, .. } => {
-                precompute_operand_aggs_into(nvalue, view, ctx);
+                precompute_operand_aggs_into(nvalue, ctx);
             }
             ResolvedNode::NestNestMatch { left_nvalue, right_nvalue, .. } => {
-                precompute_operand_aggs_into(left_nvalue, view, ctx);
-                precompute_operand_aggs_into(right_nvalue, view, ctx);
+                precompute_operand_aggs_into(left_nvalue, ctx);
+                precompute_operand_aggs_into(right_nvalue, ctx);
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 for m in matches {
-                    precompute_operand_aggs_into(&m.nvalue, view, ctx);
+                    precompute_operand_aggs_into(&m.nvalue, ctx);
                 }
             }
             ResolvedNode::Nest { nvalue: Some(nv), .. } => {
-                precompute_operand_aggs_into(nv, view, ctx);
+                precompute_operand_aggs_into(nv, ctx);
             }
             ResolvedNode::CalculationMatch { calc, .. }
             | ResolvedNode::TagCalculationMatch { calc, .. } => {
-                precompute_operand_aggs_into(&calc.left, view, ctx);
-                precompute_operand_aggs_into(&calc.right, view, ctx);
+                precompute_operand_aggs_into(&calc.left, ctx);
+                precompute_operand_aggs_into(&calc.right, ctx);
             }
             ResolvedNode::CalculationCalculationMatch { left_calc, right_calc, .. } => {
-                precompute_operand_aggs_into(&left_calc.left, view, ctx);
-                precompute_operand_aggs_into(&left_calc.right, view, ctx);
-                precompute_operand_aggs_into(&right_calc.left, view, ctx);
-                precompute_operand_aggs_into(&right_calc.right, view, ctx);
+                precompute_operand_aggs_into(&left_calc.left, ctx);
+                precompute_operand_aggs_into(&left_calc.right, ctx);
+                precompute_operand_aggs_into(&right_calc.left, ctx);
+                precompute_operand_aggs_into(&right_calc.right, ctx);
             }
             _ => {}
         }
@@ -364,39 +332,44 @@ fn build_agg_context_into(node: &ResolvedNode, view: &str, ctx: &mut Aggregation
 
 pub fn build_aggregation_context_for_operand(op: &ResolvedOperand, view: &str) -> AggregationContext {
     let mut ctx = AggregationContext::new();
-    precompute_operand_aggs_into(op, view, &mut ctx);
+    precompute_operand_aggs_into(op, &mut ctx);  // Phase 1
+    materialize_agg_context(&mut ctx, view);      // Phase 2
     ctx
 }
 
 pub fn build_aggregation_context_for_agg(agg: &ResolvedAggregationNode, view: &str) -> AggregationContext {
     let mut ctx = AggregationContext::new();
-    precompute_agg_into(agg, view, &mut ctx);
+    precompute_agg_into(agg, &mut ctx);          // Phase 1
+    materialize_agg_context(&mut ctx, view);     // Phase 2
     ctx
 }
 
-fn precompute_operand_aggs_into(operand: &ResolvedOperand, view: &str, ctx: &mut AggregationContext) {
+fn precompute_operand_aggs_into(operand: &ResolvedOperand, ctx: &mut AggregationContext) {
     for op in operand.walk() {
         if let ResolvedOperand::Aggregation(agg) = op {
-            precompute_agg_into(agg, view, ctx);
+            precompute_agg_into(agg, ctx);
         }
     }
 }
 
-fn precompute_agg_into(agg: &ResolvedAggregationNode, view: &str, ctx: &mut AggregationContext) {
+fn precompute_agg_into(agg: &ResolvedAggregationNode, ctx: &mut AggregationContext) {
     let inner = agg.inner_node();
     let key = inner as *const ResolvedNode as usize;
 
-    if !ctx.agg_filters.contains_key(&key) {
+    if !ctx.agg_filters.contains_key(&key) && !ctx.filter_nodes.contains_key(&key) {
         let (_, filter_opt, _) = inner.extract_agg_parts();
         if let Some(filter) = filter_opt {
-            ctx.agg_filters.insert(key, build_pick(&filter, view));
+            ctx.filter_nodes.insert(key, filter);
         }
     }
 
-    if matches!(agg, ResolvedAggregationNode::Count(_)) && !ctx.agg_inner_sqls.contains_key(&key) {
+    if matches!(agg, ResolvedAggregationNode::Count(_))
+        && !ctx.agg_inner_sqls.contains_key(&key)
+        && !ctx.inner_nodes.contains_key(&key)
+    {
         let (_, inner_tag_type) = resolve_count_target(inner);
         if inner_tag_type.is_none() {
-            ctx.agg_inner_sqls.insert(key, build_pick(inner, view));
+            ctx.inner_nodes.insert(key, inner.clone());
         }
     }
 }
@@ -415,7 +388,8 @@ pub fn needs_nest_context(node: &ResolvedNode) -> bool {
 /// ノードツリーを走査し、コンテキスト SQL を事前計算した NestContext を返します。
 pub fn build_nest_context(node: &ResolvedNode, view: &str) -> NestContext {
     let mut ctx = NestContext::new();
-    build_nest_context_into(node, view, &mut ctx);
+    build_nest_context_into(node, &mut ctx);    // Phase 1
+    materialize_nest_context(&mut ctx, view);   // Phase 2
     ctx
 }
 
@@ -424,65 +398,73 @@ pub fn build_nest_context_for_operand(op: &ResolvedOperand, view: &str) -> NestC
     let mut ctx = NestContext::new();
     for o in op.walk() {
         if let ResolvedOperand::Aggregation(agg) = o {
-            build_nest_context_into(agg.inner_node(), view, &mut ctx);
+            build_nest_context_into(agg.inner_node(), &mut ctx); // Phase 1
         }
     }
+    materialize_nest_context(&mut ctx, view); // Phase 2
     ctx
 }
 
-fn build_nest_context_into(node: &ResolvedNode, view: &str, ctx: &mut NestContext) {
+fn build_nest_context_into(node: &ResolvedNode, ctx: &mut NestContext) {
     for n in node.walk() {
         match n {
             ResolvedNode::NestMatch { context, .. } => {
-                if let Some(c) = context { precompute_ctx_into(c, view, ctx); }
+                if let Some(c) = context { precompute_ctx_into(c, ctx); }
             }
             ResolvedNode::NestNestMatch { left_context, right_context, .. } => {
-                if let Some(c) = left_context { precompute_ctx_into(c, view, ctx); }
-                if let Some(c) = right_context { precompute_ctx_into(c, view, ctx); }
+                if let Some(c) = left_context { precompute_ctx_into(c, ctx); }
+                if let Some(c) = right_context { precompute_ctx_into(c, ctx); }
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 for m in matches {
-                    if let Some(c) = &m.context { precompute_ctx_into(c, view, ctx); }
+                    if let Some(c) = &m.context { precompute_ctx_into(c, ctx); }
                 }
             }
             ResolvedNode::Nest { context: Some(c), .. } => {
-                precompute_ctx_into(c, view, ctx);
+                precompute_ctx_into(c, ctx);
             }
             _ => {}
         }
     }
 }
 
-fn precompute_ctx_into(ctx_node: &ResolvedNode, view: &str, ctx: &mut NestContext) {
+fn precompute_ctx_into(ctx_node: &ResolvedNode, ctx: &mut NestContext) {
     let key = ctx_node as *const ResolvedNode as usize;
-    if !ctx.contexts.contains_key(&key) {
-        ctx.contexts.insert(key, build_pick(ctx_node, view));
+    if !ctx.contexts.contains_key(&key) && !ctx.context_nodes.contains_key(&key) {
+        ctx.context_nodes.insert(key, ctx_node.clone());
     }
 }
 
-
-fn build_nest_sql(
-    keys: &[ResolvedOperand],
-    ctx_sql: Option<SelectStatement>,
-    view: &str,
-) -> SelectStatement {
-    let mut stmt = build_resolved_projection_sql(keys.first().unwrap(), view);
-    for key in keys.iter().skip(1) {
-        let key_sub = Query::select()
-            .column(Col::ItemId)
-            .from_subquery(build_resolved_projection_sql(key, view), Alias::new("_key"))
-            .to_owned();
-        stmt.and_where(Expr::col(Col::ItemId).in_subquery(key_sub));
+/// Phase 2: context_nodes を SQL 化して contexts へ移動します。
+fn materialize_nest_context(ctx: &mut NestContext, view: &str) {
+    let nodes: Vec<(usize, ResolvedNode)> = ctx.context_nodes.drain().collect();
+    for (key, node) in nodes {
+        ctx.contexts.insert(key, build_filter_sql(&node, view));
     }
-    if let Some(ctx) = ctx_sql {
-        let ctx_sub = Query::select()
-            .column(Col::ItemId)
-            .from_subquery(ctx, Alias::new("_ctx"))
-            .to_owned();
-        stmt.and_where(Expr::col(Col::ItemId).in_subquery(ctx_sub));
-    }
-    stmt
 }
+
+/// Phase 2: filter_nodes / inner_nodes を SQL 化して agg_filters / agg_inner_sqls へ移動します。
+fn materialize_agg_context(ctx: &mut AggregationContext, view: &str) {
+    let filter_nodes: Vec<(usize, ResolvedNode)> = ctx.filter_nodes.drain().collect();
+    for (key, node) in filter_nodes {
+        ctx.agg_filters.insert(key, build_filter_sql(&node, view));
+    }
+    let inner_nodes: Vec<(usize, ResolvedNode)> = ctx.inner_nodes.drain().collect();
+    for (key, node) in inner_nodes {
+        ctx.agg_inner_sqls.insert(key, build_filter_sql(&node, view));
+    }
+}
+
+/// Phase 2 専用 SQL ビルダー。フィルタ・コンテキストノード向け（集約ノードを含まない前提）。
+fn build_filter_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
+    node.fold(&|node, child_sqls: Vec<SelectStatement>| {
+        match try_dispatch_common(node, child_sqls, view) {
+            Ok(sql) => sql,
+            Err(_) => unreachable!("build_filter_sql: filter/context nodes must not contain aggregation or nest nodes"),
+        }
+    })
+}
+
 
 fn build_calculation_match_sql(
     calc: &ResolvedCalculationNode,
@@ -687,24 +669,6 @@ fn build_agg_tag_match_nest(
     stmt
 }
 
-
-fn build_resolved_tag_tag_match_sql(
-    left_storage: &StorageMapping,
-    left_sql_type: SqlType,
-    op: ComparisonOp,
-    right_storage: &StorageMapping,
-    right_sql_type: SqlType,
-    view: &str,
-) -> SelectStatement {
-    let mut q = Query::select();
-    q.column(Col::ItemId)
-        .from(Alias::new(view))
-        .group_by_col(Col::ItemId);
-    let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
-    let right_expr = build_tag_value_agg_expr(right_storage, right_sql_type);
-    q.and_having(left_expr.binary(to_bin_op(op), right_expr));
-    q
-}
 
 /// EAV 構造における Tag vs Calculation 比較用の SQL を生成します。
 fn build_tag_calc_match_eav_sql(
@@ -1038,49 +1002,6 @@ fn build_nest_nest_match_sql(
     }
 }
 
-fn build_scalar_match_sql(
-    left: &Label,
-    op: ComparisonOp,
-    right: &Label,
-    view: &str,
-) -> SelectStatement {
-    // リテラル同士のスカラー比較: is_boolean_result() 経由で
-    // build_boolean_sql が使われるため通常ここには到達しないが、
-    // wrap_boolean_collider 等から呼ばれる場合に備える。
-    let mut stmt = Query::select();
-    stmt.from(Alias::new(view));
-    stmt.column(Col::ItemId);
-    let cond = Expr::expr(label_to_unit_aware_expr(left))
-        .binary(to_bin_op(op), label_to_unit_aware_expr(right));
-    stmt.cond_where(cond);
-    stmt.limit(1);
-    stmt
-}
-
-fn build_label_set_op_pick_sql(
-    op: &LabelSetOpKind,
-    child_sqls: Vec<SelectStatement>,
-) -> SelectStatement {
-    // LabelSetOp がフィルタコンテキスト（Nest の右辺等）で呼ばれる場合:
-    // item-level の集合演算として処理する（ラベル値集合演算ではなくアイテム ID 集合）
-    match op {
-        LabelSetOpKind::Union => {
-            reduce_with_union(child_sqls, sea_query::UnionType::Distinct, Query::select().to_owned())
-        }
-        LabelSetOpKind::Intersect => {
-            reduce_with_union(child_sqls, sea_query::UnionType::Intersect, Query::select().to_owned())
-        }
-        LabelSetOpKind::Except => {
-            let mut it = child_sqls.into_iter();
-            if let (Some(l), Some(r)) = (it.next(), it.next()) {
-                build_resolved_diff_sql(l, r)
-            } else {
-                Query::select().to_owned()
-            }
-        }
-    }
-}
-
 // ========== Moved from mod.rs ==========
 
 fn get_required_row_tags(node: &ResolvedNode) -> Vec<String> {
@@ -1264,193 +1185,6 @@ fn build_tag_value_eav_row_expr(
         StorageMapping::Column(col) => Expr::col(*col).into(),
         StorageMapping::Virtual => Expr::val(None::<f64>).into(),
     }
-}
-
-/// `child_sqls` を `union_type` で結合します。空の場合は `empty_fallback` を返します。
-fn reduce_with_union(
-    child_sqls: Vec<SelectStatement>,
-    union_type: sea_query::UnionType,
-    empty_fallback: SelectStatement,
-) -> SelectStatement {
-    child_sqls.into_iter()
-        .map(wrap_in_subquery)
-        .reduce(|mut acc, next| { acc.union(union_type, next); acc })
-        .unwrap_or(empty_fallback)
-}
-
-fn build_resolved_and_sql(
-    child_sqls: Vec<SelectStatement>,
-    view: &str,
-) -> SelectStatement {
-    let fallback = Query::select()
-        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .distinct()
-        .from(Alias::new(view))
-        .to_owned();
-    reduce_with_union(child_sqls, sea_query::UnionType::Intersect, fallback)
-}
-
-fn build_resolved_or_sql(
-    child_sqls: Vec<SelectStatement>,
-    view: &str,
-) -> SelectStatement {
-    let fallback = Query::select()
-        .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from(Alias::new(view))
-        .and_where(Expr::val(1).eq(0))
-        .to_owned();
-    reduce_with_union(child_sqls, sea_query::UnionType::Distinct, fallback)
-}
-
-fn build_resolved_diff_sql(
-    l: SelectStatement,
-    r: SelectStatement,
-) -> SelectStatement {
-    let mut q = wrap_in_subquery(l);
-    q.union(sea_query::UnionType::Except, wrap_in_subquery(r));
-    q
-}
-
-fn build_resolved_comp_sql(
-    is_boolean: bool,
-    c_sql: SelectStatement,
-    view: &str,
-) -> SelectStatement {
-    let mut q = if is_boolean {
-        Query::select()
-            .expr_as(Expr::val(1i64), Col::ItemId)
-            .expr_as(Expr::val(0i64), Col::Rank)
-            .expr_as(
-                Expr::val(<&'static str>::from(ItemKind::Volatile)),
-                Col::ItemKind,
-            )
-            .to_owned()
-    } else {
-        Query::select()
-            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view))
-            .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]))
-            .to_owned()
-    };
-    let mut eq = Query::select();
-    eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from_subquery(c_sql, crate::db::Tbl::NotSide);
-    q.union(sea_query::UnionType::Except, eq);
-    q
-}
-
-fn build_resolved_match_sql(
-    storage: &StorageMapping,
-    sql_type: crate::db::SqlType,
-    op: ComparisonOp,
-    label: &Label,
-    view: &str,
-) -> SelectStatement {
-    let mut q = Query::select();
-    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .distinct()
-        .from(Alias::new(view));
-
-    q.cond_where(storage.to_condition(op, label, sql_type));
-    q
-}
-
-fn build_column_match_sql(
-    tag: SType,
-    label: &Label,
-    view: &str,
-) -> SelectStatement {
-    let mut q = Query::select();
-    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .distinct()
-        .from(Alias::new(view));
-
-    match label.value() {
-        crate::types::LabelValue::Integer(i) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelInt.into()
-            } else {
-                tag
-            };
-            q.and_where(Expr::col(t).eq(i));
-        }
-        crate::types::LabelValue::String(s) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelStr.into()
-            } else {
-                tag
-            };
-
-            let val_str = if s.starts_with('^') {
-                format!("{}*", &s[1..])
-            } else {
-                s.clone()
-            };
-
-            q.and_where(
-                Expr::col(t)
-                    .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
-            );
-        }
-        crate::types::LabelValue::Literal(s) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelStr.into()
-            } else {
-                tag
-            };
-            q.and_where(Expr::col(t).eq(s.as_str()));
-        }
-        crate::types::LabelValue::Boolean(b) => {
-            q.and_where(Expr::col(Col::LabelBool).eq(b));
-        }
-        crate::types::LabelValue::Double(bits) => {
-            q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
-        }
-        crate::types::LabelValue::Null => {
-            q.and_where(Expr::col(Col::LabelStr).is_null());
-        }
-    }
-    q
-}
-
-fn build_resolved_projection_sql(
-    op: &ResolvedOperand,
-    view: &str,
-) -> SelectStatement {
-    op.fold(&|op, child_results: Vec<SelectStatement>| match op {
-        ResolvedOperand::TagRef { tag_type, .. } => {
-            let mut q = Query::select();
-            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-                .distinct()
-                .from(Alias::new(view));
-            let cond = ResolvedNode::Nest {
-                keys: vec![op.clone()],
-                nvalue: None,
-                context: None,
-            }
-            .to_condition();
-            q.cond_where(cond);
-            if let TagType::Base(SType::TypedTag) = tag_type {
-                q.and_where(Expr::col(Col::TypedTag).is_not_null());
-            } else if let TagType::Base(SType::Origin) = tag_type {
-                q.and_where(Expr::col(Col::Origin).is_not_null());
-            }
-            q
-        }
-        ResolvedOperand::Calculation(_) => {
-            let [mut l, r]: [SelectStatement; 2] = child_results.try_into().unwrap();
-            l.union(sea_query::UnionType::Intersect, r);
-            l
-        }
-        _ => {
-            Query::select()
-                .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-                .distinct()
-                .from(Alias::new(view))
-                .to_owned()
-        }
-    })
 }
 
 /// 単一キーの HAVING ベース nest フィルタ SQL を構築します。
