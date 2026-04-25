@@ -1,5 +1,6 @@
 use std::fs::File;
 use ttfm::query::lens_resolver::Resolver;
+use super::has_item_tags;
 
 // ──────────────────────────────────────────────
 // define_cases! 移行済み (FileManager e2e テスト)
@@ -28,7 +29,7 @@ define_cases! {
         format_query: super::default_scope,
         query: r#"(((parentdir: &: count(extension:rs)) / (parentdir: &: count())) * 10) :> 5"#,
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "Should return items, not projection. Got: {:?}", res.type_for_projection);
+            assert!(!has_item_tags(&res.results), "Should return items, not projection");
             assert!(!res.results.is_empty(), "Should have items from src/");
             for item in &res.results {
                 assert!(!item.name.contains("doc"), "doc/ items should be excluded, but got: {}", item.name);
@@ -161,14 +162,9 @@ fn test_calculation_nvalue_label_groups() {
         "Only items from src/ should be picked"
     );
 
-    let proj_type = resolver
-        .get_projection()
-        .expect("Should have projection type");
-    let label_results = fetcher
-        .fetch_label_groups(&proj_type, 100, 0)
-        .expect("fetch_label_groups should not fail");
-    assert_eq!(label_results.len(), 1, "Only 'src' group should appear");
-    assert_eq!(label_results[0].name, "src");
+    let results = fetcher.fetch(100, 0).expect("fetch should not fail");
+    assert_eq!(results.len(), 4, "Should return 4 items from src/");
+    assert!(!has_item_tags(&results), "Should return items, not label groups");
 }
 
 #[test]
@@ -229,15 +225,7 @@ fn test_calculation_nvalue_gt_zero() {
         "All items should be picked"
     );
 
-    let proj_type = resolver
-        .get_projection()
-        .expect("Should have projection type");
-    let label_results = fetcher
-        .fetch_label_groups(&proj_type, 100, 0)
-        .expect("fetch_label_groups should not fail");
-    assert_eq!(label_results.len(), 2);
-    let names: Vec<&str> =
-        label_results.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"src"));
-    assert!(names.contains(&"doc"));
+    let results = fetcher.fetch(100, 0).expect("fetch should not fail");
+    assert_eq!(results.len(), 8, "Should return all 8 items");
+    assert!(!has_item_tags(&results), "Should return items, not label groups");
 }

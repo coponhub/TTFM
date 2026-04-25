@@ -1,7 +1,7 @@
 use crate::query::lens_resolver::Resolver;
 use crate::query::sql::{BuildPick, PickNode};
 use crate::response::{RawTagRow, SearchResult};
-use crate::types::{ItemId, ItemKind, SType, TagType};
+use crate::types::{ItemId, ItemKind, SType};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,8 +63,42 @@ impl<'a> Fetcher<'a> {
         })
     }
 
-    /// 新規：計算クエリ（集約またはブーリアン）を実行し、SearchResult形式で返します。
-    pub fn fetch_computation(&self) -> Result<SearchResult> {
+    /// クエリの種別を ResolvedNode の構造から判断し、適切な結果を返す単一エントリポイント。
+    ///
+    /// `n` は要求件数（0 = 全件）。内部で n+1 件取得して has_more 判定を呼び出し側に委ねる。
+    pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<SearchResult>> {
+        let resolver = &self.resolver;
+
+        // LabelSetOp (projection 集合演算: INTERSECT / UNION / EXCEPT)
+        // get_projection() が None (Lv.3+ 異種キー Union 等) の場合はフラットリストにフォールスルー
+        if resolver.is_label_set_op() {
+            if resolver.get_projection().is_some() {
+                return self.fetch_label_groups(n, offset);
+            }
+        }
+
+        // Nest (プロジェクション) — nvalue 比較条件なし
+        if resolver.get_projection().is_some() {
+            if resolver.get_nvalue_condition().is_none() {
+                return self.fetch_label_groups(n, offset);
+            }
+        }
+
+        // スカラー / ブーリアン結果 — プロジェクションなし
+        if (resolver.get_scalar_expression().is_some()
+            || resolver.resolved_query.is_boolean_result())
+            && resolver.get_projection().is_none()
+        {
+            return self.fetch_computation().map(|r| vec![r]);
+        }
+
+        // 通常アイテム検索
+        let limit = if n > 0 { Some(n + 1) } else { None };
+        self.fetch_items(limit, Some(offset))
+    }
+
+    /// 計算クエリ（集約またはブーリアン）を実行し、SearchResult形式で返します。
+    fn fetch_computation(&self) -> Result<SearchResult> {
         if let Some(_) = self.resolver.get_scalar_expression() {
             self.compute_aggregation()
         } else if self.resolver.resolved_query.is_boolean_result() {
@@ -195,7 +229,7 @@ impl<'a> Fetcher<'a> {
     }
 
     /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
-    pub fn fetch_items(
+    fn fetch_items(
         &self,
         limit: Option<usize>,
         offset: Option<usize>,
@@ -233,32 +267,16 @@ impl<'a> Fetcher<'a> {
     }
 
     /// ラベル（型）ごとの集約結果を取得します。
-    pub fn fetch_label_groups(
+    fn fetch_label_groups(
         &self,
-        proj_type: &TagType,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SearchResult>> {
-        use crate::response::SearchResult;
-        use crate::types::ItemId;
-        use duckdb::types::Value;
         use sea_query::PostgresQueryBuilder;
 
-        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
-        let select_sql =
-            if let Some(node) = self.resolver.get_label_set_op_node() {
-                crate::query::sql::build_fetch_label_set_op_sql(
-                    node, "oneview", limit, offset,
-                )?
-            } else {
-                crate::query::sql::build_fetch_label_groups_sql(
-                    &pick,
-                    self.resolver,
-                    proj_type,
-                    limit,
-                    offset,
-                )?
-            };
+        let select_sql = crate::query::sql::build_fetch_nest_sql(
+            self.resolver, "oneview", limit, offset,
+        )?;
 
         let sql_str = select_sql.to_string(PostgresQueryBuilder);
         if std::env::var("TTFM_DEBUG").is_ok() {
@@ -266,86 +284,12 @@ impl<'a> Fetcher<'a> {
         }
 
         let mut stmt = self.conn.prepare(&sql_str)?;
-        let mut rows = stmt.query([])?;
+        let item_iter =
+            stmt.query_map([], |row| self.decode_nest_item_from_row(row))?;
+
         let mut results = Vec::new();
-
-        let operands = self.resolver.resolved_query.get_projection_operands();
-
-        while let Some(row) = rows.next()? {
-            // SQLから label_value, group_total, item_refs を取得
-            // ラベル値を解決（複数キー対応）
-            let label_str = if let Some(ops) = operands {
-                let mut label_parts = Vec::new();
-                if ops.len() > 1 {
-                    for i in 0..ops.len() {
-                        let col_name = format!("label_value_{}", i);
-                        let val: Value = row.get(col_name.as_str())?;
-                        label_parts.push(
-                            ops[i].resolve_label(self.resolver.lens(), &val),
-                        );
-                    }
-                } else {
-                    let label_val: Value = row.get("label_value")?;
-                    label_parts.push(
-                        ops[0].resolve_label(self.resolver.lens(), &label_val),
-                    );
-                }
-                label_parts.join(" &: ")
-            } else {
-                // LabelSetOp path: operands not available, read label_value directly
-                let label_val: Value = row.get("label_value")?;
-                match &label_val {
-                    Value::Text(s) => s.clone(),
-                    Value::BigInt(i) => i.to_string(),
-                    Value::Double(d) => d.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => "null".to_string(),
-                }
-            };
-
-            let total_count: i64 = row.get("group_total")?;
-            let Value::List(item_refs_list) = row.get("item_refs")? else {
-                continue;
-            };
-
-            // Label volatile item を作成
-            let label_id = ItemId::new_volatile();
-            let mut label_item = SearchResult::new_empty(
-                label_id,
-                ItemKind::Volatile,
-                label_str.clone(),
-            );
-
-            // SQLで生成済みの "name#id" 文字列をタグとして追加（Type="item"は明示的に指定）
-            for item_ref in item_refs_list {
-                if let Value::Text(s) = item_ref {
-                    let typed_tag = crate::types::TypedTag::new("item", s);
-                    label_item.tags.entries.push(crate::types::TagEntry {
-                        label: typed_tag.label,
-                        origin: crate::types::Origin::System,
-                    });
-                }
-            }
-
-            // total_count を projected_label に保存
-            label_item.projected_label =
-                Some(crate::types::Label::from(format!("{}", total_count)));
-
-            // nvalue カラムがある場合、タグとして格納
-            if let Ok(nv) = row.get::<_, Value>("nvalue") {
-                let nv_label = crate::types::LabelValue::from(nv);
-                if !matches!(nv_label, crate::types::LabelValue::Null) {
-                    label_item.apply_tag(
-                        crate::types::Label::resolve(
-                            crate::types::TagType::from("nvalue"),
-                            nv_label,
-                        ),
-                        crate::types::Origin::System,
-                    );
-                }
-            }
-
-            results.push(label_item);
+        for item in item_iter {
+            results.push(item?);
         }
 
         Ok(results)
@@ -393,49 +337,99 @@ impl<'a> Fetcher<'a> {
         crate::util::save_parquet(self.conn, &select_sql, path, metadata)
     }
 
-    /// DuckDB の Row から SearchResult を構築します。
+    /// DuckDB の Row から SearchResult を構築します（通常アイテム用）。
     fn decode_item_from_row(
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<SearchResult> {
-        use duckdb::types::Value;
+        let (mut res, raw_tags) = read_base_from_row(row)?;
+        for tag_row in raw_tags {
+            #[allow(deprecated)]
+            res.apply_raw_tag(tag_row);
+        }
+        Ok(res)
+    }
 
-        let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
-        let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
+    /// DuckDB の Row から Projection (Nest) 結果の SearchResult を構築します。
+    /// name タグは res.name にセットするが tags.entries には追加しない。
+    /// projected_label タグは res.projected_label に移動する。
+    fn decode_nest_item_from_row(
+        &self,
+        row: &duckdb::Row,
+    ) -> duckdb::Result<SearchResult> {
+        use crate::types::{Label, LabelValue, TagType};
 
-        let kind = item_kind
-            .as_str()
-            .parse::<ItemKind>()
-            .unwrap_or(ItemKind::Volatile);
-        let id = if kind.is_volatile() {
-            // "volatile" の場合、既存のカラム値は ID として扱う
-            ItemId::Volatile(id_val as u64)
-        } else {
-            ItemId::Stored(id_val)
-        };
-
-        let mut res = SearchResult::new_empty(id, kind, String::new());
-        res.rank = row
-            .get::<_, Option<i64>>(SType::Rank.name().as_str())?
-            .unwrap_or(0);
-
-        let Value::List(tags) =
-            row.get(crate::db::QueryResultCol::Tags.to_string().as_str())?
-        else {
-            return Ok(res);
-        };
-
-        for v in tags {
-            let Value::Struct(map) = v else {
-                continue;
-            };
-            if let Some(row) = RawTagRow::from_map(&map) {
-                #[allow(deprecated)]
-                res.apply_raw_tag(row);
+        let (mut res, raw_tags) = read_base_from_row(row)?;
+        for tag_row in raw_tags {
+            match tag_row.tag_type.as_str() {
+                "name" => {
+                    if let Some(s) = tag_row.label_str {
+                        // SQL の CAST(double AS VARCHAR) は "8.0" を返すが、
+                        // 旧来の Rust 側フォーマット (f64::to_string) は "8" を返す。
+                        // f64 として解釈できる場合は Rust 側で再フォーマットする。
+                        res.name =
+                            s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                    }
+                }
+                "projected_label" => {
+                    if let Some(i) = tag_row.label_int {
+                        res.projected_label = Some(Label::resolve(
+                            TagType::from("projected_label"),
+                            LabelValue::Integer(i),
+                        ));
+                    }
+                }
+                _ => {
+                    #[allow(deprecated)]
+                    res.apply_raw_tag(tag_row);
+                }
             }
         }
         Ok(res)
     }
+}
+
+/// DuckDB Row から item_id / item_kind / rank と raw tag rows を読み取る共通ヘルパー。
+fn read_base_from_row(
+    row: &duckdb::Row,
+) -> duckdb::Result<(crate::response::SearchResult, Vec<RawTagRow>)> {
+    use duckdb::types::Value;
+
+    let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
+    let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
+
+    let kind = item_kind
+        .as_str()
+        .parse::<ItemKind>()
+        .unwrap_or(ItemKind::Volatile);
+    let id = if kind.is_volatile() {
+        ItemId::Volatile(id_val as u64)
+    } else {
+        ItemId::Stored(id_val)
+    };
+
+    let mut res = crate::response::SearchResult::new_empty(id, kind, String::new());
+    res.rank = row
+        .get::<_, Option<i64>>(SType::Rank.name().as_str())?
+        .unwrap_or(0);
+
+    let raw_tags = match row
+        .get::<_, Value>(crate::db::QueryResultCol::Tags.to_string().as_str())?
+    {
+        Value::List(tags) => tags
+            .into_iter()
+            .filter_map(|v| {
+                if let Value::Struct(map) = v {
+                    RawTagRow::from_map(&map)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Ok((res, raw_tags))
 }
 
 /// DB から ID リストを抽出する汎用ヘルパー。
@@ -735,10 +729,8 @@ mod tests {
         )
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
 
-        let results = fetcher.fetch_label_groups(&proj_type, 100, 0).unwrap();
+        let results = fetcher.fetch_label_groups(100, 0).unwrap();
 
         // 2つの parentdir グループ: docs, src
         assert_eq!(results.len(), 2, "Should have 2 parentdir groups");
@@ -814,10 +806,8 @@ mod tests {
         let resolver =
             crate::query::lens_resolver::Resolver::new("extension:").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
 
-        let results = fetcher.fetch_label_groups(&proj_type, 100, 0).unwrap();
+        let results = fetcher.fetch_label_groups(100, 0).unwrap();
         assert_eq!(results.len(), 1);
 
         // nvalue タグがないことを確認
@@ -825,5 +815,148 @@ mod tests {
             e.label.tag_type() == crate::types::TagType::from("nvalue")
         });
         assert!(!has_nvalue, "Normal projection should NOT have nvalue tag");
+    }
+
+    fn make_oneview(conn: &duckdb::Connection) {
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn insert_row(conn: &duckdb::Connection, id: i64, rank: i64, tag_type: &str, label_str: &str) {
+        conn.execute(
+            &format!(
+                "INSERT INTO oneview VALUES ({}, {}, 'file', 'user', '{}', '{}', NULL, NULL, NULL)",
+                id, rank, tag_type, label_str
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    fn insert_bool_row(conn: &duckdb::Connection, id: i64, rank: i64, tag_type: &str, label_str: &str, label_bool: bool) {
+        conn.execute(
+            &format!(
+                "INSERT INTO oneview VALUES ({}, {}, 'file', 'user', '{}', '{}', NULL, NULL, {})",
+                id, rank, tag_type, label_str, label_bool
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    // --- fetch() 統合テスト ---
+
+    #[test]
+    fn test_fetch_items_path() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        make_oneview(&conn);
+        insert_row(&conn, 1, 10, "extension", "rs");
+        insert_bool_row(&conn, 1, 10, "is_dir", "false", false);
+        insert_row(&conn, 2, 5, "extension", "txt");
+        insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
+
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+
+        let results = fetcher.fetch(100, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        // item: タグは注入されないはず（items パス）
+        let has_item_tag = results[0]
+            .tags
+            .entries
+            .iter()
+            .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+        assert!(!has_item_tag, "Items path should not have item: tags");
+    }
+
+    #[test]
+    fn test_fetch_projection_path() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        make_oneview(&conn);
+        insert_row(&conn, 1, 10, "extension", "rs");
+        insert_bool_row(&conn, 1, 10, "is_dir", "false", false);
+        insert_row(&conn, 2, 5, "extension", "txt");
+        insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
+
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("extension:").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+
+        let results = fetcher.fetch(100, 0).unwrap();
+        assert_eq!(results.len(), 2, "Should have 2 extension labels");
+        // item: タグが注入されているはず（projection パス）
+        for r in &results {
+            let has_item_tag = r
+                .tags
+                .entries
+                .iter()
+                .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+            assert!(
+                has_item_tag,
+                "Projection result '{}' should have item: tags",
+                r.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_fetch_scalar_path() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        make_oneview(&conn);
+        conn.execute(
+            "INSERT INTO oneview VALUES (1, 10, 'file', 'user', 'size', NULL, 100, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES (2, 5, 'file', 'user', 'size', NULL, 200, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let resolver =
+            crate::query::lens_resolver::Resolver::new("sum(size:)").unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+
+        let results = fetcher.fetch(100, 0).unwrap();
+        assert_eq!(results.len(), 1, "Scalar should return exactly 1 result");
+        assert!(results[0].id.is_volatile());
+    }
+
+    #[test]
+    fn test_fetch_nvalue_condition_uses_items_path() {
+        // nvalue_condition ありは items パスに落ちる
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        make_oneview(&conn);
+        insert_row(&conn, 1, 10, "parentdir", "src");
+        insert_row(&conn, 1, 10, "extension", "rs");
+        insert_bool_row(&conn, 1, 10, "is_dir", "false", false);
+        insert_row(&conn, 2, 5, "parentdir", "docs");
+        insert_row(&conn, 2, 5, "extension", "md");
+        insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
+
+        let resolver = crate::query::lens_resolver::Resolver::new(
+            "parentdir: &: (count(extension:rs) > 0)",
+        )
+        .unwrap();
+        let fetcher = Fetcher::new(&resolver, &conn);
+
+        let results = fetcher.fetch(100, 0).unwrap();
+        // item: タグは注入されないはず（items パス）
+        for r in &results {
+            let has_item_tag = r
+                .tags
+                .entries
+                .iter()
+                .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+            assert!(!has_item_tag, "NestMatch path should not have item: tags");
+        }
     }
 }

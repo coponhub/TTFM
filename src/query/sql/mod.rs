@@ -51,7 +51,6 @@ use crate::db::{Col, Tbl};
 use crate::query::ast::QueryNode;
 use crate::query::lens_resolver::{ResolvedNode, ResolvedOperand};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use crate::types::TagType;
 use sea_query::{Alias, Expr, Query, SelectStatement};
 
 
@@ -258,10 +257,48 @@ pub fn build_flat_table_sql(
     q
 }
 
-pub fn build_fetch_label_groups_sql(
+/// ネストクエリ（プロジェクションまたは LabelSetOp）の結果を取得する SQL を生成します。
+/// `label_value` / `group_total` / `item_refs` スキーマを返します。
+pub fn build_fetch_nest_sql(
+    resolver: &crate::query::lens_resolver::Resolver,
+    view: &str,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<SelectStatement> {
+    if let Some(node) = resolver.get_label_set_op_node() {
+        build_label_set_op_sql(node, view, limit, offset)
+    } else {
+        let pick = PickNode::new(&resolver.resolved_query, view);
+        build_label_groups_sql(&pick, resolver, limit, offset)
+    }
+}
+
+/// raw_tag_row_columns() の 8 フィールドを持つ struct_pack 行を文字列で生成する。
+/// item_id と item_kind は volatile ダミー値で固定。
+/// type_str / label_str_expr / label_int_expr / label_double_expr に SQL 式を渡す。
+fn make_tag_struct_pack(
+    type_str: &str,
+    label_str_expr: &str,
+    label_int_expr: &str,
+    label_double_expr: &str,
+) -> String {
+    format!(
+        concat!(
+            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
+            r#""type" := '{type_str}', "label_str" := {label_str_expr}, "#,
+            r#""label_int" := {label_int_expr}, "label_double" := {label_double_expr}, "#,
+            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+        ),
+        type_str = type_str,
+        label_str_expr = label_str_expr,
+        label_int_expr = label_int_expr,
+        label_double_expr = label_double_expr,
+    )
+}
+
+fn build_label_groups_sql(
     pick: &PickNode<'_>,
     resolver: &crate::query::lens_resolver::Resolver,
-    proj_type: &TagType,
     limit: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
@@ -272,7 +309,11 @@ pub fn build_fetch_label_groups_sql(
     let pick_sql = pick.build_pick();
 
     // 1. プロジェクション対象の物理カラムを特定
-    let desc = resolver.lens().look_up_or_default(proj_type);
+    let proj_type = resolver
+        .resolved_query
+        .get_projection()
+        .ok_or_else(|| anyhow::anyhow!("build_label_groups_sql: no projection type in resolved query"))?;
+    let desc = resolver.lens().look_up_or_default(&proj_type);
     let col_iden = match &desc.storage {
         StorageMapping::Column(col) => *col,
         StorageMapping::RowTag { column, .. } => *column,
@@ -539,11 +580,51 @@ pub fn build_fetch_label_groups_sql(
 
     // --- CTE 定義終了 ---
 
-    // 4. 最終SELECT: シンプルな文字列連結で item:name#id 形式のリストを生成
-    let mut q = Query::select();
+    // 4. 最終 SELECT: item_id / rank / item_kind / tags (struct_pack) で統一スキーマ出力
+    //
+    // ラベル値の SQL 式 (VARCHAR にキャスト済み)
+    let label_ref = if proj_operands.len() > 1 {
+        (0..proj_operands.len())
+            .map(|i| {
+                format!(
+                    "CAST({}.key{} AS VARCHAR)",
+                    Iden::to_string(&Tbl::TopItems),
+                    i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" || ' &: ' || ")
+    } else {
+        format!(
+            "CAST({}.{} AS VARCHAR)",
+            Iden::to_string(&Tbl::TopItems),
+            label_col_name
+        )
+    };
 
-    // nameを取得するサブクエリを文字列で構築
-    // (SELECT label_str FROM oneview WHERE item_id = top_items.item_id AND type = 'name' LIMIT 1)
+    // Volatile item_id: グループの連番 (1 始まり)
+    let partition_order = if proj_operands.len() > 1 {
+        (0..proj_operands.len())
+            .map(|i| format!("{}.key{}", Iden::to_string(&Tbl::TopItems), i))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        format!("{}.{}", Iden::to_string(&Tbl::TopItems), label_col_name)
+    };
+    let volatile_id_expr = format!(
+        "row_number() OVER (ORDER BY {})",
+        partition_order
+    );
+
+    // name タグ struct_pack
+    let name_sp = make_tag_struct_pack(
+        "name",
+        &format!("({})", label_ref),
+        "NULL::BIGINT",
+        "NULL::DOUBLE",
+    );
+
+    // item: タグ struct_pack (list() 集約で使用)
     let name_subquery = format!(
         "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
         Iden::to_string(&Col::LabelStr),
@@ -553,48 +634,40 @@ pub fn build_fetch_label_groups_sql(
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&Col::Type)
     );
-
-    // CONCAT式を文字列で構築（COALESCEでサブクエリの結果を使用）
-    let concat_expr = format!(
+    let item_label_str = format!(
         "CONCAT(COALESCE({}, 'unknown'), '#', CAST({}.{} AS VARCHAR))",
         name_subquery,
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId)
     );
-
-    // list()関数全体を文字列で構築（rankはtop_itemsから取得）
-    let list_expr = Expr::cust(format!(
+    let item_sp = make_tag_struct_pack("item", &item_label_str, "NULL::BIGINT", "NULL::DOUBLE");
+    let item_list_expr = format!(
         "list({} ORDER BY {}.{} DESC, {}.{} DESC)",
-        concat_expr,
+        item_sp,
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::Rank),
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId)
-    ));
+    );
 
-    q.with_cte(with_clause);
-    if proj_operands.len() > 1 {
-        for i in 0..proj_operands.len() {
-            q.expr_as(
-                Expr::col((Tbl::TopItems, Alias::new(&format!("key{}", i)))),
-                Alias::new(&format!("label_value_{}", i)),
-            );
-        }
-    } else {
-        q.expr_as(
-            Expr::col((Tbl::TopItems, label_col.clone())),
-            Alias::new("label_value"),
-        );
-    }
-    q.expr_as(
-        Expr::col((Tbl::TopItems, Tbl::GroupTotal)),
-        Alias::new("group_total"),
-    )
-    .expr_as(list_expr, Alias::new("item_refs"));
+    // projected_label タグ struct_pack (グループ総数)
+    let proj_label_sp = format!(
+        concat!(
+            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
+            r#""type" := 'projected_label', "label_str" := NULL::VARCHAR, "#,
+            r#""label_int" := ANY_VALUE({}.{})::BIGINT, "label_double" := NULL::DOUBLE, "#,
+            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+        ),
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Tbl::GroupTotal)
+    );
 
-    // nvalue カラムの追加（スカラーサブクエリで nvalue_agg CTE を参照）
+    // tags = [name] || list(item:) || [projected_label] (|| [nvalue] があれば追加)
+    let mut tags_expr =
+        format!("[{}] || {} || [{}]", name_sp, item_list_expr, proj_label_sp);
+
     if has_nvalue {
-        let nvalue_lookup = if proj_operands.len() > 1 {
+        let nvalue_subq = if proj_operands.len() > 1 {
             let mut join_cond = "TRUE".to_string();
             for i in 0..proj_operands.len() {
                 join_cond.push_str(&format!(
@@ -604,31 +677,45 @@ pub fn build_fetch_label_groups_sql(
                     i
                 ));
             }
-            Expr::cust(format!(
-                "(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE {})",
-                join_cond
-            ))
+            format!("(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE {})", join_cond)
         } else {
-            Expr::cust(format!(
+            format!(
                 "(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE \"group_label\" = {}.{})",
                 Iden::to_string(&Tbl::TopItems),
                 &label_col_name,
-            ))
+            )
         };
-        q.expr_as(nvalue_lookup, Alias::new("nvalue"));
+        let nvalue_sp = format!(
+            concat!(
+                r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
+                r#""type" := 'nvalue', "label_str" := NULL::VARCHAR, "#,
+                r#""label_int" := NULL::BIGINT, "label_double" := CAST(({}) AS DOUBLE), "#,
+                r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+            ),
+            nvalue_subq
+        );
+        tags_expr = format!("{} || [{}]", tags_expr, nvalue_sp);
     }
 
+    let mut q = Query::select();
+    q.with_cte(with_clause);
+    q.expr_as(Expr::cust(volatile_id_expr), Col::ItemId);
+    q.expr_as(
+        Expr::cust(format!(
+            "ANY_VALUE({}.{})",
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Col::Rank)
+        )),
+        Col::Rank,
+    );
+    q.expr_as(Expr::cust("'volatile'"), Col::ItemKind);
+    q.expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags);
     q.from(Tbl::TopItems);
+
     if proj_operands.len() > 1 {
         for i in 0..proj_operands.len() {
             q.group_by_col((Tbl::TopItems, Alias::new(&format!("key{}", i))));
         }
-    } else {
-        q.group_by_col((Tbl::TopItems, label_col.clone()));
-    }
-    q.group_by_col((Tbl::TopItems, Tbl::GroupTotal));
-
-    if proj_operands.len() > 1 {
         for i in (0..proj_operands.len()).rev() {
             q.order_by(
                 (Tbl::TopItems, Alias::new(&format!("key{}", i))),
@@ -636,6 +723,7 @@ pub fn build_fetch_label_groups_sql(
             );
         }
     } else {
+        q.group_by_col((Tbl::TopItems, label_col.clone()));
         q.order_by((Tbl::TopItems, label_col), sea_query::Order::Asc);
     }
 
@@ -649,7 +737,7 @@ pub fn build_fetch_label_groups_sql(
     Ok(q)
 }
 
-pub fn build_fetch_label_set_op_sql(
+fn build_label_set_op_sql(
     label_set_op: &crate::query::lens_resolver::ResolvedNode,
     view: &str,
     limit: usize,
@@ -661,12 +749,12 @@ pub fn build_fetch_label_set_op_sql(
     let (op, operands) = match label_set_op {
         ResolvedNode::LabelSetOp { op, operands } => (op, operands),
         _ => anyhow::bail!(
-            "build_fetch_label_set_op_sql: expected LabelSetOp node"
+            "build_label_set_op_sql: expected LabelSetOp node"
         ),
     };
     if operands.is_empty() {
         anyhow::bail!(
-            "build_fetch_label_set_op_sql: LabelSetOp with no operands"
+            "build_label_set_op_sql: LabelSetOp with no operands"
         );
     }
 
@@ -868,7 +956,23 @@ pub fn build_fetch_label_set_op_sql(
             .to_owned(),
     );
 
-    // 最終 SELECT: (label_value, group_total, item_refs)
+    // 最終 SELECT: item_id / rank / item_kind / tags (struct_pack) で統一スキーマ出力
+    let label_ref = format!(
+        "CAST({}.label_value AS VARCHAR)",
+        Iden::to_string(&Tbl::TopItems)
+    );
+    let volatile_id_expr = format!(
+        "row_number() OVER (ORDER BY {}.label_value)",
+        Iden::to_string(&Tbl::TopItems)
+    );
+
+    let name_sp = make_tag_struct_pack(
+        "name",
+        &format!("({})", label_ref),
+        "NULL::BIGINT",
+        "NULL::DOUBLE",
+    );
+
     let name_subquery = format!(
         "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
         Iden::to_string(&Col::LabelStr),
@@ -878,33 +982,41 @@ pub fn build_fetch_label_set_op_sql(
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&Col::Type),
     );
-    let concat_expr = format!(
+    let item_label_str = format!(
         "CONCAT(COALESCE({}, 'unknown'), '#', CAST({}.{} AS VARCHAR))",
         name_subquery,
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId),
     );
-    let list_expr = Expr::cust(format!(
+    let item_sp = make_tag_struct_pack("item", &item_label_str, "NULL::BIGINT", "NULL::DOUBLE");
+    let item_list_expr = format!(
         "list({} ORDER BY {}.{} DESC)",
-        concat_expr,
+        item_sp,
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId),
-    ));
+    );
+
+    let proj_label_sp = format!(
+        concat!(
+            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
+            r#""type" := 'projected_label', "label_str" := NULL::VARCHAR, "#,
+            r#""label_int" := ANY_VALUE({}.{})::BIGINT, "label_double" := NULL::DOUBLE, "#,
+            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+        ),
+        Iden::to_string(&Tbl::TopItems),
+        Iden::to_string(&Tbl::GroupTotal)
+    );
+
+    let tags_expr = format!("[{}] || {} || [{}]", name_sp, item_list_expr, proj_label_sp);
 
     let mut q = Query::select();
-    q.with_cte(with_clause)
-        .expr_as(
-            Expr::col((Tbl::TopItems, Alias::new("label_value"))),
-            Alias::new("label_value"),
-        )
-        .expr_as(
-            Expr::col((Tbl::TopItems, Tbl::GroupTotal)),
-            Alias::new("group_total"),
-        )
-        .expr_as(list_expr, Alias::new("item_refs"))
-        .from(Tbl::TopItems)
+    q.with_cte(with_clause);
+    q.expr_as(Expr::cust(volatile_id_expr), Col::ItemId);
+    q.expr_as(Expr::cust("0::BIGINT"), Col::Rank);
+    q.expr_as(Expr::cust("'volatile'"), Col::ItemKind);
+    q.expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags);
+    q.from(Tbl::TopItems)
         .group_by_col((Tbl::TopItems, Alias::new("label_value")))
-        .group_by_col((Tbl::TopItems, Tbl::GroupTotal))
         .order_by(
             (Tbl::TopItems, Alias::new("label_value")),
             sea_query::Order::Asc,
@@ -1216,38 +1328,25 @@ mod tests {
         let query_str = "extension:";
         let resolver = Resolver::new(query_str).expect("Failed to resolve");
 
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
-
         // SQL生成
-        let sql = build_fetch_label_groups_sql(
-            &PickNode::new(&resolver.resolved_query, "oneview"),
-            &resolver, &proj_type, 100, 0,
-        )
-        .expect("Failed to build SQL");
+        let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0)
+            .expect("Failed to build SQL");
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
-        // 検証: label_value, group_total, item_refs カラムが含まれているか
+        // 検証: 統一スキーマ (item_id / rank / item_kind / tags) が生成されるか
         assert!(
-            sql_str.contains("label_value"),
-            "SQL should contain label_value alias: {}",
+            sql_str.contains("struct_pack"),
+            "SQL should contain struct_pack: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("group_total"),
-            "SQL should contain group_total alias: {}",
+            sql_str.contains("'name'"),
+            "SQL should contain name tag: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("item_refs"),
-            "SQL should contain item_refs alias: {}",
-            sql_str
-        );
-
-        // 検証: struct_pack が含まれていないこと（簡素化されているべき）
-        assert!(
-            !sql_str.contains("struct_pack"),
-            "SQL should NOT contain struct_pack (simplified): {}",
+            sql_str.contains("projected_label"),
+            "SQL should contain projected_label tag: {}",
             sql_str
         );
     }
@@ -1312,19 +1411,13 @@ mod tests {
         // parentdir: &: count(extension:jpg) → nvalue付きNest
         let resolver =
             Resolver::new("parentdir: &: count(extension:jpg)").unwrap();
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
 
         assert!(
             resolver.get_nvalue().is_some(),
             "Should have nvalue for nest query"
         );
 
-        let sql = build_fetch_label_groups_sql(
-            &PickNode::new(&resolver.resolved_query, "oneview"),
-            &resolver, &proj_type, 100, 0,
-        )
-        .unwrap();
+        let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // nvalue CTE と nvalue カラムが含まれているか
@@ -1338,15 +1431,10 @@ mod tests {
             "SQL should contain nvalue column: {}",
             sql_str
         );
-        // 既存のカラムも含まれているか
+        // struct_pack で統一スキーマが出力されるか
         assert!(
-            sql_str.contains("label_value"),
-            "SQL should contain label_value: {}",
-            sql_str
-        );
-        assert!(
-            sql_str.contains("group_total"),
-            "SQL should contain group_total: {}",
+            sql_str.contains("struct_pack"),
+            "SQL should contain struct_pack: {}",
             sql_str
         );
     }
@@ -1358,19 +1446,12 @@ mod tests {
 
         // parentdir: &: sum(size:) → nvalue付きNest (Arithmetic)
         let resolver = Resolver::new("parentdir: &: sum(size:)").unwrap();
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
-
         assert!(
             resolver.get_nvalue().is_some(),
             "Should have nvalue for nest query"
         );
 
-        let sql = build_fetch_label_groups_sql(
-            &PickNode::new(&resolver.resolved_query, "oneview"),
-            &resolver, &proj_type, 100, 0,
-        )
-        .unwrap();
+        let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         assert!(
@@ -1397,19 +1478,13 @@ mod tests {
 
         // 通常の projection — nvalue なし
         let resolver = Resolver::new("extension:").unwrap();
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
 
         assert!(
             resolver.get_nvalue().is_none(),
             "Normal projection should NOT have nvalue"
         );
 
-        let sql = build_fetch_label_groups_sql(
-            &PickNode::new(&resolver.resolved_query, "oneview"),
-            &resolver, &proj_type, 100, 0,
-        )
-        .unwrap();
+        let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // nvalue CTE が含まれていないこと
@@ -1428,16 +1503,10 @@ mod tests {
         // parentdir: &: (count(extension:jpg) > 1) → nvalue CTE に HAVING 付き
         let resolver =
             Resolver::new("parentdir: &: (count(extension:jpg) > 1)").unwrap();
-        let proj_type =
-            resolver.get_projection().expect("Should have projection");
 
         assert!(resolver.get_nvalue_condition().is_some());
 
-        let sql = build_fetch_label_groups_sql(
-            &PickNode::new(&resolver.resolved_query, "oneview"),
-            &resolver, &proj_type, 100, 0,
-        )
-        .unwrap();
+        let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // nvalue CTE に HAVING が含まれている
@@ -1532,14 +1601,8 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver = Resolver::new(&query).unwrap();
-            let proj_type =
-                resolver.get_projection().expect("Should have projection");
 
-            let sql = build_fetch_label_groups_sql(
-                &PickNode::new(&resolver.resolved_query, "oneview"),
-                &resolver, &proj_type, 100, 0,
-            )
-            .unwrap();
+            let sql = build_fetch_nest_sql(&resolver, "oneview", 100, 0).unwrap();
             let sql_str = sql.to_string(PostgresQueryBuilder);
 
             assert!(
@@ -1636,17 +1699,10 @@ mod tests {
             sql.to_string(sea_query::PostgresQueryBuilder)
         );
 
-        if let Some(_proj_node) = optimized.get_projection() {
+        if optimized.get_projection().is_some() {
             let resolver2 =
                 crate::query::lens_resolver::Resolver::new(query_str).unwrap();
-            let label_sql = crate::query::sql::build_fetch_label_groups_sql(
-                &crate::query::sql::PickNode::new(&resolver2.resolved_query, "oneview"),
-                &resolver2,
-                &crate::types::TagType::from("parentdir"),
-                100,
-                0,
-            )
-            .unwrap();
+            let label_sql = build_fetch_nest_sql(&resolver2, "oneview", 100, 0).unwrap();
             println!(
                 "Generated LABEL GROUPS SQL: {}",
                 label_sql.to_string(sea_query::PostgresQueryBuilder)
@@ -1761,7 +1817,7 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = build_fetch_label_set_op_sql(&node, "oneview", 100, 0)
+        let sql = build_label_set_op_sql(&node, "oneview", 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
@@ -1798,20 +1854,10 @@ mod tests {
             "should reference 'flavor', got: {}",
             sql
         );
-        // 結果カラム
+        // 統一スキーマ (struct_pack) が生成されるか
         assert!(
-            sql.contains("label_value"),
-            "should select label_value, got: {}",
-            sql
-        );
-        assert!(
-            sql.contains("group_total"),
-            "should select group_total, got: {}",
-            sql
-        );
-        assert!(
-            sql.contains("item_refs"),
-            "should select item_refs, got: {}",
+            sql.contains("struct_pack"),
+            "should contain struct_pack, got: {}",
             sql
         );
     }
@@ -1827,7 +1873,7 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = build_fetch_label_set_op_sql(&node, "oneview", 100, 0)
+        let sql = build_label_set_op_sql(&node, "oneview", 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
