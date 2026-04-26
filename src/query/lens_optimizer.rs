@@ -32,9 +32,6 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             Box::new(optimize(*l)),
             Box::new(optimize(*r)),
         ),
-        ResolvedNode::Complement(c) => {
-            ResolvedNode::Complement(Box::new(optimize(*c)))
-        }
         ResolvedNode::NestNestMatch {
             left_keys,
             left_nvalue,

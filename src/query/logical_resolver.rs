@@ -120,9 +120,6 @@ pub(crate) fn expand_query_node(
                 Box::new(expand_query_node(schema, *r)?),
             ))
         }
-        QueryNode::Complement(c) => Ok(QueryNode::Complement(Box::new(
-            expand_query_node(schema, *c)?,
-        ))),
         QueryNode::Comparison(cmp) => {
             expand_comparison_with_recursion(schema, cmp)
         }
@@ -294,7 +291,6 @@ fn is_set_operation(node: &QueryNode) -> bool {
         QueryNode::And(_)
         | QueryNode::Or(_)
         | QueryNode::Difference(_, _)
-        | QueryNode::Complement(_)
         | QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. } => true,
 
@@ -375,7 +371,6 @@ fn find_projection_operand(node: &QueryNode) -> Option<&Operand> {
             nodes.iter().find_map(find_projection_operand)
         }
         QueryNode::Difference(l, _) => find_projection_operand(l),
-        QueryNode::Complement(c) => find_projection_operand(c),
         _ => None,
     }
 }
@@ -390,10 +385,6 @@ fn returns_projection(node: &QueryNode) -> bool {
         QueryNode::Difference(l, _) => {
             // 差集合の左辺がProjectionなら、結果もProjection
             returns_projection(l)
-        }
-        QueryNode::Complement(_) => {
-            // 補集合は通常アイテム集合を返す
-            false
         }
         QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }

@@ -1,6 +1,6 @@
 use super::{
     build_column_match_sql, build_label_set_op_pick_sql,
-    build_resolved_and_sql, build_resolved_comp_sql, build_resolved_diff_sql,
+    build_resolved_and_sql, build_resolved_diff_sql,
     build_resolved_match_sql, build_resolved_or_sql, build_resolved_tag_tag_match_sql,
     build_scalar_match_sql,
 };
@@ -19,10 +19,6 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::Difference(_, _) => {
             let [l, r]: [SelectStatement; 2] = child_sqls.try_into().unwrap();
             Ok(build_resolved_diff_sql(l, r))
-        }
-        ResolvedNode::Complement(c) => {
-            let [c_sql]: [SelectStatement; 1] = child_sqls.try_into().unwrap();
-            Ok(build_resolved_comp_sql(c.is_boolean_result(), c_sql, view))
         }
         ResolvedNode::LabelSetOp { op, .. } => Ok(build_label_set_op_pick_sql(op, child_sqls)),
         ResolvedNode::Nest { keys, .. } => {

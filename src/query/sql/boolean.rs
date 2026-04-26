@@ -1,4 +1,4 @@
-use crate::db::{Col, CustomFunc, QueryResultCol, Tbl};
+use crate::db::{Col, CustomFunc, QueryResultCol};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
@@ -107,35 +107,6 @@ pub(super) fn build_resolved_diff_sql(
 ) -> SelectStatement {
     let mut q = wrap_in_subquery(l);
     q.union(sea_query::UnionType::Except, wrap_in_subquery(r));
-    q
-}
-
-pub(super) fn build_resolved_comp_sql(
-    is_boolean: bool,
-    c_sql: SelectStatement,
-    view: &str,
-) -> SelectStatement {
-    let mut q = if is_boolean {
-        Query::select()
-            .expr_as(Expr::val(1i64), Col::ItemId)
-            .expr_as(Expr::val(0i64), Col::Rank)
-            .expr_as(
-                Expr::val(<&'static str>::from(ItemKind::Volatile)),
-                Col::ItemKind,
-            )
-            .to_owned()
-    } else {
-        Query::select()
-            .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-            .distinct()
-            .from(Alias::new(view))
-            .and_where(Expr::col(Col::ItemKind).is_not_in(vec!["type", "tag"]))
-            .to_owned()
-    };
-    let mut eq = Query::select();
-    eq.columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from_subquery(c_sql, Tbl::NotSide);
-    q.union(sea_query::UnionType::Except, eq);
     q
 }
 

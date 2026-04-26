@@ -32,7 +32,6 @@ pub enum ResolvedNode {
     And(Vec<ResolvedNode>),
     Or(Vec<ResolvedNode>),
     Difference(Box<ResolvedNode>, Box<ResolvedNode>),
-    Complement(Box<ResolvedNode>),
     /// 投影クエリ用（ネスト構造を含む）。
     /// 深さ1の純粋なプロジェクション（例: `extension:`）も `keys: vec![op]` として表現する。
     Nest {
@@ -394,7 +393,7 @@ impl ResolvedNode {
                 operands.iter().collect()
             }
             ResolvedNode::Difference(l, r) => vec![l.as_ref(), r.as_ref()],
-            ResolvedNode::Complement(c) => vec![c.as_ref()],
+
             ResolvedNode::Nest { context: Some(ctx), .. } => {
                 vec![ctx.as_ref()]
             }
@@ -451,7 +450,7 @@ impl ResolvedNode {
             ResolvedNode::Difference(l, r) => {
                 l.is_projection_recursive() || r.is_projection_recursive()
             }
-            ResolvedNode::Complement(c) => c.is_projection_recursive(),
+
             _ => false,
         }
     }
@@ -511,9 +510,6 @@ impl ResolvedNode {
                 l.inject_context(context.clone());
                 r.inject_context(context);
             }
-            ResolvedNode::Complement(c) => {
-                c.inject_context(context);
-            }
             _ => {}
         }
     }
@@ -528,10 +524,7 @@ impl ResolvedNode {
                 // ただしサブクエリ等で使用するための基本的な条件を返す
                 l.to_condition()
             }
-            ResolvedNode::Complement(_c) => {
-                // COMPLEMENT も同様
-                Condition::any()
-            }
+
             ResolvedNode::Nest { keys, context, .. } => {
                 let mut cond = keys.first().unwrap().to_condition();
                 if let Some(ctx) = context {
@@ -651,7 +644,7 @@ impl ResolvedNode {
                     None
                 }
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_projection()
             }
             _ => None,
@@ -685,7 +678,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_nvalue()
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
@@ -708,7 +701,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_combined())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_nvalue_combined()
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
@@ -728,7 +721,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_projection_operand()
             }
             _ => None,
@@ -743,7 +736,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operands())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_projection_operands()
             }
             node => node
@@ -793,7 +786,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nested_projection())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_nested_projection()
             }
             _ => None,
@@ -861,7 +854,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_condition())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
+            ResolvedNode::Difference(l, _) => {
                 l.get_nvalue_condition()
             }
             ResolvedNode::MergedNestMatch { matches, .. } => {
@@ -967,7 +960,7 @@ impl ResolvedNode {
             ResolvedNode::Difference(l, r) => {
                 l.is_boolean_result() && r.is_boolean_result()
             }
-            ResolvedNode::Complement(c) => c.is_boolean_result(),
+
             _ => false,
         }
     }
@@ -1326,9 +1319,7 @@ pub(crate) fn resolve_query_node(
             }
             Ok(ResolvedNode::Difference(Box::new(rl), Box::new(rr)))
         }
-        QueryNode::Complement(c) => Ok(ResolvedNode::Complement(Box::new(
-            resolve_query_node(lens, *c)?,
-        ))),
+
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
         // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
         QueryNode::Projection(Operand::Calculation(calc))
@@ -2727,10 +2718,6 @@ mod tests {
             ResolvedNode::Or(vec![node_bool.clone(), node_bool.clone()]);
         assert!(node_or_bool.is_boolean_result());
 
-        // 6. Complement(Boolean) is boolean
-        let node_not_bool =
-            ResolvedNode::Complement(Box::new(node_bool.clone()));
-        assert!(node_not_bool.is_boolean_result());
     }
 
     #[test]
@@ -3904,14 +3891,6 @@ mod tests_walk_fold {
         let inner = ResolvedNode::Or(vec![leaf("a"), leaf("b")]);
         let root = ResolvedNode::And(vec![inner, leaf("c")]);
         assert_eq!(root.walk().len(), 5);
-    }
-
-    #[test]
-    fn test_node_walk_complement() {
-        let root = ResolvedNode::Complement(Box::new(leaf("a")));
-        let got = root.walk();
-        assert_eq!(got.len(), 2);
-        assert!(matches!(got[0], ResolvedNode::Complement(_)));
     }
 
     // ── ResolvedNode::fold ────────────────────────────────────────────────

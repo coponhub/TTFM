@@ -30,7 +30,7 @@ use agg_pieces::{build_agg_operand_expr, build_resolved_operand_expr_for_arithme
 use calc_pieces::{build_calculation_expr, build_calculation_eav_expr, fold_simple_operand};
 use boolean::{
     build_resolved_and_sql, build_resolved_or_sql, build_resolved_diff_sql,
-    build_resolved_comp_sql, build_label_set_op_pick_sql,
+    build_label_set_op_pick_sql,
     build_boolean_sql,
 };
 #[cfg(test)]
