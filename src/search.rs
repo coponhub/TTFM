@@ -80,7 +80,6 @@ impl FileManager {
 
         Ok(SearchResponse {
             results,
-            scalar: None,
             cid,
             has_more,
             total_count,
@@ -89,7 +88,6 @@ impl FileManager {
                 total: progress_total,
                 is_done: !has_more,
             },
-            type_for_projection: None,
             warnings,
         })
     }
@@ -156,14 +154,19 @@ impl FileManager {
         let query = meta
             .get(crate::cache::META_QUERY)
             .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
-        let node = if query.trim().is_empty() {
-            crate::query::QueryNode::And(vec![])
+        let projection: Option<String> = if query.trim().is_empty() {
+            None
         } else {
-            crate::query::parse(query)?
+            let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+            let is_projection_display = resolver.get_projection().is_some()
+                && (resolver.get_label_set_op_node().is_some()
+                    || resolver.get_nvalue_condition().is_none());
+            if is_projection_display {
+                resolver.get_projection().map(|t| t.as_str().to_string())
+            } else {
+                None
+            }
         };
-        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-        let expanded = node.expand(&q_reg);
-        let projection = expanded.get_projections().first().cloned();
 
         let (target_entries, has_more) = if let Some(ref proj_name) = projection
         {
@@ -230,11 +233,7 @@ impl FileManager {
         };
 
         if target_entries.is_empty() {
-            return Ok(SearchResponse::new_empty(
-                Some(cid.to_string()),
-                has_more,
-                projection.clone().map(|p| p.into()),
-            ));
+            return Ok(SearchResponse::new_empty(Some(cid.to_string()), has_more));
         }
 
         let fetch_ids: Vec<i64> =
@@ -429,7 +428,6 @@ impl FileManager {
 
             Ok(SearchResponse {
                 results: transposed_results,
-                scalar: None,
                 cid,
                 has_more,
                 total_count: None,
@@ -438,14 +436,11 @@ impl FileManager {
                     total: None,
                     is_done: !has_more,
                 },
-                type_for_projection: projection
-                    .map(|s| TagType::from(s.as_str())),
                 warnings: Vec::new(),
             })
         } else {
             Ok(SearchResponse {
                 results: final_results,
-                scalar: None,
                 cid,
                 has_more,
                 total_count: None,
@@ -454,7 +449,6 @@ impl FileManager {
                     total: None,
                     is_done: !has_more,
                 },
-                type_for_projection: None,
                 warnings: Vec::new(),
             })
         }

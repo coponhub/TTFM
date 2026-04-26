@@ -67,197 +67,38 @@ impl<'a> Fetcher<'a> {
     ///
     /// `n` は要求件数（0 = 全件）。内部で n+1 件取得して has_more 判定を呼び出し側に委ねる。
     pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<SearchResult>> {
+        use sea_query::PostgresQueryBuilder;
         let resolver = &self.resolver;
 
-        // LabelSetOp (projection 集合演算: INTERSECT / UNION / EXCEPT)
-        // get_projection() が None (Lv.3+ 異種キー Union 等) の場合はフラットリストにフォールスルー
-        if resolver.is_label_set_op() {
-            if resolver.get_projection().is_some() {
-                return self.fetch_label_groups(n, offset);
-            }
+        let sql = crate::query::sql::build_fetch_sql(resolver, "oneview", n, offset)?;
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            eprintln!("DEBUG: FETCH SQL: {}", sql_str);
         }
 
-        // Nest (プロジェクション) — nvalue 比較条件なし
+        // Projection → decode_nest_item_from_row
         if resolver.get_projection().is_some() {
-            if resolver.get_nvalue_condition().is_none() {
-                return self.fetch_label_groups(n, offset);
-            }
+            let mut stmt = self.conn.prepare(&sql_str)?;
+            let results = stmt
+                .query_map([], |row| self.decode_nest_item_from_row(row))?
+                .collect::<duckdb::Result<Vec<_>>>()?;
+            return Ok(results);
         }
 
-        // スカラー / ブーリアン結果 — プロジェクションなし
-        if (resolver.get_scalar_expression().is_some()
-            || resolver.resolved_query.is_boolean_result())
-            && resolver.get_projection().is_none()
-        {
-            return self.fetch_computation().map(|r| vec![r]);
+        // スカラー / ブーリアン → 単一 SearchResult をリストで返す
+        if resolver.get_scalar_expression().is_some() {
+            return self.decode_aggregation_result(&sql_str).map(|r| vec![r]);
+        }
+        if resolver.resolved_query.is_boolean_result() {
+            return self.decode_boolean_result(&sql_str).map(|r| vec![r]);
         }
 
-        // 通常アイテム検索
-        let limit = if n > 0 { Some(n + 1) } else { None };
-        self.fetch_items(limit, Some(offset))
-    }
-
-    /// 計算クエリ（集約またはブーリアン）を実行し、SearchResult形式で返します。
-    fn fetch_computation(&self) -> Result<SearchResult> {
-        if let Some(_) = self.resolver.get_scalar_expression() {
-            self.compute_aggregation()
-        } else if self.resolver.resolved_query.is_boolean_result() {
-            self.compute_boolean()
-        } else {
-            Err(anyhow::anyhow!(
-                "Query is not a computation (scalar or boolean expression)"
-            ))
-        }
-    }
-
-    /// クエリをトップレベルのスカラー式（集約計算など）として実行し、SearchResultを返します。
-    fn compute_aggregation(&self) -> Result<SearchResult> {
-        let op = self.resolver.get_scalar_expression().ok_or_else(|| {
-            anyhow::anyhow!("Query is not a top-level scalar expression")
-        })?;
-
-        let sql = crate::query::sql::build_resolved_scalar_sql(&op, "oneview");
-
-        let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            eprintln!("DEBUG: COMPUTE AGGREGATION SQL: {}", sql_str);
-        }
-
+        // 通常アイテム → decode_item_from_row (重複除去付き)
         let mut stmt = self.conn.prepare(&sql_str)?;
-        let val_id = stmt
-            .query_row([], |r| {
-                let val: duckdb::types::Value = r.get(0)?;
-                Ok(val)
-            })
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to compute aggregation: {}", e)
-            })?;
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            eprintln!("DEBUG: compute_aggregation scalar result: {:?}", val_id);
-        }
-        let duckdb_type_str = format!("{:?}", stmt.column_type(0));
-        use crate::types::{Label, LabelValue, TagType};
-
-        let label_val = LabelValue::from(val_id.clone());
-        let type_name = if let LabelValue::Null = label_val {
-            crate::util::get_db_coltype(&duckdb_type_str)
-        } else {
-            (&label_val).into()
-        };
-
-        let id = ItemId::new_volatile();
-        let name = label_val.as_display_name();
-
-        let mut res = SearchResult::new_empty(id, ItemKind::Volatile, name);
-
-        // 1. 型分類タグ (type:integer 等)
-        res.apply_tag(
-            Label::resolve(
-                TagType::Base(crate::types::SType::Type),
-                LabelValue::String(type_name.to_string()),
-            ),
-            crate::types::Origin::System,
-        );
-
-        // 2. 実値タグ (value:123 等)
-        res.apply_tag(
-            Label::resolve(
-                TagType::Base(crate::types::SType::Value),
-                label_val,
-            ),
-            crate::types::Origin::System,
-        );
-
-        Ok(res)
-    }
-
-    /// ブーリアンのみを返す特殊なクエリを実行し、SearchResultを返します。
-    fn compute_boolean(&self) -> Result<SearchResult> {
-        let sql = crate::query::sql::build_boolean_sql(
-            &self.resolver.resolved_query,
-            "oneview",
-        );
-        let sql_str = sql.to_string(sea_query::PostgresQueryBuilder);
-
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            println!(
-                "--- COMPUTE BOOLEAN SQL ---\n{}\n----------------",
-                sql_str
-            );
-        }
-
-        // NULL対応: Option<i64> で受け取る
-        let mut stmt = self.conn.prepare(&sql_str)?;
-        let id_val: Option<i64> = stmt.query_row([], |r| r.get(0))?;
-
-        let id = ItemId::new_volatile();
-        let label_val = match id_val {
-            Some(1) => LabelValue::Boolean(true),
-            Some(_) => LabelValue::Boolean(false),
-            None => LabelValue::Null,
-        };
-
-        let mut res = SearchResult::new_empty(
-            id,
-            ItemKind::Volatile,
-            label_val.as_display_name(),
-        );
-
-        // 正確な型情報を型付きタグとして注入する
-        use crate::types::{Label, LabelValue, TagType};
-        let type_name: &str = (&LabelValue::Boolean(true)).into();
-
-        // 1. 型分類タグ (type:boolean 等)
-        res.apply_tag(
-            Label::resolve(
-                TagType::Base(crate::types::SType::Type),
-                LabelValue::String(type_name.to_string()),
-            ),
-            crate::types::Origin::System,
-        );
-
-        // 2. 実値タグ (value:true 等)
-        res.apply_tag(
-            Label::resolve(
-                TagType::Base(crate::types::SType::Value),
-                label_val,
-            ),
-            crate::types::Origin::System,
-        );
-
-        Ok(res)
-    }
-
-    /// 条件に合致するアイテムと、その全タグを 1 クエリで取得します。
-    fn fetch_items(
-        &self,
-        limit: Option<usize>,
-        offset: Option<usize>,
-    ) -> Result<Vec<SearchResult>> {
-        use sea_query::PostgresQueryBuilder;
-
-        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
-        let select_sql = crate::query::sql::build_fetch_items_sql(
-            &pick,
-            limit,
-            offset,
-        );
-
-        let sql_str = select_sql.to_string(PostgresQueryBuilder);
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            println!("--- FETCH ITEMS SQL ---\n{}\n----------------", sql_str);
-        }
-
-        let mut stmt = self.conn.prepare(&sql_str)?;
-        let item_iter = stmt.query_map([], |row| {
-            // 列名の重複回避のため、ID 直接指定ではなく「構造化データ全体」を受け取るのを理想とするが
-            // 現状の fetch_items_sql が生成する単一行から復元する。
-            self.decode_item_from_row(row)
-        })?;
-
         let mut results = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
-        for item in item_iter {
+        for item in stmt.query_map([], |row| self.decode_item_from_row(row))? {
             let item = item?;
             if seen_ids.insert(item.id.clone()) {
                 results.push(item);
@@ -266,33 +107,53 @@ impl<'a> Fetcher<'a> {
         Ok(results)
     }
 
-    /// ラベル（型）ごとの集約結果を取得します。
-    fn fetch_label_groups(
-        &self,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<SearchResult>> {
-        use sea_query::PostgresQueryBuilder;
-
-        let select_sql = crate::query::sql::build_fetch_nest_sql(
-            self.resolver, "oneview", limit, offset,
-        )?;
-
-        let sql_str = select_sql.to_string(PostgresQueryBuilder);
+    fn decode_aggregation_result(&self, sql_str: &str) -> Result<SearchResult> {
+        use crate::types::{Label, LabelValue, TagType};
+        let mut stmt = self.conn.prepare(sql_str)?;
+        let val: duckdb::types::Value = stmt
+            .query_row([], |r| r.get(0))
+            .map_err(|e| anyhow::anyhow!("Failed to compute aggregation: {}", e))?;
+        let duckdb_type_str = format!("{:?}", stmt.column_type(0));
         if std::env::var("TTFM_DEBUG").is_ok() {
-            eprintln!("DEBUG: FETCH LABEL GROUPS SQL: {}", sql_str);
+            eprintln!("DEBUG: aggregation result: {:?}", val);
         }
+        let label_val = LabelValue::from(val);
+        let type_name = if let LabelValue::Null = label_val {
+            crate::util::get_db_coltype(&duckdb_type_str)
+        } else {
+            (&label_val).into()
+        };
+        let mut res = SearchResult::new_empty(
+            ItemId::new_volatile(), ItemKind::Volatile, label_val.as_display_name(),
+        );
+        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Type),
+            LabelValue::String(type_name.to_string())), crate::types::Origin::System);
+        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Value),
+            label_val), crate::types::Origin::System);
+        Ok(res)
+    }
 
-        let mut stmt = self.conn.prepare(&sql_str)?;
-        let item_iter =
-            stmt.query_map([], |row| self.decode_nest_item_from_row(row))?;
-
-        let mut results = Vec::new();
-        for item in item_iter {
-            results.push(item?);
+    fn decode_boolean_result(&self, sql_str: &str) -> Result<SearchResult> {
+        use crate::types::{Label, LabelValue, TagType};
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            eprintln!("DEBUG: BOOLEAN SQL: {}", sql_str);
         }
-
-        Ok(results)
+        let mut stmt = self.conn.prepare(sql_str)?;
+        let id_val: Option<i64> = stmt.query_row([], |r| r.get(0))?;
+        let label_val = match id_val {
+            Some(1) => LabelValue::Boolean(true),
+            Some(_) => LabelValue::Boolean(false),
+            None => LabelValue::Null,
+        };
+        let mut res = SearchResult::new_empty(
+            ItemId::new_volatile(), ItemKind::Volatile, label_val.as_display_name(),
+        );
+        let type_name: &str = (&LabelValue::Boolean(true)).into();
+        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Type),
+            LabelValue::String(type_name.to_string())), crate::types::Origin::System);
+        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Value),
+            label_val), crate::types::Origin::System);
+        Ok(res)
     }
 
     /// 平坦なタグデータのリストを取得（メモリ上での利用・デバッグ用）
@@ -635,13 +496,14 @@ mod tests {
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
-        let res = fetcher.compute_boolean().unwrap();
+        let mut results = fetcher.fetch(100, 0).unwrap();
+        let res = results.remove(0);
         assert!(res.id.is_volatile());
         assert_eq!(res.name, "NULL"); // NULL (データがないので判定不能)
 
         // データ投入
         conn.execute(
-            "INSERT INTO oneview VALUES 
+            "INSERT INTO oneview VALUES
             (1, 10, 'file', 'user', 'mtime', NULL, 100, NULL, NULL)",
             [],
         )
@@ -650,7 +512,8 @@ mod tests {
         // Date parsing happens at lens resolution time, so 2026-02-01 becomes a timestamp integer.
         // Assuming the query parser works correctly, this should return TRUE.
 
-        let res2 = fetcher.compute_boolean().unwrap();
+        let mut results2 = fetcher.fetch(100, 0).unwrap();
+        let res2 = results2.remove(0);
         assert!(res2.id.is_volatile());
         assert_eq!(res2.name, "TRUE"); // TRUE
     }
@@ -730,7 +593,7 @@ mod tests {
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
-        let results = fetcher.fetch_label_groups(100, 0).unwrap();
+        let results = fetcher.fetch(100, 0).unwrap();
 
         // 2つの parentdir グループ: docs, src
         assert_eq!(results.len(), 2, "Should have 2 parentdir groups");
@@ -780,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_label_groups_no_nvalue_regression() {
+    fn test_fetch_projection_no_nvalue_regression() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
         conn.execute(
             "CREATE TABLE oneview (
@@ -807,7 +670,7 @@ mod tests {
             crate::query::lens_resolver::Resolver::new("extension:").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
-        let results = fetcher.fetch_label_groups(100, 0).unwrap();
+        let results = fetcher.fetch(100, 0).unwrap();
         assert_eq!(results.len(), 1);
 
         // nvalue タグがないことを確認
@@ -932,12 +795,14 @@ mod tests {
 
     #[test]
     fn test_fetch_nvalue_condition_uses_items_path() {
-        // nvalue_condition ありは items パスに落ちる
+        // nvalue_condition 付き projection は Lv.1 フラットリストとして items パスを通る
         let conn = duckdb::Connection::open_in_memory().unwrap();
         make_oneview(&conn);
+        insert_row(&conn, 1, 10, "name", "main.rs");
         insert_row(&conn, 1, 10, "parentdir", "src");
         insert_row(&conn, 1, 10, "extension", "rs");
         insert_bool_row(&conn, 1, 10, "is_dir", "false", false);
+        insert_row(&conn, 2, 5, "name", "readme.md");
         insert_row(&conn, 2, 5, "parentdir", "docs");
         insert_row(&conn, 2, 5, "extension", "md");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
@@ -949,14 +814,15 @@ mod tests {
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(100, 0).unwrap();
-        // item: タグは注入されないはず（items パス）
-        for r in &results {
-            let has_item_tag = r
-                .tags
-                .entries
-                .iter()
-                .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
-            assert!(!has_item_tag, "NestMatch path should not have item: tags");
-        }
+        // count(rs) > 0 を満たすのは src のみ → src 内のファイル (Lv.1 フラットリスト)
+        assert_eq!(results.len(), 1, "Only src has rs files");
+        assert_eq!(results[0].name, "main.rs", "Items path returns filename, not group label");
+        // items パスを通るので item: タグは存在しない
+        let has_item_tag = results[0]
+            .tags
+            .entries
+            .iter()
+            .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+        assert!(!has_item_tag, "Flat list result should NOT have item: tags");
     }
 }

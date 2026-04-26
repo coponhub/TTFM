@@ -1,9 +1,10 @@
 use super::{
-    build_column_match_sql, build_label_set_op_pick_sql, build_nest_sql,
+    build_column_match_sql, build_label_set_op_pick_sql,
     build_resolved_and_sql, build_resolved_comp_sql, build_resolved_diff_sql,
     build_resolved_match_sql, build_resolved_or_sql, build_resolved_tag_tag_match_sql,
     build_scalar_match_sql,
 };
+use super::nest::filter;
 use crate::query::lens_resolver::ResolvedNode;
 use sea_query::SelectStatement;
 
@@ -25,7 +26,7 @@ pub(super) fn try_dispatch_common(
         }
         ResolvedNode::LabelSetOp { op, .. } => Ok(build_label_set_op_pick_sql(op, child_sqls)),
         ResolvedNode::Nest { keys, .. } => {
-            Ok(build_nest_sql(keys, child_sqls.into_iter().next(), view))
+            Ok(filter(keys, child_sqls.into_iter().next(), view))
         }
         ResolvedNode::ColumnMatch { tag, label } => Ok(build_column_match_sql(*tag, label, view)),
         ResolvedNode::Match { storage, sql_type, op, label, .. } => {

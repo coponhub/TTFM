@@ -1,9 +1,18 @@
 use crate::db::{Col, SqlType};
 use crate::query::ast::ComparisonOp;
+use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
-use super::{build_tag_value_agg_expr, label_to_unit_aware_expr};
+use super::{
+    build_aggregation_context_for_operand,
+    needs_nest_context, build_nest_context, build_nest_context_for_operand,
+    build_tag_value_agg_expr, label_to_unit_aware_expr,
+};
+use super::agg_pieces::{
+    build_agg, build_agg_nest,
+    build_agg_operand_subquery, build_agg_operand_subquery_nest,
+};
 
 pub(super) fn build_resolved_match_sql(
     storage: &StorageMapping,
@@ -92,4 +101,41 @@ pub(super) fn build_scalar_match_sql(
     stmt.cond_where(cond);
     stmt.limit(1);
     stmt
+}
+
+pub(super) fn build_resolved_scalar_sql(
+    op: &ResolvedOperand,
+    view: &str,
+) -> SelectStatement {
+    let agg_ctx = build_aggregation_context_for_operand(op, view);
+    match op {
+        ResolvedOperand::Aggregation(agg) => {
+            if needs_nest_context(agg.inner_node()) {
+                let nest_ctx = build_nest_context(agg.inner_node(), view);
+                build_agg_nest(agg, view, &agg_ctx, &nest_ctx)
+            } else {
+                build_agg(agg, view, &agg_ctx)
+            }
+        }
+        _ => {
+            let needs_nest = op.walk().into_iter().any(|o| {
+                if let ResolvedOperand::Aggregation(agg) = o {
+                    needs_nest_context(agg.inner_node())
+                } else {
+                    false
+                }
+            });
+            let scalar_expr = if needs_nest {
+                let nest_ctx = build_nest_context_for_operand(op, view);
+                build_agg_operand_subquery_nest(op, view, &agg_ctx, &nest_ctx)
+            } else {
+                build_agg_operand_subquery(op, view, &agg_ctx)
+            };
+            let mut stmt = Query::select();
+            stmt.from(Alias::new(view));
+            stmt.expr_as(scalar_expr, Alias::new("scalar_value"));
+            stmt.limit(1);
+            stmt
+        }
+    }
 }

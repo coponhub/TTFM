@@ -1,4 +1,4 @@
-use crate::db::{Col, CustomFunc, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Tbl};
 use crate::query::ast::ArithmeticAggOp;
 use crate::query::lens_resolver::{ResolvedAggregationNode, ResolvedNode, ResolvedOperand};
 use crate::query::lens_schema::{to_bin_op, StorageMapping};

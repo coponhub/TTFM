@@ -112,10 +112,6 @@ impl RawTagRow {
 pub struct SearchResponse {
     /// ヒットしたアイテムのリスト
     pub results: Vec<SearchResult>,
-    /// クエリで明示的に投影（Projection）されたタグ型（互換性のため維持）。
-    pub type_for_projection: Option<TagType>,
-    /// 集計結果（トップレベルが集約の場合のみ）
-    pub scalar: Option<f64>,
     /// キャッシュ ID（続きがある場合のみ有効）
     pub cid: Option<String>,
     /// 検索結果の総件数（確定している場合）
@@ -219,18 +215,12 @@ impl SearchResponse {
 
 impl SearchResponse {
     /// 空の検索結果（初期状態）を作成します。
-    pub fn new_empty(
-        cid: Option<String>,
-        has_more: bool,
-        type_for_projection: Option<TagType>,
-    ) -> Self {
+    pub fn new_empty(cid: Option<String>, has_more: bool) -> Self {
         Self {
             results: Vec::new(),
-            scalar: None,
             cid,
             has_more,
             total_count: Some(0),
-            type_for_projection,
             progress: crate::types::Progress {
                 current: 0,
                 total: Some(0),
@@ -244,14 +234,19 @@ impl SearchResponse {
     pub fn new_unfinished(cid: &str, progress: crate::types::Progress) -> Self {
         Self {
             results: Vec::new(),
-            scalar: None,
             cid: Some(cid.to_string()),
             has_more: true,
             total_count: None,
             progress,
-            type_for_projection: None,
             warnings: Vec::new(),
         }
+    }
+
+    /// 結果が Projection (ラベルグループ) 形式かどうかを `item:` タグの有無で判定します。
+    pub fn has_projection_results(&self) -> bool {
+        self.results.first().map(|r| {
+            r.tags.entries.iter().any(|e| e.label.tag_type().as_str() == "item")
+        }).unwrap_or(false)
     }
 }
 
@@ -577,8 +572,6 @@ mod tests {
 
         let response = SearchResponse {
             results: vec![res1, res2],
-            type_for_projection: None,
-            scalar: None,
             cid: None,
             total_count: None,
             has_more: false,

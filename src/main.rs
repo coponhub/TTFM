@@ -315,11 +315,6 @@ fn print_results(
         );
     }
 
-    if let Some(scalar) = response.scalar {
-        safe_println!("{}", scalar);
-        return;
-    }
-
     if response.results.is_empty() {
         if response.progress.is_finished() {
             safe_println!("No items found.");
@@ -327,8 +322,8 @@ fn print_results(
         return;
     }
 
-    // 投影 (Projection) がある場合はコンパクトな集約表示にする
-    if response.type_for_projection.is_some() {
+    // item: タグが注入されている場合は Projection グループ表示
+    if response.has_projection_results() {
         print_compact_projections(response, query, current_n);
         return;
     }
@@ -539,20 +534,14 @@ fn print_compact_projections(
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
 fn print_simple_results(response: &ttfm::SearchResponse) {
-    if let Some(scalar) = response.scalar {
-        safe_println!("{}", scalar);
-        return;
-    }
-
-    if response.type_for_projection.is_none() {
-        // プロジェクションなし: アイテムごとに解決済みの名前を出力
+    if response.has_projection_results() {
+        for label_item in &response.results {
+            safe_println!("{}", format_short_result(label_item));
+        }
+    } else {
         for res in &response.results {
             let line = res.primary_value().unwrap_or_else(|| res.name.clone());
             safe_println!("{}", line);
-        }
-    } else {
-        for label_item in &response.results {
-            safe_println!("{}", format_short_result(label_item));
         }
     }
 }
@@ -581,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_short_format_with_nvalue() {
-        // fetch_label_groupsでの生成プロセスに近い形でダミーデータを作成
+        // projection パスでの生成プロセスに近い形でダミーデータを作成
         let mut res_with_nvalue = SearchResult::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,

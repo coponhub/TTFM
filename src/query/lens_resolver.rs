@@ -659,7 +659,6 @@ impl ResolvedNode {
     }
 
     /// Or が異なるタグ型のオペランドを混在させる「混在投影」クエリかどうかを返します。
-    /// このフラグが true の場合、`type_for_projection` は設定しません。
     pub fn is_mixed_projection_query(&self) -> bool {
         match self {
             ResolvedNode::Or(nodes) => {

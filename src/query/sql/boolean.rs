@@ -1,10 +1,14 @@
 use crate::db::{Col, CustomFunc, QueryResultCol, Tbl};
 use crate::query::ast::ComparisonOp;
-use crate::query::lens_resolver::LabelSetOpKind;
+use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
 use crate::types::ItemKind;
 use sea_query::{Alias, Expr, ExprTrait, Query, SelectStatement, SimpleExpr};
-use super::wrap_in_subquery;
+use super::{
+    wrap_in_subquery, build_aggregation_context,
+    label_to_unit_aware_expr, subquery, BuildPick, PickNode,
+};
+use super::agg_pieces::{build_agg, build_agg_calc_subquery, build_agg_calc_expr};
 
 pub(super) fn build_direct_boolean_select(
     left: SimpleExpr,
@@ -157,6 +161,57 @@ pub(super) fn build_label_set_op_pick_sql(
             } else {
                 Query::select().to_owned()
             }
+        }
+    }
+}
+
+pub(super) fn build_boolean_sql(node: &ResolvedNode, view: &str) -> SelectStatement {
+    let agg_ctx = build_aggregation_context(node, view);
+    match node {
+        ResolvedNode::AggregationMatch { agg, op, label } => {
+            build_direct_boolean_select(
+                subquery(build_agg(agg, view, &agg_ctx)),
+                *op,
+                label_to_unit_aware_expr(label),
+                view,
+            )
+        }
+        ResolvedNode::AggregationAggregationMatch { left, op, right } => {
+            build_direct_boolean_select(
+                subquery(build_agg(left, view, &agg_ctx)),
+                *op,
+                subquery(build_agg(right, view, &agg_ctx)),
+                view,
+            )
+        }
+        ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
+            let calc_expr = if calc.contains_aggregation() {
+                build_agg_calc_subquery(calc, view, &agg_ctx)
+            } else {
+                build_agg_calc_expr(calc, &agg_ctx)
+            };
+            build_direct_boolean_select(
+                subquery(build_agg(agg, view, &agg_ctx)),
+                *op,
+                calc_expr,
+                view,
+            )
+        }
+        ResolvedNode::AggregationTagMatch { .. } => {
+            let pick_sql = PickNode::new(node, view).build_pick();
+            wrap_boolean_collider(pick_sql)
+        }
+        ResolvedNode::ScalarMatch { left, op, right } => {
+            build_direct_boolean_select(
+                label_to_unit_aware_expr(left),
+                *op,
+                label_to_unit_aware_expr(right),
+                view,
+            )
+        }
+        _ => {
+            let pick_sql = PickNode::new(node, view).build_pick();
+            wrap_boolean_collider(pick_sql)
         }
     }
 }

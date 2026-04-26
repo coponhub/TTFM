@@ -139,6 +139,48 @@ define_cases! {
             Ok(())
         },
     },
+    // ── 表示ルーティング検証 ───────────────────────────────────────────────────
+    // has_projection_results() が正しく true/false を返すことを保証する。
+    // Lv.2 プロジェクション (nvalue のみ) → true、ラベル比較 → false (Lv.1 フラットリスト)
+    test_display_routing_nvalue_projection: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), b"fn main() {}")?;
+            std::fs::write(dir.join("b.rs"), b"pub fn foo() {}")?;
+            std::fs::write(dir.join("c.txt"), b"hello")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: super::default_scope,
+        query: "extension: &: count()",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty(), "should return results");
+            assert!(
+                res.has_projection_results(),
+                "extension: &: count() (Lv.2 projection) should be routed as projection. names={:?}",
+                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+            );
+            Ok(())
+        },
+    },
+    test_display_routing_parentdir_label_cmp: {
+        setup: |dir| {
+            std::fs::write(dir.join("x.rs"), b"x")?;
+            std::fs::write(dir.join("y.rs"), b"y")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: super::default_scope,
+        query: "parentdir: &: count() :> 1",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty(), "should return results");
+            assert!(
+                !res.has_projection_results(),
+                "parentdir: &: count() :> 1 (Lv.1 flat list) should NOT be projection. names={:?}",
+                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+            );
+            Ok(())
+        },
+    },
 }
 
 // ──────────────────────────────────────────────
