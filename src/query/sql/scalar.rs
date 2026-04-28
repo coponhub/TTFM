@@ -1,9 +1,9 @@
-use crate::db::{Col, SqlType};
+use crate::db::{Col, CustomFunc, QueryResultCol, SqlType};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
-use sea_query::{Alias, BinOper, Expr, Query, SelectStatement};
+use sea_query::{Alias, BinOper, Expr, Query, SelectStatement, SimpleExpr};
 use super::{
     build_aggregation_context_for_operand,
     needs_nest_context, build_nest_context, build_nest_context_for_operand,
@@ -108,7 +108,7 @@ pub(super) fn build_resolved_scalar_sql(
     view: &str,
 ) -> SelectStatement {
     let agg_ctx = build_aggregation_context_for_operand(op, view);
-    match op {
+    let inner = match op {
         ResolvedOperand::Aggregation(agg) => {
             if needs_nest_context(agg.inner_node()) {
                 let nest_ctx = build_nest_context(agg.inner_node(), view);
@@ -137,5 +137,83 @@ pub(super) fn build_resolved_scalar_sql(
             stmt.limit(1);
             stmt
         }
+    };
+    scalar_to_volatile_row(inner)
+}
+
+fn typeof_eq(sv: &SimpleExpr, type_str: &str) -> SimpleExpr {
+    Expr::expr(CustomFunc::type_of(sv.clone())).eq(Expr::val(type_str.to_owned()))
+}
+
+fn cast_union(sv: &SimpleExpr, sql_type: SqlType) -> SimpleExpr {
+    CustomFunc::union_value(sql_type, Expr::expr(sv.clone()).cast_as(sql_type))
+}
+
+fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
+    let sv: SimpleExpr = Expr::col((Alias::new("s"), Alias::new("scalar_value"))).into();
+
+    let bool_name: SimpleExpr = Expr::case(Expr::expr(sv.clone()).cast_as(SqlType::BOOLEAN), Expr::val("TRUE"))
+        .finally(Expr::val("FALSE"))
+        .into();
+    let name_expr: SimpleExpr = Expr::case(Expr::expr(sv.clone()).is_null(), Expr::val("NULL"))
+        .case(typeof_eq(&sv, "BOOLEAN"), bool_name)
+        .finally(Expr::expr(sv.clone()).cast_as(SqlType::VARCHAR))
+        .into();
+
+    // NULL → 'numeric' (value is NULL regardless of declared type)
+    // BOOLEAN → boolean, DOUBLE/FLOAT → double, VARCHAR → string, ELSE → integer
+    // (SUM(BIGINT) returns HUGEINT in DuckDB, so 'BIGINT' cannot be used as a fixed check;
+    // VARCHAR and float types are the only named exclusions; everything else falls to integer)
+    let type_expr: SimpleExpr = Expr::case(Expr::expr(sv.clone()).is_null(), Expr::val("numeric"))
+        .case(typeof_eq(&sv, "BOOLEAN"), Expr::val("boolean"))
+        .case(typeof_eq(&sv, "DOUBLE"), Expr::val("double"))
+        .case(typeof_eq(&sv, "FLOAT"), Expr::val("double"))
+        .case(typeof_eq(&sv, "VARCHAR"), Expr::val("string"))
+        .finally(Expr::val("integer"))
+        .into();
+
+    let value_expr: SimpleExpr = Expr::case(typeof_eq(&sv, "BOOLEAN"), cast_union(&sv, SqlType::BOOLEAN))
+        .case(typeof_eq(&sv, "DOUBLE"), cast_union(&sv, SqlType::DOUBLE))
+        .case(typeof_eq(&sv, "FLOAT"), cast_union(&sv, SqlType::DOUBLE))
+        .case(typeof_eq(&sv, "VARCHAR"), cast_union(&sv, SqlType::VARCHAR))
+        .finally(cast_union(&sv, SqlType::BIGINT))
+        .into();
+
+    let tags = CustomFunc::list_value([
+        CustomFunc::struct_pack_tag(Expr::val("name").into(), CustomFunc::union_value(SqlType::VARCHAR, name_expr), Expr::val("system").into()),
+        CustomFunc::struct_pack_tag(Expr::val("type").into(), CustomFunc::union_value(SqlType::VARCHAR, type_expr), Expr::val("system").into()),
+        CustomFunc::struct_pack_tag(Expr::val("value").into(), value_expr, Expr::val("system").into()),
+    ]);
+
+    let mut q = Query::select();
+    q.expr_as(Expr::val(0i64), Col::ItemId)
+     .expr_as(Expr::val(0i64), Col::Rank)
+     .expr_as(Expr::val("volatile"), Col::ItemKind)
+     .expr_as(tags, QueryResultCol::Tags)
+     .from_subquery(inner, Alias::new("s"));
+    q
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn test_scalar_to_volatile_row_structure() {
+        let inner = Query::select()
+            .expr_as(Expr::val(123i64), Alias::new("scalar_value"))
+            .to_owned();
+        let sql = scalar_to_volatile_row(inner).to_string(PostgresQueryBuilder);
+
+        assert!(sql.contains("item_id"), "should have item_id: {}", sql);
+        assert!(sql.contains("item_kind"), "should have item_kind: {}", sql);
+        assert!(sql.contains("tags"), "should have tags: {}", sql);
+        assert!(sql.contains("typeof"), "should have typeof: {}", sql);
+        assert!(sql.contains("union_value"), "should have union_value: {}", sql);
+        assert!(sql.contains("tag_type"), "should have tag_type: {}", sql);
+        assert!(sql.contains("'name'"), "should have name tag: {}", sql);
+        assert!(sql.contains("'type'"), "should have type tag: {}", sql);
+        assert!(sql.contains("'value'"), "should have value tag: {}", sql);
     }
 }

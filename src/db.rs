@@ -82,6 +82,8 @@ pub enum Tbl {
     Top,
     TagsGroup,
     Rn,
+    BoolResult,
+    ScalarResult,
     GroupTotal,
     AggregatedItems,
 
@@ -280,6 +282,10 @@ pub enum DuckDbFunc {
     Count,
     #[iden = "any_value"]
     AnyValue,
+    #[iden = "list_value"]
+    ListValue,
+    #[iden = "typeof"]
+    TypeOf,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -461,6 +467,75 @@ impl CustomFunc {
         sea_query::Expr::cust(sql)
     }
 
+    /// union_value(arm := expr)::UNION(...) — SqlType に対応する UNION アームを生成し、
+    /// 完全な UNION 型にキャストします。CASE 式の型統一に必要です。
+    pub fn union_value<E: Into<sea_query::SimpleExpr>>(
+        sql_type: SqlType,
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        let arm = match sql_type {
+            SqlType::BIGINT => "i",
+            SqlType::DOUBLE => "d",
+            SqlType::BOOLEAN => "b",
+            SqlType::VARCHAR | SqlType::UUID => "s",
+        };
+        sea_query::Expr::cust_with_exprs(
+            &format!(
+                "union_value({arm} := $1)\
+                 ::UNION(i BIGINT, d DOUBLE, b BOOLEAN, s VARCHAR)"
+            ),
+            [expr.into()],
+        )
+    }
+
+    /// struct_pack("tag_type" := t, "value" := v, "origin" := o) を生成します。
+    pub fn struct_pack_tag(
+        tag_type: sea_query::SimpleExpr,
+        value: sea_query::SimpleExpr,
+        origin: sea_query::SimpleExpr,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Expr::cust_with_exprs(
+            "struct_pack(\"tag_type\" := $1, \"value\" := $2, \"origin\" := $3)",
+            [tag_type, value, origin],
+        )
+    }
+
+    /// list_value(v1, v2, ...) を生成します。
+    pub fn list_value(
+        exprs: impl IntoIterator<Item = sea_query::SimpleExpr>,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::ListValue)
+            .args(exprs)
+            .into()
+    }
+
+    /// typeof(expr) を生成します。
+    pub fn type_of<E: Into<sea_query::SimpleExpr>>(expr: E) -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::TypeOf)
+            .arg(expr.into())
+            .into()
+    }
+
+    /// EAV列の (Col, SqlType) ペア配列から CASE WHEN IS NOT NULL THEN union_value(...) 式を生成します。
+    pub fn eav_union_value(arms: &[(Col, SqlType)]) -> sea_query::SimpleExpr {
+        let Some(((first_col, first_type), rest)) = arms.split_first() else {
+            return sea_query::Expr::val(Option::<String>::None).into();
+        };
+        let init = sea_query::Expr::case(
+            sea_query::Expr::col(*first_col).is_not_null(),
+            Self::union_value(*first_type, sea_query::Expr::col(*first_col)),
+        );
+        rest.iter()
+            .fold(init, |cs, (col, sql_type)| {
+                cs.case(
+                    sea_query::Expr::col(*col).is_not_null(),
+                    Self::union_value(*sql_type, sea_query::Expr::col(*col)),
+                )
+            })
+            .finally(sea_query::Expr::val(Option::<String>::None))
+            .into()
+    }
+
     /// count(*) OVER (PARTITION BY ...) を生成します。
     pub fn count_over<P>(partition_by: P) -> sea_query::SimpleExpr
     where
@@ -550,5 +625,147 @@ impl Schema {
             }
         }
         create
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_query::{Expr, PostgresQueryBuilder, Query};
+
+    #[test]
+    fn test_union_value_varchar() {
+        let expr = CustomFunc::union_value(SqlType::VARCHAR, Expr::val("hello"));
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("union_value(s :="),
+            "should contain union_value(s :=: {}",
+            sql
+        );
+        assert!(sql.contains("'hello'"), "should contain value: {}", sql);
+    }
+
+    #[test]
+    fn test_union_value_boolean() {
+        let expr = CustomFunc::union_value(SqlType::BOOLEAN, Expr::val(true));
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("union_value(b :="),
+            "should contain union_value(b :=: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_union_value_bigint() {
+        let expr = CustomFunc::union_value(SqlType::BIGINT, Expr::val(42i64));
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("union_value(i :="),
+            "should contain union_value(i :=: {}",
+            sql
+        );
+        assert!(sql.contains("42"), "should contain 42: {}", sql);
+    }
+
+    #[test]
+    fn test_union_value_double() {
+        let expr = CustomFunc::union_value(SqlType::DOUBLE, Expr::val(3.14f64));
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("union_value(d :="),
+            "should contain union_value(d :=: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_struct_pack_tag_generates_three_fields() {
+        let expr = CustomFunc::struct_pack_tag(
+            Expr::val("name").into(),
+            CustomFunc::union_value(SqlType::VARCHAR, Expr::val("foo")),
+            Expr::val("system").into(),
+        );
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("struct_pack"),
+            "should contain struct_pack: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"tag_type\""),
+            "should contain tag_type field: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"value\""),
+            "should contain value field: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"origin\""),
+            "should contain origin field: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_eav_union_value_generates_case_when() {
+        let expr = CustomFunc::eav_union_value(&[
+            (Col::LabelInt, SqlType::BIGINT),
+            (Col::LabelStr, SqlType::VARCHAR),
+            (Col::LabelBool, SqlType::BOOLEAN),
+            (Col::LabelDouble, SqlType::DOUBLE),
+        ]);
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(sql.contains("CASE"), "should have CASE: {}", sql);
+        assert!(
+            sql.contains("union_value(i :="),
+            "should have int arm: {}",
+            sql
+        );
+        assert!(
+            sql.contains("union_value(s :="),
+            "should have str arm: {}",
+            sql
+        );
+        assert!(
+            sql.contains("union_value(b :="),
+            "should have bool arm: {}",
+            sql
+        );
+        assert!(
+            sql.contains("union_value(d :="),
+            "should have double arm: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_list_value_generates_function_call() {
+        let expr = CustomFunc::list_value([
+            Expr::val(1i64).into(),
+            Expr::val(2i64).into(),
+        ]);
+        let sql = Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("list_value"),
+            "should contain list_value: {}",
+            sql
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::db::{Col, Tbl};
+use crate::db::{Col, CustomFunc, SqlType, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
     LabelSetOpKind, NestMatchCondition, NestMatchOp,
@@ -779,21 +779,13 @@ pub(super) fn build_fetch_nest_sql(
 
 fn make_tag_struct_pack(
     type_str: &str,
-    label_str_expr: &str,
-    label_int_expr: &str,
-    label_double_expr: &str,
-) -> String {
-    format!(
-        concat!(
-            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
-            r#""type" := '{type_str}', "label_str" := {label_str_expr}, "#,
-            r#""label_int" := {label_int_expr}, "label_double" := {label_double_expr}, "#,
-            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
-        ),
-        type_str = type_str,
-        label_str_expr = label_str_expr,
-        label_int_expr = label_int_expr,
-        label_double_expr = label_double_expr,
+    sql_type: SqlType,
+    value_expr: impl Into<SimpleExpr>,
+) -> SimpleExpr {
+    CustomFunc::struct_pack_tag(
+        Expr::val(type_str).into(),
+        CustomFunc::union_value(sql_type, value_expr),
+        Expr::val("system").into(),
     )
 }
 
@@ -1083,9 +1075,8 @@ pub(super) fn nest(
 
     let name_sp = make_tag_struct_pack(
         "name",
-        &format!("({})", label_ref),
-        "NULL::BIGINT",
-        "NULL::DOUBLE",
+        SqlType::VARCHAR,
+        Expr::cust(format!("({})", label_ref)),
     );
 
     let name_subquery = format!(
@@ -1103,29 +1094,36 @@ pub(super) fn nest(
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId)
     );
-    let item_sp = make_tag_struct_pack("item", &item_label_str, "NULL::BIGINT", "NULL::DOUBLE");
-    let item_list_expr = format!(
-        "list({} ORDER BY {}.{} DESC, {}.{} DESC)",
-        item_sp,
-        Iden::to_string(&Tbl::TopItems),
-        Iden::to_string(&Col::Rank),
-        Iden::to_string(&Tbl::TopItems),
-        Iden::to_string(&Col::ItemId)
+    let item_sp = make_tag_struct_pack(
+        "item",
+        SqlType::VARCHAR,
+        Expr::cust(item_label_str),
     );
-
-    let proj_label_sp = format!(
-        concat!(
-            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
-            r#""type" := 'projected_label', "label_str" := NULL::VARCHAR, "#,
-            r#""label_int" := ANY_VALUE({}.{})::BIGINT, "label_double" := NULL::DOUBLE, "#,
-            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+    let item_list_expr = Expr::cust_with_exprs(
+        &format!(
+            "list($1 ORDER BY {}.{} DESC, {}.{} DESC)",
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Col::Rank),
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Col::ItemId),
         ),
-        Iden::to_string(&Tbl::TopItems),
-        Iden::to_string(&Tbl::GroupTotal)
+        [item_sp],
     );
 
-    let mut tags_expr =
-        format!("[{}] || {} || [{}]", name_sp, item_list_expr, proj_label_sp);
+    let proj_label_sp = make_tag_struct_pack(
+        "projected_label",
+        SqlType::BIGINT,
+        Expr::cust(format!(
+            "ANY_VALUE({}.{})::BIGINT",
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Tbl::GroupTotal),
+        )),
+    );
+
+    let mut tags_expr: SimpleExpr = Expr::cust_with_exprs(
+        "list_value($1) || $2 || list_value($3)",
+        [name_sp, item_list_expr, proj_label_sp],
+    );
 
     if has_nvalue {
         let nvalue_subq = if proj_operands.len() > 1 {
@@ -1146,16 +1144,13 @@ pub(super) fn nest(
                 &label_col_name,
             )
         };
-        let nvalue_sp = format!(
-            concat!(
-                r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
-                r#""type" := 'nvalue', "label_str" := NULL::VARCHAR, "#,
-                r#""label_int" := NULL::BIGINT, "label_double" := CAST(({}) AS DOUBLE), "#,
-                r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
-            ),
-            nvalue_subq
+        let nvalue_sp = make_tag_struct_pack(
+            "nvalue",
+            SqlType::DOUBLE,
+            Expr::cust(format!("CAST(({}) AS DOUBLE)", nvalue_subq)),
         );
-        tags_expr = format!("{} || [{}]", tags_expr, nvalue_sp);
+        tags_expr =
+            Expr::cust_with_exprs("$1 || list_value($2)", [tags_expr, nvalue_sp]);
     }
 
     let mut q = Query::select();
@@ -1170,7 +1165,7 @@ pub(super) fn nest(
         Col::Rank,
     );
     q.expr_as(Expr::cust("'volatile'"), Col::ItemKind);
-    q.expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags);
+    q.expr_as(tags_expr, crate::db::QueryResultCol::Tags);
     q.from(Tbl::TopItems);
 
     if proj_operands.len() > 1 {
@@ -1414,9 +1409,8 @@ fn label_set_op_sql(
 
     let name_sp = make_tag_struct_pack(
         "name",
-        &format!("({})", label_ref),
-        "NULL::BIGINT",
-        "NULL::DOUBLE",
+        SqlType::VARCHAR,
+        Expr::cust(format!("({})", label_ref)),
     );
 
     let name_subquery = format!(
@@ -1434,33 +1428,41 @@ fn label_set_op_sql(
         Iden::to_string(&Tbl::TopItems),
         Iden::to_string(&Col::ItemId),
     );
-    let item_sp = make_tag_struct_pack("item", &item_label_str, "NULL::BIGINT", "NULL::DOUBLE");
-    let item_list_expr = format!(
-        "list({} ORDER BY {}.{} DESC)",
-        item_sp,
-        Iden::to_string(&Tbl::TopItems),
-        Iden::to_string(&Col::ItemId),
+    let item_sp = make_tag_struct_pack(
+        "item",
+        SqlType::VARCHAR,
+        Expr::cust(item_label_str),
     );
-
-    let proj_label_sp = format!(
-        concat!(
-            r#"struct_pack("item_id" := 0::BIGINT, "item_kind" := 'volatile', "#,
-            r#""type" := 'projected_label', "label_str" := NULL::VARCHAR, "#,
-            r#""label_int" := ANY_VALUE({}.{})::BIGINT, "label_double" := NULL::DOUBLE, "#,
-            r#""label_bool" := NULL::BOOLEAN, "origin" := 'system')"#
+    let item_list_expr = Expr::cust_with_exprs(
+        &format!(
+            "list($1 ORDER BY {}.{} DESC)",
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Col::ItemId),
         ),
-        Iden::to_string(&Tbl::TopItems),
-        Iden::to_string(&Tbl::GroupTotal)
+        [item_sp],
     );
 
-    let tags_expr = format!("[{}] || {} || [{}]", name_sp, item_list_expr, proj_label_sp);
+    let proj_label_sp = make_tag_struct_pack(
+        "projected_label",
+        SqlType::BIGINT,
+        Expr::cust(format!(
+            "ANY_VALUE({}.{})::BIGINT",
+            Iden::to_string(&Tbl::TopItems),
+            Iden::to_string(&Tbl::GroupTotal),
+        )),
+    );
+
+    let tags_expr: SimpleExpr = Expr::cust_with_exprs(
+        "list_value($1) || $2 || list_value($3)",
+        [name_sp, item_list_expr, proj_label_sp],
+    );
 
     let mut q = Query::select();
     q.with_cte(with_clause);
     q.expr_as(Expr::cust(volatile_id_expr), Col::ItemId);
     q.expr_as(Expr::cust("0::BIGINT"), Col::Rank);
     q.expr_as(Expr::cust("'volatile'"), Col::ItemKind);
-    q.expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags);
+    q.expr_as(tags_expr, crate::db::QueryResultCol::Tags);
     q.from(Tbl::TopItems)
         .group_by_col((Tbl::TopItems, Alias::new("label_value")))
         .order_by(

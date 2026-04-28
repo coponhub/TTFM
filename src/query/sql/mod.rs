@@ -33,8 +33,6 @@ use boolean::{
     build_label_set_op_pick_sql,
     build_boolean_sql,
 };
-#[cfg(test)]
-use boolean::{build_direct_boolean_select, wrap_boolean_collider};
 use scalar::{
     build_resolved_match_sql, build_column_match_sql,
     build_resolved_tag_tag_match_sql, build_scalar_match_sql,
@@ -46,9 +44,9 @@ use nest::{
 use low_dispatcher::try_dispatch_common;
 use util::*;
 
-use crate::db::Col;
+use crate::db::{Col, CustomFunc};
 use crate::query::ast::QueryNode;
-use crate::query::lens_resolver::ResolvedNode;
+use crate::query::lens_resolver::{NestMatchOp, ResolvedNode, ResolvedOperand};
 #[cfg(test)]
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use sea_query::{Alias, Expr, Query, SelectStatement};
@@ -74,9 +72,8 @@ fn build_fetch_items_sql(
     }
 
     let pick_sql = pick.build_pick();
-    let columns = Col::raw_tag_row_columns();
 
-    // 1. まず ID を絞り込むためのサブクエリを構築
+    // 1. ID 絞り込みサブクエリ
     let mut id_query = Query::select();
     id_query
         .column(Col::ItemId)
@@ -91,32 +88,29 @@ fn build_fetch_items_sql(
         id_query.offset(o as u64);
     }
 
-    // 2. 物理カラムをパックして集約。
-    // DuckDB の struct_pack("col1" := "col1", ...) 構文を使用。
-    let fields = columns
-        .iter()
-        .map(|c| {
-            format!(
-                "\"{}\" := \"{}\"",
-                sea_query::Iden::to_string(c),
-                sea_query::Iden::to_string(c)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let tags_expr = format!("LIST(struct_pack({}))", fields);
+    // 2. EAV列を UNION 型に変換して struct_pack で集約
+    use crate::db::SqlType;
+    let union_val = CustomFunc::eav_union_value(&[
+        (Col::LabelInt, SqlType::BIGINT),
+        (Col::LabelStr, SqlType::VARCHAR),
+        (Col::LabelBool, SqlType::BOOLEAN),
+        (Col::LabelDouble, SqlType::DOUBLE),
+    ]);
+    let struct_expr = CustomFunc::struct_pack_tag(
+        Expr::col(Col::Type).into(),
+        union_val,
+        Expr::col(Col::Origin).into(),
+    );
+    let tags_expr = CustomFunc::list(struct_expr);
 
     let mut q = Query::select();
     q.column(Col::ItemId)
         .expr_as(Expr::col(Col::Rank).max(), Col::Rank)
         .expr_as(
-            Expr::cust(format!(
-                "ANY_VALUE(\"{}\")",
-                sea_query::Iden::to_string(&Col::ItemKind)
-            )),
+            CustomFunc::any_value(Expr::col(Col::ItemKind)),
             Col::ItemKind,
         )
-        .expr_as(Expr::cust(tags_expr), crate::db::QueryResultCol::Tags)
+        .expr_as(tags_expr, crate::db::QueryResultCol::Tags)
         .from(Alias::new(view))
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .group_by_col(Col::ItemId)
@@ -184,14 +178,62 @@ pub fn build_fetch_sql(
         let limit = if n > 0 { Some(n + 1) } else { None };
         return Ok(build_fetch_items_sql(&pick, limit, Some(offset)));
     }
-    if let Some(op) = resolver.get_scalar_expression() {
-        return Ok(build_resolved_scalar_sql(&op, view));
-    }
-    if resolver.resolved_query.is_boolean_result() {
-        return Ok(build_boolean_sql(&resolver.resolved_query, view));
+    let limit = if n > 0 { Some(n + 1) } else { None };
+    match &resolver.resolved_query {
+        // スカラー集約：単一値を返す
+        ResolvedNode::Aggregation(agg) => {
+            return Ok(build_resolved_scalar_sql(
+                &ResolvedOperand::Aggregation(agg.clone()),
+                view,
+            ));
+        }
+        // 集約または純スカラーを key に持つ Nest：単一値を返す
+        ResolvedNode::Nest { keys, .. } => {
+            let op = keys.first().unwrap();
+            if op.contains_aggregation() || op.is_pure_scalar() {
+                return Ok(build_resolved_scalar_sql(op, view));
+            }
+        }
+        // ブーリアン比較：集約同士／集約とリテラル／リテラル同士 の比較結果を volatile row で返す
+        node @ (ResolvedNode::AggregationMatch { .. }
+        | ResolvedNode::AggregationAggregationMatch { .. }
+        | ResolvedNode::AggregationCalculationMatch { .. }
+        | ResolvedNode::AggregationTagMatch { .. }
+        | ResolvedNode::CalculationMatch { .. }
+        | ResolvedNode::ScalarMatch { .. }
+        | ResolvedNode::NestMatch { .. }
+        | ResolvedNode::MergedNestMatch { .. }) => {
+            return Ok(build_boolean_sql(node, view));
+        }
+        // NestNestMatch のうち Comparison + Literal 右辺は存在確認ブーリアン
+        ResolvedNode::NestNestMatch {
+            op: NestMatchOp::Comparison(_),
+            right_nvalue: ResolvedOperand::Literal(_),
+            ..
+        } => {
+            return Ok(build_boolean_sql(&resolver.resolved_query, view));
+        }
+        // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
+        // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
+        ResolvedNode::And(nodes) | ResolvedNode::Or(nodes)
+            if !nodes.is_empty()
+                && nodes.iter().all(|n| {
+                    matches!(
+                        n,
+                        ResolvedNode::AggregationMatch { .. }
+                            | ResolvedNode::AggregationAggregationMatch { .. }
+                            | ResolvedNode::AggregationCalculationMatch { .. }
+                            | ResolvedNode::AggregationTagMatch { .. }
+                            | ResolvedNode::CalculationMatch { .. }
+                            | ResolvedNode::ScalarMatch { .. }
+                    )
+                }) =>
+        {
+            return Ok(build_boolean_sql(&resolver.resolved_query, view));
+        }
+        _ => {}
     }
     let pick = PickNode::new(&resolver.resolved_query, view);
-    let limit = if n > 0 { Some(n + 1) } else { None };
     Ok(build_fetch_items_sql(&pick, limit, Some(offset)))
 }
 
@@ -289,6 +331,63 @@ mod tests {
     }
 
     #[test]
+    fn test_build_fetch_items_sql_union_schema() {
+        use crate::query::lens_schema::StorageMapping;
+        use sea_query::PostgresQueryBuilder;
+
+        let node = ResolvedNode::Match {
+            tag_type: TagType::Base(SType::Name),
+            storage: StorageMapping::Column(Col::Name),
+            sql_type: crate::db::SqlType::VARCHAR,
+            op: ComparisonOp::Scalar(BasicOp::Eq),
+            label: Label::from("test"),
+        };
+        let pick = PickNode::new(&node, "oneview");
+        let sql = build_fetch_items_sql(&pick, Some(10), Some(0));
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        // 新スキーマ: "tag_type" フィールドが含まれる
+        assert!(
+            sql_str.contains("tag_type"),
+            "SQL should use new tag_type field: {}",
+            sql_str
+        );
+        // UNION型変換: union_value(i := ...) 等が含まれる
+        assert!(
+            sql_str.contains("union_value(i :="),
+            "SQL should have union_value(i :=: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("union_value(s :="),
+            "SQL should have union_value(s :=: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("union_value(b :="),
+            "SQL should have union_value(b :=: {}",
+            sql_str
+        );
+        assert!(
+            sql_str.contains("union_value(d :="),
+            "SQL should have union_value(d :=: {}",
+            sql_str
+        );
+        // struct_pack と list() でラップ
+        assert!(
+            sql_str.contains("struct_pack"),
+            "SQL should use struct_pack: {}",
+            sql_str
+        );
+        // 旧スキーマの EAV フィールド名が struct_pack 内に現れない
+        assert!(
+            !sql_str.contains("\"label_str\" :="),
+            "SQL should not have old label_str field: {}",
+            sql_str
+        );
+    }
+
+    #[test]
     fn test_build_agg_count_items() {
         let agg =
             ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![
@@ -347,19 +446,6 @@ mod tests {
         assert!(sql_str.contains("\"type\" IN ('size')"));
     }
 
-    #[test]
-    fn test_wrap_boolean_collider() {
-        let mut inner = Query::select();
-        inner
-            .column(Col::ItemId)
-            .from(Alias::new("t"))
-            .and_where(Expr::col(Col::ItemId).eq(1));
-
-        let sql = wrap_boolean_collider(inner);
-        let sql_str = sql.to_string(PostgresQueryBuilder);
-
-        assert!(sql_str.contains("FROM (SELECT"));
-    }
 
     #[test]
     fn test_build_aggregation_sql_structure() {
@@ -449,38 +535,6 @@ mod tests {
         assert!(sql_str.contains("42"), "Should contain literal value 42");
     }
 
-    /// TDD: build_direct_boolean_select のテスト
-    /// 生成されるSQLにNULLチェックが含まれていることを確認
-    #[test]
-    fn test_build_direct_boolean_select_null_propagation() {
-        use sea_query::PostgresQueryBuilder;
-
-        // 左辺: サブクエリ (NULL可能)
-        let left = subquery(Query::select().expr(Expr::val(100i64)).to_owned());
-        // 右辺: リテラル
-        let right = Expr::val(50i64).into();
-
-        let sql = build_direct_boolean_select(
-            left,
-            ComparisonOp::Scalar(BasicOp::Gt),
-            right,
-            "oneview",
-        );
-        let sql_str = sql.to_string(PostgresQueryBuilder);
-
-        // NULL チェックが含まれていることを確認
-        // CASE WHEN (...) THEN 1 WHEN (...) IS NULL THEN NULL ELSE 0 END
-        assert!(
-            sql_str.contains("IS NULL"),
-            "SQL should contain NULL check: {}",
-            sql_str
-        );
-        assert!(
-            sql_str.contains("CASE"),
-            "SQL should contain CASE: {}",
-            sql_str
-        );
-    }
 
 
     #[test]

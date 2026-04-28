@@ -86,15 +86,7 @@ impl<'a> Fetcher<'a> {
             return Ok(results);
         }
 
-        // スカラー / ブーリアン → 単一 SearchResult をリストで返す
-        if resolver.get_scalar_expression().is_some() {
-            return self.decode_aggregation_result(&sql_str).map(|r| vec![r]);
-        }
-        if resolver.resolved_query.is_boolean_result() {
-            return self.decode_boolean_result(&sql_str).map(|r| vec![r]);
-        }
-
-        // 通常アイテム → decode_item_from_row (重複除去付き)
+        // 通常アイテム / ブーリアン / スカラー → decode_item_from_row (重複除去付き)
         let mut stmt = self.conn.prepare(&sql_str)?;
         let mut results = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
@@ -105,55 +97,6 @@ impl<'a> Fetcher<'a> {
             }
         }
         Ok(results)
-    }
-
-    fn decode_aggregation_result(&self, sql_str: &str) -> Result<SearchResult> {
-        use crate::types::{Label, LabelValue, TagType};
-        let mut stmt = self.conn.prepare(sql_str)?;
-        let val: duckdb::types::Value = stmt
-            .query_row([], |r| r.get(0))
-            .map_err(|e| anyhow::anyhow!("Failed to compute aggregation: {}", e))?;
-        let duckdb_type_str = format!("{:?}", stmt.column_type(0));
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            eprintln!("DEBUG: aggregation result: {:?}", val);
-        }
-        let label_val = LabelValue::from(val);
-        let type_name = if let LabelValue::Null = label_val {
-            crate::util::get_db_coltype(&duckdb_type_str)
-        } else {
-            (&label_val).into()
-        };
-        let mut res = SearchResult::new_empty(
-            ItemId::new_volatile(), ItemKind::Volatile, label_val.as_display_name(),
-        );
-        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Type),
-            LabelValue::String(type_name.to_string())), crate::types::Origin::System);
-        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Value),
-            label_val), crate::types::Origin::System);
-        Ok(res)
-    }
-
-    fn decode_boolean_result(&self, sql_str: &str) -> Result<SearchResult> {
-        use crate::types::{Label, LabelValue, TagType};
-        if std::env::var("TTFM_DEBUG").is_ok() {
-            eprintln!("DEBUG: BOOLEAN SQL: {}", sql_str);
-        }
-        let mut stmt = self.conn.prepare(sql_str)?;
-        let id_val: Option<i64> = stmt.query_row([], |r| r.get(0))?;
-        let label_val = match id_val {
-            Some(1) => LabelValue::Boolean(true),
-            Some(_) => LabelValue::Boolean(false),
-            None => LabelValue::Null,
-        };
-        let mut res = SearchResult::new_empty(
-            ItemId::new_volatile(), ItemKind::Volatile, label_val.as_display_name(),
-        );
-        let type_name: &str = (&LabelValue::Boolean(true)).into();
-        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Type),
-            LabelValue::String(type_name.to_string())), crate::types::Origin::System);
-        res.apply_tag(Label::resolve(TagType::Base(crate::types::SType::Value),
-            label_val), crate::types::Origin::System);
-        Ok(res)
     }
 
     /// 平坦なタグデータのリストを取得（メモリ上での利用・デバッグ用）
@@ -203,10 +146,19 @@ impl<'a> Fetcher<'a> {
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<SearchResult> {
+        use crate::types::LabelValue;
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
-            #[allow(deprecated)]
-            res.apply_raw_tag(tag_row);
+            if tag_row.tag_type == "name" {
+                let lv = LabelValue::from(tag_row.value);
+                if !matches!(lv, LabelValue::Null) {
+                    let s = lv.as_display_name();
+                    res.name = s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                }
+            } else {
+                #[allow(deprecated)]
+                res.apply_raw_tag(tag_row);
+            }
         }
         Ok(res)
     }
@@ -224,19 +176,20 @@ impl<'a> Fetcher<'a> {
         for tag_row in raw_tags {
             match tag_row.tag_type.as_str() {
                 "name" => {
-                    if let Some(s) = tag_row.label_str {
-                        // SQL の CAST(double AS VARCHAR) は "8.0" を返すが、
-                        // 旧来の Rust 側フォーマット (f64::to_string) は "8" を返す。
-                        // f64 として解釈できる場合は Rust 側で再フォーマットする。
-                        res.name =
-                            s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                    let lv = LabelValue::from(tag_row.value);
+                    if !matches!(lv, LabelValue::Null) {
+                        let s = lv.as_display_name();
+                        // DuckDB の CAST(double AS VARCHAR) は "8.0" を返すが、
+                        // Rust の f64::to_string は "8" を返す。
+                        res.name = s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
                     }
                 }
                 "projected_label" => {
-                    if let Some(i) = tag_row.label_int {
+                    let lv = LabelValue::from(tag_row.value);
+                    if !matches!(lv, LabelValue::Null) {
                         res.projected_label = Some(Label::resolve(
                             TagType::from("projected_label"),
-                            LabelValue::Integer(i),
+                            lv,
                         ));
                     }
                 }

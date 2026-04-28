@@ -923,47 +923,6 @@ impl ResolvedNode {
         }
     }
 
-    /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
-    pub fn is_boolean_result(&self) -> bool {
-        match self {
-            ResolvedNode::AggregationMatch { .. }
-            | ResolvedNode::AggregationCalculationMatch { .. }
-            | ResolvedNode::AggregationAggregationMatch { .. }
-            | ResolvedNode::AggregationTagMatch { .. }
-            | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::NestMatch { .. }
-            | ResolvedNode::MergedNestMatch { .. } => true,
-            // Comparison 演算子の NestNestMatch:
-            // right_nvalue が Literal の場合はブーリアン結果（フィルタリング）。
-            // right_nvalue が Aggregation/Calculation の場合はフラットリスト比較なので false。
-            ResolvedNode::NestNestMatch {
-                op, right_nvalue, ..
-            } => {
-                matches!(op, NestMatchOp::Comparison(_))
-                    && matches!(right_nvalue, ResolvedOperand::Literal(_))
-            }
-            ResolvedNode::TagCalculationMatch { calc, .. }
-            | ResolvedNode::CalculationMatch { calc, .. } => {
-                calc.contains_aggregation()
-            }
-            ResolvedNode::CalculationCalculationMatch {
-                left_calc,
-                right_calc,
-                ..
-            } => {
-                left_calc.contains_aggregation()
-                    || right_calc.contains_aggregation()
-            }
-            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
-                !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
-            }
-            ResolvedNode::Difference(l, r) => {
-                l.is_boolean_result() && r.is_boolean_result()
-            }
-
-            _ => false,
-        }
-    }
 }
 
 /// ResolvedNode が Nest である場合の keys.len() を返す（And ラッパーを透過）
@@ -2581,23 +2540,6 @@ impl Resolver {
         self.resolved_query.get_nvalue_condition()
     }
 
-    /// スカラー式を返す
-    pub fn get_scalar_expression(&self) -> Option<ResolvedOperand> {
-        match &self.resolved_query {
-            ResolvedNode::Aggregation(agg) => {
-                Some(ResolvedOperand::Aggregation(agg.clone()))
-            }
-            ResolvedNode::Nest { keys, .. } => {
-                let op = keys.first().unwrap();
-                if op.contains_aggregation() || op.is_pure_scalar() {
-                    Some(op.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2679,45 +2621,6 @@ mod tests {
         );
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
-    }
-
-    #[test]
-    fn test_resolved_node_is_boolean_result() {
-        use crate::query::ast::ComparisonOp;
-        use crate::types::SType;
-
-        // 1. AggregationMatch is boolean
-        let agg =
-            ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![])));
-        let node_bool = ResolvedNode::AggregationMatch {
-            agg,
-            op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Gt),
-            label: Label::from(0),
-        };
-        assert!(node_bool.is_boolean_result());
-
-        // 2. Normal ColumnMatch is NOT boolean
-        let node_normal = ResolvedNode::ColumnMatch {
-            tag: SType::Extension,
-            label: Label::from("rs"),
-        };
-        assert!(!node_normal.is_boolean_result());
-
-        // 3. AND(Boolean, Boolean) is boolean
-        let node_and_bool =
-            ResolvedNode::And(vec![node_bool.clone(), node_bool.clone()]);
-        assert!(node_and_bool.is_boolean_result());
-
-        // 4. AND(Boolean, Normal) is NOT boolean
-        let node_mixed =
-            ResolvedNode::And(vec![node_bool.clone(), node_normal.clone()]);
-        assert!(!node_mixed.is_boolean_result());
-
-        // 5. OR(Boolean, Boolean) is boolean
-        let node_or_bool =
-            ResolvedNode::Or(vec![node_bool.clone(), node_bool.clone()]);
-        assert!(node_or_bool.is_boolean_result());
-
     }
 
     #[test]

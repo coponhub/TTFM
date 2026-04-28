@@ -28,16 +28,14 @@ pub struct RawTagRow {
     pub id: ItemId,
     pub item_kind: ItemKind,
     pub tag_type: String,
-    pub label_str: Option<String>,
-    pub label_int: Option<i64>,
-    pub label_double: Option<f64>,
-    pub label_bool: Option<bool>,
+    pub value: duckdb::types::Value,
     pub origin: String,
 }
 
 impl RawTagRow {
     pub fn from_row(r: &duckdb::Row) -> duckdb::Result<Self> {
         use crate::db::Col;
+        use duckdb::types::Value;
         use sea_query::Iden;
 
         let col = |c: Col| {
@@ -46,14 +44,27 @@ impl RawTagRow {
             s
         };
 
+        let label_int: Option<i64> = r.get(col(Col::LabelInt).as_str())?;
+        let label_str: Option<String> = r.get(col(Col::LabelStr).as_str())?;
+        let label_double: Option<f64> = r.get(col(Col::LabelDouble).as_str())?;
+        let label_bool: Option<bool> = r.get(col(Col::LabelBool).as_str())?;
+        let value = if let Some(i) = label_int {
+            Value::BigInt(i)
+        } else if let Some(s) = label_str {
+            Value::Text(s)
+        } else if let Some(b) = label_bool {
+            Value::Boolean(b)
+        } else if let Some(d) = label_double {
+            Value::Double(d)
+        } else {
+            Value::Null
+        };
+
         Ok(Self {
             id: r.get(col(Col::ItemId).as_str())?,
             item_kind: r.get(col(Col::ItemKind).as_str())?,
             tag_type: r.get(col(Col::Type).as_str())?,
-            label_str: r.get(col(Col::LabelStr).as_str())?,
-            label_int: r.get(col(Col::LabelInt).as_str())?,
-            label_double: r.get(col(Col::LabelDouble).as_str())?,
-            label_bool: r.get(col(Col::LabelBool).as_str())?,
+            value,
             origin: r.get(col(Col::Origin).as_str())?,
         })
     }
@@ -61,48 +72,26 @@ impl RawTagRow {
     pub fn from_map(
         map: &duckdb::types::OrderedMap<String, duckdb::types::Value>,
     ) -> Option<Self> {
-        use crate::db::Col;
         use duckdb::types::Value;
 
-        let get_str = |c: Col| {
-            map.get(&c.name()).and_then(|v| match v {
-                Value::Text(s) => Some(s.clone()),
-                _ => None,
-            })
+        let get = |key: &str| map.get(&key.to_string());
+
+        let tag_type = match get("tag_type")? {
+            Value::Text(s) => s.clone(),
+            _ => return None,
         };
-        let get_i64 = |c: Col| {
-            map.get(&c.name()).and_then(|v| match v {
-                Value::BigInt(i) => Some(*i),
-                _ => None,
-            })
-        };
-        let get_f64 = |c: Col| {
-            map.get(&c.name()).and_then(|v| match v {
-                Value::Double(d) => Some(*d),
-                Value::BigInt(i) => Some(*i as f64),
-                _ => None,
-            })
-        };
-        let get_bool = |c: Col| {
-            map.get(&c.name()).and_then(|v| match v {
-                Value::Boolean(b) => Some(*b),
-                _ => None,
-            })
+        let value = get("value").cloned().unwrap_or(Value::Null);
+        let origin = match get("origin") {
+            Some(Value::Text(s)) => s.clone(),
+            _ => "system".to_string(),
         };
 
         Some(Self {
-            id: get_i64(Col::ItemId)?.into(),
-            item_kind: get_str(Col::ItemKind)
-                .as_deref()
-                .and_then(|s| s.parse::<ItemKind>().ok())
-                .unwrap_or(ItemKind::Volatile),
-            tag_type: get_str(Col::Type).unwrap_or_default(),
-            label_str: get_str(Col::LabelStr),
-            label_int: get_i64(Col::LabelInt),
-            label_double: get_f64(Col::LabelDouble),
-            label_bool: get_bool(Col::LabelBool),
-            origin: get_str(Col::Origin)
-                .unwrap_or_else(|| "system".to_string()),
+            id: ItemId::Volatile(0),
+            item_kind: ItemKind::Volatile,
+            tag_type,
+            value,
+            origin,
         })
     }
 }
@@ -158,7 +147,7 @@ impl<T> PagedResult<T> {
 
 impl SearchResponse {
     /// 通常表示用に、アイテムの Kind とタグ構成（属性構成）が同一なものを集約して返します。
-    pub fn iter_type_groups(&self) -> Vec<TypeGroup> {
+    pub fn iter_type_groups(&self) -> Vec<TypeGroup<'_>> {
         use std::collections::{BTreeSet, HashMap};
 
         let mut groups: HashMap<
@@ -301,19 +290,7 @@ impl SearchResult {
         } else {
             Origin::User
         };
-
-        let label_val = if let Some(i) = row.label_int {
-            LabelValue::Integer(i)
-        } else if let Some(s) = row.label_str {
-            LabelValue::String(s)
-        } else if let Some(b) = row.label_bool {
-            LabelValue::Boolean(b)
-        } else if let Some(d) = row.label_double {
-            LabelValue::Double(d.to_bits())
-        } else {
-            LabelValue::Null
-        };
-
+        let label_val = LabelValue::from(row.value);
         let label = Label::resolve(TagType::from(row.tag_type), label_val);
         self.apply_tag(label, origin);
     }

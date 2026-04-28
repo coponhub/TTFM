@@ -15,7 +15,7 @@ use std::path::Path;
 /// このトレイトを実装した構造体を作成し、`FunctionRegistry` に登録します。
 pub trait IndexingFunction: Send + Sync {
     /// この機能の識別子名を取得します。
-    fn name(&self) -> Name;
+    fn name(&self) -> Name<'_>;
 
     /// この機能が保持する `Tagger`（抽出ロジック実行部）を取得します。
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -145,7 +145,7 @@ impl PathFunction {
 }
 
 impl IndexingFunction for PathFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Path.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -218,7 +218,7 @@ impl ParentDirFunction {
 }
 
 impl IndexingFunction for ParentDirFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Parentdir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -299,7 +299,7 @@ impl FilenameFunction {
 }
 
 impl IndexingFunction for FilenameFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Filename.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -377,7 +377,7 @@ impl StemFunction {
 }
 
 impl IndexingFunction for StemFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Stem.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -448,7 +448,7 @@ impl ExtensionFunction {
 }
 
 impl IndexingFunction for ExtensionFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Extension.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -519,7 +519,7 @@ impl DirectoryFunction {
 }
 
 impl IndexingFunction for DirectoryFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::IsDir.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -587,7 +587,7 @@ impl SizeBytesFunction {
 }
 
 impl IndexingFunction for SizeBytesFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Size.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -658,7 +658,7 @@ impl ModifiedTsFunction {
 }
 
 impl IndexingFunction for ModifiedTsFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Mtime.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -717,7 +717,7 @@ impl InodeFunction {
 }
 
 impl IndexingFunction for InodeFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::FileId.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -811,7 +811,7 @@ impl TypeFromExtFunction {
 }
 
 impl IndexingFunction for TypeFromExtFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::TypeFromExt.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -899,7 +899,7 @@ impl SizeStrFunction {
 }
 
 impl IndexingFunction for SizeStrFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::SizeStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -977,7 +977,7 @@ impl ModifiedStrFunction {
 }
 
 impl IndexingFunction for ModifiedStrFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::ModifiedStr.into()
     }
     fn tagger(&self) -> Option<&dyn Tagger> {
@@ -994,7 +994,7 @@ impl IndexingFunction for ModifiedStrFunction {
 
 pub struct NameIndexingFunction;
 impl IndexingFunction for NameIndexingFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Name.into()
     }
     fn role(&self) -> ScanRole {
@@ -1007,7 +1007,7 @@ impl IndexingFunction for NameIndexingFunction {
 
 pub struct KindIndexingFunction;
 impl IndexingFunction for KindIndexingFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::ItemKind.into()
     }
     fn role(&self) -> ScanRole {
@@ -1020,7 +1020,7 @@ impl IndexingFunction for KindIndexingFunction {
 
 pub struct ContentIndexingFunction;
 impl IndexingFunction for ContentIndexingFunction {
-    fn name(&self) -> Name {
+    fn name(&self) -> Name<'_> {
         SType::Content.into()
     }
     fn role(&self) -> ScanRole {
