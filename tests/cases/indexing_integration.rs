@@ -1,7 +1,7 @@
+use crate::cases::has_item_tags;
 use file_id::get_file_id;
 use tempfile::tempdir;
 use ttfm::FileManager;
-use crate::cases::has_item_tags;
 
 #[test]
 fn test_incremental_indexing_full_flow() {

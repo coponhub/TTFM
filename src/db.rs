@@ -66,36 +66,61 @@ pub enum Tbl {
     UserTagsDiff,
     DataTypesDiff,
 
-    // --- Work Tables / Aliases ---
+    // --- Work Tables ---
     Scan,
     Live,
     Item,
     IdItem,
     Target,
-    Diff,
     Master,
+}
+
+/// SQL 内部で使われる中間的な識別子（サブクエリエイリアス・中間カラム名）。
+/// `use crate::db::Pronoun::*;` でインポートして使用する。
+#[derive(Iden, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pronoun {
+    // --- 元 Tbl から移行 ---
     Sub,
-    InnerSub,
+    Diff,
     AllHits,
     TopItems,
-    PackedTags,
-    Top,
-    TagsGroup,
-    Rn,
-    BoolResult,
-    ScalarResult,
-    GroupTotal,
-    AggregatedItems,
-
-    // --- Set Operation Aliases ---
-    LeftSide,
-    RightSide,
-    NotSide,
-    Identities,
-    AggTags,
-
-    // --- CTE (WITH Clause) ---
     PickedIds,
+    GroupTotal,
+    Rn,
+    // --- サブクエリエイリアス ---
+    View,
+    Proj,
+    Pivot,
+    NvFilter,
+    Pk,
+    // --- JOIN エイリアス ---
+    #[iden = "L"]
+    L,
+    #[iden = "R"]
+    R,
+    // --- 中間カラム ---
+    Nvalue,
+    Group,
+    Cast,
+    Label,
+    Scalar,
+    // --- 追加分 ---
+    Agg,
+    Ctx,
+    Filter,
+    Tags,
+    Deduped,
+    Val,
+    Kind,
+    Key,
+}
+
+/// Volatile Column
+/// クエリの結果にのみあるような永続化されていないカラム名
+#[derive(Iden, Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum VCol {
+    Total,
 }
 
 /// SQL型名（CAST用）。データベース上のデータ型ID（`data_types` テーブルと連携）。
@@ -262,30 +287,20 @@ impl Col {
 /// DuckDB 固有の関数名を表す識別子。
 #[derive(Iden, Clone, Copy)]
 pub enum DuckDbFunc {
-    #[iden = "read_parquet"]
     ReadParquet,
-    #[iden = "coalesce"]
     Coalesce,
-    #[iden = "list"]
     List,
-    #[iden = "concat"]
     Concat,
-    #[iden = "parquet_kv_metadata"]
     ParquetKvMetadata,
-    #[iden = "struct_pack"]
     StructPack,
-    #[iden = "list_slice"]
     ListSlice,
-    #[iden = "row_number"]
     RowNumber,
-    #[iden = "count"]
     Count,
-    #[iden = "any_value"]
     AnyValue,
-    #[iden = "list_value"]
     ListValue,
     #[iden = "typeof"]
     TypeOf,
+    StringAgg,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -510,7 +525,9 @@ impl CustomFunc {
     }
 
     /// typeof(expr) を生成します。
-    pub fn type_of<E: Into<sea_query::SimpleExpr>>(expr: E) -> sea_query::SimpleExpr {
+    pub fn type_of<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
         sea_query::Func::cust(DuckDbFunc::TypeOf)
             .arg(expr.into())
             .into()
@@ -536,17 +553,99 @@ impl CustomFunc {
             .into()
     }
 
-    /// count(*) OVER (PARTITION BY ...) を生成します。
+    /// TRY_CAST(expr AS DOUBLE) を生成します。
+    pub fn try_cast_double<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Expr::cust_with_exprs(
+            "TRY_CAST($1 AS DOUBLE)",
+            [expr.into()],
+        )
+    }
+
+    /// COUNT(*) を生成します。
+    pub fn count_star() -> sea_query::SimpleExpr {
+        sea_query::Func::cust(DuckDbFunc::Count)
+            .arg(sea_query::Expr::cust("*"))
+            .into()
+    }
+
+    /// string_agg(expr, separator) を生成します。
+    pub fn string_agg<E, S>(expr: E, separator: S) -> sea_query::SimpleExpr
+    where
+        E: Into<sea_query::SimpleExpr>,
+        S: Into<sea_query::SimpleExpr>,
+    {
+        sea_query::Func::cust(DuckDbFunc::StringAgg)
+            .args([expr.into(), separator.into()])
+            .into()
+    }
+
+    /// count(*) OVER (PARTITION BY col) を生成します。
     pub fn count_over<P>(partition_by: P) -> sea_query::SimpleExpr
     where
         P: sea_query::IntoIden,
     {
-        let mut p_name = String::new();
-        partition_by.into_iden().unquoted(&mut p_name);
-        sea_query::Expr::cust(format!(
-            "count(*) OVER (PARTITION BY \"{}\")",
-            p_name
-        ))
+        Self::count_over_multi(&[partition_by.into_iden()])
+    }
+
+    /// count(*) OVER (PARTITION BY col1, col2, ...) を生成します。
+    pub fn count_over_multi(
+        partition_cols: &[sea_query::DynIden],
+    ) -> sea_query::SimpleExpr {
+        let cols = partition_cols
+            .iter()
+            .map(|c| {
+                let mut s = String::new();
+                c.unquoted(&mut s);
+                format!("\"{}\"", s)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        sea_query::Expr::cust(format!("count(*) OVER (PARTITION BY {})", cols))
+    }
+
+    /// row_number() OVER (PARTITION BY col1, col2, ... ORDER BY ...) を生成します。
+    pub fn row_number_over_multi<O>(
+        partition_cols: &[sea_query::DynIden],
+        order_bys: Vec<(O, sea_query::Order)>,
+    ) -> sea_query::SimpleExpr
+    where
+        O: sea_query::IntoIden,
+    {
+        let cols = partition_cols
+            .iter()
+            .map(|c| {
+                let mut s = String::new();
+                c.unquoted(&mut s);
+                format!("\"{}\"", s)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("row_number() OVER (PARTITION BY {}", cols);
+        if !order_bys.is_empty() {
+            sql.push_str(" ORDER BY ");
+            let orders = order_bys
+                .into_iter()
+                .map(|(col, ord)| {
+                    let mut s = String::new();
+                    col.into_iden().unquoted(&mut s);
+                    format!(
+                        "\"{}\" {}",
+                        s,
+                        if matches!(ord, sea_query::Order::Asc) {
+                            "ASC"
+                        } else {
+                            "DESC"
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&orders);
+        }
+        sql.push(')');
+        sea_query::Expr::cust(sql)
     }
 }
 
@@ -635,10 +734,9 @@ mod tests {
 
     #[test]
     fn test_union_value_varchar() {
-        let expr = CustomFunc::union_value(SqlType::VARCHAR, Expr::val("hello"));
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let expr =
+            CustomFunc::union_value(SqlType::VARCHAR, Expr::val("hello"));
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(s :="),
             "should contain union_value(s :=: {}",
@@ -650,9 +748,7 @@ mod tests {
     #[test]
     fn test_union_value_boolean() {
         let expr = CustomFunc::union_value(SqlType::BOOLEAN, Expr::val(true));
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(b :="),
             "should contain union_value(b :=: {}",
@@ -663,9 +759,7 @@ mod tests {
     #[test]
     fn test_union_value_bigint() {
         let expr = CustomFunc::union_value(SqlType::BIGINT, Expr::val(42i64));
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(i :="),
             "should contain union_value(i :=: {}",
@@ -677,9 +771,7 @@ mod tests {
     #[test]
     fn test_union_value_double() {
         let expr = CustomFunc::union_value(SqlType::DOUBLE, Expr::val(3.14f64));
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(d :="),
             "should contain union_value(d :=: {}",
@@ -694,9 +786,7 @@ mod tests {
             CustomFunc::union_value(SqlType::VARCHAR, Expr::val("foo")),
             Expr::val("system").into(),
         );
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("struct_pack"),
             "should contain struct_pack: {}",
@@ -727,9 +817,7 @@ mod tests {
             (Col::LabelBool, SqlType::BOOLEAN),
             (Col::LabelDouble, SqlType::DOUBLE),
         ]);
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(sql.contains("CASE"), "should have CASE: {}", sql);
         assert!(
             sql.contains("union_value(i :="),
@@ -759,12 +847,83 @@ mod tests {
             Expr::val(1i64).into(),
             Expr::val(2i64).into(),
         ]);
-        let sql = Query::select()
-            .expr(expr)
-            .to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("list_value"),
             "should contain list_value: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_count_star() {
+        let sql = Query::select()
+            .expr(CustomFunc::count_star())
+            .to_string(PostgresQueryBuilder);
+        assert!(sql.contains("count(*)"), "should contain count(*): {}", sql);
+    }
+
+    #[test]
+    fn test_string_agg() {
+        let expr =
+            CustomFunc::string_agg(Expr::col(Col::LabelStr), Expr::val(","));
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("string_agg"),
+            "should contain string_agg: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_try_cast_double() {
+        let expr = CustomFunc::try_cast_double(Expr::col(Col::LabelInt));
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("TRY_CAST") && sql.contains("DOUBLE"),
+            "should contain TRY_CAST ... DOUBLE: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_count_over_multi() {
+        use sea_query::{Alias, IntoIden};
+        let cols = vec![
+            Alias::new("key0").into_iden(),
+            Alias::new("key1").into_iden(),
+        ];
+        let sql = Query::select()
+            .expr(CustomFunc::count_over_multi(&cols))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("count(*)") && sql.contains("PARTITION BY"),
+            "should contain count(*) OVER PARTITION BY: {}",
+            sql
+        );
+        assert!(
+            sql.contains("key0") && sql.contains("key1"),
+            "should contain both keys: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_row_number_over_multi() {
+        use sea_query::{Alias, IntoIden, Order};
+        let cols = vec![Alias::new("label_value").into_iden()];
+        let order_bys = vec![(Col::ItemId, Order::Desc)];
+        let sql = Query::select()
+            .expr(CustomFunc::row_number_over_multi(&cols, order_bys))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("row_number()") && sql.contains("PARTITION BY"),
+            "should contain row_number() OVER PARTITION BY: {}",
+            sql
+        );
+        assert!(
+            sql.contains("label_value"),
+            "should contain partition key: {}",
             sql
         );
     }

@@ -1,6 +1,6 @@
+use super::has_item_tags;
 use std::fs::File;
 use ttfm::query::lens_resolver::Resolver;
-use super::has_item_tags;
 
 // ──────────────────────────────────────────────
 // define_cases! 移行済み (FileManager e2e テスト)
@@ -164,7 +164,10 @@ fn test_calculation_nvalue_label_groups() {
 
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     assert_eq!(results.len(), 4, "Should return 4 items from src/");
-    assert!(!has_item_tags(&results), "Should return items, not label groups");
+    assert!(
+        !has_item_tags(&results),
+        "Should return items, not label groups"
+    );
 }
 
 #[test]
@@ -227,5 +230,8 @@ fn test_calculation_nvalue_gt_zero() {
 
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     assert_eq!(results.len(), 8, "Should return all 8 items");
-    assert!(!has_item_tags(&results), "Should return items, not label groups");
+    assert!(
+        !has_item_tags(&results),
+        "Should return items, not label groups"
+    );
 }

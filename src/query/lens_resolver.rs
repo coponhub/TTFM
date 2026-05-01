@@ -343,7 +343,8 @@ impl ResolvedOperand {
     where
         F: Fn(&ResolvedOperand, Vec<T>) -> T,
     {
-        let child_results = self.children().into_iter().map(|c| c.fold(f)).collect();
+        let child_results =
+            self.children().into_iter().map(|c| c.fold(f)).collect();
         f(self, child_results)
     }
 
@@ -394,7 +395,9 @@ impl ResolvedNode {
             }
             ResolvedNode::Difference(l, r) => vec![l.as_ref(), r.as_ref()],
 
-            ResolvedNode::Nest { context: Some(ctx), .. } => {
+            ResolvedNode::Nest {
+                context: Some(ctx), ..
+            } => {
                 vec![ctx.as_ref()]
             }
             _ => vec![],
@@ -407,7 +410,8 @@ impl ResolvedNode {
     where
         F: Fn(&ResolvedNode, Vec<T>) -> T,
     {
-        let child_results = self.children().into_iter().map(|c| c.fold(f)).collect();
+        let child_results =
+            self.children().into_iter().map(|c| c.fold(f)).collect();
         f(self, child_results)
     }
 
@@ -427,7 +431,9 @@ impl ResolvedNode {
             | ResolvedNode::AggregationCalculationMatch { agg, .. } => {
                 result.extend(agg.inner_node().walk());
             }
-            ResolvedNode::AggregationAggregationMatch { left, right, .. } => {
+            ResolvedNode::AggregationAggregationMatch {
+                left, right, ..
+            } => {
                 result.extend(left.inner_node().walk());
                 result.extend(right.inner_node().walk());
             }
@@ -644,9 +650,7 @@ impl ResolvedNode {
                     None
                 }
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_projection()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection(),
             _ => None,
         }
     }
@@ -678,9 +682,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_nvalue()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.first().map(|m| &m.nvalue)
             }
@@ -701,9 +703,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_combined())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_nvalue_combined()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue_combined(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.first().map(|m| m.nvalue.clone())
             }
@@ -721,9 +721,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_projection_operand()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection_operand(),
             _ => None,
         }
     }
@@ -732,13 +730,13 @@ impl ResolvedNode {
         match self {
             ResolvedNode::Nest { keys, .. }
             | ResolvedNode::NestMatch { keys, .. }
-            | ResolvedNode::MergedNestMatch { keys, .. } => Some(keys.as_slice()),
+            | ResolvedNode::MergedNestMatch { keys, .. } => {
+                Some(keys.as_slice())
+            }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operands())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_projection_operands()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection_operands(),
             node => node
                 .get_projection_operand()
                 .map(|op| std::slice::from_ref(op)),
@@ -768,9 +766,8 @@ impl ResolvedNode {
     /// 通常の Nest / NestMatch では .context フィールドを返します。
     pub fn get_agg_context(&self) -> Option<&ResolvedNode> {
         match self {
-            ResolvedNode::Nest { context, .. } | ResolvedNode::NestMatch { context, .. } => {
-                context.as_deref()
-            }
+            ResolvedNode::Nest { context, .. }
+            | ResolvedNode::NestMatch { context, .. } => context.as_deref(),
             ResolvedNode::And(nodes) => {
                 nodes.iter().find_map(|n| n.get_agg_context())
             }
@@ -786,9 +783,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nested_projection())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_nested_projection()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nested_projection(),
             _ => None,
         }
     }
@@ -854,9 +849,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_condition())
             }
-            ResolvedNode::Difference(l, _) => {
-                l.get_nvalue_condition()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue_condition(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.iter().find_map(|m| {
                     let crate::query::lens_resolver::NestMatchOp::Comparison(
@@ -922,7 +915,6 @@ impl ResolvedNode {
             _ => None,
         }
     }
-
 }
 
 /// ResolvedNode が Nest である場合の keys.len() を返す（And ラッパーを透過）
@@ -2539,7 +2531,6 @@ impl Resolver {
     pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
         self.resolved_query.get_nvalue_condition()
     }
-
 }
 
 #[cfg(test)]
@@ -3746,7 +3737,10 @@ mod tests_walk_fold {
     fn leaf(name: &str) -> ResolvedNode {
         ResolvedNode::ColumnMatch {
             tag: SType::Name,
-            label: Label::resolve(TagType::from(name), LabelValue::String(name.to_string())),
+            label: Label::resolve(
+                TagType::from(name),
+                LabelValue::String(name.to_string()),
+            ),
         }
     }
 
@@ -3754,10 +3748,7 @@ mod tests_walk_fold {
         ResolvedOperand::Literal(Label::from(n))
     }
 
-    fn calc(
-        left: ResolvedOperand,
-        right: ResolvedOperand,
-    ) -> ResolvedOperand {
+    fn calc(left: ResolvedOperand, right: ResolvedOperand) -> ResolvedOperand {
         ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
             left,
             op: ArithmeticOp::Add,
@@ -3831,14 +3822,12 @@ mod tests_walk_fold {
         use std::cell::RefCell;
         let order: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let root = ResolvedNode::And(vec![leaf("a"), leaf("b")]);
-        root.fold(&|node, _: Vec<()>| {
-            match node {
-                ResolvedNode::And(_) => order.borrow_mut().push("And".to_string()),
-                ResolvedNode::ColumnMatch { label, .. } => {
-                    order.borrow_mut().push(label.as_str().to_string())
-                }
-                _ => {}
+        root.fold(&|node, _: Vec<()>| match node {
+            ResolvedNode::And(_) => order.borrow_mut().push("And".to_string()),
+            ResolvedNode::ColumnMatch { label, .. } => {
+                order.borrow_mut().push(label.as_str().to_string())
             }
+            _ => {}
         });
         // 後順なので "a", "b", "And" の順
         assert_eq!(*order.borrow(), vec!["a", "b", "And"]);

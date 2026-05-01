@@ -112,7 +112,7 @@ pub enum QueryNode {
     Or(Vec<QueryNode>),
     /// 二項差集合 (`A - B`)
     Difference(Box<QueryNode>, Box<QueryNode>),
-/// 比較演算
+    /// 比較演算
     Comparison(ComparisonNode),
     /// 汎用タグ検索 (TypedTag 型を使用)
     TypedTag(TypedTag),

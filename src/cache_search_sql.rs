@@ -1,6 +1,6 @@
-use crate::db::{Col, Tbl};
+use crate::db::{Col, Pronoun::*, Tbl, VCol};
 use crate::types::{Label, SType, TagType};
-use sea_query::{Alias, Expr, Query, SelectStatement};
+use sea_query::{Expr, Query, SelectStatement};
 
 /// 指定されたタグタイプについて、ユニークなラベル値と件数を取得します。
 pub fn build_label_counts(
@@ -44,22 +44,18 @@ pub fn build_label_counts(
         .expr_as(col_int, Col::LabelInt)
         .expr_as(col_double, Col::LabelDouble)
         .expr_as(col_bool, Col::LabelBool)
-        .expr_as(Expr::cust("COUNT(*)"), Alias::new("total_count"));
+        .expr_as(Expr::cust("COUNT(*)"), VCol::Total);
 
     if from_table {
-        q.from(Tbl::OneView).and_where(
-            Expr::col(Col::ItemId).in_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .from(Tbl::Sub)
-                    .to_owned(),
-            ),
-        );
+        q.from(Tbl::OneView)
+            .and_where(Expr::col(Col::ItemId).in_subquery(
+                Query::select().column(Col::ItemId).from(Sub).to_owned(),
+            ));
     } else if let Some(path) = path_str {
         q.from_function(
             sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                 .arg(Expr::val(path)),
-            Tbl::Diff,
+            Diff,
         );
     }
 
@@ -116,19 +112,15 @@ pub fn build_label_expansion_sql(
     q.distinct().column(Col::ItemId);
 
     if from_table {
-        q.from(Tbl::OneView).and_where(
-            Expr::col(Col::ItemId).in_subquery(
-                Query::select()
-                    .column(Col::ItemId)
-                    .from(Tbl::Sub)
-                    .to_owned(),
-            ),
-        );
+        q.from(Tbl::OneView)
+            .and_where(Expr::col(Col::ItemId).in_subquery(
+                Query::select().column(Col::ItemId).from(Sub).to_owned(),
+            ));
     } else if let Some(path) = path_str {
         q.from_function(
             sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                 .arg(Expr::val(path)),
-            Tbl::Diff,
+            Diff,
         );
     }
 
@@ -139,38 +131,34 @@ pub fn build_label_expansion_sql(
         TagType::Base(SType::Origin) => {
             q.and_where(Expr::col(Col::Origin).eq(label.as_str()));
         }
-        TagType::Base(SType::Rank) => {
-            match label.value() {
-                crate::types::LabelValue::Integer(i) => {
-                    q.and_where(Expr::col(Col::Rank).eq(i));
-                }
-                _ => {
-                    q.and_where(Expr::val(1).eq(0));
-                }
+        TagType::Base(SType::Rank) => match label.value() {
+            crate::types::LabelValue::Integer(i) => {
+                q.and_where(Expr::col(Col::Rank).eq(i));
             }
-        }
-        TagType::Base(SType::Label) => {
-            match label.value() {
-                crate::types::LabelValue::String(s)
-                | crate::types::LabelValue::Literal(s) => {
-                    q.and_where(Expr::col(Col::LabelStr).eq(s));
-                }
-                crate::types::LabelValue::Integer(i) => {
-                    q.and_where(Expr::col(Col::LabelInt).eq(i));
-                }
-                crate::types::LabelValue::Boolean(b) => {
-                    q.and_where(Expr::col(Col::LabelBool).eq(b));
-                }
-                crate::types::LabelValue::Double(bits) => {
-                    q.and_where(
-                        Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
-                    );
-                }
-                crate::types::LabelValue::Null => {
-                    q.and_where(Expr::col(Col::LabelStr).is_null());
-                }
+            _ => {
+                q.and_where(Expr::val(1).eq(0));
             }
-        }
+        },
+        TagType::Base(SType::Label) => match label.value() {
+            crate::types::LabelValue::String(s)
+            | crate::types::LabelValue::Literal(s) => {
+                q.and_where(Expr::col(Col::LabelStr).eq(s));
+            }
+            crate::types::LabelValue::Integer(i) => {
+                q.and_where(Expr::col(Col::LabelInt).eq(i));
+            }
+            crate::types::LabelValue::Boolean(b) => {
+                q.and_where(Expr::col(Col::LabelBool).eq(b));
+            }
+            crate::types::LabelValue::Double(bits) => {
+                q.and_where(
+                    Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
+                );
+            }
+            crate::types::LabelValue::Null => {
+                q.and_where(Expr::col(Col::LabelStr).is_null());
+            }
+        },
         _ => {
             q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
             match label.value() {

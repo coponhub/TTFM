@@ -18,24 +18,24 @@ fn test_build_optimized_merged_projection_sql_logical() {
     let resolved = Resolver::new(query_str).unwrap().resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&optimized, "tags_view").build_pick();
+    let stmt = ttfm::query::sql::PickNode::new(&optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Logical SQL: {}", sql);
 
     // 期待されるSQL: 1つのGROUP BY に対する HAVING に複数条件がマージされている
     let expected = normalize_sql(
         r#"
-        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view"
+        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
         WHERE "type" = 'parentdir' AND "label_str" IN (
-            SELECT "group_label" FROM (
-                SELECT "proj"."label_str" AS "group_label"
-                FROM "tags_view" AS "proj"
-                INNER JOIN "tags_view" AS "c" ON "proj"."item_id" = "c"."item_id"
+            SELECT "group" FROM (
+                SELECT "proj"."label_str" AS "group"
+                FROM "oneview" AS "proj"
+                INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'
                 GROUP BY "proj"."label_str"
-                HAVING COUNT(DISTINCT (CASE WHEN ("c"."item_id" IN (SELECT "item_id" FROM (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'extension' AND "label_str" = 'rs') AS "sub" INTERSECT (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'is_dir' AND ("label_bool" = 'false' OR "label_bool" = FALSE)) AS "sub")) AS "nv_filter")) THEN "c"."item_id" ELSE NULL END)) > 0
-                AND SUM((CASE WHEN ("c"."type" = 'size') THEN COALESCE("c"."label_int", "c"."label_double", TRY_CAST("c"."label_str" AS DOUBLE)) ELSE NULL END)) > 1000
-            ) AS "nfilter"
+                HAVING COUNT(DISTINCT (CASE WHEN ("view"."item_id" IN (SELECT "item_id" FROM (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview" WHERE "type" = 'extension' AND "label_str" = 'rs') AS "sub" INTERSECT (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview" WHERE "type" = 'is_dir' AND ("label_bool" = 'false' OR "label_bool" = FALSE)) AS "sub")) AS "nv_filter")) THEN "view"."item_id" ELSE NULL END)) > 0
+                AND SUM((CASE WHEN ("view"."type" = 'size') THEN COALESCE("view"."label_int", "view"."label_double", TRY_CAST("view"."label_str" AS DOUBLE)) ELSE NULL END)) > 1000
+            ) AS "filter"
         )
     "#,
     );
@@ -54,7 +54,7 @@ fn test_build_optimized_merged_projection_sql_arithmetic() {
     let resolved = Resolver::new(query_str).unwrap().resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&optimized, "tags_view").build_pick();
+    let stmt = ttfm::query::sql::PickNode::new(&optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Arithmetic SQL: {}", sql);
 
@@ -62,18 +62,18 @@ fn test_build_optimized_merged_projection_sql_arithmetic() {
     // (L INNER JOIN R) ではなく、一つの SELECT ... GROUP BY ... HAVING (agg / agg) > 100 となるべき
     let expected = normalize_sql(
         r#"
-        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view"
+        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
         WHERE "type" = 'parentdir' AND "label_str" IN (
-            SELECT "group_label" FROM (
-                SELECT "proj"."label_str" AS "group_label"
-                FROM "tags_view" AS "proj"
-                INNER JOIN "tags_view" AS "c" ON "proj"."item_id" = "c"."item_id"
+            SELECT "group" FROM (
+                SELECT "proj"."label_str" AS "group"
+                FROM "oneview" AS "proj"
+                INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'
                 GROUP BY "proj"."label_str"
-                HAVING CAST(COUNT(DISTINCT (CASE WHEN ("c"."item_id" IN (SELECT "item_id" FROM (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'extension' AND "label_str" = 'rs') AS "sub" INTERSECT (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view" WHERE "type" = 'is_dir' AND ("label_bool" = 'false' OR "label_bool" = FALSE)) AS "sub")) AS "nv_filter")) THEN "c"."item_id" ELSE NULL END)) AS DOUBLE)
-                    / CAST(COUNT(DISTINCT "c"."item_id") AS DOUBLE)
+                HAVING CAST(COUNT(DISTINCT (CASE WHEN ("view"."item_id" IN (SELECT "item_id" FROM (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview" WHERE "type" = 'extension' AND "label_str" = 'rs') AS "sub" INTERSECT (SELECT "item_id", "rank", "item_kind" FROM (SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview" WHERE "type" = 'is_dir' AND ("label_bool" = 'false' OR "label_bool" = FALSE)) AS "sub")) AS "nv_filter")) THEN "view"."item_id" ELSE NULL END)) AS DOUBLE)
+                    / CAST(COUNT(DISTINCT "view"."item_id") AS DOUBLE)
                 > 100
-            ) AS "nfilter"
+            ) AS "filter"
         )
     "#,
     );
@@ -96,23 +96,23 @@ fn test_build_optimized_merged_projection_sql_comparison() {
     let resolved = Resolver::new(query_str).unwrap().resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&optimized, "tags_view").build_pick();
+    let stmt = ttfm::query::sql::PickNode::new(&optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Comparison SQL: {}", sql);
 
     // 集計関数同士の比較が一つのHAVING句内で完結していることを確認
     let expected = normalize_sql(
         r#"
-        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "tags_view"
+        SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
         WHERE "type" = 'parentdir' AND "label_str" IN (
-            SELECT "group_label" FROM (
-                SELECT "proj"."label_str" AS "group_label"
-                FROM "tags_view" AS "proj"
-                INNER JOIN "tags_view" AS "c" ON "proj"."item_id" = "c"."item_id"
+            SELECT "group" FROM (
+                SELECT "proj"."label_str" AS "group"
+                FROM "oneview" AS "proj"
+                INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'
                 GROUP BY "proj"."label_str"
-                HAVING COUNT(DISTINCT (CASE WHEN ("c"."type" = 'size') THEN "c"."item_id" ELSE NULL END)) = SUM((CASE WHEN ("c"."type" = 'size') THEN COALESCE("c"."label_int", "c"."label_double", TRY_CAST("c"."label_str" AS DOUBLE)) ELSE NULL END))
-            ) AS "nfilter"
+                HAVING COUNT(DISTINCT (CASE WHEN ("view"."type" = 'size') THEN "view"."item_id" ELSE NULL END)) = SUM((CASE WHEN ("view"."type" = 'size') THEN COALESCE("view"."label_int", "view"."label_double", TRY_CAST("view"."label_str" AS DOUBLE)) ELSE NULL END))
+            ) AS "filter"
         )
     "#,
     );

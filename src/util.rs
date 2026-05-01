@@ -285,13 +285,13 @@ pub trait DotOk: Sized {
 impl<T: Sized> DotOk for T {}
 
 pub fn parquet_query(path: &str) -> SelectStatement {
-    use crate::db::{DuckDbFunc, Tbl};
+    use crate::db::{DuckDbFunc, Pronoun::*};
     use sea_query::Func;
     Query::select()
         .column(sea_query::Asterisk)
         .from_function(
             Func::cust(DuckDbFunc::ReadParquet).arg(Expr::val(path)),
-            Tbl::Diff,
+            Diff,
         )
         .to_owned()
 }

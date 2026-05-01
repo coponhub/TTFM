@@ -1,9 +1,11 @@
-use crate::db::{Col, CustomFunc, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, SqlType};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
-use sea_query::{Alias, BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
+use sea_query::{
+    BinOper, Expr, Func, Query, SelectStatement, SimpleExpr,
+};
 use std::collections::HashMap;
 
 /// `SelectStatement` をインライン副問合せ式 (`SimpleExpr`) に変換します。
@@ -11,11 +13,11 @@ pub(super) fn subquery(stmt: SelectStatement) -> SimpleExpr {
     SimpleExpr::SubQuery(None, Box::new(stmt.into_sub_query_statement()))
 }
 
-/// SQL を `SELECT item_id FROM (sql) AS t` でラップします。
+/// SQL を `SELECT item_id FROM (sql) AS sub` でラップします。
 pub(super) fn wrap_to_item_ids(sql: SelectStatement) -> SelectStatement {
     Query::select()
         .column(Col::ItemId)
-        .from_subquery(sql, Alias::new("t"))
+        .from_subquery(sql, Sub)
         .to_owned()
 }
 
@@ -24,7 +26,7 @@ pub(super) fn wrap_to_item_ids(sql: SelectStatement) -> SelectStatement {
 pub(super) fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
     Query::select()
         .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from_subquery(q, Tbl::Sub)
+        .from_subquery(q, Sub)
         .to_owned()
 }
 
@@ -67,8 +69,12 @@ pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
         Expr::val(bytes).cast_as(SqlType::DOUBLE).into()
     } else {
         match lab.value() {
-            LabelValue::Integer(i) => Expr::val(i).cast_as(SqlType::DOUBLE).into(),
-            LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s.clone()).into(),
+            LabelValue::Integer(i) => {
+                Expr::val(i).cast_as(SqlType::DOUBLE).into()
+            }
+            LabelValue::String(s) | LabelValue::Literal(s) => {
+                Expr::val(s.clone()).into()
+            }
             LabelValue::Boolean(b) => Expr::val(b).into(),
             LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
             LabelValue::Null => Expr::val(None::<i32>).into(),
@@ -87,9 +93,7 @@ pub(super) fn apply_arithmetic_agg(
         Sum => {
             if is_string {
                 // 文字列の合計はカンマ区切り結合 (DuckDB: string_agg)
-                Func::cust(Alias::new("string_agg"))
-                    .args([expr, Expr::val(", ").into()])
-                    .into()
+                CustomFunc::string_agg(expr, Expr::val(", "))
             } else {
                 Func::sum(expr).into()
             }
@@ -113,7 +117,7 @@ pub(super) fn build_storage_column_expr(
             if *column == Col::LabelStr
                 && matches!(sql_type, SqlType::BIGINT | SqlType::DOUBLE)
             {
-                Expr::cust_with_exprs("TRY_CAST($1 AS DOUBLE)", [col_expr.into()])
+                CustomFunc::try_cast_double(col_expr)
             } else {
                 col_expr.into()
             }
@@ -178,20 +182,16 @@ pub(super) fn build_tag_value_agg_expr(
     _sql_type: SqlType,
 ) -> SimpleExpr {
     match storage {
-        StorageMapping::Column(col) => CustomFunc::any_value(Expr::col(*col)).into(),
+        StorageMapping::Column(col) => {
+            CustomFunc::any_value(Expr::col(*col)).into()
+        }
         StorageMapping::RowTag { column, tag_type } => {
-            let cast_expr = Expr::cust_with_exprs(
-                "TRY_CAST($1 AS DOUBLE)",
-                [Expr::col(*column).into()],
+            let cast_expr = CustomFunc::try_cast_double(Expr::col(*column));
+            let case_expr = Expr::case(
+                Expr::col(Col::Type).eq(tag_type.as_str()),
+                cast_expr,
             );
-            Expr::cust_with_exprs(
-                "MAX(CASE WHEN $1 = $2 THEN $3 END)",
-                [
-                    Expr::col(Col::Type).into(),
-                    Expr::val(tag_type.as_str()).into(),
-                    cast_expr.into(),
-                ],
-            )
+            Func::max(case_expr).into()
         }
         StorageMapping::Virtual => CustomFunc::any_value(Expr::val(0)).into(),
     }
@@ -204,8 +204,17 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
         return sea_query::Condition::all();
     }
     let defaults = [
-        "name", "path", "size", "mtime", "rank", "item_kind",
-        "content", "value", "tag", "filename", "is_dir",
+        "name",
+        "path",
+        "size",
+        "mtime",
+        "rank",
+        "item_kind",
+        "content",
+        "value",
+        "tag",
+        "filename",
+        "is_dir",
     ];
     for def in defaults {
         if !types.iter().any(|t| t == def) {

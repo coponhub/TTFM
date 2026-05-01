@@ -1,56 +1,59 @@
-mod pick;
-mod util;
 mod agg_pieces;
-mod calc_pieces;
 mod boolean;
-mod scalar;
-mod nest;
+mod calc_pieces;
 mod low_dispatcher;
+mod nest;
+mod pick;
 mod precompute;
-pub use pick::{
-    build_pick, build_pick_agg, build_pick_nest,
-    BuildPick, SimplePickNode, AggPickNode, NestPickNode, PickNode,
-};
-pub use util::{AggregationContext, NestContext, to_tag_condition};
-pub use precompute::{
-    needs_aggregation_context, build_aggregation_context, build_aggregation_context_for_operand, build_aggregation_context_for_agg,
-    needs_nest_context, build_nest_context, build_nest_context_for_operand,
-};
+mod scalar;
+mod util;
 use agg_pieces::{
-    agg_expr, resolve_count_target,
-    build_agg, build_agg_nest,
-    build_agg_calc_expr, build_agg_calc_eav_expr,
-    build_agg_calc_subquery, build_agg_calc_subquery_nest,
-    build_agg_operand_eav_expr,
-    build_nvalue_standalone_subquery, build_nvalue_cte, build_nvalue_cte_nest,
-    build_nest_pivot_cte,
+    agg_expr, build_agg, build_agg_calc_eav_expr, build_agg_calc_expr,
+    build_agg_calc_subquery, build_agg_calc_subquery_nest, build_agg_nest,
+    build_agg_operand_eav_expr, build_nest_pivot_cte, build_nvalue_cte,
+    build_nvalue_cte_nest, build_nvalue_standalone_subquery,
+    resolve_count_target,
 };
 #[cfg(test)]
-use agg_pieces::{build_agg_operand_expr, build_resolved_operand_expr_for_arithmetic};
-use calc_pieces::{build_calculation_expr, build_calculation_eav_expr, fold_simple_operand};
+use agg_pieces::{
+    build_agg_operand_expr, build_resolved_operand_expr_for_arithmetic,
+};
 use boolean::{
-    build_resolved_and_sql, build_resolved_or_sql, build_resolved_diff_sql,
-    build_label_set_op_pick_sql,
-    build_boolean_sql,
+    build_boolean_sql, build_label_set_op_pick_sql, build_resolved_and_sql,
+    build_resolved_diff_sql, build_resolved_or_sql,
 };
-use scalar::{
-    build_resolved_match_sql, build_column_match_sql,
-    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
-    build_resolved_scalar_sql,
-};
-use nest::{
-    build_nest_match_sql, build_nest_nest_match_sql, build_merged_nest_match_sql,
+use calc_pieces::{
+    build_calculation_eav_expr, build_calculation_expr, fold_simple_operand,
 };
 use low_dispatcher::try_dispatch_common;
+use nest::{
+    build_merged_nest_match_sql, build_nest_match_sql,
+    build_nest_nest_match_sql,
+};
+pub use pick::{
+    build_pick, build_pick_agg, build_pick_nest, AggPickNode, BuildPick,
+    NestPickNode, PickNode, SimplePickNode,
+};
+pub use precompute::{
+    build_aggregation_context, build_aggregation_context_for_agg,
+    build_aggregation_context_for_operand, build_nest_context,
+    build_nest_context_for_operand, needs_aggregation_context,
+    needs_nest_context,
+};
+use scalar::{
+    build_column_match_sql, build_resolved_match_sql,
+    build_resolved_scalar_sql, build_resolved_tag_tag_match_sql,
+    build_scalar_match_sql,
+};
 use util::*;
+pub use util::{to_tag_condition, AggregationContext, NestContext};
 
-use crate::db::{Col, CustomFunc};
+use crate::db::{Col, CustomFunc, Pronoun::*, Tbl};
 use crate::query::ast::QueryNode;
 use crate::query::lens_resolver::{NestMatchOp, ResolvedNode, ResolvedOperand};
 #[cfg(test)]
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use sea_query::{Alias, Expr, Query, SelectStatement};
-
+use sea_query::{Expr, Query, SelectStatement};
 
 fn build_fetch_items_sql(
     pick: &PickNode<'_>,
@@ -58,7 +61,6 @@ fn build_fetch_items_sql(
     offset: Option<usize>,
 ) -> SelectStatement {
     let node = pick.node();
-    let view = pick.view();
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
     // oneview との結合を行わず、集約計算結果だけをそのまま返す。
     // NestMatch / NestNestMatch は tags カラムが必要なため
@@ -77,7 +79,7 @@ fn build_fetch_items_sql(
     let mut id_query = Query::select();
     id_query
         .column(Col::ItemId)
-        .from_subquery(pick_sql, Alias::new("pk"))
+        .from_subquery(pick_sql, Pk)
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
@@ -111,7 +113,7 @@ fn build_fetch_items_sql(
             Col::ItemKind,
         )
         .expr_as(tags_expr, crate::db::QueryResultCol::Tags)
-        .from(Alias::new(view))
+        .from(Tbl::OneView)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .group_by_col(Col::ItemId)
         .order_by(Col::Rank, sea_query::Order::Desc)
@@ -126,7 +128,6 @@ pub fn build_flat_table_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> SelectStatement {
-    let view = pick.view();
     let pick_sql = pick.build_pick();
     let tagcond = to_tag_condition(query_node);
 
@@ -134,7 +135,7 @@ pub fn build_flat_table_sql(
     let mut id_query = Query::select();
     id_query
         .column(Col::ItemId)
-        .from_subquery(pick_sql.to_owned(), Alias::new("pk"))
+        .from_subquery(pick_sql.to_owned(), Pk)
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
@@ -148,7 +149,7 @@ pub fn build_flat_table_sql(
     let mut q = Query::select();
     q.columns(Col::raw_tag_row_columns())
         .column(Col::Rank)
-        .from(Alias::new(view))
+        .from(Tbl::OneView)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .and_where(tagcond.into())
         .order_by(Col::Rank, sea_query::Order::Desc)
@@ -165,16 +166,17 @@ pub fn build_flat_table_sql(
 ///   - Regular items                               → build_fetch_items_sql
 pub fn build_fetch_sql(
     resolver: &crate::query::lens_resolver::Resolver,
-    view: &str,
     n: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     if resolver.get_projection().is_some() {
-        if resolver.get_label_set_op_node().is_some() || resolver.get_nvalue_condition().is_none() {
-            return nest::build_fetch_nest_sql(resolver, view, n, offset);
+        if resolver.get_label_set_op_node().is_some()
+            || resolver.get_nvalue_condition().is_none()
+        {
+            return nest::build_fetch_nest_sql(resolver, n, offset);
         }
         // nvalue比較あり → Lv.1 フラットリスト（items path）
-        let pick = PickNode::new(&resolver.resolved_query, view);
+        let pick = PickNode::new(&resolver.resolved_query);
         let limit = if n > 0 { Some(n + 1) } else { None };
         return Ok(build_fetch_items_sql(&pick, limit, Some(offset)));
     }
@@ -184,14 +186,13 @@ pub fn build_fetch_sql(
         ResolvedNode::Aggregation(agg) => {
             return Ok(build_resolved_scalar_sql(
                 &ResolvedOperand::Aggregation(agg.clone()),
-                view,
             ));
         }
         // 集約または純スカラーを key に持つ Nest：単一値を返す
         ResolvedNode::Nest { keys, .. } => {
             let op = keys.first().unwrap();
             if op.contains_aggregation() || op.is_pure_scalar() {
-                return Ok(build_resolved_scalar_sql(op, view));
+                return Ok(build_resolved_scalar_sql(op));
             }
         }
         // ブーリアン比較：集約同士／集約とリテラル／リテラル同士 の比較結果を volatile row で返す
@@ -203,7 +204,7 @@ pub fn build_fetch_sql(
         | ResolvedNode::ScalarMatch { .. }
         | ResolvedNode::NestMatch { .. }
         | ResolvedNode::MergedNestMatch { .. }) => {
-            return Ok(build_boolean_sql(node, view));
+            return Ok(build_boolean_sql(node));
         }
         // NestNestMatch のうち Comparison + Literal 右辺は存在確認ブーリアン
         ResolvedNode::NestNestMatch {
@@ -211,7 +212,7 @@ pub fn build_fetch_sql(
             right_nvalue: ResolvedOperand::Literal(_),
             ..
         } => {
-            return Ok(build_boolean_sql(&resolver.resolved_query, view));
+            return Ok(build_boolean_sql(&resolver.resolved_query));
         }
         // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
         // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
@@ -229,11 +230,11 @@ pub fn build_fetch_sql(
                     )
                 }) =>
         {
-            return Ok(build_boolean_sql(&resolver.resolved_query, view));
+            return Ok(build_boolean_sql(&resolver.resolved_query));
         }
         _ => {}
     }
-    let pick = PickNode::new(&resolver.resolved_query, view);
+    let pick = PickNode::new(&resolver.resolved_query);
     Ok(build_fetch_items_sql(&pick, limit, Some(offset)))
 }
 
@@ -262,7 +263,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_to_tag_condition_generation() {
         let node =
@@ -271,8 +271,8 @@ mod tests {
 
         let mut query = Query::select();
         query
-            .column(Alias::new("id"))
-            .from(Alias::new("tbl"))
+            .column(sea_query::Alias::new("id"))
+            .from(sea_query::Alias::new("tbl"))
             .cond_where(cond);
         let sql = query.to_string(SqliteQueryBuilder);
 
@@ -280,7 +280,6 @@ mod tests {
         // We ensure a query is generated (condition applied).
         assert!(!sql.is_empty());
     }
-
 
     #[test]
     fn test_build_flat_table_sql_structure() {
@@ -295,8 +294,12 @@ mod tests {
             label: Label::from("test"),
         };
         let query_node = QueryNode::And(vec![]);
-        let sql =
-            build_flat_table_sql(&PickNode::new(&node, "oneview"), &query_node, Some(10), None);
+        let sql = build_flat_table_sql(
+            &PickNode::new(&node),
+            &query_node,
+            Some(10),
+            None,
+        );
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 基本構造の検証
@@ -342,7 +345,7 @@ mod tests {
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
-        let pick = PickNode::new(&node, "oneview");
+        let pick = PickNode::new(&node);
         let sql = build_fetch_items_sql(&pick, Some(10), Some(0));
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
@@ -403,8 +406,8 @@ mod tests {
                 },
             ])));
 
-        let agg_ctx = build_aggregation_context_for_agg(&agg, "oneview");
-        let sql = build_agg(&agg, "oneview", &agg_ctx);
+        let agg_ctx = build_aggregation_context_for_agg(&agg);
+        let sql = build_agg(&agg, &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // アイテム数を数えるので COUNT(DISTINCT "item_id")
@@ -436,7 +439,7 @@ mod tests {
             }),
         };
 
-        let sql = build_agg(&agg, "oneview", &AggregationContext::new());
+        let sql = build_agg(&agg, &AggregationContext::new());
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -445,7 +448,6 @@ mod tests {
         assert!(sql_str.contains("any_value(\"label_int\") AS \"val\""));
         assert!(sql_str.contains("\"type\" IN ('size')"));
     }
-
 
     #[test]
     fn test_build_aggregation_sql_structure() {
@@ -484,8 +486,8 @@ mod tests {
             ])),
         };
 
-        let agg_ctx = build_aggregation_context_for_agg(&agg, "oneview");
-        let sql = build_agg(&agg, "oneview", &agg_ctx);
+        let agg_ctx = build_aggregation_context_for_agg(&agg);
+        let sql = build_agg(&agg, &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -535,8 +537,6 @@ mod tests {
         assert!(sql_str.contains("42"), "Should contain literal value 42");
     }
 
-
-
     #[test]
     fn test_build_resolved_operand_expr_for_arithmetic_boolean_cast() {
         use crate::db::SqlType;
@@ -548,8 +548,10 @@ mod tests {
             TagType::from("is_dir"),
             crate::types::LabelValue::Boolean(true),
         ));
-        let expr_lit =
-            build_resolved_operand_expr_for_arithmetic(&lit_bool, &AggregationContext::new());
+        let expr_lit = build_resolved_operand_expr_for_arithmetic(
+            &lit_bool,
+            &AggregationContext::new(),
+        );
         let sql_lit = sea_query::Query::select()
             .expr(expr_lit)
             .to_string(sea_query::PostgresQueryBuilder);
@@ -572,8 +574,10 @@ mod tests {
             ),
             sql_type: SqlType::BOOLEAN,
         };
-        let expr_tag =
-            build_resolved_operand_expr_for_arithmetic(&tag_bool, &AggregationContext::new());
+        let expr_tag = build_resolved_operand_expr_for_arithmetic(
+            &tag_bool,
+            &AggregationContext::new(),
+        );
         let sql_tag = sea_query::Query::select()
             .expr(expr_tag)
             .to_string(sea_query::PostgresQueryBuilder);
@@ -588,6 +592,4 @@ mod tests {
             sql_tag
         );
     }
-
 }
-

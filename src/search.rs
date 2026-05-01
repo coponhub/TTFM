@@ -1,5 +1,5 @@
 use crate::db::TargetTable;
-use crate::db::{Col, Tbl};
+use crate::db::{Col, Pronoun::*, VCol};
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{ItemKind, Progress, TagType};
 use crate::{FileManager, FunctionRegistry};
@@ -197,7 +197,7 @@ impl FileManager {
                 .from_function(
                     sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                         .arg(Expr::val(path_str.clone())),
-                    Tbl::Diff,
+                    Diff,
                 )
                 .order_by_expr(
                     Expr::col(Col::Rank).into(),
@@ -233,7 +233,10 @@ impl FileManager {
         };
 
         if target_entries.is_empty() {
-            return Ok(SearchResponse::new_empty(Some(cid.to_string()), has_more));
+            return Ok(SearchResponse::new_empty(
+                Some(cid.to_string()),
+                has_more,
+            ));
         }
 
         let fetch_ids: Vec<i64> =
@@ -245,7 +248,7 @@ impl FileManager {
             .from_function(
                 sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                     .arg(Expr::val(path_str)),
-                Tbl::Diff,
+                Diff,
             )
             .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
 
@@ -288,7 +291,7 @@ impl FileManager {
             .query_map([], |r| {
                 let label =
                     crate::types::Label::from_raw_row(proj_type.clone(), r, 0);
-                let count: i64 = r.get("total_count")?;
+                let count: i64 = r.get(VCol::Total.as_ref())?;
                 Ok((label, count as usize))
             })?
             .collect::<Result<Vec<(crate::types::Label, usize)>, _>>()?;
@@ -528,7 +531,7 @@ impl FileManager {
             .from_function(
                 sea_query::Func::cust(DuckDbFunc::ParquetKvMetadata)
                     .arg(Expr::val(path_str)),
-                Tbl::Diff,
+                Diff,
             );
 
         let map: HashMap<String, String> = self
@@ -861,11 +864,9 @@ mod tests {
         let res_db = fm.search(query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
         // 転置形式: item: タグが注入されていればグループ表示
-        assert!(res_db.results.iter().any(|r| r
-            .tags
-            .entries
-            .iter()
-            .any(|e| e.label.tag_type() == crate::types::TagType::from("item"))));
+        assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
+            |e| e.label.tag_type() == crate::types::TagType::from("item")
+        )));
         // 転置形式: results はラベルアイテム
         assert!(res_db
             .results
@@ -897,12 +898,19 @@ mod tests {
 
         // 整合性チェック: DB とキャッシュ両方で item: タグが存在するか一致
         let db_has_item_tag = res_db.results.iter().any(|r| {
-            r.tags.entries.iter().any(|e| e.label.tag_type() == crate::types::TagType::from("item"))
+            r.tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            })
         });
         let cache_has_item_tag = res_cache.results.iter().any(|r| {
-            r.tags.entries.iter().any(|e| e.label.tag_type() == crate::types::TagType::from("item"))
+            r.tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            })
         });
-        assert_eq!(db_has_item_tag, cache_has_item_tag, "item: tag presence mismatch");
+        assert_eq!(
+            db_has_item_tag, cache_has_item_tag,
+            "item: tag presence mismatch"
+        );
         assert_eq!(
             res_db.results.len(),
             res_cache.results.len(),

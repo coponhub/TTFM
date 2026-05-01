@@ -1,7 +1,7 @@
+use crate::cases::has_item_tags;
 use std::fs::File;
 use tempfile::tempdir;
 use ttfm::FileManager;
-use crate::cases::has_item_tags;
 
 // ──────────────────────────────────────────────
 // スタンドアロン: bare クエリの挙動確認
@@ -492,4 +492,3 @@ fn test_projection_returns_label_volatile_items() {
         );
     }
 }
-

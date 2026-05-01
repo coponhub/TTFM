@@ -163,9 +163,7 @@ fn find_representative_function<'a>(
             QueryNode::And(nodes) | QueryNode::Or(nodes) => {
                 nodes.iter().find_map(find_projection)
             }
-            QueryNode::Difference(l, _) => {
-                find_projection(l)
-            }
+            QueryNode::Difference(l, _) => find_projection(l),
             _ => None,
         }
     }

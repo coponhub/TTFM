@@ -1,4 +1,4 @@
-use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
+use crate::db::{Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl};
 use crate::indexing::functions::ScanEntry;
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::ItemId;
@@ -8,9 +8,7 @@ use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use duckdb::Connection;
 use rustc_hash::FxHashMap;
-use sea_query::{
-    Alias, Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table,
-};
+use sea_query::{Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
 use std::path::{Path, PathBuf};
 
 use super::diff;
@@ -305,7 +303,7 @@ impl<'a> Indexer<'a> {
         lhs.columns(Col::item_references_columns()).from_function(
             Func::cust(DuckDbFunc::ReadParquet)
                 .arg(Expr::val(items_str.to_string())),
-            Alias::new("diff"),
+            Diff,
         );
 
         let mut query_union = lhs;

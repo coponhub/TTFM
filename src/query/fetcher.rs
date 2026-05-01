@@ -37,7 +37,7 @@ impl<'a> Fetcher<'a> {
         let resolved = &self.resolver.resolved_query;
 
         // 1. SQL 構築
-        let pick_node = crate::query::sql::PickNode::new(resolved, "oneview");
+        let pick_node = crate::query::sql::PickNode::new(resolved);
         let mut select_sql = pick_node.build_pick();
 
         // 検索仕様に基づき Rank と ItemId で降順ソート
@@ -70,7 +70,7 @@ impl<'a> Fetcher<'a> {
         use sea_query::PostgresQueryBuilder;
         let resolver = &self.resolver;
 
-        let sql = crate::query::sql::build_fetch_sql(resolver, "oneview", n, offset)?;
+        let sql = crate::query::sql::build_fetch_sql(resolver, n, offset)?;
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         if std::env::var("TTFM_DEBUG").is_ok() {
@@ -106,7 +106,8 @@ impl<'a> Fetcher<'a> {
         offset: Option<usize>,
     ) -> Result<Vec<RawTagRow>> {
         use sea_query::PostgresQueryBuilder;
-        let pick = crate::query::sql::PickNode::new(&self.resolver.resolved_query, "oneview");
+        let pick =
+            crate::query::sql::PickNode::new(&self.resolver.resolved_query);
         let select_sql = crate::query::sql::build_flat_table_sql(
             &pick,
             &self.resolver.expanded_query,
@@ -131,7 +132,7 @@ impl<'a> Fetcher<'a> {
         path: &Path,
         metadata: Option<&HashMap<String, String>>,
     ) -> Result<()> {
-        let pick = PickNode::new(&self.resolver.resolved_query, "oneview");
+        let pick = PickNode::new(&self.resolver.resolved_query);
         let select_sql = crate::query::sql::build_flat_table_sql(
             &pick,
             &self.resolver.expanded_query,
@@ -153,7 +154,8 @@ impl<'a> Fetcher<'a> {
                 let lv = LabelValue::from(tag_row.value);
                 if !matches!(lv, LabelValue::Null) {
                     let s = lv.as_display_name();
-                    res.name = s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                    res.name =
+                        s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
                 }
             } else {
                 #[allow(deprecated)]
@@ -181,7 +183,10 @@ impl<'a> Fetcher<'a> {
                         let s = lv.as_display_name();
                         // DuckDB の CAST(double AS VARCHAR) は "8.0" を返すが、
                         // Rust の f64::to_string は "8" を返す。
-                        res.name = s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                        res.name = s
+                            .parse::<f64>()
+                            .map(|f| f.to_string())
+                            .unwrap_or(s);
                     }
                 }
                 "projected_label" => {
@@ -222,7 +227,8 @@ fn read_base_from_row(
         ItemId::Stored(id_val)
     };
 
-    let mut res = crate::response::SearchResult::new_empty(id, kind, String::new());
+    let mut res =
+        crate::response::SearchResult::new_empty(id, kind, String::new());
     res.rank = row
         .get::<_, Option<i64>>(SType::Rank.name().as_str())?
         .unwrap_or(0);
@@ -644,7 +650,13 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_row(conn: &duckdb::Connection, id: i64, rank: i64, tag_type: &str, label_str: &str) {
+    fn insert_row(
+        conn: &duckdb::Connection,
+        id: i64,
+        rank: i64,
+        tag_type: &str,
+        label_str: &str,
+    ) {
         conn.execute(
             &format!(
                 "INSERT INTO oneview VALUES ({}, {}, 'file', 'user', '{}', '{}', NULL, NULL, NULL)",
@@ -655,7 +667,14 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_bool_row(conn: &duckdb::Connection, id: i64, rank: i64, tag_type: &str, label_str: &str, label_bool: bool) {
+    fn insert_bool_row(
+        conn: &duckdb::Connection,
+        id: i64,
+        rank: i64,
+        tag_type: &str,
+        label_str: &str,
+        label_bool: bool,
+    ) {
         conn.execute(
             &format!(
                 "INSERT INTO oneview VALUES ({}, {}, 'file', 'user', '{}', '{}', NULL, NULL, {})",
@@ -684,11 +703,10 @@ mod tests {
         let results = fetcher.fetch(100, 0).unwrap();
         assert_eq!(results.len(), 1);
         // item: タグは注入されないはず（items パス）
-        let has_item_tag = results[0]
-            .tags
-            .entries
-            .iter()
-            .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+        let has_item_tag =
+            results[0].tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            });
         assert!(!has_item_tag, "Items path should not have item: tags");
     }
 
@@ -709,11 +727,9 @@ mod tests {
         assert_eq!(results.len(), 2, "Should have 2 extension labels");
         // item: タグが注入されているはず（projection パス）
         for r in &results {
-            let has_item_tag = r
-                .tags
-                .entries
-                .iter()
-                .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+            let has_item_tag = r.tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            });
             assert!(
                 has_item_tag,
                 "Projection result '{}' should have item: tags",
@@ -769,13 +785,15 @@ mod tests {
         let results = fetcher.fetch(100, 0).unwrap();
         // count(rs) > 0 を満たすのは src のみ → src 内のファイル (Lv.1 フラットリスト)
         assert_eq!(results.len(), 1, "Only src has rs files");
-        assert_eq!(results[0].name, "main.rs", "Items path returns filename, not group label");
+        assert_eq!(
+            results[0].name, "main.rs",
+            "Items path returns filename, not group label"
+        );
         // items パスを通るので item: タグは存在しない
-        let has_item_tag = results[0]
-            .tags
-            .entries
-            .iter()
-            .any(|e| e.label.tag_type() == crate::types::TagType::from("item"));
+        let has_item_tag =
+            results[0].tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            });
         assert!(!has_item_tag, "Flat list result should NOT have item: tags");
     }
 }

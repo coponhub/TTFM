@@ -46,7 +46,8 @@ impl RawTagRow {
 
         let label_int: Option<i64> = r.get(col(Col::LabelInt).as_str())?;
         let label_str: Option<String> = r.get(col(Col::LabelStr).as_str())?;
-        let label_double: Option<f64> = r.get(col(Col::LabelDouble).as_str())?;
+        let label_double: Option<f64> =
+            r.get(col(Col::LabelDouble).as_str())?;
         let label_bool: Option<bool> = r.get(col(Col::LabelBool).as_str())?;
         let value = if let Some(i) = label_int {
             Value::BigInt(i)
@@ -233,9 +234,15 @@ impl SearchResponse {
 
     /// 結果が Projection (ラベルグループ) 形式かどうかを `item:` タグの有無で判定します。
     pub fn has_projection_results(&self) -> bool {
-        self.results.first().map(|r| {
-            r.tags.entries.iter().any(|e| e.label.tag_type().as_str() == "item")
-        }).unwrap_or(false)
+        self.results
+            .first()
+            .map(|r| {
+                r.tags
+                    .entries
+                    .iter()
+                    .any(|e| e.label.tag_type().as_str() == "item")
+            })
+            .unwrap_or(false)
     }
 }
 

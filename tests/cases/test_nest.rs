@@ -1,7 +1,7 @@
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
-    default_scope, get_nvalue, get_nvalue_f64, has_item_tags, inject_path_scope,
-    scope_path_from_dir,
+    default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
+    inject_path_scope, scope_path_from_dir,
 };
 
 // ──────────────────────────────────────────────

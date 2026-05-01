@@ -156,9 +156,9 @@ mod tests {
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
         let resolver = Resolver::new("extension:rs").unwrap();
-        let sql =
-            PickNode::new(&resolver.resolved_query, "oneview").build_pick()
-                .to_string(PostgresQueryBuilder);
+        let sql = PickNode::new(&resolver.resolved_query)
+            .build_pick()
+            .to_string(PostgresQueryBuilder);
 
         assert!(
             sql.contains("\"rank\""),
@@ -183,9 +183,9 @@ mod tests {
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
         let resolver = Resolver::new("type:file & extension:rs").unwrap();
-        let sql =
-            PickNode::new(&resolver.resolved_query, "oneview").build_pick()
-                .to_string(PostgresQueryBuilder);
+        let sql = PickNode::new(&resolver.resolved_query)
+            .build_pick()
+            .to_string(PostgresQueryBuilder);
 
         assert!(
             sql.contains("INTERSECT"),
