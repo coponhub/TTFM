@@ -163,9 +163,7 @@ fn find_representative_function<'a>(
             QueryNode::And(nodes) | QueryNode::Or(nodes) => {
                 nodes.iter().find_map(find_projection)
             }
-            QueryNode::Difference(l, _) | QueryNode::Complement(l) => {
-                find_projection(l)
-            }
+            QueryNode::Difference(l, _) => find_projection(l),
             _ => None,
         }
     }
@@ -293,22 +291,22 @@ fn expand_mtime_range_op(
             }),
         ],
         BasicOp::Ne => {
-            vec![QueryNode::Complement(Box::new(QueryNode::And(vec![
+            vec![QueryNode::Or(vec![
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        make_op(BasicOp::Ge),
+                        make_op(BasicOp::Lt),
                         Operand::Literal(Label::Mtime(range.start)),
                     )],
                 }),
                 QueryNode::Comparison(ComparisonNode {
                     first: first.clone(),
                     rest: vec![(
-                        make_op(BasicOp::Le),
+                        make_op(BasicOp::Gt),
                         Operand::Literal(Label::Mtime(range.end)),
                     )],
                 }),
-            ])))]
+            ])]
         }
         BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
@@ -362,9 +360,6 @@ pub fn expand_query_node(
             Box::new(expand_query_node(*l, registry)),
             Box::new(expand_query_node(*r, registry)),
         ),
-        QueryNode::Complement(c) => {
-            QueryNode::Complement(Box::new(expand_query_node(*c, registry)))
-        }
         QueryNode::Comparison(cmp) => expand_comparison_node(cmp, registry),
         QueryNode::ColumnMatch { tag, label } => {
             QueryNode::ColumnMatch { tag, label }

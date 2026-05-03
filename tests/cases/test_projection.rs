@@ -1,3 +1,4 @@
+use crate::cases::has_item_tags;
 use std::fs::File;
 use tempfile::tempdir;
 use ttfm::FileManager;
@@ -138,6 +139,48 @@ define_cases! {
             Ok(())
         },
     },
+    // ── 表示ルーティング検証 ───────────────────────────────────────────────────
+    // has_projection_results() が正しく true/false を返すことを保証する。
+    // Lv.2 プロジェクション (nvalue のみ) → true、ラベル比較 → false (Lv.1 フラットリスト)
+    test_display_routing_nvalue_projection: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), b"fn main() {}")?;
+            std::fs::write(dir.join("b.rs"), b"pub fn foo() {}")?;
+            std::fs::write(dir.join("c.txt"), b"hello")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: super::default_scope,
+        query: "extension: &: count()",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty(), "should return results");
+            assert!(
+                res.has_projection_results(),
+                "extension: &: count() (Lv.2 projection) should be routed as projection. names={:?}",
+                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+            );
+            Ok(())
+        },
+    },
+    test_display_routing_parentdir_label_cmp: {
+        setup: |dir| {
+            std::fs::write(dir.join("x.rs"), b"x")?;
+            std::fs::write(dir.join("y.rs"), b"y")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: super::default_scope,
+        query: "parentdir: &: count() :> 1",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty(), "should return results");
+            assert!(
+                !res.has_projection_results(),
+                "parentdir: &: count() :> 1 (Lv.1 flat list) should NOT be projection. names={:?}",
+                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+            );
+            Ok(())
+        },
+    },
 }
 
 // ──────────────────────────────────────────────
@@ -174,10 +217,7 @@ fn test_projection_queries() {
     // 転置: results には label items が格納される（name="rs", name="txt"）
     assert!(results.results.iter().any(|r| r.name == "rs"));
     assert!(results.results.iter().any(|r| r.name == "txt"));
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("extension"))
-    );
+    assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
     let results = fm.search("directory:", Default::default()).unwrap();
@@ -192,11 +232,7 @@ fn test_projection_queries() {
     );
     assert!(results.results.iter().any(|r| r.name == "test_dir"));
     // 仮想ラベル directory: は内部で filename を投影する
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("filename")),
-        "directory: projection should resolve to filename"
-    );
+    assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
     let results = fm.search("filename:", Default::default()).unwrap();
@@ -217,11 +253,7 @@ fn test_projection_queries() {
         .iter()
         .all(|r| r.item_kind == ttfm::ItemKind::Volatile));
     // 仮想ラベル filename: は内部で filename を投影する
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("filename")),
-        "filename: projection should resolve to filename"
-    );
+    assert!(has_item_tags(&results.results));
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
@@ -241,10 +273,7 @@ fn test_projection_queries() {
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results = fm.search("type:", Default::default()).unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("type"))
-    );
+    assert!(has_item_tags(&results.results));
 
     // 転置: results には label items が格納され、各 label の name がタグタイプ名
     // 結果に含まれる全てのタグタイプ（label の name）を収集
@@ -269,10 +298,7 @@ fn test_projection_queries() {
     let results = fm.search("tag:", Default::default()).unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("tag"))
-    );
+    assert!(has_item_tags(&results.results));
 
     // 検証: アイテムが tag タグを持っているか
     let has_tag = results
@@ -305,7 +331,7 @@ fn test_projection_queries() {
     // NOTE: 現在の実装では rank: は type='rank' を検索してしまい、0件になる可能性がある。
     // ユーザーの指摘により、これをサポートすべきか確認するフェーズ。
     // 一旦アサーションは入れず、挙動を確認する。
-    if results.type_for_projection == Some(ttfm::types::TagType::from("rank")) {
+    if has_item_tags(&results.results) {
         // サポートされている場合
         assert!(
             !results.results.is_empty(),
@@ -325,10 +351,7 @@ fn test_projection_queries() {
         results.results.len() >= 1,
         "category: should match items with category tag"
     );
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("category"))
-    );
+    assert!(has_item_tags(&results.results));
     // 転置: results には label items が格納され、name が "important" であることを確認
     let has_val = results.results.iter().any(|r| {
         r.item_kind == ttfm::ItemKind::Volatile && r.name == "important"
@@ -343,10 +366,7 @@ fn test_projection_queries() {
         results.results.len() >= 3,
         "label: should match all tagged items"
     );
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("label"))
-    );
+    assert!(has_item_tags(&results.results));
 }
 
 #[test]
@@ -369,10 +389,7 @@ fn test_projection_returns_label_volatile_items() {
     let results = fm.search("extension:", Default::default()).unwrap();
 
     // 検証1: type_for_projection が設定されている
-    assert_eq!(
-        results.type_for_projection,
-        Some(ttfm::types::TagType::from("extension"))
-    );
+    assert!(has_item_tags(&results.results));
 
     // 検証2: results に label items が格納されている
     assert!(
@@ -475,4 +492,3 @@ fn test_projection_returns_label_volatile_items() {
         );
     }
 }
-

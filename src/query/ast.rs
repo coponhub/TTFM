@@ -112,8 +112,6 @@ pub enum QueryNode {
     Or(Vec<QueryNode>),
     /// 二項差集合 (`A - B`)
     Difference(Box<QueryNode>, Box<QueryNode>),
-    /// 補集合 (`^(A)`)
-    Complement(Box<QueryNode>),
     /// 比較演算
     Comparison(ComparisonNode),
     /// 汎用タグ検索 (TypedTag 型を使用)
@@ -159,9 +157,6 @@ impl QueryNode {
                 l.collect_types(types);
                 r.collect_types(types);
             }
-            QueryNode::Complement(c) => {
-                c.collect_types(types);
-            }
             QueryNode::Comparison(cmp) => {
                 cmp.collect_types(types);
             }
@@ -197,9 +192,6 @@ impl QueryNode {
             }
             QueryNode::Difference(l, _) => {
                 l.collect_projections(projections);
-            }
-            QueryNode::Complement(c) => {
-                c.collect_projections(projections);
             }
             QueryNode::Projection(op) => {
                 op.collect_projections(projections);

@@ -32,7 +32,6 @@ pub enum ResolvedNode {
     And(Vec<ResolvedNode>),
     Or(Vec<ResolvedNode>),
     Difference(Box<ResolvedNode>, Box<ResolvedNode>),
-    Complement(Box<ResolvedNode>),
     /// 投影クエリ用（ネスト構造を含む）。
     /// 深さ1の純粋なプロジェクション（例: `extension:`）も `keys: vec![op]` として表現する。
     Nest {
@@ -187,6 +186,14 @@ pub enum ResolvedAggregationNode {
 }
 
 impl ResolvedAggregationNode {
+    /// 集約ノードの内部 ResolvedNode を返します。
+    pub fn inner_node(&self) -> &ResolvedNode {
+        match self {
+            ResolvedAggregationNode::Count(inner) => inner,
+            ResolvedAggregationNode::Arithmetic { inner, .. } => inner,
+        }
+    }
+
     pub fn is_string_type(&self) -> bool {
         match self {
             ResolvedAggregationNode::Count(_) => false,
@@ -311,6 +318,44 @@ impl ResolvedOperand {
     pub fn get_storage(&self) -> Option<&StorageMapping> {
         extract_storage_from_operand(self)
     }
+
+    /// 直接の子オペランドを返す。
+    /// - `Calculation`: left / right
+    /// - `Aggregation`: 集約内部のプロジェクションオペランド（存在する場合）
+    pub fn children(&self) -> Vec<&ResolvedOperand> {
+        match self {
+            ResolvedOperand::Calculation(calc) => vec![&calc.left, &calc.right],
+            ResolvedOperand::Aggregation(agg) => {
+                let inner = match agg {
+                    ResolvedAggregationNode::Count(node) => node,
+                    ResolvedAggregationNode::Arithmetic { inner, .. } => inner,
+                };
+                let (_, _, operand) = inner.extract_agg_parts();
+                operand.map(|op| vec![op]).unwrap_or_default()
+            }
+            _ => vec![],
+        }
+    }
+
+    /// ツリーを後順（post-order）で fold する。
+    /// 葉から順に `f(node, child_results)` が呼ばれる。
+    pub fn fold<T, F>(&self, f: &F) -> T
+    where
+        F: Fn(&ResolvedOperand, Vec<T>) -> T,
+    {
+        let child_results =
+            self.children().into_iter().map(|c| c.fold(f)).collect();
+        f(self, child_results)
+    }
+
+    /// 深さ優先（前順）で全オペランドを列挙する。
+    pub fn walk(&self) -> Vec<&ResolvedOperand> {
+        let mut result = vec![self];
+        for child in self.children() {
+            result.extend(child.walk());
+        }
+        result
+    }
 }
 
 /// 算術演算の解決済みノード
@@ -338,6 +383,65 @@ impl ResolvedCalculationNode {
 }
 
 impl ResolvedNode {
+    /// 直接の子 `ResolvedNode` を返す。
+    /// `build_pick_sql` が再帰する対象のみを含む。
+    pub fn children(&self) -> Vec<&ResolvedNode> {
+        match self {
+            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
+                nodes.iter().collect()
+            }
+            ResolvedNode::LabelSetOp { operands, .. } => {
+                operands.iter().collect()
+            }
+            ResolvedNode::Difference(l, r) => vec![l.as_ref(), r.as_ref()],
+
+            ResolvedNode::Nest {
+                context: Some(ctx), ..
+            } => {
+                vec![ctx.as_ref()]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// ツリーを後順（post-order）で fold する。
+    /// 葉から順に `f(node, child_results)` が呼ばれる。
+    pub fn fold<T, F>(&self, f: &F) -> T
+    where
+        F: Fn(&ResolvedNode, Vec<T>) -> T,
+    {
+        let child_results =
+            self.children().into_iter().map(|c| c.fold(f)).collect();
+        f(self, child_results)
+    }
+
+    /// 深さ優先（前順）で全ノードを列挙する。
+    /// Aggregation 系ノードの inner_node にも降りる。
+    /// fold() は children() ベースのまま変更しない。
+    pub fn walk(&self) -> Vec<&ResolvedNode> {
+        let mut result = vec![self];
+        for child in self.children() {
+            result.extend(child.walk());
+        }
+        // children() に含まれない Aggregation の inner_node にも降りる
+        match self {
+            ResolvedNode::Aggregation(agg)
+            | ResolvedNode::AggregationMatch { agg, .. }
+            | ResolvedNode::AggregationTagMatch { agg, .. }
+            | ResolvedNode::AggregationCalculationMatch { agg, .. } => {
+                result.extend(agg.inner_node().walk());
+            }
+            ResolvedNode::AggregationAggregationMatch {
+                left, right, ..
+            } => {
+                result.extend(left.inner_node().walk());
+                result.extend(right.inner_node().walk());
+            }
+            _ => {}
+        }
+        result
+    }
+
     /// 自身、または入れ子のいずれかに Projection / NestMatch を含むかチェックします。
     pub fn is_projection_recursive(&self) -> bool {
         match self {
@@ -352,7 +456,7 @@ impl ResolvedNode {
             ResolvedNode::Difference(l, r) => {
                 l.is_projection_recursive() || r.is_projection_recursive()
             }
-            ResolvedNode::Complement(c) => c.is_projection_recursive(),
+
             _ => false,
         }
     }
@@ -412,9 +516,6 @@ impl ResolvedNode {
                 l.inject_context(context.clone());
                 r.inject_context(context);
             }
-            ResolvedNode::Complement(c) => {
-                c.inject_context(context);
-            }
             _ => {}
         }
     }
@@ -429,10 +530,7 @@ impl ResolvedNode {
                 // ただしサブクエリ等で使用するための基本的な条件を返す
                 l.to_condition()
             }
-            ResolvedNode::Complement(_c) => {
-                // COMPLEMENT も同様
-                Condition::any()
-            }
+
             ResolvedNode::Nest { keys, context, .. } => {
                 let mut cond = keys.first().unwrap().to_condition();
                 if let Some(ctx) = context {
@@ -552,15 +650,12 @@ impl ResolvedNode {
                     None
                 }
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_projection()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection(),
             _ => None,
         }
     }
 
     /// Or が異なるタグ型のオペランドを混在させる「混在投影」クエリかどうかを返します。
-    /// このフラグが true の場合、`type_for_projection` は設定しません。
     pub fn is_mixed_projection_query(&self) -> bool {
         match self {
             ResolvedNode::Or(nodes) => {
@@ -587,9 +682,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_nvalue()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.first().map(|m| &m.nvalue)
             }
@@ -610,9 +703,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_combined())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_nvalue_combined()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue_combined(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.first().map(|m| m.nvalue.clone())
             }
@@ -630,22 +721,22 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_projection_operand()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection_operand(),
             _ => None,
         }
     }
 
     pub fn get_projection_operands(&self) -> Option<&[ResolvedOperand]> {
         match self {
-            ResolvedNode::Nest { keys, .. } => Some(keys.as_slice()),
+            ResolvedNode::Nest { keys, .. }
+            | ResolvedNode::NestMatch { keys, .. }
+            | ResolvedNode::MergedNestMatch { keys, .. } => {
+                Some(keys.as_slice())
+            }
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_projection_operands())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_projection_operands()
-            }
+            ResolvedNode::Difference(l, _) => l.get_projection_operands(),
             node => node
                 .get_projection_operand()
                 .map(|op| std::slice::from_ref(op)),
@@ -670,6 +761,20 @@ impl ResolvedNode {
         }
     }
 
+    /// 集約 inner ノードとして見たときのフィルタコンテキストを返します。
+    /// `And([filter, Nest])` ラッパーでは And の filter 側ノードを返します。
+    /// 通常の Nest / NestMatch では .context フィールドを返します。
+    pub fn get_agg_context(&self) -> Option<&ResolvedNode> {
+        match self {
+            ResolvedNode::Nest { context, .. }
+            | ResolvedNode::NestMatch { context, .. } => context.as_deref(),
+            ResolvedNode::And(nodes) => {
+                nodes.iter().find_map(|n| n.get_agg_context())
+            }
+            _ => None,
+        }
+    }
+
     /// ネストされた Nest を再帰的に探索して返します。
     pub fn get_nested_projection(&self) -> Option<&ResolvedOperand> {
         match self {
@@ -678,9 +783,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nested_projection())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_nested_projection()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nested_projection(),
             _ => None,
         }
     }
@@ -746,9 +849,7 @@ impl ResolvedNode {
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_condition())
             }
-            ResolvedNode::Difference(l, _) | ResolvedNode::Complement(l) => {
-                l.get_nvalue_condition()
-            }
+            ResolvedNode::Difference(l, _) => l.get_nvalue_condition(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.iter().find_map(|m| {
                     let crate::query::lens_resolver::NestMatchOp::Comparison(
@@ -812,48 +913,6 @@ impl ResolvedNode {
                 }
             }
             _ => None,
-        }
-    }
-
-    /// 全ての子要素が集約比較であれば、このノード全体をスカラー（ブーリアン）結果として扱う
-    pub fn is_boolean_result(&self) -> bool {
-        match self {
-            ResolvedNode::AggregationMatch { .. }
-            | ResolvedNode::AggregationCalculationMatch { .. }
-            | ResolvedNode::AggregationAggregationMatch { .. }
-            | ResolvedNode::AggregationTagMatch { .. }
-            | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::NestMatch { .. }
-            | ResolvedNode::MergedNestMatch { .. } => true,
-            // Comparison 演算子の NestNestMatch:
-            // right_nvalue が Literal の場合はブーリアン結果（フィルタリング）。
-            // right_nvalue が Aggregation/Calculation の場合はフラットリスト比較なので false。
-            ResolvedNode::NestNestMatch {
-                op, right_nvalue, ..
-            } => {
-                matches!(op, NestMatchOp::Comparison(_))
-                    && matches!(right_nvalue, ResolvedOperand::Literal(_))
-            }
-            ResolvedNode::TagCalculationMatch { calc, .. }
-            | ResolvedNode::CalculationMatch { calc, .. } => {
-                calc.contains_aggregation()
-            }
-            ResolvedNode::CalculationCalculationMatch {
-                left_calc,
-                right_calc,
-                ..
-            } => {
-                left_calc.contains_aggregation()
-                    || right_calc.contains_aggregation()
-            }
-            ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
-                !nodes.is_empty() && nodes.iter().all(|n| n.is_boolean_result())
-            }
-            ResolvedNode::Difference(l, r) => {
-                l.is_boolean_result() && r.is_boolean_result()
-            }
-            ResolvedNode::Complement(c) => c.is_boolean_result(),
-            _ => false,
         }
     }
 }
@@ -1211,9 +1270,7 @@ pub(crate) fn resolve_query_node(
             }
             Ok(ResolvedNode::Difference(Box::new(rl), Box::new(rr)))
         }
-        QueryNode::Complement(c) => Ok(ResolvedNode::Complement(Box::new(
-            resolve_query_node(lens, *c)?,
-        ))),
+
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
         // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
         QueryNode::Projection(Operand::Calculation(calc))
@@ -2474,24 +2531,6 @@ impl Resolver {
     pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
         self.resolved_query.get_nvalue_condition()
     }
-
-    /// スカラー式を返す
-    pub fn get_scalar_expression(&self) -> Option<ResolvedOperand> {
-        match &self.resolved_query {
-            ResolvedNode::Aggregation(agg) => {
-                Some(ResolvedOperand::Aggregation(agg.clone()))
-            }
-            ResolvedNode::Nest { keys, .. } => {
-                let op = keys.first().unwrap();
-                if op.contains_aggregation() || op.is_pure_scalar() {
-                    Some(op.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2573,49 +2612,6 @@ mod tests {
         );
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
-    }
-
-    #[test]
-    fn test_resolved_node_is_boolean_result() {
-        use crate::query::ast::ComparisonOp;
-        use crate::types::SType;
-
-        // 1. AggregationMatch is boolean
-        let agg =
-            ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![])));
-        let node_bool = ResolvedNode::AggregationMatch {
-            agg,
-            op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Gt),
-            label: Label::from(0),
-        };
-        assert!(node_bool.is_boolean_result());
-
-        // 2. Normal ColumnMatch is NOT boolean
-        let node_normal = ResolvedNode::ColumnMatch {
-            tag: SType::Extension,
-            label: Label::from("rs"),
-        };
-        assert!(!node_normal.is_boolean_result());
-
-        // 3. AND(Boolean, Boolean) is boolean
-        let node_and_bool =
-            ResolvedNode::And(vec![node_bool.clone(), node_bool.clone()]);
-        assert!(node_and_bool.is_boolean_result());
-
-        // 4. AND(Boolean, Normal) is NOT boolean
-        let node_mixed =
-            ResolvedNode::And(vec![node_bool.clone(), node_normal.clone()]);
-        assert!(!node_mixed.is_boolean_result());
-
-        // 5. OR(Boolean, Boolean) is boolean
-        let node_or_bool =
-            ResolvedNode::Or(vec![node_bool.clone(), node_bool.clone()]);
-        assert!(node_or_bool.is_boolean_result());
-
-        // 6. Complement(Boolean) is boolean
-        let node_not_bool =
-            ResolvedNode::Complement(Box::new(node_bool.clone()));
-        assert!(node_not_bool.is_boolean_result());
     }
 
     #[test]
@@ -3729,5 +3725,174 @@ mod tests_integration {
             "cat: should have context injected, got: {:?}",
             resolver.resolved_query
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_walk_fold {
+    use super::*;
+    use crate::query::ast::ArithmeticOp;
+    use crate::types::{Label, LabelValue, SType, TagType};
+
+    fn leaf(name: &str) -> ResolvedNode {
+        ResolvedNode::ColumnMatch {
+            tag: SType::Name,
+            label: Label::resolve(
+                TagType::from(name),
+                LabelValue::String(name.to_string()),
+            ),
+        }
+    }
+
+    fn lit(n: i64) -> ResolvedOperand {
+        ResolvedOperand::Literal(Label::from(n))
+    }
+
+    fn calc(left: ResolvedOperand, right: ResolvedOperand) -> ResolvedOperand {
+        ResolvedOperand::Calculation(Box::new(ResolvedCalculationNode {
+            left,
+            op: ArithmeticOp::Add,
+            right,
+        }))
+    }
+
+    // ── ResolvedNode::walk ────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_walk_leaf() {
+        let n = leaf("a");
+        let got = n.walk();
+        assert_eq!(got.len(), 1);
+        assert!(std::ptr::eq(got[0], &n));
+    }
+
+    #[test]
+    fn test_node_walk_and() {
+        let a = leaf("a");
+        let b = leaf("b");
+        let root = ResolvedNode::And(vec![a, b]);
+        // 前順: root, child0, child1
+        let got = root.walk();
+        assert_eq!(got.len(), 3);
+        assert!(matches!(got[0], ResolvedNode::And(_)));
+        assert!(matches!(got[1], ResolvedNode::ColumnMatch { .. }));
+        assert!(matches!(got[2], ResolvedNode::ColumnMatch { .. }));
+    }
+
+    #[test]
+    fn test_node_walk_nested() {
+        // And([Or([a, b]), c])  → And + Or + a + b + c = 5 nodes
+        let inner = ResolvedNode::Or(vec![leaf("a"), leaf("b")]);
+        let root = ResolvedNode::And(vec![inner, leaf("c")]);
+        assert_eq!(root.walk().len(), 5);
+    }
+
+    // ── ResolvedNode::fold ────────────────────────────────────────────────
+
+    #[test]
+    fn test_node_fold_count() {
+        // And([a, Or([b, c])]) = 5 nodes
+        let root = ResolvedNode::And(vec![
+            leaf("a"),
+            ResolvedNode::Or(vec![leaf("b"), leaf("c")]),
+        ]);
+        let count = root.fold(&|_node, child_counts: Vec<usize>| {
+            1 + child_counts.into_iter().sum::<usize>()
+        });
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_node_fold_depth() {
+        let root = ResolvedNode::And(vec![
+            leaf("a"),
+            ResolvedNode::Or(vec![leaf("b"), leaf("c")]),
+        ]);
+        // depth = max child depth + 1
+        let depth = root.fold(&|_node, child_depths: Vec<usize>| {
+            1 + child_depths.into_iter().max().unwrap_or(0)
+        });
+        // And depth=3: Or depth=2: leaves depth=1
+        assert_eq!(depth, 3);
+    }
+
+    #[test]
+    fn test_node_fold_postorder() {
+        // fold は後順（子が先に処理される）ことを確認
+        use std::cell::RefCell;
+        let order: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let root = ResolvedNode::And(vec![leaf("a"), leaf("b")]);
+        root.fold(&|node, _: Vec<()>| match node {
+            ResolvedNode::And(_) => order.borrow_mut().push("And".to_string()),
+            ResolvedNode::ColumnMatch { label, .. } => {
+                order.borrow_mut().push(label.as_str().to_string())
+            }
+            _ => {}
+        });
+        // 後順なので "a", "b", "And" の順
+        assert_eq!(*order.borrow(), vec!["a", "b", "And"]);
+    }
+
+    // ── ResolvedOperand::walk ─────────────────────────────────────────────
+
+    #[test]
+    fn test_operand_walk_leaf() {
+        let op = lit(1);
+        let got = op.walk();
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn test_operand_walk_calc() {
+        // (1 + 2)  → 3 nodes
+        let op = calc(lit(1), lit(2));
+        assert_eq!(op.walk().len(), 3);
+    }
+
+    #[test]
+    fn test_operand_walk_nested_calc() {
+        // ((1 + 2) + 3)  → 5 nodes
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        assert_eq!(op.walk().len(), 5);
+    }
+
+    // ── ResolvedOperand::fold ─────────────────────────────────────────────
+
+    #[test]
+    fn test_operand_fold_sum_literals() {
+        // fold で Literal の合計を計算
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        let sum = op.fold(&|node, child_sums: Vec<i64>| match node {
+            ResolvedOperand::Literal(label) => label.as_i64(),
+            _ => child_sums.into_iter().sum(),
+        });
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    fn test_operand_fold_count_leaves() {
+        let op = calc(calc(lit(1), lit(2)), lit(3));
+        let count = op.fold(&|node, child_counts: Vec<usize>| match node {
+            ResolvedOperand::Calculation(_) => child_counts.into_iter().sum(),
+            _ => 1,
+        });
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_operand_fold_postorder() {
+        use std::cell::RefCell;
+        let order: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let op = calc(lit(1), lit(2));
+        op.fold(&|node, _: Vec<()>| match node {
+            ResolvedOperand::Literal(label) => {
+                order.borrow_mut().push(label.as_i64().to_string())
+            }
+            ResolvedOperand::Calculation(_) => {
+                order.borrow_mut().push("calc".to_string())
+            }
+            _ => {}
+        });
+        assert_eq!(*order.borrow(), vec!["1", "2", "calc"]);
     }
 }

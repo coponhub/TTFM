@@ -1,7 +1,7 @@
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
-    default_scope, get_nvalue, get_nvalue_f64, inject_path_scope,
-    scope_path_from_dir,
+    default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
+    inject_path_scope, scope_path_from_dir,
 };
 
 // ──────────────────────────────────────────────
@@ -26,7 +26,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(extension:jpg)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "Should be projection");
+            assert!(has_item_tags(&res.results), "Should be projection");
             let src = res.results.iter().find(|r| r.name.contains("src")).expect("src");
             let docs = res.results.iter().find(|r| r.name.contains("docs")).expect("docs");
             assert_eq!(get_nvalue(src).as_deref(), Some("2"), "src: 2 jpg");
@@ -46,7 +46,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: sum(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("300"), "sub sum=300");
             Ok(())
@@ -62,7 +62,7 @@ define_cases! {
         format_query: default_scope,
         query: "extension:",
         assert: |res, _dir| {
-            assert_eq!(res.type_for_projection, Some(ttfm::types::TagType::from("extension")));
+            assert!(has_item_tags(&res.results));
             assert!(res.results.iter().any(|r| r.name == "rs"));
             assert!(res.results.iter().any(|r| r.name == "txt"));
             for item in &res.results {
@@ -84,7 +84,7 @@ define_cases! {
         format_query: default_scope,
         query: "extension: &: count(*:*)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
             let txt = res.results.iter().find(|r| r.name == "txt").expect("txt");
             assert_eq!(get_nvalue(rs).as_deref(), Some("2"), "rs count=2");
@@ -103,7 +103,7 @@ define_cases! {
         format_query: default_scope,
         query: "extension: &: sum(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
             let txt = res.results.iter().find(|r| r.name == "txt").expect("txt");
             assert_eq!(get_nvalue(rs).as_deref(), Some("300"), "rs sum=300");
@@ -123,7 +123,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: max(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("500"), "max=500");
             Ok(())
@@ -141,7 +141,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: min(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("10"), "min=10");
             Ok(())
@@ -159,7 +159,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: avg(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
             let nv: f64 = get_nvalue(sub).expect("nvalue").parse().expect("numeric");
             assert!((nv - 150.0).abs() < 1.0, "avg~150, got {}", nv);
@@ -182,7 +182,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(*:*)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let alpha = res.results.iter().find(|r| r.name.contains("alpha")).expect("alpha");
             let beta = res.results.iter().find(|r| r.name.contains("beta")).expect("beta");
             assert_eq!(get_nvalue(alpha).as_deref(), Some("3"), "alpha=3");
@@ -199,7 +199,7 @@ define_cases! {
         format_query: default_scope,
         query: "filename: &: sum(size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let hello = res.results.iter().find(|r| r.name == "hello.txt").expect("hello.txt");
             assert_eq!(get_nvalue(hello).as_deref(), Some("100"), "sum=100");
             Ok(())
@@ -222,7 +222,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (count(extension:jpg) > 1)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "a.jpg" || n == "b.jpg" || n == "c.jpg"),
                 "src items should appear: {:?}", names);
@@ -242,7 +242,7 @@ define_cases! {
         format_query: default_scope,
         query: "extension: &: (sum(size:) > 100)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "a.rs" || n == "b.rs"),
                 "rs (sum=110) should appear: {:?}", names);
@@ -329,7 +329,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (avg(size:) == sum(size:))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             let parentdirs: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter()
                     .filter(|e| e.label.tag_type().as_str() == "parentdir")
@@ -387,7 +387,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (200 > sum(size:) > 50)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n == "a.txt" || n == "b.txt"), "dirA included: {:?}", names);
             assert!(!names.iter().any(|&n| n == "c.txt" || n == "d.txt"), "dirB excluded: {:?}", names);
@@ -617,7 +617,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(extension:rs)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some());
+            assert!(has_item_tags(&res.results));
             let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
             assert!(names.iter().any(|&n| n.contains("dir1")), "dir1 included");
             assert!(!names.iter().any(|&n| n.contains("dir2")), "dir2 excluded");
@@ -698,7 +698,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: extension: &: (sum(size:) > 2)",
         assert: |res, _dir| {
-            assert_eq!(res.type_for_projection, None);
+            assert!(!has_item_tags(&res.results));
             let files: Vec<_> = res.results.iter().filter(|r| {
                 !r.tags.entries.iter().any(|e| {
                     e.label.tag_type().to_string() == "is_dir" && e.label.as_str() == "true"
@@ -767,7 +767,7 @@ define_cases! {
         format_query: default_scope,
         query: "extension: &: (sum(size:) > (sum(size:) / 2))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "flat list");
+            assert!(!has_item_tags(&res.results), "flat list");
             assert!(!res.results.is_empty(), "has results");
             Ok(())
         },
@@ -788,7 +788,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: count(extension:jpg))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 3.0, "scalar 3.0, got {}", val);
@@ -810,7 +810,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(parentdir: &: count(extension:jpg))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 2.0, "scalar 2.0, got {}", val);
@@ -834,7 +834,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 1.0, "scalar 1.0, got {}", val);
@@ -858,7 +858,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 3.0, "scalar 3.0, got {}", val);
@@ -882,7 +882,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "100 - count(parentdir: &: (count(extension:jpg) > 1))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 99.0, "99.0, got {}", val);
@@ -905,7 +905,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: (count(extension:jpg) > 1)) * 2",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none());
+            assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
             let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
             assert_eq!(val, 6.0, "6.0, got {}", val);
@@ -973,7 +973,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "projection");
+            assert!(has_item_tags(&res.results), "projection");
             let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             let dir2_r = res.results.iter().find(|r| r.name.contains("dir2")).expect("dir2");
             assert_eq!(get_nvalue_f64(dir1_r), Some(17.0), "dir1 sum=17");
@@ -996,7 +996,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(parentdir: &: extension:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "projection");
+            assert!(has_item_tags(&res.results), "projection");
             let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
             let dir2_r = res.results.iter().find(|r| r.name.contains("dir2")).expect("dir2");
             assert_eq!(get_nvalue_f64(dir1_r), Some(2.0), "dir1 count=2");
@@ -1020,7 +1020,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: extension: &: size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "projection");
+            assert!(has_item_tags(&res.results), "projection");
             assert_eq!(res.results.len(), 4, "4 groups");
             let find_nv = |pdir: &str, ext: &str| -> f64 {
                 let g = res.results.iter()
@@ -1045,7 +1045,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:rs & size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "scalar");
+            assert!(!has_item_tags(&res.results), "scalar");
             assert_eq!(res.results[0].name, "17", "sum=17");
             Ok(())
         },
@@ -1065,7 +1065,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: count())",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "scalar");
+            assert!(!has_item_tags(&res.results), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
             assert_eq!(val, 5.0, "sum of counts=5");
             Ok(())
@@ -1086,7 +1086,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(parentdir: &: extension: &: filename: &: size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "projection");
+            assert!(has_item_tags(&res.results), "projection");
             assert_eq!(res.results.len(), 3, "3 groups");
             let find_nv = |pdir: &str, ext: &str, fname: &str| -> f64 {
                 let g = res.results.iter()
@@ -1115,7 +1115,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(sum(parentdir: &: extension: &: size:))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "scalar");
+            assert!(!has_item_tags(&res.results), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
             assert_eq!(val, 22.0, "22.0, got {}", val);
             Ok(())
@@ -1136,7 +1136,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(count(parentdir: &: extension:))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "scalar");
+            assert!(!has_item_tags(&res.results), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
             assert_eq!(val, 3.0, "3.0, got {}", val);
             Ok(())
@@ -1152,7 +1152,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(extension: &: parentdir: &: (sum(size:) > 10))",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_none(), "scalar");
+            assert!(!has_item_tags(&res.results), "scalar");
             let val: f64 = res.results[0].name.parse().expect("numeric");
             assert_eq!(val, 1.0, "1 valid group, got {}", val);
             Ok(())
@@ -1290,7 +1290,7 @@ define_cases! {
         assert: |res, _dir| {
             // 仕様: 共通プレフィックスなし → Lv.2 Projection (type_for_projection = Some)
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj & Proj (different keys) should set type_for_projection (Lv.2 by spec)"
             );
             assert_eq!(
@@ -1334,7 +1334,7 @@ define_cases! {
         query: "tagX: | tagY:",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj | Proj (異なるキー) は Lv.2 混合 Projection → type_for_projection = Some"
             );
             assert_eq!(
@@ -1375,7 +1375,7 @@ define_cases! {
         query: "fruit: -: veggie:",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj -: Proj (左辺 Lv.2) は Lv.2 Projection → type_for_projection = Some"
             );
             assert_eq!(
@@ -1412,7 +1412,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (tagA: | tagB:)",
         assert: |res, dir| {
-            assert!(res.type_for_projection.is_some(), "Should return Projection result");
+            assert!(has_item_tags(&res.results), "Should return Projection result");
             // 複合ラベル形式: "parentdir_path &: tag_value"
             let dir_a = dir.join("dir_a").to_string_lossy().into_owned();
             let dir_b = dir.join("dir_b").to_string_lossy().into_owned();
@@ -1447,7 +1447,7 @@ define_cases! {
         query: "sum(parentdir: &: size:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "sum(Nest & path_filter) must Unnest and return Projection, not scalar"
             );
             let dir1_group = res.results.iter()
@@ -1507,7 +1507,7 @@ define_cases! {
         query: "extension: | path:dir_a/*",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
+                !has_item_tags(&res.results),
                 "Proj | TypedTag should return Lv.1 (flat list), not Lv.2 Projection"
             );
             // extension: が全3ファイルをカバーするため Union 結果は過不足なく3ファイル
@@ -1542,7 +1542,7 @@ define_cases! {
         query: "extension: - path:exclude/*",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj - TypedTag should still return Projection (Lv.2)"
             );
             // rs グループ: include/a.rs のみ（exclude/c.rs は除外済み）
@@ -1631,7 +1631,7 @@ define_cases! {
         query: "sum((parentdir: & path:dir/*) &: (size: & path:dir/*))",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "sum((parentdir: & filter) &: (size: & filter)) must return Projection"
             );
             let dir1_group = res.results.iter()
@@ -1667,7 +1667,7 @@ define_cases! {
         query: "(cat: &: flavor:) & grade:A",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest & TypedTag should maintain Nest structure (Lv.3)"
             );
             // a.txt の cat:one/flavor:sweet グループが存在する
@@ -1705,7 +1705,7 @@ define_cases! {
         query: "(cat: &: flavor:) | grade:A",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
+                !has_item_tags(&res.results),
                 "Nest | TypedTag should flatten to Lv.1"
             );
             assert!(
@@ -1748,7 +1748,7 @@ define_cases! {
         query: "(cat: &: flavor:) - grade:A",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest - TypedTag should maintain Nest structure (Lv.3)"
             );
             // b.txt (grade:A) の "one &: sour" グループが消える
@@ -1791,7 +1791,7 @@ define_cases! {
         assert: |res, _dir| {
             // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj & Nest should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
@@ -1830,7 +1830,7 @@ define_cases! {
         assert: |res, _dir| {
             // 仕様: & 演算の結果は常に Projection → is_some()
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest & Nest should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
@@ -1880,7 +1880,7 @@ define_cases! {
         query: "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest2 & Nest3 should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter()
@@ -1917,15 +1917,10 @@ define_cases! {
         format_query: default_scope,
         query: "extension: & size:",
         assert: |res, _dir| {
-            // 仕様: 共通プレフィックスなし、かつラベル値型不一致 → 空 Projection
-            assert!(
-                res.type_for_projection.is_some(),
-                "extension: & size: should produce LabelSetOp (with type_for_projection), got: {:?}",
-                res.type_for_projection
-            );
+            // 仕様: 共通プレフィックスなし、かつラベル値型不一致 → 空結果
             assert!(
                 res.results.is_empty(),
-                "extension: & size: label value sets are disjoint (string vs int) → empty Projection, got: {:?}",
+                "extension: & size: label value sets are disjoint (string vs int) → empty result, got: {:?}",
                 res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
             );
             Ok(())
@@ -1944,9 +1939,8 @@ define_cases! {
         query: "size: & size:",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
-                "size: & size: should produce Projection (type_for_projection = Some), got: {:?}",
-                res.type_for_projection
+                has_item_tags(&res.results),
+                "size: & size: should produce Projection (with item: tags)"
             );
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
@@ -1982,7 +1976,7 @@ define_cases! {
         query: "tagA: | (tagA: &: tagB:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj | Nest should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter()
@@ -2026,7 +2020,7 @@ define_cases! {
         query: "(cat: &: flavor:) | (shape: &: color:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_none(),
+                !has_item_tags(&res.results),
                 "Nest | Nest (Lv.3 異なるキー、共通プレフィックスなし) → Lv.1 フラット"
             );
             // LabelSetOp SQL はラベル値グループを返すため r.name はラベル値
@@ -2069,7 +2063,7 @@ define_cases! {
         query: "tagA: -: (tagA: &: tagB:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Proj -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
             // ラベルの確認（メイン）: "y" グループのみ残り "x" は除外される
@@ -2117,7 +2111,7 @@ define_cases! {
         query: "(cat: &: flavor:) -: grade:",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest -: Proj should produce LabelSetOp Except (with type_for_projection)"
             );
             // ラベルの確認（メイン）: "one" グループのみ残り "two" は除外される
@@ -2169,7 +2163,7 @@ define_cases! {
         query: "(tagA: &: tagB:) -: (tagA: &: tagC:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Nest -: Nest should produce LabelSetOp Except (with type_for_projection)"
             );
             // ラベルの確認（メイン）: "x" グループのみ残る（a.txt が除外されても b.txt が "x" に残る）
@@ -2220,7 +2214,7 @@ define_cases! {
         query: "(tagA: &: tagB: &: tagC:) -: grade:",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Lv.4 Nest -: Proj should produce LabelSetOp Except (with type_for_projection)"
             );
             // ラベルの確認（メイン）: "x"（a.txt のみ）と "y"（c.txt）が残る
@@ -2270,7 +2264,7 @@ define_cases! {
         query: "(tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)",
         assert: |res, _dir| {
             assert!(
-                res.type_for_projection.is_some(),
+                has_item_tags(&res.results),
                 "Lv.4 Nest -: Lv.4 Nest should produce LabelSetOp Except (with type_for_projection)"
             );
             // ラベルの確認（メイン）: "x" グループのみ（b.txt）
@@ -2302,7 +2296,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension: &: size:)",
         assert: |res, _dir| {
-            assert!(res.type_for_projection.is_some(), "Should return projection result");
+            assert!(has_item_tags(&res.results), "Should return projection result");
             let rs_group = res.results.iter().find(|r| r.name.contains("rs")).expect("rs group");
             let txt_group = res.results.iter().find(|r| r.name.contains("txt")).expect("txt group");
             assert_eq!(get_nvalue_f64(rs_group), Some(17.0));

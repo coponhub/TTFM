@@ -11,6 +11,7 @@ use file_id::get_file_id;
 use sea_query::{Expr, PostgresQueryBuilder, Query};
 use std::path::Path;
 
+pub mod cache_search_sql;
 pub mod config;
 pub mod db;
 pub mod indexing;
@@ -179,19 +180,6 @@ impl FunctionRegistry {
         }
         Ok(row)
     }
-
-    // --- Search Support ---
-
-    /// `all_tags` ビューに対する検索SQL（IDのリストを返すクエリ）を生成します。
-    pub fn generate_view_query(
-        &self,
-        node: &crate::query::QueryNode,
-        view_name: &str,
-    ) -> String {
-        let registry = crate::query::QueryFunctionRegistry::with_standard();
-        let select = node.clone().expand(&registry).to_sql(view_name);
-        select.to_string(PostgresQueryBuilder)
-    }
 }
 
 /// ファイル管理システムのメインインターフェース。
@@ -283,7 +271,9 @@ impl FileManager {
     /// 同一インメモリDBを共有する新しい `FileManager` を作成します。
     /// parquet の再読み込みを行わないため、テストの高速化に使用します。
     pub fn try_clone(&self) -> Result<Self> {
-        let conn = self.conn.try_clone()
+        let conn = self
+            .conn
+            .try_clone()
             .context("Failed to clone DuckDB connection")?;
         Ok(Self {
             conn,

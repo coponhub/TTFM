@@ -69,6 +69,7 @@ pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Col, Pronoun::*};
     use crate::indexing::functions::IndexingFunction;
     use crate::taggers::{ColumnDef, TagValue, Tagger};
     use sea_query::{Expr, PostgresQueryBuilder, Query};
@@ -151,9 +152,8 @@ mod tests {
         // Key: col("content")
         let expr = build_rank_expr(
             &reg,
-            Condition::all()
-                .add(Expr::col(sea_query::Alias::new("kind")).eq("type")),
-            Expr::col(sea_query::Alias::new("content")),
+            Condition::all().add(Expr::col(Kind).eq("type")),
+            Expr::col(Col::Content),
             0,
         );
 

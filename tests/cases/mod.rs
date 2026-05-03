@@ -110,6 +110,16 @@ pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
         })
 }
 
+/// 結果が item: タグを持つか（グループ表示 / projection パス）を判定します。
+pub(super) fn has_item_tags(results: &[ttfm::SearchResult]) -> bool {
+    results.iter().any(|r| {
+        r.tags
+            .entries
+            .iter()
+            .any(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+    })
+}
+
 /// デフォルト: `(Q) & path:<dir>/*` — 通常の nest / 比較クエリ用
 pub(super) fn default_scope(query: &str, dir: &Path) -> String {
     format!("({}) & path:{}/*", query, dir.to_string_lossy())

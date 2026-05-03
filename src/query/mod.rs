@@ -24,10 +24,6 @@ impl QueryNode {
         res
     }
 
-    pub fn to_sql(&self, view_name: &str) -> sea_query::SelectStatement {
-        sql::to_sql(self, view_name)
-    }
-
     pub fn to_tag_condition(&self) -> sea_query::Condition {
         sql::to_tag_condition(self)
     }
@@ -156,11 +152,14 @@ mod tests {
 
     #[test]
     fn test_query_to_sql_ranking() {
+        use crate::query::lens_resolver::Resolver;
+        use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let q = parse("extension:rs").unwrap();
-        let sql = q.to_sql("oneview").to_string(PostgresQueryBuilder);
+        let resolver = Resolver::new("extension:rs").unwrap();
+        let sql = PickNode::new(&resolver.resolved_query)
+            .build_pick()
+            .to_string(PostgresQueryBuilder);
 
-        // rank, item_id, item_kind が選択されていることを確認
         assert!(
             sql.contains("\"rank\""),
             "SQL should select rank column: {}",
@@ -176,26 +175,23 @@ mod tests {
             "SQL should select item_kind column: {}",
             sql
         );
-        assert!(
-            sql.contains("DISTINCT"),
-            "SQL should contain DISTINCT for leaf nodes: {}",
-            sql
-        );
     }
 
     #[test]
     fn test_query_to_sql_and_precedence() {
+        use crate::query::lens_resolver::Resolver;
+        use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let q = parse("type:file & extension:rs").unwrap();
-        let sql = q.to_sql("oneview").to_string(PostgresQueryBuilder);
+        let resolver = Resolver::new("type:file & extension:rs").unwrap();
+        let sql = PickNode::new(&resolver.resolved_query)
+            .build_pick()
+            .to_string(PostgresQueryBuilder);
 
-        // INTERSECT が使用されていることを確認
         assert!(
             sql.contains("INTERSECT"),
             "AND query should use INTERSECT: {}",
             sql
         );
-        // 各項がサブクエリでラップされ、Rank, ItemKind が引き継がれていることを確認
         assert!(
             sql.contains("\"rank\""),
             "Subqueries should select rank: {}",

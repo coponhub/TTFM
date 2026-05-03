@@ -1,3 +1,4 @@
+use crate::cases::has_item_tags;
 use file_id::get_file_id;
 use tempfile::tempdir;
 use ttfm::FileManager;
@@ -174,11 +175,7 @@ fn test_system_items_registration() {
     let results_projection = fm.search("tag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
-    assert_eq!(
-        results_projection.type_for_projection,
-        Some(ttfm::types::TagType::from("tag")),
-        "Query should project 'tag' field"
-    );
+    assert!(has_item_tags(&results_projection.results));
     assert!(!results_projection.results.is_empty(), "Should find items");
 
     // 投影された値の中に extension:txt が含まれているか（動的生成の確認）
@@ -194,11 +191,7 @@ fn test_system_items_registration() {
 
     // 3. origin のプロジェクションも確認
     let results_origin = fm.search("origin:", Default::default()).unwrap();
-    assert_eq!(
-        results_origin.type_for_projection,
-        Some(ttfm::types::TagType::from("origin")),
-        "Query should project 'origin' field"
-    );
+    assert!(has_item_tags(&results_origin.results));
     assert!(!results_origin.results.is_empty());
 
     // 転置: results には label items が格納され、name が "system" であることを確認

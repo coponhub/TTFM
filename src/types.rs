@@ -356,6 +356,7 @@ impl From<duckdb::types::Value> for LabelValue {
     fn from(v: duckdb::types::Value) -> Self {
         use duckdb::types::Value;
         match v {
+            Value::Union(inner) => LabelValue::from(*inner),
             Value::Boolean(b) => LabelValue::Boolean(b),
             Value::Int(i) => LabelValue::Integer(i as i64),
             Value::BigInt(i) => LabelValue::Integer(i),

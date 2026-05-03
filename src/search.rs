@@ -1,5 +1,5 @@
 use crate::db::TargetTable;
-use crate::db::{Col, Tbl};
+use crate::db::{Col, Pronoun::*, VCol};
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{ItemKind, Progress, TagType};
 use crate::{FileManager, FunctionRegistry};
@@ -41,99 +41,21 @@ impl FileManager {
         // 2. 新規検索の実行
         let n = options.n.unwrap_or(100);
         let offset = options.offset.unwrap_or(0);
-        let limit = if n > 0 { n + 1 } else { 0 };
 
         let resolver = crate::query::lens_resolver::Resolver::new(query)?;
         let fetcher =
             crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
 
-        // 2-A0. LabelSetOp ケース（Projection 集合演算: INTERSECT / UNION / EXCEPT）
-        if resolver.is_label_set_op() {
-            let proj_type = resolver
-                .get_projection()
-                .unwrap_or_else(|| TagType::from("dummy"));
-            let mut results =
-                fetcher.fetch_label_groups(&proj_type, n, offset)?;
-            let has_more = n > 0 && results.len() > n;
-            if has_more {
-                results.truncate(n);
-            }
-            // Proj & Proj（Intersect）の場合は &: の使用を提案する警告を生成する
-            let warnings = if resolver.is_label_set_intersect() {
-                vec![
-                    "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
-                ]
-            } else {
-                Vec::new()
-            };
-            return Ok(SearchResponse {
-                results,
-                has_more,
-                warnings,
-                type_for_projection: resolver.get_projection(),
-                ..SearchResponse::new_empty(
-                    None,
-                    has_more,
-                    resolver.get_projection(),
-                )
-            });
-        }
+        // 2. クエリ実行（種別判断は Fetcher 内部に委譲）
+        let warnings = if resolver.is_label_set_intersect() {
+            vec![
+                "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
 
-        // 2-A. Projection ケース（転置: Label → Items）
-        // QUERY.md L77: ラベル比較はアイテムリストを返すため、
-        // nvalue_condition 付き（NestMatch/MergedNestMatch）
-        // では通常検索ケース (2-C) に委ねる。
-        if let Some(tag) = resolver.get_projection() {
-            if resolver.get_nvalue_condition().is_none() {
-                let mut label_items =
-                    fetcher.fetch_label_groups(&tag, n, offset)?;
-                let has_more = n > 0 && label_items.len() > n;
-
-                if has_more {
-                    label_items.truncate(n);
-                }
-
-                // Or/Difference 混在クエリはフラットリストとして扱い type_for_projection を設定しない
-                let type_for_projection =
-                    if resolver.resolved_query.is_mixed_projection_query() {
-                        None
-                    } else {
-                        Some(tag)
-                    };
-                return Ok(SearchResponse {
-                    results: label_items,
-                    has_more,
-                    type_for_projection,
-                    ..SearchResponse::new_empty(None, has_more, None)
-                });
-            }
-        }
-
-        // 2-B. スカラー/ブーリアン結果ケース
-        // Projection 付きの場合はアイテムリストを返すため除外
-        if (resolver.get_scalar_expression().is_some()
-            || resolver.resolved_query.is_boolean_result())
-            && resolver.get_projection().is_none()
-        {
-            let res = fetcher.fetch_computation()?;
-            return Ok(SearchResponse {
-                results: vec![res],
-                scalar: None,
-                cid: None,
-                has_more: false,
-                total_count: Some(1),
-                progress: Progress {
-                    current: 1,
-                    total: Some(1),
-                    is_done: true,
-                },
-                type_for_projection: None,
-                warnings: Vec::new(),
-            });
-        }
-
-        // 2-C. 通常検索ケース
-        let mut results = fetcher.fetch_items(Some(limit), Some(offset))?;
+        let mut results = fetcher.fetch(n, offset)?;
         let has_more = n > 0 && results.len() > n;
         if has_more {
             results.truncate(n);
@@ -158,7 +80,6 @@ impl FileManager {
 
         Ok(SearchResponse {
             results,
-            scalar: None,
             cid,
             has_more,
             total_count,
@@ -167,8 +88,7 @@ impl FileManager {
                 total: progress_total,
                 is_done: !has_more,
             },
-            type_for_projection: None,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 
@@ -234,14 +154,19 @@ impl FileManager {
         let query = meta
             .get(crate::cache::META_QUERY)
             .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
-        let node = if query.trim().is_empty() {
-            crate::query::QueryNode::And(vec![])
+        let projection: Option<String> = if query.trim().is_empty() {
+            None
         } else {
-            crate::query::parse(query)?
+            let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+            let is_projection_display = resolver.get_projection().is_some()
+                && (resolver.get_label_set_op_node().is_some()
+                    || resolver.get_nvalue_condition().is_none());
+            if is_projection_display {
+                resolver.get_projection().map(|t| t.as_str().to_string())
+            } else {
+                None
+            }
         };
-        let q_reg = crate::query::QueryFunctionRegistry::with_standard();
-        let expanded = node.expand(&q_reg);
-        let projection = expanded.get_projections().first().cloned();
 
         let (target_entries, has_more) = if let Some(ref proj_name) = projection
         {
@@ -272,7 +197,7 @@ impl FileManager {
                 .from_function(
                     sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                         .arg(Expr::val(path_str.clone())),
-                    Tbl::Diff,
+                    Diff,
                 )
                 .order_by_expr(
                     Expr::col(Col::Rank).into(),
@@ -311,7 +236,6 @@ impl FileManager {
             return Ok(SearchResponse::new_empty(
                 Some(cid.to_string()),
                 has_more,
-                projection.clone().map(|p| p.into()),
             ));
         }
 
@@ -324,7 +248,7 @@ impl FileManager {
             .from_function(
                 sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
                     .arg(Expr::val(path_str)),
-                Tbl::Diff,
+                Diff,
             )
             .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
 
@@ -353,7 +277,7 @@ impl FileManager {
         n: usize,
         offset: usize,
     ) -> Result<Vec<(crate::types::Label, usize)>> {
-        let label_query = crate::query::sql::build_label_aggregation_sql(
+        let label_query = crate::cache_search_sql::build_label_counts(
             proj_type,
             from_table,
             path_str.as_deref(),
@@ -367,7 +291,7 @@ impl FileManager {
             .query_map([], |r| {
                 let label =
                     crate::types::Label::from_raw_row(proj_type.clone(), r, 0);
-                let count: i64 = r.get("total_count")?;
+                let count: i64 = r.get(VCol::Total.as_ref())?;
                 Ok((label, count as usize))
             })?
             .collect::<Result<Vec<(crate::types::Label, usize)>, _>>()?;
@@ -385,7 +309,7 @@ impl FileManager {
         let mut entries = Vec::new();
 
         for (label, count) in labels {
-            let id_query = crate::query::sql::build_label_expansion_sql(
+            let id_query = crate::cache_search_sql::build_label_expansion_sql(
                 proj_type,
                 label,
                 from_table,
@@ -489,11 +413,12 @@ impl FileManager {
 
                     // 各アイテムを "item:name#id" タグとして格納
                     for item in items.into_iter().take(200) {
+                        let typed_tag = crate::types::TypedTag::new(
+                            "item",
+                            format!("{}#{}", item.name, item.id),
+                        );
                         res.tags.entries.push(TagEntry {
-                            label: crate::types::Label::from(format!(
-                                "item:{}#{}",
-                                item.name, item.id
-                            )),
+                            label: typed_tag.label,
                             origin: Origin::System,
                         });
                     }
@@ -506,7 +431,6 @@ impl FileManager {
 
             Ok(SearchResponse {
                 results: transposed_results,
-                scalar: None,
                 cid,
                 has_more,
                 total_count: None,
@@ -515,14 +439,11 @@ impl FileManager {
                     total: None,
                     is_done: !has_more,
                 },
-                type_for_projection: projection
-                    .map(|s| TagType::from(s.as_str())),
                 warnings: Vec::new(),
             })
         } else {
             Ok(SearchResponse {
                 results: final_results,
-                scalar: None,
                 cid,
                 has_more,
                 total_count: None,
@@ -531,7 +452,6 @@ impl FileManager {
                     total: None,
                     is_done: !has_more,
                 },
-                type_for_projection: None,
                 warnings: Vec::new(),
             })
         }
@@ -611,7 +531,7 @@ impl FileManager {
             .from_function(
                 sea_query::Func::cust(DuckDbFunc::ParquetKvMetadata)
                     .arg(Expr::val(path_str)),
-                Tbl::Diff,
+                Diff,
             );
 
         let map: HashMap<String, String> = self
@@ -942,8 +862,11 @@ mod tests {
 
         // 1. 通常検索 (DBから)
         let res_db = fm.search(query, SearchOptions::default())?;
-        assert!(res_db.type_for_projection.is_some());
         assert!(!res_db.results.is_empty());
+        // 転置形式: item: タグが注入されていればグループ表示
+        assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
+            |e| e.label.tag_type() == crate::types::TagType::from("item")
+        )));
         // 転置形式: results はラベルアイテム
         assert!(res_db
             .results
@@ -973,10 +896,20 @@ mod tests {
             },
         )?;
 
-        // 整合性チェック
+        // 整合性チェック: DB とキャッシュ両方で item: タグが存在するか一致
+        let db_has_item_tag = res_db.results.iter().any(|r| {
+            r.tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            })
+        });
+        let cache_has_item_tag = res_cache.results.iter().any(|r| {
+            r.tags.entries.iter().any(|e| {
+                e.label.tag_type() == crate::types::TagType::from("item")
+            })
+        });
         assert_eq!(
-            res_db.type_for_projection, res_cache.type_for_projection,
-            "type_for_projection mismatch"
+            db_has_item_tag, cache_has_item_tag,
+            "item: tag presence mismatch"
         );
         assert_eq!(
             res_db.results.len(),
