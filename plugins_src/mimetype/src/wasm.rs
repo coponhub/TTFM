@@ -12,25 +12,25 @@ impl exports::ttfm::plugin::core::Guest for MimetypePlugin {
         exports::ttfm::plugin::core::PluginInfo {
             name: "mimetype".to_string(),
             version: "0.2.3".to_string(),
-            kind: exports::ttfm::plugin::core::PluginKind::TagFunction,
+            kind: exports::ttfm::plugin::core::PluginKind::IndexingFunction,
         }
     }
 }
 
-impl exports::ttfm::plugin::tag_function::Guest for MimetypePlugin {
-    fn get_columns() -> Vec<exports::ttfm::plugin::tag_function::ColumnDef> {
-        vec![exports::ttfm::plugin::tag_function::ColumnDef {
+impl exports::ttfm::plugin::indexing_function::Guest for MimetypePlugin {
+    fn get_columns() -> Vec<exports::ttfm::plugin::indexing_function::ColumnDef> {
+        vec![exports::ttfm::plugin::indexing_function::ColumnDef {
             name: "mimetype".to_string(),
             sql_type: "TEXT".to_string(),
         }]
     }
 
-    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::tag_function::TagValue> {
+    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing_function::TagValue> {
         let mime = logic::detect_mime(&path);
         if mime == "empty" {
-            vec![exports::ttfm::plugin::tag_function::TagValue::Empty]
+            vec![exports::ttfm::plugin::indexing_function::TagValue::Empty]
         } else {
-            vec![exports::ttfm::plugin::tag_function::TagValue::Text(mime)]
+            vec![exports::ttfm::plugin::indexing_function::TagValue::Text(mime)]
         }
     }
 }

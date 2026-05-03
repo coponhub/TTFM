@@ -1,0 +1,56 @@
+use super::nest::filter;
+use super::{
+    build_column_match_sql, build_label_set_op_pick_sql,
+    build_resolved_and_sql, build_resolved_diff_sql, build_resolved_match_sql,
+    build_resolved_or_sql, build_resolved_tag_tag_match_sql,
+    build_scalar_match_sql,
+};
+use crate::query::lens_resolver::ResolvedNode;
+use sea_query::SelectStatement;
+
+pub(super) fn try_dispatch_common(
+    node: &ResolvedNode,
+    child_sqls: Vec<SelectStatement>,
+) -> Result<SelectStatement, Vec<SelectStatement>> {
+    match node {
+        ResolvedNode::And(_) => Ok(build_resolved_and_sql(child_sqls)),
+        ResolvedNode::Or(_) => Ok(build_resolved_or_sql(child_sqls)),
+        ResolvedNode::Difference(_, _) => {
+            let [l, r]: [SelectStatement; 2] = child_sqls.try_into().unwrap();
+            Ok(build_resolved_diff_sql(l, r))
+        }
+        ResolvedNode::LabelSetOp { op, .. } => {
+            Ok(build_label_set_op_pick_sql(op, child_sqls))
+        }
+        ResolvedNode::Nest { keys, .. } => {
+            Ok(filter(keys, child_sqls.into_iter().next()))
+        }
+        ResolvedNode::ColumnMatch { tag, label } => {
+            Ok(build_column_match_sql(*tag, label))
+        }
+        ResolvedNode::Match {
+            storage,
+            sql_type,
+            op,
+            label,
+            ..
+        } => Ok(build_resolved_match_sql(storage, *sql_type, *op, label)),
+        ResolvedNode::TagTagMatch {
+            left_storage,
+            left_sql_type,
+            op,
+            right_storage,
+            right_sql_type,
+        } => Ok(build_resolved_tag_tag_match_sql(
+            left_storage,
+            *left_sql_type,
+            *op,
+            right_storage,
+            *right_sql_type,
+        )),
+        ResolvedNode::ScalarMatch { left, op, right } => {
+            Ok(build_scalar_match_sql(left, *op, right))
+        }
+        _ => Err(child_sqls),
+    }
+}

@@ -1,8 +1,9 @@
-pub mod scan;
 pub mod diff;
-pub mod triage;
-pub mod merge;
+pub mod functions;
 pub mod indexer;
+pub mod merge;
+pub mod scan;
+pub mod triage;
 
 pub use indexer::Indexer;
-pub use indexer::{TaggingResult, DynamicRow, TagRow};
+pub use indexer::{DynamicRow, TagRow, TaggingResult};

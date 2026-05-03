@@ -1,12 +1,12 @@
-use crate::db::{Tbl, Col};
-use crate::functions::{ScanEntry};
-use crate::util::{ExecuteSql, ParquetExt, TableCreateExt, SafeMetadata};
-use crate::types::{ItemId};
-use super::indexer::{ScanHash, TempScanEntry, calc_scanhash};
-use rustc_hash::{FxHashMap};
+use super::indexer::{calc_scanhash, ScanHash, TempScanEntry};
+use crate::db::{Col, Tbl};
+use crate::indexing::functions::ScanEntry;
+use crate::types::ItemId;
+use crate::util::{ExecuteSql, ParquetExt, SafeMetadata, TableCreateExt};
 use anyhow::Result;
-use duckdb::{Connection};
-use sea_query::{Query, Expr, Table, Iden};
+use duckdb::Connection;
+use rustc_hash::FxHashMap;
+use sea_query::{Expr, Iden, Query, Table};
 use std::path::{Path, PathBuf};
 
 // ========================================================
@@ -123,9 +123,9 @@ impl<'a> FileScanner<'a> {
         Ok(())
     }
 
-    pub(crate) fn scan<'s, 'e>(&mut self, s: &'s std::thread::Scope<'s, 'e>) 
+    pub(crate) fn scan<'s, 'e>(&mut self, s: &'s std::thread::Scope<'s, 'e>)
     where
-        'a: 's
+        'a: 's,
     {
         let walker = self.walker.take().expect("Walker already consumed");
         let tx = self.tx.take().expect("Sender already consumed");
@@ -145,14 +145,21 @@ impl<'a> FileScanner<'a> {
         });
     }
 
-    pub(crate) fn write(&self, rx: std::sync::mpsc::Receiver<ScanMessage>) -> Result<usize> {
+    pub(crate) fn write(
+        &self,
+        rx: std::sync::mpsc::Receiver<ScanMessage>,
+    ) -> Result<usize> {
         let mut current_count = 0;
-        let mut app_scan = (!self.dry_run).then(|| {
-            self.conn.appender(&Tbl::Scan.to_string().replace('"', ""))
-        }).transpose()?;
-        let mut app_live = (!self.dry_run).then(|| {
-            self.conn.appender(&Tbl::Live.to_string().replace('"', ""))
-        }).transpose()?;
+        let mut app_scan = (!self.dry_run)
+            .then(|| {
+                self.conn.appender(&Tbl::Scan.to_string().replace('"', ""))
+            })
+            .transpose()?;
+        let mut app_live = (!self.dry_run)
+            .then(|| {
+                self.conn.appender(&Tbl::Live.to_string().replace('"', ""))
+            })
+            .transpose()?;
 
         for msg in rx {
             match msg {
@@ -167,7 +174,7 @@ impl<'a> FileScanner<'a> {
                     }
                 }
             }
-            
+
             current_count += 1;
             if let Some(cb) = self.on_progress {
                 if current_count % 1000 == 0 {
@@ -183,7 +190,11 @@ impl<'a> FileScanner<'a> {
         Ok(current_count)
     }
 
-    pub(crate) fn finalize_tables(&self, scan_path: &Path, live_path: &Path) -> Result<()> {
+    pub(crate) fn finalize_tables(
+        &self,
+        scan_path: &Path,
+        live_path: &Path,
+    ) -> Result<()> {
         if self.dry_run {
             return Ok(());
         }
@@ -229,7 +240,9 @@ fn process_entry(
     // メタデータの取得
     let m = match e.metadata() {
         Ok(real_m) => SafeMetadata::new(&real_m),
-        Err(err) if crate::util::is_not_found_err(&err) => return ignore::WalkState::Continue,
+        Err(err) if crate::util::is_not_found_err(&err) => {
+            return ignore::WalkState::Continue
+        }
         Err(_) => SafeMetadata::recovered(),
     };
 
@@ -245,15 +258,18 @@ fn process_entry(
     );
 
     // ハッシュがキャッシュにあれば生存 ID として報告
-    if let Some(&id) = cache.get(&hash) {
-        if tx.send(ScanMessage::Live(id)).is_err() {
+    if let Some(id) = cache.get(&hash) {
+        if tx.send(ScanMessage::Live(id.clone())).is_err() {
             return ignore::WalkState::Quit;
         }
         return ignore::WalkState::Continue;
     }
 
     // 変更ありならフルデータを送信
-    if tx.send(ScanMessage::Found(TempScanEntry { entry, hash })).is_err() {
+    if tx
+        .send(ScanMessage::Found(TempScanEntry { entry, hash }))
+        .is_err()
+    {
         return ignore::WalkState::Quit;
     }
 
@@ -277,15 +293,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join(".ttfm/db");
         std::fs::create_dir_all(&db_dir).unwrap();
-        
+
         let db_file = db_dir.join("entities.parquet");
         std::fs::write(&db_file, "data").unwrap();
-        
+
         let normal_file = dir.path().join("normal.txt");
         std::fs::write(&normal_file, "content").unwrap();
-        
+
         let db_dir_abs = db_dir.canonicalize().unwrap();
-        
+
         assert!(is_db_dir(&db_file, &db_dir_abs));
         assert!(!is_db_dir(&normal_file, &db_dir_abs));
     }

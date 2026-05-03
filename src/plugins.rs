@@ -1,17 +1,16 @@
-use wasmtime::component::*;
-use wasmtime::{Config, Engine, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, ResourceTable};
-use anyhow::{Result, Context};
 use crate::util::DotOk;
-use std::path::Path;
-use std::sync::Arc;
+use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use wasmtime::component::*;
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
-use crate::functions::{TagFunction, exists_in_tags};
-use crate::taggers::{Tagger, ColumnDef, TagValue};
-use crate::db::{TargetTable, SqlType};
-use crate::types::TypedTag;
+use crate::db::{SqlType, TargetTable};
+use crate::indexing::functions::IndexingFunction;
+use crate::taggers::{ColumnDef, TagValue, Tagger};
 
 // WIT定義から自動生成
 bindgen!({
@@ -21,7 +20,7 @@ bindgen!({
 
 // 生成された型のパスを短縮
 use exports::ttfm::plugin::core::PluginKind;
-use exports::ttfm::plugin::tag_function::TagValue as WasmVal;
+use exports::ttfm::plugin::indexing_function::TagValue as WasmVal;
 
 /// Wasmプラグインを管理するための共有ストア。
 /// WASIの実行コンテキストとリソーステーブルを保持します。
@@ -31,8 +30,12 @@ struct WasmStore {
 }
 
 impl WasiView for WasmStore {
-    fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
-    fn table(&mut self) -> &mut ResourceTable { &mut self.resource_table }
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi_ctx
+    }
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.resource_table
+    }
 }
 
 // スレッドローカルなインスタンスキャッシュ。
@@ -74,14 +77,15 @@ impl WasmPlugin {
         let mut store = self
             .create_store()
             .context("Failed to create store for introspection")?;
-        let plugin = Plugin::instantiate(&mut store, &self.component, &self.linker)
-            .context("Failed to instantiate plugin for introspection")?;
+        let plugin =
+            Plugin::instantiate(&mut store, &self.component, &self.linker)
+                .context("Failed to instantiate plugin for introspection")?;
         let info = plugin
             .ttfm_plugin_core()
             .call_get_info(&mut store)
             .context("Failed to call get_info")?;
 
-        let interface = plugin.ttfm_plugin_tag_function();
+        let interface = plugin.ttfm_plugin_indexing_function();
         let wasm_cols = interface
             .call_get_columns(&mut store)
             .context("Failed to call get_columns")?;
@@ -89,11 +93,11 @@ impl WasmPlugin {
         let mut columns = Vec::new();
         for c in wasm_cols {
             let sql_type = match c.sql_type.to_uppercase().as_str() {
-                "BIGINT" => SqlType::BIGINT,
+                "BIGINT" | "INTEGER" | "INT" => SqlType::BIGINT,
                 "HUGEINT" | "UUID" => SqlType::UUID,
-                "BOOLEAN" => SqlType::BOOLEAN,
-                "VARCHAR" | "TEXT" => SqlType::VARCHAR,
-                other => SqlType::Other(other.to_string()),
+                "BOOLEAN" | "BOOL" => SqlType::BOOLEAN,
+                "VARCHAR" | "TEXT" | "STRING" => SqlType::VARCHAR,
+                _ => SqlType::VARCHAR,
             };
 
             columns.push(ColumnDef {
@@ -135,7 +139,7 @@ impl WasmPlugin {
     }
 }
 
-/// Wasmプラグインを `TagFunction` として扱うためのアダプター。
+/// Wasmプラグインを `IndexingFunction` として扱うためのアダプター。
 pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
     /// プラグインの名前（タグ名）
@@ -170,10 +174,11 @@ impl Tagger for WasmPluginAdapter {
                 cache.insert(self.name.clone(), (store, plugin));
             }
 
-            let (store, plugin) = cache.get_mut(&self.name).ok_or_else(|| {
-                anyhow::anyhow!("Plugin instance missing from cache")
-            })?;
-            let interface = plugin.ttfm_plugin_tag_function();
+            let (store, plugin) =
+                cache.get_mut(&self.name).ok_or_else(|| {
+                    anyhow::anyhow!("Plugin instance missing from cache")
+                })?;
+            let interface = plugin.ttfm_plugin_indexing_function();
 
             interface.call_tag_file(store, &path_str).with_context(|| {
                 format!("Wasm execution error for file: {}", path_str)
@@ -188,20 +193,13 @@ impl Tagger for WasmPluginAdapter {
     }
 }
 
-impl TagFunction for WasmPluginAdapter {
+impl IndexingFunction for WasmPluginAdapter {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn tagger(&self) -> Option<&dyn Tagger> {
         Some(self)
-    }
-
-    fn to_expr(&self, tag: &TypedTag) -> Option<sea_query::SimpleExpr> {
-        if tag.tagtype.0 == self.name {
-            return Some(exists_in_tags(&self.name, &tag.label.0, false));
-        }
-        None
     }
 }
 

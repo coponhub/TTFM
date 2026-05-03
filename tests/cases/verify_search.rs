@@ -1,0 +1,655 @@
+use std::fs::File;
+use tempfile::tempdir;
+use ttfm::FileManager;
+
+#[test]
+fn verify_complex_search_patterns() -> anyhow::Result<()> {
+    // 1. Setup Environment
+    let dir = tempdir()?;
+    let root = dir.path();
+
+    let files = vec![
+        "project_alpha_report.pdf",
+        "project_beta_report.pdf",
+        "project_alpha_draft.txt",
+        "image_vacation_2024.jpg",
+        "image_work_2024.png",
+        "backup_2023.zip",
+        "foo&bar.txt", // File with & in name (DESIGN.md:26 test)
+    ];
+
+    println!("Creating test files and folders in {:?}...", root);
+    for name in &files {
+        File::create(root.join(name))?;
+    }
+
+    // Create specific folders
+    std::fs::create_dir(root.join("work_docs"))?;
+    std::fs::create_dir(root.join("personal_photos"))?;
+    std::fs::create_dir(root.join("temp_backup"))?;
+
+    // 2. Index
+    println!("Indexing...");
+    // Use a custom index path inside the temp dir
+    let index_path = root.join("test_index.parquet");
+    let fm = FileManager::new_with_index_path(&index_path)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 3. Verify Queries
+    let test_cases = vec![
+        ("filename:project_alpha_report.pdf | filename:project_beta_report.pdf", 2),
+        ("extension:pdf - filename:project_beta_report.pdf", 1), // Set difference: pdf minus beta = alpha only
+        ("filename:image_vacation_2024.jpg | filename:image_work_2024.png", 2),
+        ("filename:image_vacation_2024.jpg", 1),
+        ("(extension:pdf | extension:txt | extension:jpg | extension:png) - extension:txt", 4), // Set difference: 5 files - 1 txt = 4
+
+        // --- Added cases to verify set-based search fixes ---
+        ("extension:pdf & filename:project_alpha_report.pdf", 1),   // Cross-attribute AND
+        ("extension:txt & filename:project_alpha_draft.txt", 1), // Cross-attribute AND
+        ("directory:work_docs", 1),                   // Keyword search on directory (full name)
+        ("directory:personal_photos", 1),
+        ("filename:backup_2023.zip", 1),
+
+        // --- Complex nested combinations ---
+        ("(extension:pdf | extension:txt) & filename:project_alpha_report.pdf", 1),
+        ("extension:pdf & (filename:project_alpha_report.pdf | filename:project_beta_report.pdf)", 2),
+        ("(directory:work_docs & name:work_docs) | (extension:pdf & filename:project_beta_report.pdf)", 2),
+
+        // --- Deeply nested parentheses ---
+        ("((extension:pdf | extension:txt) & filename:project_alpha_report.pdf) | directory:work_docs", 2),
+
+        // --- DESIGN.md:26: & without spaces is part of label, not set operator ---
+        ("name:foo&bar.txt", 1), // & is part of the label, matches "foo&bar.txt"
+
+        // Folder specific searches (directories are also entries with filenames)
+        ("filename:work_docs", 0),            // filename no longer matches directories
+        ("name:work_docs", 1),                // name matches directory only (label item removed)
+        ("filename:personal_photos | filename:temp_backup | filename:backup_2023.zip", 1),
+        ("name:work_docs & directory:work_docs", 1),     
+    ];
+
+    for (query, expected_count) in test_cases {
+        print!("Query: '{:<25}' -> ", query);
+
+        let response = fm.search(query, Default::default()).unwrap_or_default();
+
+        if response.results.len() == expected_count {
+            println!("OK ({} hits)", response.results.len());
+        } else {
+            println!(
+                "FAIL (Expected {}, got {})",
+                expected_count,
+                response.results.len()
+            );
+
+            for r in &response.results {
+                println!(" - Found: {:?}", r);
+            }
+
+            panic!("Test failed for query: '{}'", query);
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_comparison_logic() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+
+    // Override TTFM_HOME to point to temp dir to avoid user config interference
+    unsafe {
+        std::env::set_var("TTFM_HOME", root.join(".ttfm"));
+    }
+
+    // Create a data directory for indexing target
+    let data_dir = root.join("data");
+    std::fs::create_dir(&data_dir)?;
+
+    // ファイル作成 (サイズを変える)
+    std::fs::write(data_dir.join("small.txt"), vec![0u8; 100])?;
+    std::fs::write(data_dir.join("medium.txt"), vec![0u8; 500])?;
+    std::fs::write(data_dir.join("large.txt"), vec![0u8; 1000])?;
+
+    // Use a specific DB directory inside the temp dir to ensure isolation
+    let db_dir = root.join(".ttfm/db");
+    let fm = ttfm::FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+
+    // 1. 基本的なサイズ比較
+    println!("Testing 'size: :> 300'...");
+    let res = fm.search("size: :> 300", Default::default())?;
+    assert_eq!(res.results.len(), 2); // medium, large
+
+    // 2. 連鎖比較 (Between)
+    println!("Testing '200 :< size: :< 800'...");
+    let res = fm.search("200 :< size: :< 800", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+    assert!(res.results[0].name.contains("medium.txt"));
+
+    // 3. カスタムタグ (TRY_CAST 経由)
+    println!("Testing custom tag with TRY_CAST...");
+    let item_id = res.results[0].id.to_string();
+    fm.tag_item(&item_id, "width:640")?;
+
+    let res = fm.search("width: :> 500", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].id.to_string(), item_id);
+
+    // 4. 複数条件の組み合わせ
+    println!("Testing multiple conditions...");
+    let res = fm.search("size: :> 300 & width: :> 500", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].name, "medium.txt");
+
+    // 5. スペースなしフォーマット
+    println!("Testing 'width:>500' (no spaces)...");
+    let res = fm.search("width:>500", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+    assert_eq!(res.results[0].id.to_string(), item_id);
+
+    // 6. その他の比較演算子 (>=, <=, ==, ^=)
+    println!("Testing other operators...");
+
+    // >= (Inclusive)
+    println!("Testing 'size: :>= 500'...");
+    let res = fm.search("size: :>= 500", Default::default())?;
+    assert_eq!(res.results.len(), 2, "size: :>= 500 failed"); // medium(500), large(1000)
+
+    // <= (Inclusive)
+    println!("Testing 'size: :<= 500'...");
+    // 0-byte directory might match <= 500, so exclude directory explicitly
+    let res = fm.search("size: :<= 500 & is_dir:false", Default::default())?;
+    assert_eq!(res.results.len(), 2, "size: :<= 500 failed"); // small(100), medium(500)
+
+    // == (Equal)
+    println!("Testing 'size: := 500'...");
+    let res = fm.search("size: := 500", Default::default())?;
+    assert_eq!(res.results.len(), 1, "size: := 500 failed"); // medium(500)
+
+    // ^= (Not Equal)
+    println!("Testing 'size: :^= 500'...");
+    let res = fm.search("size: :^= 500 & is_dir:false", Default::default())?;
+    assert_eq!(res.results.len(), 2); // small(100), large(1000)
+
+    // ^ (Not Equal shorthand)
+    let res = fm.search("size: :^ 500 & is_dir:false", Default::default())?;
+    assert_eq!(res.results.len(), 2); // small(100), large(1000)
+
+    // Custom tag exact match (Cast check)
+    let res = fm.search("width: := 640", Default::default())?;
+    assert_eq!(res.results.len(), 1);
+
+    // width:640 is set on one item. Others don't have width.
+    // If we search for 'width: ^= 999', it effectively means "Has 'width' AND width != 999".
+    // Since only one item has 'width' (640), and 640 != 999, it should match that one item.
+    // NOTE: The current logic for generic generic tags is: type='...' AND TRY_CAST(label) != ...
+    // So it implicitely filters by type='width'.
+    assert_eq!(res.results.len(), 1);
+
+    // 7. 日時比較 (mtime)
+    let now = chrono::Local::now();
+    let today_str = now.format("%Y/%m/%d").to_string();
+    let yesterday = now - chrono::Duration::days(1);
+    let yesterday_str = yesterday.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    println!("Testing 'mtime:today'...");
+    let res = fm.search("mtime:today", Default::default())?;
+    assert!(res.results.len() >= 3, "Should match files created today");
+
+    println!("Testing 'mtime:\"{}\"'...", today_str);
+    let query = format!("mtime:\"{}\"", today_str);
+    let res = fm.search(&query, Default::default())?;
+    assert!(res.results.len() >= 3, "Should match specific date (today)");
+
+    // 過去のファイルを準備 (Linux の touch コマンドを使用)
+    let past_file = data_dir.join("past.txt");
+    std::fs::write(&past_file, "past content")?;
+    let status = std::process::Command::new("touch")
+        .args(["-d", &yesterday_str, past_file.to_str().unwrap()])
+        .status()?;
+    assert!(status.success());
+
+    // 再インデックスして mtime を反映させる
+    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+
+    println!("Testing 'mtime:yesterday'...");
+    let res = fm.search("mtime:yesterday", Default::default())?;
+    assert!(
+        res.results.iter().any(|r| r.name == "past.txt"),
+        "Should match past.txt by 'yesterday'"
+    );
+
+    println!("Testing 'mtime:<today'...");
+    let res = fm.search("mtime:<today", Default::default())?;
+    assert!(
+        res.results.iter().any(|r| r.name == "past.txt"),
+        "Should match past.txt by '<today'"
+    );
+    assert!(
+        res.results.iter().all(|r| r.name != "small.txt"),
+        "Should NOT match files created today"
+    );
+
+    Ok(())
+}
+
+#[test]
+
+fn test_or_negation_complex_behavior() {
+    let dir = tempdir().unwrap();
+
+    let root = dir.path();
+
+    let db_dir = root.join(".ttfm/db");
+
+    // 1. ファイル準備 (.rs と .txt)
+
+    std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+    std::fs::write(root.join("readme.txt"), "hello").unwrap();
+
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 2. クエリ実行: item_kind:file - extension:rs (差集合: 全ファイル - rsファイル)
+
+    let query = "item_kind:file - extension:rs";
+
+    let results = fm.search(query, Default::default()).unwrap();
+
+    let mut found_txt_file = false;
+
+    let mut found_rs_file = false;
+
+    for r in &results.results {
+        if r.item_kind == ttfm::ItemKind::File {
+            if r.get_tag_value("extension")
+                .map(|v| v == "txt")
+                .unwrap_or(false)
+            {
+                found_txt_file = true;
+            }
+
+            if r.get_tag_value("extension")
+                .map(|v| v == "rs")
+                .unwrap_or(false)
+            {
+                found_rs_file = true;
+            }
+        }
+    }
+
+    assert!(found_txt_file, "Should find readme.txt");
+
+    assert!(
+        !found_rs_file,
+        "Should NOT find main.rs (excluded by difference)"
+    );
+}
+
+#[test]
+fn test_glob_search_behavior() -> anyhow::Result<()> {
+    let dir = tempdir().unwrap();
+
+    let root = dir.path();
+
+    let db_dir = root.join(".ttfm/db");
+
+    std::fs::write(root.join("project_alpha.pdf"), "").unwrap();
+
+    std::fs::write(root.join("project_beta.txt"), "").unwrap();
+
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 1. ワイルドカードによる部分一致
+
+    let results = fm.search("filename:*alpha*", Default::default()).unwrap();
+
+    assert_eq!(results.results.len(), 1);
+
+    assert!(results.results[0]
+        .primary_value()
+        .unwrap_or_default()
+        .contains("alpha"));
+
+    // 2. 複数のワイルドカード
+
+    let results = fm.search("filename:project*", Default::default()).unwrap();
+
+    assert_eq!(results.results.len(), 2);
+
+    // 3. ワイルドカードなし (完全一致として動作)
+
+    let results = fm.search("filename:project", Default::default()).unwrap();
+
+    assert_eq!(results.results.len(), 0);
+
+    let results = fm
+        .search("filename:project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    // 4. ? (任意の一文字)
+    let results = fm
+        .search("filename:project_alph?.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(results.results[0].name, "project_alpha.pdf");
+
+    // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
+    let results = fm
+        .search("filename:project_[ab]*", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 2); // alpha and beta
+
+    // 6. [!...] (否定文字セット) - beta のみを拾う
+    let results = fm
+        .search("filename:project_[!a]eta*", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1); // beta only
+
+    // 7. クォート内でのGlob (無効化されるはず)
+    let results = fm
+        .search("filename:\"project_[ab]*\"", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 0); // リテラル一致を試みるため0件
+
+    // 8. クォートでの完全一致
+    let results = fm
+        .search("filename:\"project_alpha.pdf\"", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    // 9. Type側の引用符
+    let results = fm
+        .search("\"filename\":project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    // 10. Type側のGlob (実装済みか確認)
+    // filename が対象になるはず
+    let results = fm
+        .search("*name:project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    // 11. Type Wildcard + Value Prefix (Regression Test)
+    // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
+    // This confirms that 'exte*' parses as a typed tag (not comparison) and '^pd' becomes 'pd*' glob.
+    let results = fm.search("exte*:^pd", Default::default()).unwrap();
+    assert!(
+        results.results.len() > 0,
+        "Should match .pdf files via 'exte*' type glob and '^pd' value prefix"
+    );
+
+    // 12. Type側のGlob ([...] / [!...])
+    let results = fm
+        .search("[f]ilename:project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    let results = fm
+        .search("[!f]ilename:project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 0); // filename にはマッチしないはず
+
+    // 13. Type側のGlob (?)
+    let results = fm
+        .search("file?ame:project_alpha.pdf", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+
+    // 13. バックスラッシュ・エスケープ
+    // テスト用の特殊ファイルを作成
+    let special_file = root.join("[WIP]_test.txt");
+    std::fs::File::create(&special_file)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // バックスラッシュなしだとGlobとして解釈され、マッチしない可能性がある（または意図しないマッチ）
+    // ここでは \[WIP\] とすることでリテラルとして扱う
+    let results = fm
+        .search(r"filename:\[WIP\]_*", Default::default())
+        .unwrap();
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(results.results[0].name, "[WIP]_test.txt");
+
+    Ok(())
+}
+
+#[test]
+fn test_complex_search_combinations() {
+    // Setup FM with dedicated temp dir
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    // Create deterministic test data
+    // 15 .rs files
+    for i in 0..15 {
+        std::fs::write(root.join(format!("test_src_{}.rs", i)), "").unwrap();
+    }
+    // Main file
+    std::fs::write(root.join("main.rs"), "").unwrap();
+    std::fs::write(root.join("lib.rs"), "").unwrap();
+    // Mod file
+    std::fs::write(root.join("mod.rs"), "").unwrap();
+    // Other types
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("LICENSE"), "").unwrap();
+    std::fs::write(root.join("readme.txt"), "").unwrap();
+
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 1. Type Glob + Value Glob (exte*:r*)
+    // Should match 15 test_src + main + lib + mod = 18 files. (Extension is "rs")
+    let results = fm.search("exte*:r*", Default::default()).unwrap();
+    assert!(
+        results.results.len() >= 18,
+        "exte*:r* should match all rs files"
+    );
+
+    // 2. Type Glob + AND + Comparison (exte*:rs & size:>0)
+    // All files are empty (size 0), so this should be 0.
+    // Wait, let's make main.rs non-empty
+    std::fs::write(root.join("main.rs"), "content").unwrap();
+    // Re-index to update metadata
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    let results = fm.search("exte*:rs & size:>0", Default::default()).unwrap();
+    assert_eq!(
+        results.results.len(),
+        1,
+        "exte*:rs & size:>0 should match main.rs"
+    );
+
+    // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
+    let results = fm
+        .search("name:*.toml | name:^LIC", Default::default())
+        .unwrap();
+    // Verify correct items are present (ignoring extra matches)
+    assert!(
+        results.results.iter().any(|r| r.name == "Cargo.toml"),
+        "Should find Cargo.toml"
+    );
+    assert!(
+        results.results.iter().any(|r| r.name == "LICENSE"),
+        "Should find LICENSE"
+    );
+
+    // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
+    let all_rs = fm
+        .search("exte*:rs", Default::default())
+        .unwrap()
+        .results
+        .len();
+    let results_diff = fm
+        .search("exte*:rs - name:mod*", Default::default())
+        .unwrap();
+    assert_eq!(
+        results_diff.results.len(),
+        all_rs - 1,
+        "Difference should remove mod.rs"
+    );
+    assert!(results_diff.results.iter().all(|r| r.name != "mod.rs"));
+
+    // 5. Grouping + Glob Types + Comparison
+    // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
+    let results = fm
+        .search("(exte*:rs | exte*:toml) & size:>0", Default::default())
+        .unwrap();
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+
+    // 6. Value Glob + Value Prefix AND (name:*.rs & name:mai*)
+    let results = fm
+        .search("name:*.rs & name:mai*", Default::default())
+        .unwrap();
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+
+    // 7. Bracket Glob (name:[m]ain.rs)
+    let results = fm.search("name:[m]ain.rs", Default::default()).unwrap();
+    assert!(results.results.len() >= 1);
+    assert!(results.results.iter().any(|r| r.name == "main.rs"));
+
+    // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
+    let results = fm.search("exte*:r?", Default::default()).unwrap();
+    assert!(results.results.len() >= 18);
+
+    // 9. Double Glob (nam*:*.rs)
+    let results = fm.search("nam*:*.rs", Default::default()).unwrap();
+    assert!(results.results.len() >= 18);
+
+    // 10. Type Prefix + Value Glob (item_kind:^fi & name:*.rs)
+    // Matches 'file' type items which are .rs
+    let results = fm
+        .search("item_kind:^fi & name:*.rs", Default::default())
+        .unwrap();
+    assert!(results.results.len() >= 18);
+}
+
+#[test]
+fn test_escaping_behavior() {
+    use std::fs::File;
+    // Setup explicit temp dir for file creation
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Create special files
+    File::create(root.join("colon:file.txt")).unwrap();
+    File::create(root.join("space file.txt")).unwrap();
+    File::create(root.join("caret^file.txt")).unwrap();
+    File::create(root.join("normal.txt")).unwrap();
+
+    let db_dir = root.join(".ttfm/db");
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // 1. Escaped Colon (Using raw string)
+    let res = fm
+        .search(r"name:colon\:file.txt", Default::default())
+        .unwrap();
+    assert!(res.results.len() >= 1, "Should match escaped colon");
+    assert!(res.results.iter().any(|r| r.name == "colon:file.txt"));
+
+    // 2. Escaped Space
+    let res = fm
+        .search(r"name:space\ file.txt", Default::default())
+        .unwrap();
+    assert!(res.results.len() >= 1, "Should match escaped space");
+    assert!(res.results.iter().any(|r| r.name == "space file.txt"));
+
+    // 3. Escaped Caret
+    let res = fm
+        .search(r"name:caret\^file.txt", Default::default())
+        .unwrap();
+    assert!(res.results.len() >= 1, "Should match escaped caret");
+    assert!(res.results.iter().any(|r| r.name == "caret^file.txt"));
+
+    // 4. Quoted Colon
+    let res = fm
+        .search(r#"name:"colon:file.txt""#, Default::default())
+        .unwrap();
+    assert!(res.results.len() >= 1, "Should match quoted colon");
+
+    // 5. Double Escape (colon + glob)
+    let res = fm.search(r"name:colon\:*.txt", Default::default()).unwrap();
+    assert!(res.results.len() >= 1, "Should match colon + glob");
+
+    // 6. Mixed Logic
+    let res = fm
+        .search(r"name:colon\:* | name:space\ *", Default::default())
+        .unwrap();
+    assert!(res.results.len() >= 2, "Should match combined");
+}
+
+#[test]
+fn test_parent_directory_logic() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+
+    // 1. ファイル構造の作成
+    // src/
+    //   main.rs
+    //   lib.rs
+    //   sub_folder/  <-- これがヒットしてしまうか確認
+    //     mod.rs
+    //   strange.rs/  <-- 拡張子っぽい名前のフォルダ
+    //     ignored.txt
+
+    let src = root.join("src");
+    std::fs::create_dir(&src)?;
+
+    File::create(src.join("main.rs"))?;
+    File::create(src.join("lib.rs"))?;
+
+    let sub = src.join("sub_folder");
+    std::fs::create_dir(&sub)?;
+    File::create(sub.join("mod.rs"))?;
+
+    let strange = src.join("strange.rs");
+    std::fs::create_dir(&strange)?;
+    File::create(strange.join("ignored.txt"))?;
+
+    // 2. インデックス作成
+    let index_path = root.join("debug_index.parquet");
+    let fm = FileManager::new_with_index_path(&index_path)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // 3. 検索実行: parentdir:src & extension:rs
+    let results =
+        fm.search("parentdir:src & extension:rs", Default::default())?;
+
+    for path in &results.results {
+        println!("Hit: {:?}", path);
+    }
+
+    // 期待値:
+    // main.rs -> OK
+    // lib.rs -> OK
+    // sub_folder -> NG (拡張子なし、parentはsrc)
+    // strange.rs -> ? (拡張子はrsと判定されるか？ ディレクトリなら除外すべきか？)
+    // sub_folder/mod.rs -> NG (parentは src/sub_folder なので parent:src にはヒットしないはず)
+
+    // もし "sub_folder" がヒットしているなら、extension判定がバグっている
+    let sub_hits = results.results.iter().any(|p| {
+        let val = p.primary_value().unwrap_or_default();
+        val.contains("sub_folder") && !val.ends_with(".rs")
+    });
+    assert!(!sub_hits, "'sub_folder' directory found in results!");
+
+    // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
+    let strange_hits = results.results.iter().any(|p| {
+        let val = p.primary_value().unwrap_or_default();
+        val.contains("strange.rs") && !val.ends_with("ignored.txt")
+    });
+    assert!(!strange_hits, "'strange.rs' directory found in results!");
+
+    Ok(())
+}

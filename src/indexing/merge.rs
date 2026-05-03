@@ -1,15 +1,15 @@
-use crate::taggers::{ColumnDef, TagValue};
-use crate::db::{Tbl, Col, SqlType, TargetTable, Store};
-use crate::{FunctionRegistry};
-use crate::util::{self, ExecuteSql, ParquetExt, IdenExt};
-use crate::indexing::indexer::{TaggingResult, DynamicRow};
+use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
+use crate::indexing::indexer::{DynamicRow, TaggingResult};
+use crate::taggers::TagValue;
+use crate::types::ItemId;
+use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
+use crate::FunctionRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    Query, Expr, Condition, JoinType, 
-    Iden, SelectStatement, CaseStatement
+    Condition, Expr, Iden, JoinType, Order, Query, SelectStatement, SimpleExpr,
 };
-use std::path::{Path};
+use std::path::Path;
 
 // ========================================================
 // Merge Phase Orchestrator
@@ -21,40 +21,51 @@ pub(crate) fn run_merge(
     store: &Store,
     results: Vec<TaggingResult>,
     moved: Vec<DynamicRow>,
-    deleted_ids: Vec<i64>,
+    deleted_ids: Vec<ItemId>,
     temp_scan_path: &Path,
     temp_live_path: &Path,
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
 ) -> Result<()> {
     // 各テーブルの取り込みと同期を実行
-    
-    // A. 実体テーブル (不変): 削除は行わず、新規登録のみ。
-    let ent = FileEntityMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results)?
-        .sync()?;
-    
-    // B. 場所テーブル (可変): 属性（size/mtime/hash）を含めて上書き更新。
-    let loc = LocationMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results, &moved)?
-        .sync(temp_live_path)?;
-    
-    // C. タグテーブル (可変): 削除 ID の分を掃除。
-    let tag = BaseTagMerger { conn, registry, store }
-        .prepare()?
-        .ingest(&results)?
-        .sync(&deleted_ids)?;
 
-    if !results.is_empty() || !moved.is_empty() {
-        let tags = MergeQueryParts::diff_tags(&registry.get_all_columns());
-        let candidates_data = MergeQueryParts::expand_variants(tags);
-        update_sys_fn(Some(candidates_data))?;
+    // A. 実体テーブル (不変): 削除は行わず、新規登録のみ。
+    let ent = FileEntityMerger {
+        conn,
+        registry,
+        store,
     }
+    .prepare()?
+    .ingest(&results)?
+    .sync(&deleted_ids)?;
+
+    // B. 場所テーブル (可変): 属性（size/mtime/hash）を含めて上書き更新。
+    let loc = LocationMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results, &moved)?
+    .sync(temp_live_path)?;
+
+    // C. タグテーブル (可変): 削除 ID の分を掃除。
+    let tag = BaseTagMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results)?
+    .sync(&deleted_ids)?;
 
     ent.cleanup()?;
     loc.cleanup()?;
     tag.cleanup()?;
+
+    // システムアイテム（基本Type定義のみ）の更新
+    // 以前はここで type/label/tag の全バリエーションを登録していたが、
+    // oneview のプロジェクションにより不要になったため廃止した。
+    update_sys_fn(None)?;
 
     // クリーンアップ
     std::fs::remove_file(temp_scan_path).ok();
@@ -76,8 +87,8 @@ impl<'a> FileEntityMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         let mut create_stmt = crate::db::Schema::build_table(
-            TargetTable::FileEntities,
-            Tbl::FileEntitiesDiff,
+            TargetTable::FileReferences,
+            Tbl::FileReferencesDiff,
             &all_cols,
         );
         create_stmt.temporary().execute(self.conn)?;
@@ -88,9 +99,9 @@ impl<'a> FileEntityMerger<'a> {
         if results.is_empty() {
             return Ok(self);
         }
-        let table_name = Tbl::FileEntitiesDiff.to_string().replace('"', "");
+        let table_name = Tbl::FileReferencesDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             let mut er = vec![&res.entity_row.id as &dyn ToSql];
             er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
@@ -99,20 +110,26 @@ impl<'a> FileEntityMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self) -> Result<Self> {
+    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        let ids_i64: Vec<i64> =
+            deleted_ids.iter().map(|id| id.as_i64()).collect();
         // file_entities は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
-            &self.store.path_for_target(TargetTable::FileEntities),
-            Tbl::FileEntitiesDiff,
-            None,
+            &self.store.path_for_target(TargetTable::FileReferences),
+            Tbl::FileReferencesDiff,
+            (!ids_i64.is_empty()).then(|| {
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
+            }),
             Col::ItemId,
+            None,
         )?;
         Ok(self)
     }
 
     pub(crate) fn cleanup(self) -> Result<()> {
-        Tbl::FileEntitiesDiff.drop_table(self.conn).ok();
+        Tbl::FileReferencesDiff.drop_table(self.conn).ok();
         Ok(())
     }
 }
@@ -127,21 +144,25 @@ impl<'a> LocationMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         let mut create_stmt = crate::db::Schema::build_table(
-                TargetTable::Locations,
-                Tbl::LocationsDiff,
-                &all_cols,
-            );
+            TargetTable::Locations,
+            Tbl::LocationsDiff,
+            &all_cols,
+        );
         create_stmt.temporary().execute(self.conn)?;
         Ok(self)
     }
 
-    pub(crate) fn ingest(self, results: &[TaggingResult], moved: &[DynamicRow]) -> Result<Self> {
+    pub(crate) fn ingest(
+        self,
+        results: &[TaggingResult],
+        moved: &[DynamicRow],
+    ) -> Result<Self> {
         if results.is_empty() && moved.is_empty() {
             return Ok(self);
         }
         let table_name = Tbl::LocationsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             let mut lr = vec![&res.location_row.id as &dyn ToSql];
             lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
@@ -169,8 +190,12 @@ impl<'a> LocationMerger<'a> {
             self.conn,
             &self.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
-            Some(Condition::all().add(Expr::col(Col::ItemId).in_subquery(live_query))),
+            Some(
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).in_subquery(live_query)),
+            ),
             Col::Path,
+            None,
         )?;
         Ok(self)
     }
@@ -191,12 +216,12 @@ impl<'a> BaseTagMerger<'a> {
     pub(crate) fn prepare(self) -> Result<Self> {
         let all_cols = self.registry.get_all_columns();
         crate::db::Schema::build_table(
-                TargetTable::BaseTags,
-                Tbl::BaseTagsDiff,
-                &all_cols,
-            )
-            .temporary()
-            .execute(self.conn)?;
+            TargetTable::BaseTags,
+            Tbl::BaseTagsDiff,
+            &all_cols,
+        )
+        .temporary()
+        .execute(self.conn)?;
         Ok(self)
     }
 
@@ -206,30 +231,36 @@ impl<'a> BaseTagMerger<'a> {
         }
         let table_name = Tbl::BaseTagsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
-        
+
         for res in results {
             for t in &res.tags {
                 app.append_row([
                     &t.item_id as &dyn ToSql,
                     &t.tag_type,
-                    &t.label,
+                    &t.label_str,
+                    &t.label_int,
+                    &t.label_double,
+                    &t.label_bool,
                 ])?;
             }
         }
         Ok(self)
     }
 
-    pub(crate) fn sync(self, deleted_ids: &[i64]) -> Result<Self> {
+    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        let ids_i64: Vec<i64> =
+            deleted_ids.iter().map(|id| id.as_i64()).collect();
         // base_tags は item_id をキーにしてマージ
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::BaseTags),
             Tbl::BaseTagsDiff,
-            (!deleted_ids.is_empty()).then(|| {
+            (!ids_i64.is_empty()).then(|| {
                 Condition::all()
-                    .add(Expr::col(Col::ItemId).is_not_in(deleted_ids.to_vec()))
+                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
             }),
             Col::ItemId,
+            Some(vec![Col::Type, Col::LabelInt, Col::LabelStr, Col::ItemId]),
         )?;
         Ok(self)
     }
@@ -243,73 +274,39 @@ impl<'a> BaseTagMerger<'a> {
 // ========================================================
 // 2. Query Builder for Merging
 // ========================================================
-
 pub(crate) struct MergeQueryParts;
 
-impl MergeQueryParts {
-    pub(crate) fn diff_tags(all_cols: &[ColumnDef]) -> SelectStatement {
-        let mut source_q = Query::select();
-        source_q
-            .expr_as(Expr::col(Col::Type), Col::Type)
-            .expr_as(Expr::col(Col::Label), Col::Label)
-            .from(Tbl::BaseTagsDiff);
+// 唯一の定義箇所。ここが Single Source of Truth となります。
+crate::define_item_schema! {
+    kind    => ItemKind,
+    content => Content,
+    name    => Name,
+    rank    => Rank,
+    type_   => Type,
+    label   => Label,
+}
 
-        for col in all_cols.iter().filter(|c| {
-            c.target_table == TargetTable::Locations
-        }) {
-            let mut sub = Query::select();
-            let col_iden = util::col_to_iden(&col.name);
-            sub.expr_as(Expr::val(col.name.to_string()), Col::Type)
-                .expr_as(
-                    Expr::col(col_iden.clone()).cast_as(SqlType::VARCHAR),
-                    Col::Label,
-                )
-                .from(Tbl::LocationsDiff)
-                .and_where(Expr::col(col_iden).is_not_null());
-            source_q.union(sea_query::UnionType::Distinct, sub.to_owned());
+impl ItemRow {
+    pub(crate) fn new_type(content: SimpleExpr, rank: i64) -> Self {
+        Self {
+            kind: Expr::val("type").into(),
+            content: content.clone(),
+            name: content.clone(),
+            rank: Expr::val(rank).into(),
+            type_: content,
+            label: util::null_as(SqlType::VARCHAR),
         }
-        source_q
+    }
+}
+
+impl MergeQueryParts {
+    pub(crate) fn item_columns() -> [Col; 6] {
+        ItemRow::all_columns()
     }
 
-    pub(crate) fn expand_variants(tags: SelectStatement) -> SelectStatement {
-        let mut cand_q = Query::select();
-        cand_q
-            .expr_as(Expr::val("type"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Type), Col::Content)
-            .expr_as(Expr::val(0), Col::Rank)
-            .column(Col::Type)
-            .expr_as(Expr::cust("NULL"), Col::Label)
-            .from_subquery(tags.clone(), Tbl::Diff);
-
-        let mut label_q = Query::select();
-        label_q
-            .expr_as(Expr::val("label"), Col::ItemKind)
-            .expr_as(Expr::col(Col::Label), Col::Content)
-            .expr_as(Expr::val(0), Col::Rank)
-            .expr_as(Expr::cust("NULL"), Col::Type)
-            .column(Col::Label)
-            .from_subquery(tags.clone(), Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, label_q.to_owned());
-
-        let mut tt_q = Query::select();
-        tt_q.expr_as(Expr::val("typedtag"), Col::ItemKind)
-            .expr_as(
-                Expr::cust_with_exprs("$1 || ':' || $2", [
-                    Expr::col(Col::Type).into(),
-                    Expr::col(Col::Label).into(),
-                ]),
-                Col::Content,
-            )
-            .expr_as(Expr::val(0), Col::Rank)
-            .column(Col::Type)
-            .column(Col::Label)
-            .from_subquery(tags, Tbl::Diff);
-        cand_q.union(sea_query::UnionType::Distinct, tt_q.to_owned());
-
-        cand_q
-    }
-
-    pub(crate) fn registry_variants(registry: &FunctionRegistry) -> SelectStatement {
+    pub(crate) fn registry_variants(
+        registry: &FunctionRegistry,
+    ) -> SelectStatement {
         let funcs = registry.all_functions();
         if funcs.is_empty() {
             let mut q = Query::select();
@@ -317,96 +314,63 @@ impl MergeQueryParts {
             return q;
         }
 
-        let mut query = Query::select();
         let first = &funcs[0];
-        query
-            .expr_as(Expr::val("type"), Col::ItemKind)
-            .expr_as(Expr::val(first.name()), Col::Content)
-            .expr_as(Expr::val(first.default_rank()), Col::Rank)
-            .expr_as(Expr::val(first.name()), Col::Type)
-            .expr_as(Expr::cust("NULL"), Col::Label);
+        let mut query = ItemRow::new_type(
+            Expr::val(first.name()).into(),
+            first.default_rank(),
+        )
+        .select();
 
         for func in funcs.iter().skip(1) {
-            let mut sub = Query::select();
-            sub.expr_as(Expr::val("type"), Col::ItemKind)
-                .expr_as(Expr::val(func.name()), Col::Content)
-                .expr_as(Expr::val(func.default_rank()), Col::Rank)
-                .expr_as(Expr::val(func.name()), Col::Type)
-                .expr_as(Expr::cust("NULL"), Col::Label);
-            query.union(sea_query::UnionType::Distinct, sub);
+            query.union(
+                sea_query::UnionType::Distinct,
+                ItemRow::new_type(
+                    Expr::val(func.name()).into(),
+                    func.default_rank(),
+                )
+                .select(),
+            );
         }
         query
     }
 
-    pub(crate) fn filter_new(candidates: SelectStatement, items_path: &str) -> SelectStatement {
+    pub(crate) fn filter_new(
+        candidates: SelectStatement,
+        items_path: &str,
+    ) -> SelectStatement {
         Query::select()
-            .column((Tbl::Item, Col::ItemKind))
-            .column((Tbl::Item, Col::Content))
-            .column((Tbl::Item, Col::Type))
-            .column((Tbl::Item, Col::Label))
-            .column((Tbl::Item, Col::Rank))
+            .columns(Self::item_columns().map(|c| (Tbl::Item, c)))
             .distinct()
             .from_subquery(candidates, Tbl::Item)
             .join_subquery(
                 JoinType::LeftJoin,
                 util::parquet_query(items_path),
-                Tbl::ItemEntities,
+                Tbl::ItemReferences,
                 Condition::all()
                     .add(
-                        Expr::col((Tbl::Item, Col::ItemKind))
-                            .eq(Expr::col((Tbl::ItemEntities, Col::ItemKind))),
+                        Expr::col((Tbl::Item, Col::ItemKind)).eq(Expr::col((
+                            Tbl::ItemReferences,
+                            Col::ItemKind,
+                        ))),
                     )
                     .add(
                         Expr::col((Tbl::Item, Col::Content))
-                            .eq(Expr::col((Tbl::ItemEntities, Col::Content))),
+                            .eq(Expr::col((Tbl::ItemReferences, Col::Content))),
                     ),
             )
-            .and_where(Expr::col((Tbl::ItemEntities, Col::ItemId)).is_null())
+            .and_where(Expr::col((Tbl::ItemReferences, Col::ItemId)).is_null())
             .to_owned()
     }
 
     pub(crate) fn assign_ids(start_id: i64) -> SelectStatement {
         Query::select()
             .expr_as(
-                Expr::cust_with_exprs(
-                    "$1 - (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
-                    [Expr::val(start_id).into()],
-                ),
+                crate::db::CustomFunc::assign_id_window(start_id),
                 Col::ItemId,
             )
-            .column(Col::Rank)
-            .column(Col::ItemKind)
-            .column(Col::Content)
-            .column(Col::Type)
-            .column(Col::Label)
+            .columns(Self::item_columns())
             .from(Tbl::Item)
             .to_owned()
-    }
-
-    pub(crate) fn metadata_tags() -> SelectStatement {
-        let mut meta = Query::select();
-        meta.column(Col::ItemId)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                CaseStatement::new()
-                    .case(
-                        Expr::col(Col::ItemKind).eq("typedtag"),
-                        Expr::col(Col::Type),
-                    )
-                    .finally(Expr::col(Col::ItemKind)),
-                Col::Label,
-            )
-            .from(Tbl::IdItem);
-
-        let mut label = Query::select();
-        label
-            .column(Col::ItemId)
-            .expr_as(Expr::val("label"), Col::Type)
-            .column(Col::Label)
-            .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("typedtag"));
-
-        meta.union(sea_query::UnionType::All, label).to_owned()
     }
 }
 
@@ -420,9 +384,10 @@ fn merge_and_save(
     temp_table: impl Iden + Clone + 'static,
     filter: Option<Condition>,
     key_col: Col,
+    order_by: Option<Vec<Col>>,
 ) -> Result<()> {
     let base_query = Query::select()
-        .expr(Expr::cust("*"))
+        .column(sea_query::Asterisk)
         .from(temp_table.clone())
         .to_owned();
 
@@ -435,11 +400,17 @@ fn merge_and_save(
 
     // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
     query.and_where(Expr::col(key_col).not_in_subquery(
-        Query::select().column(key_col).from(temp_table).to_owned()
+        Query::select().column(key_col).from(temp_table).to_owned(),
     ));
 
     if let Some(cond) = filter {
         query.cond_where(cond);
+    }
+
+    if let Some(cols) = order_by {
+        for col in cols {
+            query.order_by(col, Order::Asc);
+        }
     }
 
     query
@@ -454,25 +425,53 @@ fn merge_and_save(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_query::PostgresQueryBuilder;
+    use sea_query::Alias;
+    use tempfile::tempdir;
 
     #[test]
-    fn test_query_parts_expand_variants_structure() {
-        let tags = Query::select()
-            .expr_as(Expr::val("extension"), Col::Type)
-            .expr_as(Expr::val("rs"), Col::Label)
-            .from(Tbl::Diff)
-            .to_owned();
-        let sql = MergeQueryParts::expand_variants(tags).to_string(PostgresQueryBuilder);
-        assert!(sql.contains("'type'"));
-        assert!(sql.contains("'label'"));
-        assert!(sql.contains("'typedtag'"));
-    }
+    fn test_merge_and_save_sorting() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test.parquet");
+        let conn = Connection::open_in_memory()?;
 
-    #[test]
-    fn test_query_parts_metadata_tags_logic() {
-        let sql = MergeQueryParts::metadata_tags().to_string(PostgresQueryBuilder);
-        assert!(sql.contains("CASE"));
-        assert!(sql.contains("'typedtag'"));
+        // 1. Initial Data (Unsorted): id=2, id=1
+        conn.execute("CREATE TABLE t1 (item_id BIGINT, type VARCHAR)", [])?;
+        conn.execute("INSERT INTO t1 VALUES (2, 'B'), (1, 'A')", [])?;
+        conn.execute(
+            &format!(
+                "COPY t1 TO '{}' (FORMAT PARQUET)",
+                db_path.to_string_lossy()
+            ),
+            [],
+        )?;
+
+        // 2. New Data (Temp Table): id=3
+        let temp_table = Alias::new("temp_t");
+        conn.execute("CREATE TABLE temp_t (item_id BIGINT, type VARCHAR)", [])?;
+        conn.execute("INSERT INTO temp_t VALUES (3, 'C')", [])?;
+
+        // 3. Merge with Sort (ORDER BY item_id ASC)
+        // Original data (2, 1) + New (3) -> Expect (1, 2, 3)
+        merge_and_save(
+            &conn,
+            &db_path,
+            temp_table.clone(), // using alias as table name
+            None,
+            Col::ItemId,             // key col
+            Some(vec![Col::ItemId]), // check sort by item_id
+        )?;
+
+        // 4. Verify
+        let rows: Vec<i64> = conn
+            .prepare(&format!(
+                "SELECT item_id FROM read_parquet('{}')",
+                db_path.to_string_lossy()
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(rows, vec![1, 2, 3]);
+
+        Ok(())
     }
 }

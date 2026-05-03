@@ -9,6 +9,8 @@ duckdb = { version = "1.0", features = ["bundled", "uuid"] }
 walkdir = "2.4"
 anyhow = "1.0"
 chrono = "0.4"
+chrono-english = "0.1"
+dateparser = "0.2"
 indicatif = "0.18.3"
 wasmtime = { version = "28.0", features = ["component-model", "cranelift", "async"] }
 wasmtime-wasi = "28.0"
@@ -25,6 +27,16 @@ path-slash = "0.2"
 strum = { version = "0.26", features = ["derive"] }
 rustc-hash = "2.1.1"
 uuid = { version = "1.19.0", features = ["v4", "v5"] }
+pest = "2.7"
+pest_derive = "2.7"
 
 [dev-dependencies]
+filetime = "0.2.27"
 tempfile = "3.24.0"
+rstest = "0.25"
+
+# Optimize dependency build times and binary size
+[profile.dev.package."*"]
+debug = 0
+strip = "debuginfo"
+

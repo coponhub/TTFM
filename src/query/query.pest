@@ -1,0 +1,216 @@
+// --- Whitespace handling ---
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+// --- Main entry point ---
+// --- Main entry point ---
+// Try scalar_arithmetic_query first to handle top-level arithmetic like "count() - count()" or "size: * 2".
+// Then expr for set operations.
+// bare_calculation_query is fallback for other arithmetic like "1 + 2".
+query = { SOI ~ ( (scalar_arithmetic_query ~ EOI) | (expr ~ EOI) ) }
+
+// --- Top-level Arithmetic Priority Rule ---
+// Allows "count() - count()", "count() + 1", "size: * 2", "1 + 2" without parentheses.
+// Strictly requires BOTH operands to be arithmetic-compatible (Scalar or Projection).
+scalar_arithmetic_query = { scalar_arithmetic_expr }
+
+scalar_arithmetic_expr = ${
+    WHITESPACE* ~ arithmetic_operand ~ (arith_op ~ arithmetic_operand)+ ~ WHITESPACE*
+}
+
+// Operands valid for top-level arithmetic prioritization
+arithmetic_operand = {
+    aggregation
+    | number
+    | calculation
+    | type_ref
+    | parenthesized_expr
+    | label
+}
+
+// Common arithmetic operator definition
+arithmetic_operator = { "+" | "-" | "*" | "/" | "%" }
+
+// --- Set operations (Pratt Parser) ---
+// DESIGN.md: Spaces are REQUIRED around set operators
+// "a:1&b:2" -> Not a set operation, parsed as TypedTag "a:1&b:2"
+// "a:1 & b:2" -> Set AND operation
+expr = ${ WHITESPACE* ~ primary ~ (WHITESPACE+ ~ set_infix ~ WHITESPACE+ ~ primary)* ~ WHITESPACE* }
+
+set_infix = _{ ampersand | pipe | minus_colon | minus }
+    ampersand_colon = { "&:" }
+    ampersand       = { "&" }
+    pipe            = { "|" }
+    minus_colon     = { "-:" }
+    minus           = { "-" }
+
+// --- Primary elements ---
+primary = { factor }
+
+// --- Factors ---
+// PEG priority: Try specific rules first.
+factor = {
+    comparison
+  | nest_expr
+  | typed_tag
+  | projection
+  | aggregation
+  | "(" ~ expr ~ ")"
+  | label
+}
+
+// Nest expression: &: operator, higher priority than set operations.
+// Requires at least one &: to match; standalone operands fall through to other factor alternatives.
+nest_expr = ${ nest_operand ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_operand)+ }
+// scalar_comparison is tried first so bare scalar comparisons (e.g. count(...) > 0) work as nest
+// right operand without causing left-recursion (comparison->label_comparison->nest_expr->nest_operand).
+// aggregation is the fallback when scalar_comparison fails (e.g. count(...) :> X leaves :>X for outer label_op).
+nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }
+
+projection = { type_ref | calculation }
+
+// --- Label/Scalar Comparison ---
+// DESIGN.md:
+// - Label Comparison: Stuck operator (size:>100) or Colon operator (size: := 100)
+// - Scalar Comparison: Space between operand and operator (sum(size:) > 1GB)
+// - TypedTag/TypeRef + ScalarOp (size: > 100) is a Syntax Error.
+
+comparison = {
+    label_comparison
+  | scalar_comparison
+}
+
+// Label comparison: operand (including projection) followed by label-style operator
+// Specification: Proj :Op Scalar | Scalar :Op Proj | Scalar :Op Proj :Op Scalar ...
+label_comparison = ${
+    ( (nest_expr | type_ref | calculation | parenthesized_expr) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
+  | ( (number | quoted_string | unquoted_string | unquoted_tag_string | calculation) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
+}
+
+// Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
+// DESIGN.md:71 - Label equality uses single "=" not "=="
+label_op = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ operand }
+label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ (type_ref | calculation) }
+
+// Stuck operator: ^, ^=, >, >=, <, <= (NO equality operator)
+// DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
+// DESIGN.md:88 - NO whitespace allowed between operator and operand
+stuck_op_step = ${ stuck_basic_op ~ stuck_operand }
+stuck_operand = { quoted_string | number | type_ref | calculation | unquoted_tag_string }
+
+colon = { ":" }
+
+// Label comparison operators: = for equality (not ==)
+label_basic_op = @{ "=" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
+
+// Stuck comparison operators: NO equality (= or ==) since TypedTag handles that
+stuck_basic_op = @{ "<=" | ">=" | "^" | ">" | "<" }
+
+// Scalar comparison: scalar-only operand followed by scalar-style operator
+// Note: projection (type_ref) is NOT allowed in scalar_operand.
+// Calculations containing projections must use label comparison.
+scalar_comparison = ${ scalar_operand ~ (WHITESPACE+ ~ scalar_basic_op ~ WHITESPACE+ ~ scalar_operand)+ }
+
+scalar_operand = { aggregation | scalar_calculation | parenthesized_expr | label }
+
+// Scalar-only calculation: does NOT allow type_ref (projections)
+// This ensures "(1 + 2) > 3" is valid but "(size: + 1) > 3" is rejected
+scalar_calculation = { "(" ~ scalar_calculation_inner ~ ")" }
+scalar_calculation_inner = ${ WHITESPACE* ~ scalar_operand_calc ~ (arith_op ~ scalar_operand_calc)+ ~ WHITESPACE* }
+scalar_operand_calc = { aggregation | label | scalar_calculation }
+
+// Scalar comparison operators: == for equality
+scalar_basic_op = @{ "==" | "^=" | "<=" | ">=" | "^" | ">" | "<" }
+
+// --- Typed Tag ---
+// DESIGN.md: type:label (no space allowed between them)
+typed_tag = ${ tag_type ~ ":" ~ tag_label }
+
+operand = {
+    aggregation
+  | calculation
+  | type_ref
+  | parenthesized_expr
+  | label
+}
+
+// --- Aggregation Functions ---
+// sum(size:), count(extension:), avg(size:), max(size:), min(size:)
+// bare_calculation を優先で試行し、失敗時は expr へフォールバック
+aggregation = ${ aggregator ~ "(" ~ WHITESPACE* ~ (bare_calculation | expr)? ~ ")" }
+aggregator = @{ "sum" | "count" | "avg" | "max" | "min" }
+
+// ... existing rules ...
+
+// Tag Label (permissive, allows ^)
+tag_label = { quoted_string | number | unquoted_tag_string }
+
+// Unquoted tag string: allows ^ and set operators (&, |) without spaces
+// DESIGN.md:26 - "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
+unquoted_tag_string = @{
+    (escape | (!(WHITESPACE | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+
+}
+
+// ... existing unquoted_string ...
+
+
+// --- Label Calculation ---
+// Arithmetic requires explicit parentheses, except inside
+// aggregation parentheses (see bare_calculation above).
+// DESIGN.md:112 - Arithmetic operators REQUIRE whitespace around them
+// "1*2" -> Not arithmetic, literal string
+// "1 * 2" -> Arithmetic operation
+
+// Bracket-omission (QUERY.md:103): 集約の括弧内に
+// 算術演算のみが含まれる場合、算術の括弧を省略可。
+// sum(size: - 2B) は sum((size: - 2B)) と同意。
+bare_calculation = { calculation_inner ~ &")" }
+
+calculation = { "(" ~ calculation_inner ~ ")" }
+calculation_inner = ${ WHITESPACE* ~ operand_calc ~ (arith_op ~ operand_calc)+ ~ WHITESPACE* }
+arith_op = @{ WHITESPACE+ ~ arithmetic_operator ~ WHITESPACE+ }
+
+// Calc operands (to avoid ambiguity)
+operand_calc = { aggregation | type_ref | label | calculation | parenthesized_expr }
+
+// Parenthesized expression: allows set operations as arithmetic operands
+// e.g., sum((is_dir:false & size:) + 1000)
+parenthesized_expr = { "(" ~ expr ~ ")" }
+
+// Type Reference (trailing colon)
+type_ref = ${ tag_type ~ ":" }
+
+tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ (WHITESPACE | EOI | ":")) ~ identifier) }
+
+// --- Labels and Literals ---
+label = { quoted_string | number | (!type_ref ~ unquoted_string) }
+
+// Identifiers (boundary is :)
+identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
+
+// Numbers
+number = @{ "-"? ~ ASCII_DIGIT+ ~ &(WHITESPACE | EOI | ")") }
+
+// Quoted strings
+quoted_string = ${
+    ("\"" ~ inner_str_double ~ "\"")
+  | ("'" ~ inner_str_single ~ "'")
+}
+inner_str_double = @{ (!("\"" | "\\") ~ ANY | "\\" ~ ANY)* }
+inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
+
+// Unquoted strings: Allow colons in labels.
+unquoted_string = @{
+    !number ~ (escape | (!(WHITESPACE | ":" | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
+}
+
+escape = @{ "\\" ~ ANY }
+
+// Reserved characters are only those that trigger higher-level rules or separators.
+// Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
+reserved_chars = _{
+    WHITESPACE
+  | "&" | "|" | "(" | ")" | "\"" | "'"
+  | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
+  | "," | ";" | "{" | "}"
+  | ":"
+}

@@ -1,15 +1,12 @@
-use crate::functions::{ScanEntry};
-use crate::db::{Tbl, Col, TargetTable, Store};
+use super::indexer::{ScanEntryLoader, TempScanEntry};
+use crate::db::{Col, Store, TargetTable, Tbl};
+use crate::indexing::functions::ScanEntry;
+use crate::types::ItemId;
 use crate::util::{self};
-use crate::types::{ItemId};
-use super::indexer::{TempScanEntry, ScanEntryLoader};
 use anyhow::Result;
-use duckdb::{Connection};
-use sea_query::{
-    Query, Expr, JoinType, PostgresQueryBuilder, 
-    SelectStatement
-};
-use std::path::{Path};
+use duckdb::Connection;
+use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query, SelectStatement};
+use std::path::Path;
 
 // ========================================================
 // Diff Phase Orchestrator
@@ -53,7 +50,7 @@ impl DiffAuditor {
         Self {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
             live: store.temp_live_path().to_string_lossy().into_owned(),
-            ents: path(TargetTable::FileEntities),
+            ents: path(TargetTable::FileReferences),
         }
     }
 
@@ -65,7 +62,11 @@ impl DiffAuditor {
     pub(crate) fn query_all_scanned(&self) -> SelectStatement {
         Query::select()
             .expr_as(Expr::cust("NULL"), Col::ItemId)
-            .columns(TempScanEntry::columns_with_type().into_iter().map(|(c, _)| c))
+            .columns(
+                TempScanEntry::columns_with_type()
+                    .into_iter()
+                    .map(|(c, _)| c),
+            )
             .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
             .to_owned()
     }
@@ -73,24 +74,29 @@ impl DiffAuditor {
     /// スキャン結果と既存 DB を Inode で JOIN し、既存 ID を特定するクエリ
     pub(crate) fn query_with_existing_ids(&self) -> SelectStatement {
         let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
-        
+
         // Inode ごとに最小 ID を 1つ選ぶユニーク名簿
         let distinct_ents = Query::select()
             .expr(crate::util::CustomExpr::distinct_on_all(Col::FileId))
-            .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences)
             .order_by(Col::FileId, sea_query::Order::Asc)
             .order_by(Col::ItemId, sea_query::Order::Asc)
             .to_owned();
 
         Query::select()
-            .column((Tbl::FileEntities, Col::ItemId))
-            .columns(TempScanEntry::columns_with_type().into_iter().map(|(c, _)| (Tbl::Scan, c)))
+            .column((Tbl::FileReferences, Col::ItemId))
+            .columns(
+                TempScanEntry::columns_with_type()
+                    .into_iter()
+                    .map(|(c, _)| (Tbl::Scan, c)),
+            )
             .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
             .join_subquery(
                 JoinType::LeftJoin,
                 distinct_ents,
-                Tbl::FileEntities,
-                Expr::col((Tbl::Scan, col_file_id.clone())).eq(Expr::col((Tbl::FileEntities, col_file_id)))
+                Tbl::FileReferences,
+                Expr::col((Tbl::Scan, col_file_id.clone()))
+                    .eq(Expr::col((Tbl::FileReferences, col_file_id))),
             )
             .to_owned()
     }
@@ -98,22 +104,29 @@ impl DiffAuditor {
     /// 削除判定：生存リスト(live)にも、変更(scan)にも載っていない既存 ID
     pub(crate) fn query_deleted(&self) -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities);
+        q.column(Col::ItemId).from_subquery(
+            util::parquet_query(&self.ents),
+            Tbl::FileReferences,
+        );
 
         let mut live_q = Query::select();
-        live_q.column(Col::ItemId).from_subquery(util::parquet_query(&self.live), Tbl::Live);
+        live_q
+            .column(Col::ItemId)
+            .from_subquery(util::parquet_query(&self.live), Tbl::Live);
         q.union(sea_query::UnionType::Except, live_q);
 
         let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
         let mut scan_q = Query::select();
-        scan_q.column((Tbl::FileEntities, Col::ItemId))
-              .from_subquery(util::parquet_query(&self.ents), Tbl::FileEntities)
-              .join_subquery(
-                  JoinType::InnerJoin, 
-                  util::parquet_query(&self.scan), 
-                  Tbl::Scan, 
-                  Expr::col((Tbl::FileEntities, col_file_id.clone())).eq(Expr::col((Tbl::Scan, col_file_id)))
-              );
+        scan_q
+            .column((Tbl::FileReferences, Col::ItemId))
+            .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences)
+            .join_subquery(
+                JoinType::InnerJoin,
+                util::parquet_query(&self.scan),
+                Tbl::Scan,
+                Expr::col((Tbl::FileReferences, col_file_id.clone()))
+                    .eq(Expr::col((Tbl::Scan, col_file_id))),
+            );
         q.union(sea_query::UnionType::Except, scan_q);
 
         q
@@ -125,18 +138,25 @@ impl DiffAuditor {
 // ========================================================
 
 pub(crate) trait SelectFetchExt {
-    fn fetch_with_ids(&self, conn: &Connection) -> Result<Vec<(Option<ItemId>, TempScanEntry)>>;
+    fn fetch_with_ids(
+        &self,
+        conn: &Connection,
+    ) -> Result<Vec<(Option<ItemId>, TempScanEntry)>>;
     fn fetch_ids(&self, conn: &Connection) -> Result<Vec<ItemId>>;
 }
 
 impl SelectFetchExt for SelectStatement {
-    fn fetch_with_ids(&self, conn: &Connection) -> Result<Vec<(Option<ItemId>, TempScanEntry)>> {
+    fn fetch_with_ids(
+        &self,
+        conn: &Connection,
+    ) -> Result<Vec<(Option<ItemId>, TempScanEntry)>> {
         let loader = ScanEntryLoader::new();
         let sql = self.to_string(PostgresQueryBuilder);
         conn.prepare(&sql)?
             .query_map([], |row| {
                 let id: Option<ItemId> = row.get(0)?;
-                let entry = TempScanEntry::from_row_with_offset(row, 1, &loader)?;
+                let entry =
+                    TempScanEntry::from_row_with_offset(row, 1, &loader)?;
                 Ok((id, entry))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()

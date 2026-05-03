@@ -1,0 +1,266 @@
+# TTFM Query Design Specification
+
+- **名称** Typed Tag Query Language 略してTTQLと呼ぶ
+
+## 1. クエリは以下の要素で構成される
+
+- **TypedTag**:
+    - `type:label` 形式の基本単位。
+    - **意味**: 記載されたTypedTagが付与されたアイテムを取得する
+    - **ルール**: 
+        - `type` と `label` の間にスペースを含めることはできない。
+        - 右辺はScalar値であり、集約値(Aggregateの結果)を用いる事も出来る
+        - 密着ラベル比較のEqual(一致比較)と見なす事も可能
+- **集合演算 (set operation)**:
+    - 演算子 ※全て2項演算子
+        - `&`: 積集合 (Intersection)
+        - `|`: 和集合 (Union)
+        - `-`: 差集合 (Difference)
+        - 例: `extension:rs & project:ttfm`
+    - **演算対象 (Operand)**:
+        - TypedTag
+        - Projection:
+    - **演算子の優先順位**: 
+        - `&` > `|` = `-`
+    - **ルール**
+    - 演算子とオペランドの間にはスペースを入れなければならない。`extension:rs&project:ttfm` のような記載は集合演算と見なされない
+    - `Projection:`同士の集合演算について
+        - 両辺をラベルの集合として捉える
+        - 型が違う場合も可能だが、完全に要素の重複無しの集合同士の集合演算として処理する
+        - 結果は`Projection`となる
+        - 差集合については `-:` と記載する(算術演算と区別するため)
+        - 積集合`&`では、Warningを表示して`&:`で分割ラベル(組み合わせキー)が可能となる事を知らせる
+    - `Projection:`と`TypedTag`の集合演算について
+        - `Proj & TypedTag` ProjとTypedTagのアイテムの積集合の`Projection`が返る。左右を入れ替えても同じ結果。
+        - `Proj | TypedTag` ProjとTypedTagに含まれるアイテムの和集合の`フラットリスト`が返る。左右を入れ替えても同じ結果。
+        - `Proj - TypedTag` ProjからTypedTagのアイテムを除外した`Projection`が返る
+        - `TypedTag - Proj` TypedTagからProjが付与されたアイテムを除外した`フラットリスト`が返る
+- **集約 (Aggregation)**:
+    - 形式: `[aggregator]([query])`
+    - aggregator: `count`, `sum`, `avg`, `max`, `min`
+    - query: 任意の検索クエリ。ただし、数値集計（sum, avg等）を行う場合は、数値のProjectionを返すクエリとする
+    - 戻り値: クエリ結果を集約した数値（スカラー）。
+    - 例: `sum(size:)`
+        - `sum(project:A & size:>1GB & size:)`
+        - `count(filename:)` ファイル名の種類をカウント
+    - `count(Proj:)`でcountをProjectionやネストに適用するとアイテム数ではなくProjection(ラベルの種類)をカウントする
+    - countを引数無しで記載`count()`すると`count(*:*)`と同じ意味となる
+    - 関数としてはスカラー値を返すため、演算のオペランドとしてはスカラー値として扱われる
+- **スカラー比較(Scalar Comparison)**:
+    - 形式: `[Scalar] [Operator] [Scalar]`
+    - 演算子: `==` (一致), `^` または `^=` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
+    - 返り値: 真偽値を返す
+     - **ルール**
+        - 演算子とオペランドの間にはスペースを入れなければならない。`1>1` のような記載はスペースが無いためスカラー比較と見做されない
+- **ラベル取得 / Projection: (Label Retrieval / Projection)**:
+    - `Type:`形式。
+    - **意味**: `Type:`が含まれるTypedTagのLabelを取り出す
+        - 「Typeに含まれるラベル」と、「そのType:Labelが付与されたItemのItemID」のペアを取得する。
+    - Type: TypedTagの:の左辺にくるもの。型を示す
+    - ラベルに評価値`nvalue`が付与されている場合は、表示する際`nvalue`が併記され、実際のラベル値の代わりに評価値`nvalue`が演算に使用される(集合演算を除く)
+    - **例**:
+        - `project:A & price:` (プロジェクトAに属するアイテムの価格一覧を取得)
+        - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
+        - `path:` (各アイテムのパスを取得)
+- **ネスト (Nest)**:
+    - `[Projection|Nest] &: [Projection|Scalar|(Scalar comparison)|Aggregation|Nest]` 形式
+    - `&:` をネスト演算子(Nest Operator) と呼ぶ 
+    - 右辺がProjectionの場合、ProjectionがGroup Byのキーのように両辺のProjectionの組み合わせとなる。
+    - 例: 
+        - `Project: &: extension:`で以下のようなProjectionの結果を取得できる(`...`は省略)
+            `:rs &: :ProjectA ... item1, item2, ...`
+            `:rs &: :ProjectB ... item3, item4, ...,`
+            `:txt &: :ProjectA ... item4, item6, ...,`
+        - `(extension: &: count(*:*)) := (parentdir: &: count(*:*))`「そのフォルダ内にあるファイルが、すべて特定の拡張子（例えば .jpg）で統一されている」状態のアイテムを取得する
+    - Nest同士の結合も可能。
+        - `(A: &: B:) &: (C: &: D:)` = `(A: &: B: &: C: &: D:)`
+    - 出力表示としては、ラベルの表示が複数`&:`を挟んで並べられている事以外はラベル取得と同様とする
+    - **nvalueの付与**
+        - 右辺がScalar同士の算術演算やScalar、集計、比較式の場合、左辺のProjection又はNestに対して値`nvalue`が付与される
+        - Nestに対して`nvalue`を付与する場合、Nestの最後のProjectionに付与される。
+        - `nvalue`が付与されたProjection又はNestに対して、`&:`を使用してさらにProjection又はNestを加えた場合、`nvalue`がそのProjectionに対して維持されたまま、新たにProjectionが追加される
+        - UI表示においては、`(Label or Nest) - nvalue` の形式で併記される。
+    - **演算** Nestに対して算術演算や比較を行う場合、以下のルールに従う
+        - 最も右側のprojectionのラベルを使用して演算する。
+            - ただし、そのProjectionに`nvalue`が付与されていた場合`nvalue`を使用して演算する
+            - ラベル比較に対しては、通常の演算と同様アイテムリストを返す
+        - Nestは、他の演算に対しては`Projection`として振る舞う
+    - **返り値**
+        - `Projection &: [Scalar|(Scalar comparison)|Aggregation]`はProjectionに対して`nvalue`を付与するだけで、結果はNestとならずProjectionが返る(ネストの深さがLevel 1)。
+        - `Projection &: Projection`ないし、両辺のどちらかにNestを含む`&:`の適用はネストが返る。(ネストの深さがLevel 2 以上のため)
+    - 右辺がスカラー比較式または集約の場合、以下の挙動を取る
+        - スカラー比較式は括弧で囲む必要がある
+        - スカラー比較式,または集約の括弧内は左辺をコンテキスト(グループ)として、そのコンテキスト(グループ)内に対して集計・比較される
+        - 例: 
+            - `parentdir: &: (count(extension:jpg) > 10)` これは `parentdir: &: count(extension:jpg) :> 10`と等値
+            - `parentdir: &: (avg(size:) == sum(size:))` これは `(parentdir: &: count(size:)) :=  (parentdir: &: sum(size:))` と等値
+            - `parentdir: &: sum(size:>1GB & size:)` 各parentdirのサイズ1GB以上のアイテムの合計値を取得する
+- **集約による平坦化 (Unnest by aggregation)**
+    - `aggreagator([nest])`
+    - ネストに対する集約ではネストの最後のProjectionが集約値のスカラーに置き換わる。つまり最後のネスト1段分が集約(平坦化)され消費され`nvalue`になる。
+    - 平坦化によってネストの深さが1になるとProjectionとなる。
+    - 展開例: parentdir &: extension:jpgがparentdirが3つあり、dirAにjpgが3, dirBとdirCにjpgが6あり、jpgのサイズが全て1の場合。
+        `sum(sum(extension:jpg & parentdir: &: size:) :> 5)` =
+        `sum({item(paretdir:dirA, nvalue:3), item(paretdir:dirB, nvalue:6), item(paretdir:dirC, nvalue:6)} :> 5)` =
+        `sum({parentdir with nvalue}: :> 5)` = 
+        `sum({item(paretdir:dirB, nvalue:6), item(paretdir:dirC, nvalue:6)})` =
+        `sum([6, 6])` = `12`
+    - 例:
+        - `sum(sum(parentdir: &: size:) :> 1GB & size:)` (フォルダ毎の合計サイズが1GB超のアイテムのサイズの合計)
+        - `count(parentdir: &: count(extension:jpg) :> 10)` (JPGファイルを10個以上含むフォルダの数の合計)
+        - `parentdir: &: (sum(mtime: :> "7d ago" & size:) < 10GB)` (フォルダ内の「更新日が7日以内のアイテム」の合計サイズが10GB以下のアイテムの一覧を取得)
+- **汎用ラベル比較 (Label Comparison)**:
+    - **ラベル比較式** `[Operand] [ComparisonOp] [Operand]` 形式。一つの項として扱われる。取得した各ラベルを比較する。
+    - **演算対象 (Operand)**:
+        - **Scalar値**: 文字列または数値
+        - **Projection**: 上記「ラベル取得」
+    - **演算子**:
+        - **ラベル比較演算子**: `:=`, `:^`or`:^=` (不一致), `:>`, `:>=`, `:<`, `:<=` (大小比較)。
+    - **ルール**:
+        - 両辺をScalarにする事は出来ない（少なくとも一方はProjectionまたは集約である必要がある）
+            - `Proj :> Scalar` -> OK
+            - `Scalar :> Proj` -> OK
+            - `Proj :> Proj` -> OK
+            - `Scalar :> Scalar` -> ERROR
+        - 数式のような柔軟な記述が可能（例: `100 :< size:`）。
+        - 連鎖比較が可能（例: `50 :< height: :< 100`）。
+        - 演算子とオペランドの間にはスペースを入れなければならない。
+        - Proj同士の場合、同一ItemのLabelを比較し、抽出した集合を返す
+        - nvalueが付与されていてもアイテム集合を返す
+- **密着ラベル比較 (Stuck Label Comparison)**
+    - `[Projection][ComparisonOp][Scalar]` 形式
+    - **Projection**: 上記「ラベル取得」汎用ラベル比較と違い左辺は必ずProjectionとなる
+    - **Scalar**: 文字列または数値  汎用ラベル比較と違い右辺は必ずScalarとなる
+    - **演算子**:
+        - **比較演算子**: `^` (不一致), `>`, `>=`, `<`, `<=` (大小比較)。
+    - **ルール**:
+        - 演算子とオペランドの間にスペースを含める事は出来ない `size: >1GB` `size: > 1GB` のような記載はエラーとなる
+        - 左辺は必ずProjectionが来る。
+        - 省略したラベル比較のように記載できる (例: `extension:^rs`, `size:>=1GB`)
+        - イコール演算子(=)は存在しない。TypedTagをそのまま書いた場合と同じ結果となるため
+		- ラベルに評価値`nvalue`が付与されている場合は、Projectionを返す
+- **算術演算 (Calculation)**:
+    -  `(Operand [ArithmeticOp] Operand)` の形式。
+    - **演算子**:
+        - **算術演算子**: `+`, `-`, `*`, `/`, `%`。
+    - **演算対象 (Operand)**:
+        - Projection
+        - Scalar値(集約関数による集約値を含む)
+    - **ルール**:
+        - projectionの演算では各アイテムのタグのプロジェクション同士の演算となる
+        - 算術演算は括弧で囲まなければならない。
+            - ただし、同じレベルの`()`内(一番外側の場合も含む)に算術演算子以外の演算子が無い場合は括弧を省略できる
+            - 例: 
+                - `(1 - 2) :> size:` OK
+                - `1 - 2 :> size:` NG
+                - `size: - 2 & project:A` NG
+                - `1 - 2` OK
+                - `sum(size: - 2B)` OK
+                - `sum(size: - 10TB :> 10TB)` NG
+                - `sum((size: - 10TB) :> 10TB)` OK
+                - `sum(size: - 2TB) > 10TB` OK 
+                - `sum(size:) == avg(size:) * count(size:)` NG
+                - `sum(size:) == (avg(size:) * count(size:))` OK
+        - 演算子とオペランドの間にはスペースを開ける必要がある。 `1*2` `1 /2` `proj:*2`のような記載は算術演算とはみなされない。
+        - TypedTagに対する算術演算はエラーとなる
+- **エスケープと引用符 (Escaping & Quoting)**:
+    - **基本**: スペース、演算子記号、あるいはクオート自体を含める場合は、`""` (ダブルクオート) または `''` (シングルクオート) で囲む。
+    - **適用範囲**: Type（左側）と Label（右側）の両方で使用可能。ただし、単語の途中を引用符で囲むことはできず、全体を囲む必要がある。
+    - **リテラル化**: 引用符で囲まれた文字列内では、Globパターン（`*`, `?` 等）は無効化され、完全一致検索が行われる。
+    - **バックスラッシュ**: クォート内での `\"`, `\'`, `\\` 等のエスケープ、および未クォート時の一文字エスケープに使用する。
+    - 例: `"extension":rs`, `filename:"project_*"` (Glob無効、完全一致), `filename:\[WIP\]_*` (ブラケットを文字として扱い、末尾はワイルドカード)
+- **グルーピング**:
+    - `()`: 算術演算、集合演算の評価の優先順位を制御するために使用する。
+- **Globパターンのサポート**: 未クォートの文字列では `*`, `?`, `[]`, `[!...]` を Label および Type の両方で使用できる。
+
+## 2.  **評価の優先順位**:
+- 以下の順序で評価される。
+-  `ネスト` > `密着ラベル比較 / TypedTag` > `汎用ラベル比較` > `ラベル取得` > `集約` > `算術演算` > `集合演算 `
+- **注**: `集約` や `ネスト`、`算術演算` 等で使用される括弧 `()` 内の式は、再帰的に評価され、常に括弧の外側の演算よりも優先される。
+
+## 3. 検索における型
+- TTQLでは、文字列、単位付きの数字、小数などを受け付けるが、論理解決層では以下の型を使用できる
+    - String
+    - Integer
+    - Double
+    - Boolean
+    - Date (lens_resolverにはIntegerとして渡される)
+- StringとString以外の型の比較・算術演算はエラーとなる
+- Boolean同士の比較・算術演算については、FALSE=0 TRUE=1として行う。Booleanに対して算術演算を行った結果は、数値(IntegerまたはDouble)となる。これによりBoolean値のsumも可能となる
+- String同士は比較は可能。String同士の算術演算は以下の通り
+    - `+` ","区切りでの文字列結合
+    - `*` 文字列結合(区切り文字無し)
+    - `/`, `-` についてはエラーとなる
+## 4. データ構造
+- TTQLでは、各データをネストの深度によって以下のように呼び分ける
+    - level 0. スカラー
+        - 例
+            - `1`
+            - `count()`
+            - `"text"`
+    - level 1. フラットリスト
+        - 例
+            - `extension:rs`
+            - `size: :< 1GB`
+            - `parentdir: &: count(extension:jpg) :> 10`
+            - `project &: (sum(size:) > 1)`
+    - level 2. プロジェクション
+        - 例
+            - `extension:`
+            - `project:gtk4 & extension:`
+            - `project: &: count()`
+            - `project: &: sum(width: :> height:)`
+    - level n. ネスト(Lv.n)
+        - 例
+            - `project: &: extension:`
+            - `project: &: (extension: + 1)`
+            - `prentdir: &: (width: * height:)`
+            - `extension: &: (extension:rs & size:)`
+            - `project: &: extension: &: sum(size:)` (Lv3)
+            - `project: &: extension: &: size:` (Lv4)
+- **データ構造同士の関係性**
+    - **集合演算による平坦化・深化**: 全ての要素は `*:`(全typeのProjection) をベースキーとする Nest として捉えることができる（例: TypedTag `t:l` = Lv.1 フィルタ、Projection `A:` = `*:* &: A:`、Nest `A: &: B:` = `*:* &: A: &: B:`）。集合演算は両辺の共通キープレフィックスまで降りて、そのレベルでのラベル値集合演算として解釈される。
+        - **`&`（積集合）**: 共通プレフィックスまで降りたラベル値の積集合。深い側の構造が維持される。交換可能。
+            - `Lv.n & Lv.n`（同一キー構造）→ `Lv.n`（ラベル値の積集合）
+            - `Lv.n & Lv.m`（n != m, 共通プレフィックスあり）→ `Lv.max(n,m)`（浅い側は深い側のアイテムフィルタとして機能）。
+            - `Lv.n & Lv.1`（TypedTag との積集合）→ `Lv.n`（アイテムのみフィルタ、構造維持）。
+            - 共通プレフィックスなし（キー構造が完全に異なる）→ `Lv.2`プロジェクション(ラベル値の積集合）
+        - **`|`（和集合）**: 共通プレフィックスまで降りたラベル値の和集合。共通構造のレベルに平坦化される。交換可能。
+            - `Lv.n | Lv.n`（同一キー構造）→ `Lv.n`（ラベル値の和集合）
+            - `Lv.2 | Lv.2`（異なるキーの Projection 同士）→ `Lv.2`（異なる型のラベル値を含む混合 Projection）
+            - `Lv.n | Lv.m`（共通プレフィックスが Lv.c まで）→ `Lv.c+1`（共通プレフィックスの 1 段上に平坦化）
+            - `Lv.n | Lv.1`（TypedTag との和集合）→ `Lv.1`（フラットリスト）。
+            - Lv.3+ のネスト同士でキー構造が異なる（共通プレフィックスなし）→ `Lv.1`（フラットリスト）
+        - **`-:`/`-`（差集合）**: 左辺のラベル値集合から右辺を除外。左辺の構造を維持。
+            - `Lv.n(Proj/Nest) -: Lv.m(Proj/Nest)` → `Lv.n`
+            - `Lv.n(Proj/Nest) - Lv.1(TypedTag)` → `Lv.n`
+            - `Lv.1(TypedTag) - Lv.n(Proj/Nest)` → `Lv.1`
+    - **集約による平坦化**: 集約関数 (`count`, `sum` 等) を適用すると、構造が平坦化される。
+        - **Lv.1 (フラットリスト) → Lv.0 (スカラー)**:
+            特定の集約(現状countのみ)ではフラットリストを集約できる
+        - **Lv.2 (プロジェクション) → Lv.0 (スカラー)**: プロジェクションに対して集約を行い、単一の値にする。 (例: `sum(size:)`)
+        - **Lv.n (ネスト) → Lv. n-1**: ネストの最も深いプロジェクションを集約し、評価値(`nvalue`)に変換する事でネストの深度が1つ浅くなる。 (例: `sum(project: &: size:)` → `project:` のみに)
+    - **データ構造(ネスト)の深化**
+        - **Lv. 0 → Lv. 1**: スカラー値とプロジェクションをラベル演算するとフラットリストになる `2 :< size:`
+        - **Lv. 0 → Lv. n**: スカラー値とプロジェクションを算術演算すると結果はプロジェクションになる `2 * size:`
+        - **Lv. 1 → Lv. 2**: `Type:Label & Type:` のように`&`でプロジェクションによる絞り込みを行う事で、フラットリストをネストしてプロジェクションに変換できる。
+        - **Lv. 2 → Lv. n+1**: プロジェクション同士を `&:` 演算子で結合すると、複合キーのグルーピングとなり階層が深くなる。 (例: `project: &: extension:`)
+        - **Lv.n -> Lv.n+1**: nvalue付きのプロジェクションに対し、異なるプロジェクションの算術演算を行うと、計算結果は新たにNestとして追加され、levelが深くなる
+    - **比較による要素の展開**: プロジェクションやネストに対して、ラベル比較 (`:>`, `:=` 等) を行うと、条件を満たすグループに抽出され、そのグループに属するアイテムのフラットリスト (Lv. 1) として展開される。
+        - 例: `parentdir: &: count(extension:jpg) :> 10`
+    - **評価値 (nvalue) の付与**: プロジェクション (Lv. 2) や ネストに対してスカラー (Lv. 0) またはスカラーを返す演算・集約を`&:`演算子を通じて適用すると、そのスカラー値が評価値 (`nvalue`) として付与される。この時、階層の深さは変化しない。
+- **データ構造同士の演算**
+    - **集合演算 (`&`, `|`, `-`)**: スカラー(Lv.0)、フラットリスト(Lv.1)、プロジェクション(Lv.2)、ネスト(Lv.n) 間で可能。
+    - **算術演算 (`+`, `-`, `*`, `/`, `%`)**:
+        - Lv.0(スカラー値)では普通に計算され、その結果をスカラー値として受け取る
+        - **フラットリスト(Lv.1) に対しては適用不可**。
+        - プロジェクション(Lv.2)同士 (例: `width: * height:`)では、各アイテム毎に行レベル計算され、結果は計算値のプロジェクション(Lv.2)となる。
+        - `nvalue`が付与されていれば、`nvalue`を用いて計算が行われる
+        - ネスト(Lv.n)に対しては、一番右側の値または`nvalue`を用いて計算が行われる。演算の結果が`nvalue`に格納・上書きされたものとして扱われる。深度(Lv)は変化しない
+        - キー構造が異なる場合でも計算は可能。（例: `(parentdir: &: count()) + (extension: &: count())`）各アイテムに対して右辺の`nvalue`と左辺の`nvalue`がそれぞれタグ付けされているものと想定して計算する。計算結果は、左辺のNestに加えて`&: nvalue:`が新たに付与され、ネストが深くなった形となる
+
+    - **ラベル比較 (`:=`, `:>` 等)**: スカラー(Lv.0)、プロジェクション(Lv.2)、ネスト(Lv.n) の間で可能。**フラットリスト(Lv.1) に対しては適用不可**。
+        - 一番右側（深部）のグループを「条件判定のふるい」として使用し、条件を満たしたアイテムを抽出する。
+        - 比較評価が行われた時点でネスト構造は解体され、**フラットリスト (Lv. 1) として展開される**。どのような深さのネスト（Lv.n）から比較を行っても、抽出結果はフラットリスト（Lv.1）になる。
+    - **ネスト演算 (`&:`)**: **フラットリスト(Lv.1) に対しては適用不可**。
+        - プロジェクションやネストに対して右辺からプロジェクションを適用し、複合キーとしてマージする事で階層を深くする。　集約などのスカラー値の場合は、右辺を評価値(`nvalue`)として付加する。

@@ -16,7 +16,7 @@ pub mod exports {
                 #[repr(u8)]
                 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
                 pub enum PluginKind {
-                    TagFunction,
+                    IndexingFunction,
                 }
                 impl ::core::fmt::Debug for PluginKind {
                     fn fmt(
@@ -24,8 +24,8 @@ pub mod exports {
                         f: &mut ::core::fmt::Formatter<'_>,
                     ) -> ::core::fmt::Result {
                         match self {
-                            PluginKind::TagFunction => {
-                                f.debug_tuple("PluginKind::TagFunction").finish()
+                            PluginKind::IndexingFunction => {
+                                f.debug_tuple("PluginKind::IndexingFunction").finish()
                             }
                         }
                     }
@@ -37,7 +37,7 @@ pub mod exports {
                             return ::core::mem::transmute(val);
                         }
                         match val {
-                            0 => PluginKind::TagFunction,
+                            0 => PluginKind::IndexingFunction,
                             _ => panic!("invalid enum discriminant"),
                         }
                     }
@@ -131,9 +131,9 @@ pub mod exports {
                         * ::core::mem::size_of::<*const u8>()],
                 );
             }
-            /// TagFunction (メタデータ抽出) 固有のインターフェース
+            /// IndexingFunction (メタデータ抽出) 固有のインターフェース
             #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-            pub mod tag_function {
+            pub mod indexing_function {
                 #[used]
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
@@ -369,27 +369,27 @@ pub mod exports {
                     fn tag_file(path: _rt::String) -> _rt::Vec<TagValue>;
                 }
                 #[doc(hidden)]
-                macro_rules! __export_ttfm_plugin_tag_function_cabi {
+                macro_rules! __export_ttfm_plugin_indexing_function_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "ttfm:plugin/tag-function#get-columns")] unsafe extern "C" fn
+                        "ttfm:plugin/indexing-function#get-columns")] unsafe extern "C" fn
                         export_get_columns() -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_get_columns_cabi::<$ty > () } } #[unsafe (export_name =
-                        "cabi_post_ttfm:plugin/tag-function#get-columns")] unsafe extern
+                        "cabi_post_ttfm:plugin/indexing-function#get-columns")] unsafe extern
                         "C" fn _post_return_get_columns(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_get_columns::<$ty > (arg0) } }
-                        #[unsafe (export_name = "ttfm:plugin/tag-function#tag-file")]
+                        #[unsafe (export_name = "ttfm:plugin/indexing-function#tag-file")]
                         unsafe extern "C" fn export_tag_file(arg0 : * mut u8, arg1 :
                         usize,) -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_tag_file_cabi::<$ty > (arg0, arg1) } } #[unsafe
-                        (export_name = "cabi_post_ttfm:plugin/tag-function#tag-file")]
+                        (export_name = "cabi_post_ttfm:plugin/indexing-function#tag-file")]
                         unsafe extern "C" fn _post_return_tag_file(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_tag_file::<$ty >
                         (arg0) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub(crate) use __export_ttfm_plugin_tag_function_cabi;
+                pub(crate) use __export_ttfm_plugin_indexing_function_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
@@ -480,8 +480,8 @@ macro_rules! __export_plugin_impl {
         $($path_to_types_root)*::
         exports::ttfm::plugin::core::__export_ttfm_plugin_core_cabi!($ty with_types_in
         $($path_to_types_root)*:: exports::ttfm::plugin::core); $($path_to_types_root)*::
-        exports::ttfm::plugin::tag_function::__export_ttfm_plugin_tag_function_cabi!($ty
-        with_types_in $($path_to_types_root)*:: exports::ttfm::plugin::tag_function);
+        exports::ttfm::plugin::indexing_function::__export_ttfm_plugin_indexing_function_cabi!($ty
+        with_types_in $($path_to_types_root)*:: exports::ttfm::plugin::indexing_function);
     };
 }
 #[doc(inline)]
@@ -494,13 +494,13 @@ pub(crate) use __export_plugin_impl as export;
 #[allow(clippy::octal_escapes)]
 pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 444] = *b"\
 \0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xbf\x02\x01A\x02\x01\
-A\x04\x01B\x06\x01m\x01\x0ctag-function\x04\0\x0bplugin-kind\x03\0\0\x01r\x03\x04\
+A\x04\x01B\x06\x01m\x01\x0cindexing-function\x04\0\x0bplugin-kind\x03\0\0\x01r\x03\x04\
 names\x07versions\x04kind\x01\x04\0\x0bplugin-info\x03\0\x02\x01@\0\0\x03\x04\0\x08\
 get-info\x01\x04\x04\0\x10ttfm:plugin/core\x05\0\x01B\x0a\x01r\x02\x04names\x08s\
 ql-types\x04\0\x0acolumn-def\x03\0\0\x01q\x04\x04text\x01s\0\x07big-int\x01x\0\x07\
 boolean\x01\x7f\0\x05empty\0\0\x04\0\x09tag-value\x03\0\x02\x01p\x01\x01@\0\0\x04\
 \x04\0\x0bget-columns\x01\x05\x01p\x03\x01@\x01\x04paths\0\x06\x04\0\x08tag-file\
-\x01\x07\x04\0\x18ttfm:plugin/tag-function\x05\x01\x04\0\x12ttfm:plugin/plugin\x04\
+\x01\x07\x04\0\x18ttfm:plugin/indexing-function\x05\x01\x04\0\x12ttfm:plugin/plugin\x04\
 \0\x0b\x0c\x01\0\x06plugin\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwi\
 t-component\x070.227.1\x10wit-bindgen-rust\x060.41.0";
 #[inline(never)]

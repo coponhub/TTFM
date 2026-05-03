@@ -1,9 +1,14 @@
 # TTFM (Typed Tag File Manager) Roadmap
 
 ## Project Overview
-TTFM is a high-performance, query-based file manager utilizing DuckDB and Parquet for indexing. It supports boolean logic search (AND/OR/NOT) and typed tags (e.g., `ext:rs`, `parent:src`).
+TTFM is a high-performance, query-based file manager utilizing DuckDB and Parquet for indexing. It supports complex boolean logic search (AND/OR/NOT) and extensible typed tagging systems.
 
-## Current Status (v0.1.0)
+---
+
+## Milestone 1: Prototype (Status: [x])
+Initial foundation, core indexing infrastructure, and schema reorganization.
+
+### Core Features (v0.1.0)
 - [x] **Core Indexing**: Recursive directory scanning with fast insertion via DuckDB Appender.
 - [x] **High Performance**: 
   - **Parallel Processing**: Multi-threaded indexing using `rayon`.
@@ -16,108 +21,141 @@ TTFM is a high-performance, query-based file manager utilizing DuckDB and Parque
   - `parent:` (normalized path match)
   - `type_from_ext:Folder` (directory filtering)
 - [x] **Plugin System (WebAssembly)**: 
-  - **WIT Interface**: Standardized plugin interface for `TagFunction`.
+  - **WIT Interface**: Standardized plugin interface for `IndexingFunction`.
   - **Wasm Runtime**: High-speed plugin execution via `wasmtime`.
   - **MIME Type Plugin**: Proof-of-concept plugin with directory detection (`inode/directory`).
 - [x] **User-Defined Tags & Persistence**:
   - **Table Implementation**: `user_tags` table for persistent storage (item_id, type, value).
   - **CLI Command**: `tag` command implemented (`ttfm tag <FILE> project:alpha`).
   - **Search**: Support for searching user tags and filtering.
-- [x] **Cross-Platform**: Path normalization (`\` -> `/`) for Windows/Linux compatibility.
 - [x] **CLI Interface**: Basic `index`, `search`, `list`, `clear`, `tag`, `note`, `rank` commands.
+- [x] **Cross-Platform**: Path normalization (`\` -> `/`) for Windows/Linux compatibility.
 
----
-
-## Upcoming Features & Improvements
-
-### 1. Query-Based Tagging
-Enable tagging multiple files at once using search queries.
-- [ ] **Feature**: Support `ttfm tag <QUERY> <TAG>`.
-    - Allow the first argument of the `tag` command to be a search query (e.g., `ext:jpg`) instead of just a single file path/ID.
-    - All items matching the query will be tagged with the specified tag.
-
-### 2. Search Result Control
-Improve flexibility in viewing search results.
-- [ ] **Pagination/Limit**: Allow users to specify result limits (currently fixed at 100).
-- [ ] **Sorting**: Add options to sort by Size, Date Modified, or Name.
-- [ ] **Output Formats**: Support JSON output for integration with other tools.
-
-### 3. Documentation & Help
-Make the tool user-friendly.
-- [ ] **Ease of Input**: Implement Tab completion (CLI) and Search Suggestions (GUI) for tags.
-- [ ] **Enhanced Help**: Update `clap` definitions to include query syntax examples in `--help`.
-- [ ] **Query Syntax Guide**: detailed explanation of `&`, `|`, `-`, and available typed tags.
-
-### 4. GUI Implementation (Relm4/GTK4)
-Create a desktop interface for ease of use.
-- [ ] **Project Structure**: Create `src/bin/gui.rs`.
-- [ ] **UI Design**: Search bar, Result Table, Indexing Progress Bar.
-- [ ] **Async Integration**: Run indexing/searching in background threads to keep UI responsive.
-
-### 5. Advanced Indexing
-- [ ] **Incremental Indexing**: Detect changes and update only modified files (watch mode).
-- [ ] **Content Indexing**: (Optional/Future) Index text content within files.
-
-### 6. Schema Redesign & Origin Management (v0.2.0)
-Transition to a robust schema that separates system-generated metadata from user-defined tags.
-
-- [x] **Home Directory Support**:
-    - [x] Switch storage/config location to `~/.ttfm` (Linux) / `%USERPROFILE%\.ttfm` (Windows).
-    - [x] Remove current directory dependency.
-
+### Infrastructure & Refactoring 
+- [x] **Home Directory Support**: Switch storage/config location to `~/.ttfm`.
 - [x] **Database Schema Migration**:
-    - [x] Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
-    - [x] Split tag storage into `base_tags` (scan results), `system_tags` (definitions), and `user_tags` (persistent).
-    - [x] Implement `Unified View (oneview)` with `name` and `origin` resolution logic.
-
-- [x] **Item Name Abstraction**:
-    - [x] Implement `name` tag support in query parser and search results.
-    - [x] Update UI/CLI to display resolved names instead of raw filenames by default.
-
-- [x] **Entity-Based Location Management**: Support multiple locations per item (e.g., hard links) and replace "move detection" with robust location synchronization.
-
-### 7. File Operations
-Directly interact with files from the CLI.
-- [ ] **Feature**: Support `ttfm open <QUERY>`.
-    - Opens the file(s) matching the search query using the system's default application.
-    - If the argument does not contain a colon (`:`), it is treated as a relative path to a local file rather than a query.
-    - Implementation should handle cross-platform openers (`xdg-open`, `open`, `start`).
+    - Rename columns for clarity: `id` -> `item_id`, `inode` -> `file_id`.
+    - Split tag storage into `base_tags`, `system_tags`, and `user_tags`.
+    - Implement **Unified View (oneview)** with `name` and `origin` resolution logic.
+- [x] **Other Refactoring**:
+    - Refactored `ScanEntry` using macros and `TagDefinition` for DRY/type safety.
+    - Improved error handling with `Result` propagation and logging.
+    - Unified static (`TagDefinition`) and dynamic (`IndexingFunction`) tag systems using `ScanRole`.
+    - Avoid redundant metadata calls via hash-based early filtering and UUID-based identity tracking.
+- [x] **Location Management**:
+    - **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization.
+    - **Entity-Based Location Management**: Support multiple locations per item (e.g., hard links).
+- [x] **Benchmarks**: Validated performance on large datasets (1M+ files).
+- [x] **Search Control**: Pagination/Limit support for result sets.
 
 ---
 
-## Technical Debt / Refactoring
+## Milestone 2: Search & Query (CLI) (Status: [/])
+Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 
-- [x] **Phase 1: Error Handling & Architecture**:
+- [x] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals.
+- [x] **Projection**: Value extraction via `type:`.
+- [x] **Backend Optimization**:
+    - **Separate `label` column into stored typed columns**:
+        - `label_str` (VARCHAR), `label_int` (BIGINT), `label_double` (DOUBLE), `label_bool` (BOOLEAN).
+    - Remove privileged physical columns (`size`, `mtime`, `rank`) and map them to `label_int`.
+    - **Tag Schema Table**: Dedicated table to map Tag Keys to Data Types (e.g., `size` -> `Int`).
+    - **Identity Verification**: Multi-layer identity matching.
+- [x] **Query Module Decoupling**: Split `src/query.rs` into a dedicated `query/` module (AST, Parser, SQL gen).
+- [x] **Aggregation**: Statistical calculations such as `sum(size:)`, `count(ext:jpg)`.
+- [x] **Comparison Operators**: Scalar, Label, and Stuck comparisons (e.g., `size > 100MB`).
+- [x] **Calculation**: Arithmetic operations within queries, including parentheses support.
+- [x] **Nest & Flatten**:
+    - Multi-key projections and dynamic mapping using the `&:` operator.
+    - Group-based scalar comparisons and filtering (e.g., `parentdir: &: (sum(size:) > 1GB)`).
+- [ ] **Refactoring of Query module**
 
-  - [x] Refactored `ScanEntry` using macros and `TagDefinition` for better DRY and type safety.
+---
 
-  - [x] Improved error handling by replacing silent failures with `Result` propagation and logging.
+## Milestone 3: Tag & Plugin Refinement (Status: [ ])
+Modularizing the core for tag-centricity and extensibility.
 
-  - [x] Unified static (`TagDefinition`) and dynamic (`TagFunction`) tag systems using `ScanRole`.
+- [ ] **Tag-Centric Management**: Centralize `IndexingFunction`, `QueryFunction`, display/extraction rules within `TagType` modules.
+- [ ] **Modular Plugins**: Enable adding/overriding functionality on a per-`TagType` basis via plugins.
+- [ ] **Component Decoupling**:
+    - Decompose `FileManager` in `lib.rs` (extract indexing and plugin management).
 
-  - [x] Generalized file move detection logic to be implementation-agnostic.
+---
 
-- [x] **Phase 1.5: Indexing Optimization & Robustness**:
-  - [x] **Avoid redundant metadata calls**: (Implemented via hash-based early filtering and UUID-based identity tracking).
+## Milestone 4: Tag Edit (Status: [ ])
+Tag-based operations including file movement and functional integration.
 
-- [ ] **Phase 2: Plugin System Optimization**:
+- [ ] **Query-Based Tagging**: Support `ttfm tag <QUERY> <TAG>` to batch-tag items.
+- [ ] **Functional Integration**: Merge `rank` assignment into the generalized tag editing system.
+- [ ] **Virtual Operations (mv)**: Realize file moving/renaming by updating `path` tags.
 
-  - [ ] Optimize WASM instance management to prevent initialization bottlenecks during parallel indexing.
+---
 
-  - [ ] Enhance WASI security by restricting `preopened_dir` to specific scan targets.
+## Milestone 5: Interactive Mode (CLI) (Status: [ ])
+The fdisk-like conversational interface.
 
-- [ ] **Phase 3: Database & Search Refinement**:
+- [ ] **feature**: Support `ttfm -i`.
+    - **REPL Interface**: Interactive interface for managing files and tags.
+    - **Continuous Flow**: Operation results scroll smoothly upward for iterative processing.
 
-  - [ ] Support comparison operators (e.g., `size > 100`) in `QueryParser` and `TagFunction`.
+---
 
-  - [ ] Standardize error messages for invalid queries.
+## Milestone 6: GUI Prototype (Status: [ ])
+Desktop experience with asynchronous integration.
 
-- [ ] **Identity & Location Management**:
-  - [x] **Abolish "Move" logic**: Replace explicit move detection with static location set synchronization to naturally handle hard links.
-  - [ ] **Multi-Layer Identity Verification**: Support identity matching using FileID, Hash (MD5/SHA256), or Name+Size+Mtime heuristics.
-  - [ ] **Online File Support**: Integrate `RemoteID` (ETag/VersionID) into the location identity model.
-  - [ ] **Split & Merge Commands**: Implement `ttfm split` to separate multi-location items and `ttfm merge` to combine identical entities.
+- [ ] **Relm4/GTK4 Implementation**:
+    - **Project Structure**: `src/bin/gui.rs`.
+    - **UI Design**: Search bar, Result Table, Indexing Progress Bar.
+    - **Async Integration**: Responsive UI with background indexing/searching threads.
 
-- [x] **Benchmark**: Validate performance on extreme datasets (1M+ files).
+---
 
-- [ ] **Test Coverage**: Add more edge cases for Windows paths and complex boolean logic.
+## Milestone 7: Windows Support (Status: [ ])
+Core compatibility and native integration for Windows environments.
+
+### CLI Support
+- [ ] **Terminal Integration**: Optimize console output (UTF-8), colors, and input handling for PowerShell and CMD.
+- [ ] **Native Path Handling**: Robust handling and autocompletion of Windows-style paths (`C:\...`) in CLI.
+
+### GUI Support
+- [ ] **Windows Native UI**: Optimize GTK4/Relm4 window decorations, font rendering, and High DPI support on Windows.
+- [ ] **System Integration**: Integration with Windows desktop notifications, tray icons, and Shell extensions.
+
+### Common & Infrastructure
+- [ ] **File System Events**: Implement Windows-specific file system monitoring (e.g., `ReadDirectoryChangesW`).
+- [ ] **Packaging**: Establish reliable build and signing pipelines for Windows binaries (`.exe`, `.msi`).
+
+---
+
+## MileStone X: Future Backlog (Status: [ ])
+Remaining features, optimizations, and long-term vision.
+
+### Features & Operations
+- [ ] **Advanced Indexing**: Incremental indexing (watch mode) and Content indexing.
+- [ ] **Open Operations**: Support `ttfm open <QUERY>` with system-default apps.
+- [ ] **Item Operations**: `split` (separate multi-location items) and `merge` (combine entities).
+- [ ] **Remote Support**: Integrate `RemoteID` (ETag/VersionID) for online files.
+
+### Search & UI Enhancements
+- [ ] **Sorting**: Sort results by Size, Date Modified, or Name.
+- [ ] **Output Formats**: Support JSON output.
+- [ ] **Rank Display Scaling**: Decimal representation of BigInt ranks.
+- [ ] **UI/UX Improvements**:
+    - Tab completion (CLI) and Search Suggestions (GUI).
+    - Enhanced Help: Syntax examples in `--help` and detailed Query syntax guide.
+- [ ] **Query Strictness**: Investigate implementing tag existence verification in `lens_resolver` to improve query strictness and detect typos.
+
+### System & Maintenance
+- [ ] **Plugin System Optimization**:
+    - WASM instance management optimization (parallel initialization).
+    - WASI security (restricting `preopened_dir`).
+    - Conditional Plugin Updates: Version-aware overwriting of default plugins.
+- [ ] **Identity Matching**: Enhanced heuristics using Hash (MD5/SHA256).
+- [ ] **Observability**: Async error visualization for background cache workers.
+- [ ] **Indexing Performance Improvements**:
+    - Further optimize parallel scanning and metadata extraction for massive directories.
+    - Investigate more efficient memory management during high-concurrency indexing.
+    - Explore batch insertion strategies to consolidate data before writing to the database to improve I/O throughput.
+- [ ] **Test Coverage**: Windows paths and complex boolean logic edge cases.
+- [ ] **Optimization Trade-offs**: Directory optimization to reduce metadata calls (scalability target: 100M+ files).
+
