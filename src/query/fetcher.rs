@@ -1,19 +1,10 @@
 use crate::query::lens_resolver::Resolver;
-use crate::query::sql::{BuildPick, PickNode};
+use crate::query::sql::PickNode;
 use crate::response::{RawTagRow, SearchResult};
 use crate::types::{ItemId, ItemKind, SType};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// 検索結果の抽出（Pick）計画。
-#[derive(Debug, Clone)]
-pub struct PickPlan {
-    /// 候補となるアイテムの ID と本来の優先度を取得するための SQL。
-    pub select_sql: sea_query::SelectStatement,
-    /// すでに抽出された候補 ID のリスト。
-    pub candidate_ids: Vec<i64>,
-}
 
 /// クエリに基づきデータベースからデータを取得（Fetch）を担当する。
 pub struct Fetcher<'a> {
@@ -24,43 +15,6 @@ pub struct Fetcher<'a> {
 impl<'a> Fetcher<'a> {
     pub fn new(resolver: &'a Resolver, conn: &'a duckdb::Connection) -> Self {
         Self { resolver, conn }
-    }
-
-    /// 合致するアイテムの ID と Rank を抽出する計画を立て、実行します。
-    pub fn pick(
-        &self,
-        offset: Option<usize>,
-        limit: Option<usize>,
-    ) -> Result<PickPlan> {
-        use sea_query::{Expr, Order};
-
-        let resolved = &self.resolver.resolved_query;
-
-        // 1. SQL 構築
-        let pick_node = crate::query::sql::PickNode::new(resolved);
-        let mut select_sql = pick_node.build_pick();
-
-        // 検索仕様に基づき Rank と ItemId で降順ソート
-        let rank_col = self.resolver.lens().resolve_col(SType::Rank)?;
-        let id_col = self.resolver.lens().resolve_col(SType::ItemId)?;
-
-        select_sql.order_by_expr(Expr::col(rank_col).into(), Order::Desc);
-        select_sql.order_by_expr(Expr::col(id_col).into(), Order::Desc);
-
-        if let Some(o) = offset {
-            select_sql.offset(o as u64);
-        }
-        if let Some(l) = limit {
-            select_sql.limit(l as u64);
-        }
-
-        // 2. DB 実行して ID を抽出
-        let candidate_ids = fetch_ids(self.conn, &select_sql)?;
-
-        Ok(PickPlan {
-            select_sql,
-            candidate_ids,
-        })
     }
 
     /// クエリの種別を ResolvedNode の構造から判断し、適切な結果を返す単一エントリポイント。
@@ -361,9 +315,9 @@ mod tests {
             crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
-        let plan = fetcher.pick(None, None).unwrap();
-
-        assert_eq!(plan.candidate_ids, vec![1]);
+        let results = fetcher.fetch(10, 0).unwrap();
+        let ids: Vec<_> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![crate::types::ItemId::Stored(1)]);
     }
 
     #[test]

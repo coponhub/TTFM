@@ -155,15 +155,16 @@ fn test_calculation_nvalue_label_groups() {
     let q = r#"(((parentdir: &: count(extension:rs)) / (parentdir: &: count())) * 10) :> 5"#;
     let resolver = Resolver::new(q).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
-    let plan = fetcher.pick(None, None).unwrap();
-    assert_eq!(
-        plan.candidate_ids,
-        vec![1, 2, 3, 4],
-        "Only items from src/ should be picked"
-    );
-
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
-    assert_eq!(results.len(), 4, "Should return 4 items from src/");
+    let mut ids: Vec<i64> = results
+        .iter()
+        .filter_map(|r| match r.id {
+            ttfm::types::ItemId::Stored(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2, 3, 4], "Only items from src/ should be picked");
     assert!(
         !has_item_tags(&results),
         "Should return items, not label groups"
@@ -221,14 +222,16 @@ fn test_calculation_nvalue_gt_zero() {
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 0"#;
     let resolver = Resolver::new(q).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
-    let plan = fetcher.pick(None, None).unwrap();
-    assert_eq!(
-        plan.candidate_ids,
-        vec![1, 2, 3, 4, 5, 6, 7, 8],
-        "All items should be picked"
-    );
-
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
+    let mut ids: Vec<i64> = results
+        .iter()
+        .filter_map(|r| match r.id {
+            ttfm::types::ItemId::Stored(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7, 8], "All items should be picked");
     assert_eq!(results.len(), 8, "Should return all 8 items");
     assert!(
         !has_item_tags(&results),
