@@ -2,7 +2,8 @@ use super::{
     apply_arithmetic_agg, apply_arithmetic_op, build_agg_calc_eav_expr,
     build_agg_calc_expr, build_agg_operand_eav_expr,
     build_aggregation_context_for_operand, build_calculation_eav_expr,
-    build_calculation_expr, build_nest_pivot_cte, build_nvalue_cte,
+    build_calculation_expr, build_nest_pivot_cte, build_nest_pivot_cte_no_agg,
+    build_nvalue_cte,
     build_nvalue_cte_nest, build_nvalue_standalone_subquery, build_pick,
     label_to_simple_expr, label_to_unit_aware_expr, wrap_to_item_ids,
     AggregationContext, BuildPick, NestContext, PickNode,
@@ -912,10 +913,10 @@ pub(super) fn nest(
         .len()
         > 1
     {
-        let agg_ctx = pick
-            .agg_ctx()
-            .expect("AggregationContext required for pivot CTE");
-        let pivot_q = build_nest_pivot_cte(proj_operands, None, agg_ctx);
+        let pivot_q = match pick.agg_ctx() {
+            Some(agg_ctx) => build_nest_pivot_cte(proj_operands, None, agg_ctx),
+            None => build_nest_pivot_cte_no_agg(proj_operands),
+        };
         let pivot_cte = CommonTableExpression::new()
             .query(pivot_q)
             .table_name(Pivot)

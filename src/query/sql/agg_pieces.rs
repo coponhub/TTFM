@@ -1,8 +1,8 @@
 use super::{
-    apply_arithmetic_agg, apply_arithmetic_op, build_resolved_literal_expr,
-    build_storage_column_expr, build_tag_value_agg_expr, fold_simple_operand,
-    label_to_simple_expr, subquery, wrap_to_item_ids, AggregationContext,
-    NestContext,
+    apply_arithmetic_agg, apply_arithmetic_op, build_calculation_eav_expr,
+    build_resolved_literal_expr, build_storage_column_expr,
+    build_tag_value_agg_expr, fold_simple_operand, label_to_simple_expr,
+    subquery, wrap_to_item_ids, AggregationContext, NestContext,
 };
 use crate::db::{Col, CustomFunc, Pronoun::*, Tbl};
 use crate::query::ast::ArithmeticAggOp;
@@ -1027,11 +1027,15 @@ fn build_nvalue_cte_inner(
 // ── Nest / Pivot SQL ───────────────────────────────────────────────────────
 
 /// 多キー Nest の Pivot CTE を構築します。
-pub(super) fn build_nest_pivot_cte(
+/// Pivot CTE の stmt 初期化とキーループ処理を共通化するヘルパー。
+/// Calculation キーの式生成だけをクロージャで差し替え可能にする。
+/// 戻り値: (構築途中の stmt, type_filters)
+fn build_pivot_keys_into_stmt(
     keys: &[ResolvedOperand],
-    nvalue: Option<&ResolvedOperand>,
-    agg_ctx: &AggregationContext,
-) -> SelectStatement {
+    calc_expr_fn: impl Fn(
+        &crate::query::lens_resolver::ResolvedCalculationNode,
+    ) -> SimpleExpr,
+) -> (SelectStatement, std::collections::HashSet<String>) {
     let mut stmt = Query::select();
     stmt.column(Col::ItemId);
     stmt.expr_as(CustomFunc::any_value(Expr::col(Col::Rank)), Col::Rank);
@@ -1072,7 +1076,7 @@ pub(super) fn build_nest_pivot_cte(
             ResolvedOperand::Calculation(calc) => {
                 collect_tag_types_from_operand(&calc.left, &mut type_filters);
                 collect_tag_types_from_operand(&calc.right, &mut type_filters);
-                let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
+                let calc_expr = calc_expr_fn(calc);
                 stmt.expr_as(
                     calc_expr.clone(),
                     Alias::new(&format!("key{}", i)),
@@ -1083,11 +1087,41 @@ pub(super) fn build_nest_pivot_cte(
         }
     }
 
+    (stmt, type_filters)
+}
+
+/// 集約あり多キー Nest 用の Pivot CTE を構築します。
+pub(super) fn build_nest_pivot_cte(
+    keys: &[ResolvedOperand],
+    nvalue: Option<&ResolvedOperand>,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(keys, |calc| {
+        build_agg_calc_eav_expr(calc, agg_ctx)
+    });
+
     if let Some(nv) = nvalue {
         let nv_expr = build_agg_operand_eav_expr(nv, agg_ctx);
         stmt.expr_as(nv_expr, Nvalue);
     } else if !type_filters.is_empty() {
-        stmt.and_where(Expr::col(Col::Type).is_in(type_filters.clone()));
+        stmt.and_where(Expr::col(Col::Type).is_in(type_filters));
+    }
+
+    stmt.group_by_col(Col::ItemId);
+    stmt
+}
+
+/// 集約なし多キー Nest 用の Pivot CTE を構築します。
+/// `agg_ctx` 不要。Calculation キーには `build_calculation_eav_expr` を使用します。
+pub(super) fn build_nest_pivot_cte_no_agg(
+    keys: &[ResolvedOperand],
+) -> SelectStatement {
+    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(keys, |calc| {
+        build_calculation_eav_expr(calc)
+    });
+
+    if !type_filters.is_empty() {
+        stmt.and_where(Expr::col(Col::Type).is_in(type_filters));
     }
 
     stmt.group_by_col(Col::ItemId);

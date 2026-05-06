@@ -3,6 +3,8 @@ use super::{
     default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
     inject_path_scope, scope_path_from_dir,
 };
+use tempfile::tempdir;
+use ttfm::FileManager;
 
 // ──────────────────────────────────────────────
 // 全E2Eテストケースの定義
@@ -2549,4 +2551,44 @@ fn test_nest_query_vs_calc_resolves() {
             result.err().map(|e| e.to_string()).unwrap_or_default()
         );
     }
+}
+
+/// スコープなしで `parentdir: &: extension:` を実行する。
+/// Bug 1 が存在する場合はここで panic する。
+#[test]
+fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let dir1 = root.join("dir1");
+    let dir2 = root.join("dir2");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::create_dir_all(&dir2)?;
+    std::fs::write(dir1.join("a.rs"), "hello")?;
+    std::fs::write(dir1.join("b.txt"), "world")?;
+    std::fs::write(dir2.join("c.rs"), "foo")?;
+
+    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res = fm.search("parentdir: &: extension:", ttfm::SearchOptions::default())?;
+    assert!(!res.results.is_empty());
+    Ok(())
+}
+
+/// スコープなしで `parentdir: &: (size: * 2)` を実行する。
+/// Bug 1 が存在する場合はここで panic する。
+#[test]
+fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let dir1 = root.join("dir1");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::write(dir1.join("a.rs"), "hello")?;
+
+    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    let res = fm.search("parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
+    assert!(!res.results.is_empty());
+    Ok(())
 }
