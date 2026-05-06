@@ -1,4 +1,4 @@
-use super::default_scope;
+use super::{default_scope, inject_path_scope};
 use anyhow::Result;
 use tempfile::tempdir;
 use ttfm::FileManager;
@@ -17,6 +17,21 @@ define_cases! {
         format_query: default_scope,
         query: "extension:rs & (size: * 2)",
         assert: |_res, _dir| Ok(()),
+    },
+    label_calc_grouped_set_arith: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), vec![0u8; 100])?;
+            std::fs::write(dir.join("b.txt"), vec![0u8; 200])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "(extension:rs & size:) * 2",
+        assert: |res, _dir| {
+            assert!(!res.results.is_empty(), "should return results");
+            assert_eq!(res.results[0].name, "200", "size(100) * 2 = 200");
+            Ok(())
+        },
     },
     label_calc_arith_units: {
         setup: |dir| {

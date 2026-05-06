@@ -445,18 +445,21 @@ fn strip_filters_from_operand(
 ) -> Operand {
     match operand {
         Operand::Query(node) => {
-            if let QueryNode::And(nodes) = *node {
-                let (filter_nodes, core_nodes): (Vec<_>, Vec<_>) =
-                    nodes.into_iter().partition(|n| !returns_projection(n));
-                filters.extend(filter_nodes);
-                match core_nodes.len() {
-                    1 => Operand::Query(Box::new(
-                        core_nodes.into_iter().next().unwrap(),
-                    )),
-                    _ => Operand::Query(Box::new(QueryNode::And(core_nodes))),
-                }
-            } else {
-                Operand::Query(node)
+            let nodes = match *node {
+                QueryNode::And(nodes) => nodes,
+                QueryNode::Projection(op) => return op,
+                other => return Operand::Query(Box::new(other)),
+            };
+            let (filter_nodes, core_nodes): (Vec<_>, Vec<_>) =
+                nodes.into_iter().partition(|n| !returns_projection(n));
+            filters.extend(filter_nodes);
+            let core = match core_nodes.len() {
+                1 => core_nodes.into_iter().next().unwrap(),
+                _ => return Operand::Query(Box::new(QueryNode::And(core_nodes))),
+            };
+            match core {
+                QueryNode::Projection(op) => op,
+                other => Operand::Query(Box::new(other)),
             }
         }
         Operand::Calculation(calc) => {

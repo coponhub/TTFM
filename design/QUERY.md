@@ -156,8 +156,8 @@
                 - `size: - 2 & project:A` NG
                 - `1 - 2` OK
                 - `sum(size: - 2B)` OK
-                - `sum(size: - 10TB :> 10TB)` NG
-                - `sum((size: - 10TB) :> 10TB)` OK
+                - `sum((size: - 10TB :> 10TB) & size:)` NG
+                - `sum(((size: - 10TB) :> 10TB) & size:)` OK
                 - `sum(size: - 2TB) > 10TB` OK 
                 - `sum(size:) == avg(size:) * count(size:)` NG
                 - `sum(size:) == (avg(size:) * count(size:))` OK
