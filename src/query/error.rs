@@ -1,6 +1,9 @@
 // Error messages for the query module
 
-use crate::query::ast::{AggregationNode, ArithmeticAggOp, Operand, QueryNode};
+use crate::query::ast::{
+    AggregationNode, ArithmeticAggOp, ComparisonNode, ComparisonOp, Operand,
+    QueryNode,
+};
 
 // =========================================================================
 // Parser Errors
@@ -145,14 +148,14 @@ pub fn invalid_set_operation_operand_msg(
     let mut msg = if !left_is_set && !right_is_set {
         // 両方がスカラーの場合
         format!(
-            "Set operations between scalars are not implemented.\n\
+            "Set operations between scalars are invalid.\n\
              Set operation '{}' contains only scalar values ({}).",
             op, operand_type
         )
     } else {
         // 片方がスカラー、片方が集合の場合
         format!(
-            "Set operations between sets and scalars are not implemented.\n\
+            "Set operations between sets and scalars are invalid.\n\
              Set operation '{}' contains a scalar value ({}).",
             op, operand_type
         )
@@ -543,6 +546,55 @@ pub fn mismatched_arithmetic_keys(
         ARITHMETIC_MISMATCHED_KEYS,
         left_key,
         right_key
+    )
+}
+
+/// &: 右辺の Comparison が nvalue フィルタとして有効かを判定する。
+/// label 演算子 (:>, :< など) を使い、かつ投影(TypeRef)を含む場合は無効（アイテム集合を返す）。
+pub fn comparison_is_valid_nest_rhs(cmp: &ComparisonNode) -> bool {
+    let has_label_op = cmp
+        .rest
+        .iter()
+        .any(|(op, _)| matches!(op, ComparisonOp::Label(_)));
+    if !has_label_op {
+        return true;
+    }
+    operand_is_agg_or_literal(&cmp.first)
+        && cmp
+            .rest
+            .iter()
+            .all(|(_, op)| operand_is_agg_or_literal(op))
+}
+
+fn operand_is_agg_or_literal(operand: &Operand) -> bool {
+    match operand {
+        Operand::Literal(_) | Operand::Aggregation(_) => true,
+        Operand::Calculation(c) => {
+            operand_is_agg_or_literal(&c.left)
+                && operand_is_agg_or_literal(&c.right)
+        }
+        Operand::Query(q) => match q.as_ref() {
+            QueryNode::Projection(op) => operand_is_agg_or_literal(op),
+            QueryNode::Aggregation(_) => true,
+            _ => false,
+        },
+        Operand::TypeRef(_) => false,
+    }
+}
+
+pub fn invalid_nest_rhs_label_comparison() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Invalid right side of '&:': label comparison (':>', ':<', etc.) involving projections \
+         returns an item set, not a nvalue. \
+         Use a scalar comparison (e.g., count(rs) > 5) or an aggregation."
+    )
+}
+
+pub fn invalid_aggregation_inner_item_set() -> anyhow::Error {
+    anyhow::anyhow!(
+        "Invalid argument to aggregation: the inner expression is a label comparison (':>', ':<', etc.) \
+         which returns an item set, not a numeric projection. \
+         Aggregation functions (sum, avg, etc.) require a numeric projection (e.g., size:)."
     )
 }
 

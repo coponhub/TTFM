@@ -81,7 +81,7 @@ fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains(
-            "Set operations between sets and scalars are not implemented"
+            "Set operations between sets and scalars are invalid"
         ),
         "Error message should indicate invalid set operation: {}",
         err_msg
@@ -115,7 +115,7 @@ fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains(
-            "Set operations between sets and scalars are not implemented"
+            "Set operations between sets and scalars are invalid"
         ),
         "Error message should indicate invalid set operation: {}",
         err_msg
@@ -149,7 +149,7 @@ fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains(
-            "Set operations between sets and scalars are not implemented"
+            "Set operations between sets and scalars are invalid"
         ),
         "Error message should indicate invalid set operation: {}",
         err_msg
@@ -184,7 +184,7 @@ fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains(
-            "Set operations between sets and scalars are not implemented"
+            "Set operations between sets and scalars are invalid"
         ),
         "Error message should indicate invalid set operation: {}",
         err_msg
@@ -250,7 +250,7 @@ fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Set operations between scalars are not implemented"),
+        err_msg.contains("Set operations between scalars are invalid"),
         "Error message should indicate scalar-to-scalar set operation: {}",
         err_msg
     );
@@ -323,4 +323,55 @@ fn test_parse_nest_in_comparison_left() {
     } else {
         panic!("Expected Count Aggregation, got {:?}", node);
     }
+}
+
+#[test]
+fn test_sum_with_label_comparison_inner_is_error() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+
+    // バグ1: sum() の内側に label comparison → パニックではなくエラー
+    let queries = [
+        "sum((size: * 2) :> 1000)",
+        "sum(size: > (count(extension:rs) * 2))",
+        "sum((size: * 2) :> (count(extension:rs) + 1))",
+        "parentdir: &: ((size: * 2) :> 1000)",
+    ];
+    for q in &queries {
+        let result = fm.search(q, Default::default());
+        assert!(result.is_err(), "'{q}' should return an error, not panic");
+    }
+}
+
+#[test]
+fn test_set_operation_error_message_says_invalid() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // バグ4: エラーメッセージが "not implemented" ではなく "invalid"
+    let queries = [
+        "(extension:rs & count()) + 1",
+        "type:file & sum(size:)",
+        "sum(size:) & count(path:)",
+    ];
+    for q in &queries {
+        let result = fm.search(q, Default::default());
+        assert!(result.is_err(), "'{q}' should return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            !msg.contains("not implemented"),
+            "Error message for '{q}' should not say 'not implemented': {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("invalid"),
+            "Error message for '{q}' should say 'invalid': {msg}"
+        );
+    }
+    Ok(())
 }

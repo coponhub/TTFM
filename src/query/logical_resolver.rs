@@ -758,6 +758,9 @@ fn expand_nest(
 
     let result = match right_with_filter {
         QueryNode::Comparison(cmp) => {
+            if !error::comparison_is_valid_nest_rhs(&cmp) {
+                return Err(error::invalid_nest_rhs_label_comparison());
+            }
             expand_nest_comparison(left.clone(), cmp)?
         }
         QueryNode::And(mut nodes) => {
@@ -1067,6 +1070,9 @@ fn expand_aggregation(
         }
         AggregationNode::Arithmetic { op, inner } => {
             let expanded = expand_query_node(schema, *inner)?;
+            if matches!(expanded, QueryNode::Comparison(_)) {
+                return Err(error::invalid_aggregation_inner_item_set());
+            }
             Ok(AggregationNode::Arithmetic {
                 op,
                 inner: Box::new(expanded),
