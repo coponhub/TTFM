@@ -50,7 +50,7 @@ Initial foundation, core indexing infrastructure, and schema reorganization.
 
 ---
 
-## Milestone 2: Search & Query (CLI) (Status: [/])
+## Milestone 2: Search & Query (CLI) (Status: [x])
 Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 
 - [x] **Typed Literals**: Support for Float (e.g., `1.23`) and Date (e.g., `2024-01-01`) literals.
@@ -68,11 +68,11 @@ Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 - [x] **Nest & Flatten**:
     - Multi-key projections and dynamic mapping using the `&:` operator.
     - Group-based scalar comparisons and filtering (e.g., `parentdir: &: (sum(size:) > 1GB)`).
-- [ ] **Refactoring of Query module**
+- [x] **Refactoring of Query module**
 
 ---
 
-## Milestone 3: Tag & Plugin Refinement (Status: [ ])
+## Milestone 3: Tag & Plugin Refinement (Status: [/])
 Modularizing the core for tag-centricity and extensibility.
 
 - [ ] **Tag-Centric Management**: Centralize `IndexingFunction`, `QueryFunction`, display/extraction rules within `TagType` modules.
