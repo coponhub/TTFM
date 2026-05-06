@@ -6,6 +6,7 @@ mod nest;
 mod pick;
 mod precompute;
 mod scalar;
+pub(crate) mod schema_pieces;
 mod util;
 use agg_pieces::{
     agg_expr, build_agg, build_agg_calc_eav_expr, build_agg_calc_expr,

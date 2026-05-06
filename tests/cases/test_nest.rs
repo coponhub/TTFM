@@ -2592,3 +2592,31 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     assert!(!res.results.is_empty());
     Ok(())
 }
+
+/// `type: & parentdir:` を実行する。
+/// Bug 2 が存在する場合は "cannot determine label type from operand 0" エラーになる。
+#[test]
+fn test_label_set_op_column_storage() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let dir1 = root.join("dir1");
+    let dir2 = root.join("dir2");
+    std::fs::create_dir_all(&dir1)?;
+    std::fs::create_dir_all(&dir2)?;
+    std::fs::write(dir1.join("a.rs"), "hello")?;
+    std::fs::write(dir1.join("b.txt"), "world")?;
+    std::fs::write(dir2.join("c.rs"), "foo")?;
+
+    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
+    fm.index_directory(root, None::<&fn(usize)>, false)?;
+
+    // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
+    let res = fm.search("type: & parentdir:", ttfm::SearchOptions::default())?;
+    assert!(res.results.is_empty(), "type: & parentdir: should be empty");
+
+    // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
+    let res = fm.search("type: | extension:", ttfm::SearchOptions::default())?;
+    assert!(!res.results.is_empty(), "type: | extension: should return labels from both");
+
+    Ok(())
+}

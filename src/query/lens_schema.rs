@@ -21,6 +21,26 @@ pub enum StorageMapping {
 }
 
 impl StorageMapping {
+    /// このストレージマッピングに基づき、ラベル値を SELECT する SQL を生成します。
+    /// Virtual の場合は None を返します。
+    pub fn to_label_select(
+        &self,
+        ids_sql: sea_query::SelectStatement,
+    ) -> Option<sea_query::SelectStatement> {
+        use crate::query::sql::schema_pieces::{
+            build_lens_select_column, build_lens_select_row_tag,
+        };
+        match self {
+            StorageMapping::Column(col) => {
+                Some(build_lens_select_column(*col, ids_sql))
+            }
+            StorageMapping::RowTag { column, tag_type } => {
+                Some(build_lens_select_row_tag(*column, tag_type, ids_sql))
+            }
+            StorageMapping::Virtual => None,
+        }
+    }
+
     /// このストレージマッピングに基づき、指定された演算子とラベルに対する SQL 条件を生成します。
     pub fn to_condition(
         &self,

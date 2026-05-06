@@ -84,15 +84,12 @@ pub(super) fn filter(
 
 // ── LabelSetOp helpers ─────────────────────────────────────────────────────
 
-pub(super) fn extract_primary_label_tag_type_from_node(
+pub(super) fn extract_primary_storage_from_node(
     node: &ResolvedNode,
-) -> Option<(String, Col)> {
+) -> Option<StorageMapping> {
     node.walk().into_iter().find_map(|n| match n {
         ResolvedNode::Nest { keys, .. } => match keys.first()? {
-            ResolvedOperand::TagRef {
-                storage: StorageMapping::RowTag { tag_type, column },
-                ..
-            } => Some((tag_type.clone(), *column)),
+            ResolvedOperand::TagRef { storage, .. } => Some(storage.clone()),
             _ => None,
         },
         _ => None,
@@ -1270,44 +1267,30 @@ fn label_set_op_sql(
             if let Some(keys) = extract_multi_key_nest_operands(operand) {
                 build_multi_key_labels_sql(&keys, ids_sql)?
             } else {
-                let (label_tag_type, label_col) =
-                    extract_primary_label_tag_type_from_node(operand).ok_or_else(|| {
+                let storage =
+                    extract_primary_storage_from_node(operand).ok_or_else(|| {
                         anyhow::anyhow!(
                             "label_set_op_sql: cannot determine label type from operand {}", i
                         )
                     })?;
-                let cast_expr = Expr::cust_with_exprs(
-                    "CAST($1 AS VARCHAR)",
-                    vec![Expr::col(label_col).into()],
-                );
-                let mut s = Query::select();
-                s.expr_as(cast_expr, Cast)
-                    .column(Col::ItemId)
-                    .from(Tbl::OneView)
-                    .and_where(Expr::col(Col::Type).eq(label_tag_type.as_str()))
-                    .and_where(Expr::col(label_col).is_not_null())
-                    .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
-                s
+                storage.to_label_select(ids_sql).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
+                    )
+                })?
             }
         } else {
-            let (label_tag_type, label_col) =
-                extract_primary_label_tag_type_from_node(operand).ok_or_else(|| {
+            let storage =
+                extract_primary_storage_from_node(operand).ok_or_else(|| {
                     anyhow::anyhow!(
                         "label_set_op_sql: cannot determine label type from operand {}", i
                     )
                 })?;
-            let cast_expr = Expr::cust_with_exprs(
-                "CAST($1 AS VARCHAR)",
-                vec![Expr::col(label_col).into()],
-            );
-            let mut s = Query::select();
-            s.expr_as(cast_expr, Cast)
-                .column(Col::ItemId)
-                .from(Tbl::OneView)
-                .and_where(Expr::col(Col::Type).eq(label_tag_type.as_str()))
-                .and_where(Expr::col(label_col).is_not_null())
-                .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
-            s
+            storage.to_label_select(ids_sql).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
+                )
+            })?
         };
 
         with_clause.cte(
