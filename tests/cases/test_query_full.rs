@@ -164,7 +164,11 @@ fn test_calculation_nvalue_label_groups() {
         })
         .collect();
     ids.sort();
-    assert_eq!(ids, vec![1, 2, 3, 4], "Only items from src/ should be picked");
+    assert_eq!(
+        ids,
+        vec![1, 2, 3, 4],
+        "Only items from src/ should be picked"
+    );
     assert!(
         !has_item_tags(&results),
         "Should return items, not label groups"
@@ -231,7 +235,11 @@ fn test_calculation_nvalue_gt_zero() {
         })
         .collect();
     ids.sort();
-    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 7, 8], "All items should be picked");
+    assert_eq!(
+        ids,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "All items should be picked"
+    );
     assert_eq!(results.len(), 8, "Should return all 8 items");
     assert!(
         !has_item_tags(&results),

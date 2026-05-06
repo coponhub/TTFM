@@ -11,10 +11,9 @@ mod util;
 use agg_pieces::{
     agg_expr, build_agg, build_agg_calc_eav_expr, build_agg_calc_expr,
     build_agg_calc_subquery, build_agg_calc_subquery_nest, build_agg_nest,
-    build_agg_operand_eav_expr, build_nest_pivot_cte, build_nest_pivot_cte_no_agg,
-    build_nvalue_cte,
-    build_nvalue_cte_nest, build_nvalue_standalone_subquery,
-    resolve_count_target,
+    build_agg_operand_eav_expr, build_nest_pivot_cte,
+    build_nest_pivot_cte_no_agg, build_nvalue_cte, build_nvalue_cte_nest,
+    build_nvalue_standalone_subquery, resolve_count_target,
 };
 #[cfg(test)]
 use agg_pieces::{

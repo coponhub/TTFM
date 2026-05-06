@@ -2,10 +2,11 @@ use crate::db::Col;
 use crate::query::ast::{ComparisonOp, QueryNode};
 use crate::query::functions::*;
 use crate::query::logical_resolver::{LogicalSchema, LogicalType};
+use crate::query::sql::schema_pieces;
 use crate::query::QueryFunction;
 use crate::types::{Label, LabelValue, SType, TagType};
 use duckdb::types::Value;
-use sea_query::{BinOper, Condition, Expr, SimpleExpr};
+use sea_query::{BinOper, Condition, SimpleExpr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -63,17 +64,18 @@ impl StorageMapping {
 }
 
 pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
-    let mut tag_op = BinOper::Equal;
-    if tag_type.contains('*')
+    let tag_op = if tag_type.contains('*')
         || tag_type.contains('?')
         || tag_type.contains('[')
     {
-        tag_op = BinOper::Custom("GLOB");
-    }
-    Expr::col(crate::db::Col::Type).binary(tag_op, tag_type)
+        BinOper::Custom("GLOB")
+    } else {
+        BinOper::Equal
+    };
+    schema_pieces::type_filter(tag_op, tag_type)
 }
 
-pub(crate) fn build_column_condition(
+fn build_column_condition(
     col: Col,
     op: ComparisonOp,
     label: &Label,
@@ -89,27 +91,24 @@ pub(crate) fn build_column_condition(
         || col == Col::LabelBool;
 
     match label.value() {
-        crate::types::LabelValue::Integer(i) => {
+        LabelValue::Integer(i) => {
             build_int_condition(col, bin_op, i, is_generic_row_col)
         }
-        crate::types::LabelValue::Boolean(b) => build_str_condition(
+        LabelValue::Boolean(b) => build_str_condition(
             col,
             bin_op,
             &b.to_string(),
             sql_type,
             is_generic_row_col,
         ),
-        crate::types::LabelValue::Double(bits) => Condition::any().add(
-            Expr::col(Col::LabelDouble)
-                .binary(bin_op, Expr::val(f64::from_bits(bits))),
-        ),
-        crate::types::LabelValue::Null => {
-            Condition::any().add(Expr::col(Col::LabelStr).is_null())
+        LabelValue::Double(bits) => {
+            schema_pieces::build_double_condition(bin_op, bits)
         }
-        crate::types::LabelValue::String(s) => {
+        LabelValue::Null => schema_pieces::build_null_condition(),
+        LabelValue::String(s) => {
             build_str_condition(col, bin_op, &s, sql_type, is_generic_row_col)
         }
-        crate::types::LabelValue::Literal(s) => {
+        LabelValue::Literal(s) => {
             build_literal_condition(col, bin_op, &s, is_generic_row_col)
         }
     }
@@ -123,14 +122,16 @@ pub(crate) fn build_int_condition(
 ) -> Condition {
     let mut cond = Condition::any();
     if col != Col::LabelStr {
-        cond = cond.add(Expr::col(col).binary(op, Expr::val(val)));
+        cond = cond.add(schema_pieces::col_cmp_i64(col, op, val));
     }
     if is_generic {
-        cond = cond
-            .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(val as f64)));
+        cond = cond.add(schema_pieces::col_cmp_f64(
+            Col::LabelDouble,
+            op,
+            val as f64,
+        ));
         if col == Col::LabelStr {
-            cond =
-                cond.add(Expr::col(Col::LabelInt).binary(op, Expr::val(val)));
+            cond = cond.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, val));
         }
     }
     cond
@@ -153,7 +154,7 @@ pub(crate) fn build_str_condition(
 
     [string_cond, generic_conds]
         .into_iter()
-        .flatten() // None を除去
+        .flatten()
         .fold(Condition::any(), |acc, cond| acc.add(cond))
 }
 
@@ -162,7 +163,7 @@ pub(crate) fn check_string_match(
     op: BinOper,
     val: &str,
     sql_type: crate::db::SqlType,
-) -> Option<sea_query::SimpleExpr> {
+) -> Option<SimpleExpr> {
     let is_numeric_field = matches!(
         sql_type,
         crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE
@@ -180,7 +181,7 @@ pub(crate) fn check_string_match(
         (val.to_string(), op)
     };
 
-    Some(Expr::col(col).binary(effective_op, val_str))
+    Some(schema_pieces::col_cmp_str(col, effective_op, &val_str))
 }
 
 pub(crate) fn try_parse_generic_value_as_cond(
@@ -188,24 +189,28 @@ pub(crate) fn try_parse_generic_value_as_cond(
     op: BinOper,
     val: &str,
 ) -> Option<Condition> {
-    // Try Integer -> Float -> Boolean chain
     val.parse::<i64>()
         .ok()
         .map(|i| {
             let mut c = Condition::any()
-                .add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)))
-                .add(
-                    Expr::col(Col::LabelDouble).binary(op, Expr::val(i as f64)),
-                );
+                .add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i))
+                .add(schema_pieces::col_cmp_f64(
+                    Col::LabelDouble,
+                    op,
+                    i as f64,
+                ));
             if col == Col::LabelStr {
-                c = c.add(Expr::col(Col::LabelInt).binary(op, Expr::val(i)));
+                c = c.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i));
             }
             c
         })
         .or_else(|| {
             val.parse::<f64>().ok().map(|f| {
-                Condition::any()
-                    .add(Expr::col(Col::LabelDouble).binary(op, Expr::val(f)))
+                Condition::any().add(schema_pieces::col_cmp_f64(
+                    Col::LabelDouble,
+                    op,
+                    f,
+                ))
             })
         })
         .or_else(|| {
@@ -215,8 +220,11 @@ pub(crate) fn try_parse_generic_value_as_cond(
                 _ => None,
             }
             .map(|b| {
-                Condition::any()
-                    .add(Expr::col(Col::LabelBool).binary(op, Expr::val(b)))
+                Condition::any().add(schema_pieces::col_cmp_bool(
+                    Col::LabelBool,
+                    op,
+                    b,
+                ))
             })
         })
 }
@@ -227,7 +235,7 @@ pub(crate) fn build_literal_condition(
     val: &str,
     is_generic: bool,
 ) -> Condition {
-    let literal_cond = Expr::col(col).binary(op, Expr::val(val));
+    let literal_cond = schema_pieces::col_cmp_str(col, op, val);
     let generic_conds = if is_generic {
         try_parse_generic_value_as_cond(col, op, val)
     } else {

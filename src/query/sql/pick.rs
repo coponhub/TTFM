@@ -8,7 +8,7 @@ use super::{
     label_to_unit_aware_expr, needs_aggregation_context, needs_nest_context,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
-use crate::db::{Col, Pronoun::Sub, CustomFunc, QueryResultCol, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, SqlType, Tbl};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,

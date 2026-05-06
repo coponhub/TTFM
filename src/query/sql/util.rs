@@ -3,9 +3,7 @@ use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
-use sea_query::{
-    BinOper, Expr, Func, Query, SelectStatement, SimpleExpr,
-};
+use sea_query::{BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
 use std::collections::HashMap;
 
 /// `SelectStatement` をインライン副問合せ式 (`SimpleExpr`) に変換します。

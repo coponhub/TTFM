@@ -2570,7 +2570,8 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("parentdir: &: extension:", ttfm::SearchOptions::default())?;
+    let res =
+        fm.search("parentdir: &: extension:", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2588,7 +2589,8 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
+    let res =
+        fm.search("parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2611,12 +2613,17 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     fm.index_directory(root, None::<&fn(usize)>, false)?;
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res = fm.search("type: & parentdir:", ttfm::SearchOptions::default())?;
+    let res =
+        fm.search("type: & parentdir:", ttfm::SearchOptions::default())?;
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res = fm.search("type: | extension:", ttfm::SearchOptions::default())?;
-    assert!(!res.results.is_empty(), "type: | extension: should return labels from both");
+    let res =
+        fm.search("type: | extension:", ttfm::SearchOptions::default())?;
+    assert!(
+        !res.results.is_empty(),
+        "type: | extension: should return labels from both"
+    );
 
     Ok(())
 }
