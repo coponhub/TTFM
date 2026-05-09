@@ -455,7 +455,9 @@ fn strip_filters_from_operand(
             filters.extend(filter_nodes);
             let core = match core_nodes.len() {
                 1 => core_nodes.into_iter().next().unwrap(),
-                _ => return Operand::Query(Box::new(QueryNode::And(core_nodes))),
+                _ => {
+                    return Operand::Query(Box::new(QueryNode::And(core_nodes)))
+                }
             };
             match core {
                 QueryNode::Projection(op) => op,

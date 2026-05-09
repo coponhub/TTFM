@@ -560,10 +560,7 @@ pub fn comparison_is_valid_nest_rhs(cmp: &ComparisonNode) -> bool {
         return true;
     }
     operand_is_agg_or_literal(&cmp.first)
-        && cmp
-            .rest
-            .iter()
-            .all(|(_, op)| operand_is_agg_or_literal(op))
+        && cmp.rest.iter().all(|(_, op)| operand_is_agg_or_literal(op))
 }
 
 fn operand_is_agg_or_literal(operand: &Operand) -> bool {

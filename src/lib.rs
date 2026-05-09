@@ -21,6 +21,7 @@ pub mod plugins;
 pub mod query;
 pub mod rank;
 pub mod response;
+pub mod tag;
 mod taggers;
 pub mod types;
 pub mod util;

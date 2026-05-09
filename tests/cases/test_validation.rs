@@ -80,9 +80,7 @@ fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Set operations between sets and scalars are invalid"
-        ),
+        err_msg.contains("Set operations between sets and scalars are invalid"),
         "Error message should indicate invalid set operation: {}",
         err_msg
     );
@@ -114,9 +112,7 @@ fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Set operations between sets and scalars are invalid"
-        ),
+        err_msg.contains("Set operations between sets and scalars are invalid"),
         "Error message should indicate invalid set operation: {}",
         err_msg
     );
@@ -148,9 +144,7 @@ fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Set operations between sets and scalars are invalid"
-        ),
+        err_msg.contains("Set operations between sets and scalars are invalid"),
         "Error message should indicate invalid set operation: {}",
         err_msg
     );
@@ -183,9 +177,7 @@ fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains(
-            "Set operations between sets and scalars are invalid"
-        ),
+        err_msg.contains("Set operations between sets and scalars are invalid"),
         "Error message should indicate invalid set operation: {}",
         err_msg
     );
