@@ -1,5 +1,5 @@
 use crate::types::Rank;
-use crate::FunctionRegistry;
+use crate::tag::TagRegistry;
 use sea_query::{CaseStatement, Condition, SimpleExpr};
 
 /// システムにおける標準的なランク（優先度）の定義。
@@ -27,7 +27,7 @@ impl SystemRank {
 /// * `key_expr` - ランク決定のキーとなる値を持つ式（例: `Content`）
 /// * `default_rank` - 条件に合致しない、またはキーに対応するランクがない場合のデフォルト値
 pub fn build_rank_expr(
-    registry: &FunctionRegistry,
+    registry: &TagRegistry,
     guard_condition: Condition,
     key_expr: impl Into<SimpleExpr>,
     default_rank: Rank,
@@ -36,7 +36,7 @@ pub fn build_rank_expr(
     let mut key_case = CaseStatement::new();
 
     // 1. Registryからランク情報を収集してCASE文を構築
-    for func in registry.all_functions() {
+    for func in registry.all_indexing_functions() {
         let rank = func.default_rank();
         // 0 (デフォルト) 以外の場合のみ明示的にルール化
         if rank != 0 {
@@ -56,9 +56,9 @@ pub fn build_rank_expr(
 
 /// 指定されたタグ名に対応するデフォルトランクを取得します。
 /// CLI (main.rs) 等で、単一のランク値を知りたい場合に使用します。
-pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
+pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
     // Registry内を検索
-    for func in registry.all_functions() {
+    for func in registry.all_indexing_functions() {
         if func.name() == name {
             return func.default_rank();
         }
@@ -104,26 +104,26 @@ mod tests {
         }
     }
 
-    fn create_registry() -> FunctionRegistry {
-        let mut reg = FunctionRegistry::new();
-        reg.register(Box::new(MockFunc {
+    fn create_registry() -> TagRegistry {
+        let mut reg = TagRegistry::new();
+        reg.register_plugin(Box::new(MockFunc {
             name: "high".to_string(),
             rank: 100,
         }));
-        reg.register(Box::new(MockFunc {
+        reg.register_plugin(Box::new(MockFunc {
             name: "low".to_string(),
             rank: 1,
         }));
-        reg.register(Box::new(MockFunc {
+        reg.register_plugin(Box::new(MockFunc {
             name: "zero".to_string(),
             rank: 0,
         }));
         // Add system defaults for testing
-        reg.register(Box::new(MockFunc {
+        reg.register_plugin(Box::new(MockFunc {
             name: "name".to_string(),
             rank: 10,
         }));
-        reg.register(Box::new(MockFunc {
+        reg.register_plugin(Box::new(MockFunc {
             name: "kind".to_string(),
             rank: 5,
         }));

@@ -3,7 +3,7 @@ use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::taggers::TagValue;
 use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
-use crate::FunctionRegistry;
+use crate::tag::TagRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
@@ -17,7 +17,7 @@ use std::path::Path;
 
 pub(crate) fn run_merge(
     conn: &Connection,
-    registry: &FunctionRegistry,
+    registry: &TagRegistry,
     store: &Store,
     results: Vec<TaggingResult>,
     moved: Vec<DynamicRow>,
@@ -79,7 +79,7 @@ pub(crate) fn run_merge(
 
 pub(crate) struct FileEntityMerger<'a> {
     pub(crate) conn: &'a Connection,
-    pub(crate) registry: &'a FunctionRegistry,
+    pub(crate) registry: &'a TagRegistry,
     pub(crate) store: &'a Store,
 }
 
@@ -136,7 +136,7 @@ impl<'a> FileEntityMerger<'a> {
 
 pub(crate) struct LocationMerger<'a> {
     pub(crate) conn: &'a Connection,
-    pub(crate) registry: &'a FunctionRegistry,
+    pub(crate) registry: &'a TagRegistry,
     pub(crate) store: &'a Store,
 }
 
@@ -208,7 +208,7 @@ impl<'a> LocationMerger<'a> {
 
 pub(crate) struct BaseTagMerger<'a> {
     pub(crate) conn: &'a Connection,
-    pub(crate) registry: &'a FunctionRegistry,
+    pub(crate) registry: &'a TagRegistry,
     pub(crate) store: &'a Store,
 }
 
@@ -305,9 +305,9 @@ impl MergeQueryParts {
     }
 
     pub(crate) fn registry_variants(
-        registry: &FunctionRegistry,
+        registry: &TagRegistry,
     ) -> SelectStatement {
-        let funcs = registry.all_functions();
+        let funcs = registry.all_indexing_functions();
         if funcs.is_empty() {
             let mut q = Query::select();
             q.expr(Expr::val(1)).and_where(Expr::val(1).eq(0));

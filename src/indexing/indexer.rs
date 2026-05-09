@@ -3,7 +3,7 @@ use crate::indexing::functions::ScanEntry;
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
-use crate::FunctionRegistry;
+use crate::tag::TagRegistry;
 use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use duckdb::Connection;
@@ -48,14 +48,14 @@ pub struct TagRow {
 
 pub struct Indexer<'a> {
     pub(crate) conn: &'a Connection,
-    pub(crate) registry: &'a FunctionRegistry,
+    pub(crate) registry: &'a TagRegistry,
     pub(crate) store: Store,
 }
 
 impl<'a> Indexer<'a> {
     pub fn new(
         conn: &'a Connection,
-        registry: &'a FunctionRegistry,
+        registry: &'a TagRegistry,
         db_dir: PathBuf,
     ) -> Self {
         Self {
@@ -558,7 +558,7 @@ pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FunctionRegistry;
+    use crate::tag::TagRegistry;
     use tempfile::tempdir;
 
     #[test]
@@ -580,7 +580,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().to_path_buf();
         let conn = Connection::open_in_memory().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let registry = TagRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir);
 
         // まだファイルがない状態でのロード
@@ -596,7 +596,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().to_path_buf();
         let conn = Connection::open_in_memory().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let registry = TagRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir);
 
         // 1. テーブルを初期化
@@ -636,7 +636,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join(".ttfm/db");
         let conn = Connection::open_in_memory().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let registry = TagRegistry::with_standard();
         let indexer = Indexer::new(&conn, &registry, db_dir.clone());
         indexer.initialize_tables().unwrap();
         assert!(db_dir.join("file_references.parquet").exists());

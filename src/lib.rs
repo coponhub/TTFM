@@ -190,7 +190,7 @@ pub struct FileManager {
     /// データベースディレクトリのパス
     db_dir: std::path::PathBuf,
     /// 利用可能な機能のレジストリ
-    registry: FunctionRegistry,
+    registry: crate::tag::TagRegistry,
     /// キャッシュマネージャ
     cache_manager: CacheManager,
 }
@@ -247,7 +247,7 @@ impl FileManager {
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory database connection")?;
 
-        let registry = FunctionRegistry::with_standard();
+        let registry = crate::tag::TagRegistry::with_standard();
 
         // Initialize tables and views
         let indexer =
@@ -279,7 +279,7 @@ impl FileManager {
         Ok(Self {
             conn,
             db_dir: self.db_dir.clone(),
-            registry: FunctionRegistry::with_standard(),
+            registry: crate::tag::TagRegistry::with_standard(),
             cache_manager: CacheManager::new(
                 self.db_dir.join("cache"),
                 3 * 1024 * 1024 * 1024,
@@ -660,7 +660,7 @@ impl FileManager {
                                     adapter.name, path
                                 );
                             }
-                            self.registry.register(Box::new(adapter));
+                            self.registry.register_plugin(Box::new(adapter));
                         } else {
                             if cfg!(debug_assertions)
                                 && std::env::var("TTFM_DEBUG").is_ok()
@@ -708,7 +708,7 @@ mod tests_file_manager {
         let db_dir = dir.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let registry = crate::tag::TagRegistry::with_standard();
 
         // Initialize tables
         let indexer =
