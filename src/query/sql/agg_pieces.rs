@@ -23,10 +23,10 @@ pub(super) fn resolve_count_target(
     inner
         .get_nested_projection()
         .and_then(|op| match op.get_storage() {
-            Some(StorageMapping::RowTag {
+            Some(StorageMapping::Basic {
                 column, tag_type, ..
             }) => Some((*column, Some(tag_type.clone()))),
-            Some(StorageMapping::Column(col)) => Some((*col, None)),
+            Some(StorageMapping::Fixed(col)) => Some((*col, None)),
             _ => None,
         })
         .unwrap_or((Col::ItemId, None))
@@ -66,8 +66,8 @@ pub(super) fn agg_expr(
             let (storage, cond, _) = inner.extract_agg_parts();
             let col = if let Some(s) = storage {
                 match s {
-                    StorageMapping::Column(c) => Col::from(*c),
-                    StorageMapping::RowTag { column, .. } => *column,
+                    StorageMapping::Fixed(c) => Col::from(*c),
+                    StorageMapping::Basic { column, .. } => *column,
                     _ => Col::LabelInt,
                 }
             } else {
@@ -96,8 +96,8 @@ pub(super) fn agg_expr(
             let (storage, cond, _) = inner.extract_agg_parts();
             let col = if let Some(s) = storage {
                 match s {
-                    StorageMapping::Column(c) => Col::from(*c),
-                    StorageMapping::RowTag { column, .. } => *column,
+                    StorageMapping::Fixed(c) => Col::from(*c),
+                    StorageMapping::Basic { column, .. } => *column,
                     _ => Col::LabelInt,
                 }
             } else {
@@ -279,7 +279,7 @@ pub(super) fn build_agg_calc_subquery_nest(
 }
 
 /// 算術演算用のオペランドをSQL式に変換します。
-/// RowTag の LabelStr (VARCHAR) は TRY_CAST で DOUBLE に変換されます。
+/// LabelStr (VARCHAR) は TRY_CAST で DOUBLE に変換されます。
 pub(super) fn build_resolved_operand_expr_for_arithmetic(
     operand: &ResolvedOperand,
     agg_ctx: &AggregationContext,
@@ -306,16 +306,16 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                         .into();
                 }
                 match storage {
-                    StorageMapping::RowTag { column, .. }
+                    StorageMapping::Basic { column, .. }
                         if *column == Col::LabelStr =>
                     {
                         CustomFunc::try_cast_double(Expr::col(*column))
                     }
-                    StorageMapping::RowTag { column, .. } => {
+                    StorageMapping::Basic { column, .. } => {
                         Expr::col(*column).into()
                     }
-                    StorageMapping::Column(col) => Expr::col(*col).into(),
-                    StorageMapping::Virtual => Expr::col(Col::LabelStr).into(),
+                    StorageMapping::Fixed(col) => Expr::col(*col).into(),
+                    StorageMapping::Composite => Expr::col(Col::LabelStr).into(),
                 }
             }
             ResolvedOperand::Calculation(calc) => {
@@ -330,7 +330,7 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
     })
 }
 
-/// オペランド内に含まれる RowTag のキーをすべて抽出します。
+/// オペランド内に含まれるタグのキーをすべて抽出します。
 pub(super) fn collect_tag_types(
     operand: &ResolvedOperand,
     keys: &mut Vec<String>,
@@ -338,13 +338,13 @@ pub(super) fn collect_tag_types(
     for op in operand.walk() {
         match op {
             ResolvedOperand::TagRef {
-                storage: StorageMapping::RowTag { tag_type, .. },
+                storage: StorageMapping::Basic { tag_type, .. },
                 ..
             } => keys.push(tag_type.clone()),
             ResolvedOperand::Aggregation(agg) => match agg {
                 ResolvedAggregationNode::Count(inner) => {
                     let (storage, _, _) = inner.extract_agg_parts();
-                    if let Some(StorageMapping::RowTag { tag_type, .. }) =
+                    if let Some(StorageMapping::Basic { tag_type, .. }) =
                         storage
                     {
                         keys.push(tag_type.clone());
@@ -352,7 +352,7 @@ pub(super) fn collect_tag_types(
                 }
                 ResolvedAggregationNode::Arithmetic { inner, .. } => {
                     let (storage, _, _) = inner.extract_agg_parts();
-                    if let Some(StorageMapping::RowTag { tag_type, .. }) =
+                    if let Some(StorageMapping::Basic { tag_type, .. }) =
                         storage
                     {
                         keys.push(tag_type.clone());
@@ -364,14 +364,14 @@ pub(super) fn collect_tag_types(
     }
 }
 
-/// オペランド内に含まれる RowTag 型を HashSet に収集します。
+/// オペランド内に含まれるタグ型を HashSet に収集します。
 pub(super) fn collect_tag_types_from_operand(
     operand: &ResolvedOperand,
     set: &mut std::collections::HashSet<String>,
 ) {
     for op in operand.walk() {
         if let ResolvedOperand::TagRef {
-            storage: StorageMapping::RowTag { tag_type, .. },
+            storage: StorageMapping::Basic { tag_type, .. },
             ..
         } = op
         {
@@ -563,10 +563,10 @@ pub(super) fn build_nvalue_standalone_subquery(
 ) -> SelectStatement {
     let (proj_col, proj_tag_type) = match proj_operand {
         ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::RowTag {
+            StorageMapping::Basic {
                 column, tag_type, ..
             } => (*column, Some(tag_type.as_str())),
-            StorageMapping::Column(col) => (*col, None),
+            StorageMapping::Fixed(col) => (*col, None),
             _ => return SelectStatement::default(),
         },
         _ => return SelectStatement::default(),
@@ -697,14 +697,14 @@ pub(super) fn build_nvalue_standalone_subquery(
             let mut stmt = Query::select();
             stmt.from_as(Tbl::OneView, Proj);
             match nval_storage {
-                StorageMapping::Column(nv_col) => {
+                StorageMapping::Fixed(nv_col) => {
                     stmt.expr_as(Expr::col((Proj, proj_col)), Group);
                     stmt.expr_as(
                         CustomFunc::any_value(Expr::col((Proj, *nv_col))),
                         Nvalue,
                     );
                 }
-                StorageMapping::RowTag {
+                StorageMapping::Basic {
                     column: nv_col,
                     tag_type: nv_tag_type,
                 } => {
@@ -735,7 +735,7 @@ pub(super) fn build_nvalue_standalone_subquery(
                         Nvalue,
                     );
                 }
-                StorageMapping::Virtual => {
+                StorageMapping::Composite => {
                     stmt.expr_as(Expr::col((Proj, proj_col)), Group);
                     stmt.expr_as(Expr::val(0.0f64), Nvalue);
                 }
@@ -938,14 +938,14 @@ fn build_nvalue_cte_inner(
     let proj_operand = &proj_operands[0];
     let (proj_col, proj_storage) = match proj_operand {
         ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::RowTag { column, .. } => (*column, storage),
-            StorageMapping::Column(col) => (*col, storage),
+            StorageMapping::Basic { column, .. } => (*column, storage),
+            StorageMapping::Fixed(col) => (*col, storage),
             _ => return SelectStatement::default(),
         },
         _ => return SelectStatement::default(),
     };
     let proj_tag_type =
-        if let StorageMapping::RowTag { tag_type, .. } = &proj_storage {
+        if let StorageMapping::Basic { tag_type, .. } = &proj_storage {
             Some(tag_type.as_str())
         } else {
             None
@@ -1050,7 +1050,7 @@ fn build_pivot_keys_into_stmt(
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef { storage, .. } => match storage {
-                StorageMapping::RowTag { tag_type, column } => {
+                StorageMapping::Basic { tag_type, column } => {
                     type_filters.insert(tag_type.as_str().to_string());
                     let case_expr = Expr::case(
                         Expr::col(Col::Type).eq(tag_type.as_str()),
@@ -1063,7 +1063,7 @@ fn build_pivot_keys_into_stmt(
                     );
                     stmt.and_having(max_expr.is_not_null());
                 }
-                StorageMapping::Column(col) => {
+                StorageMapping::Fixed(col) => {
                     let max_expr = Expr::col(*col).max();
                     stmt.expr_as(
                         max_expr.clone(),

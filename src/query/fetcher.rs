@@ -264,10 +264,10 @@ mod tests {
         } = resolved
         {
             match storage {
-                StorageMapping::RowTag { tag_type, .. } => {
+                StorageMapping::Basic { tag_type, .. } => {
                     assert_eq!(tag_type, "size")
                 }
-                _ => panic!("Expected RowTag mapping for size"),
+                _ => panic!("Expected Basic mapping for size"),
             }
             // Size は LabelInt (BIGINT)
             assert_eq!(*sql_type, crate::db::SqlType::BIGINT);

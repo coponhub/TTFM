@@ -12,32 +12,32 @@ use std::sync::Arc;
 /// タグの物理的な格納場所
 #[derive(Debug, PartialEq, Clone)]
 pub enum StorageMapping {
-    /// oneview の直接のカラム
-    Column(Col),
-    /// oneview の行ベースのタグ (特定のラベルカラム + タグ名)
-    RowTag { column: Col, tag_type: String },
-    /// 他のタグに展開される論理タグ
-    Virtual,
+    /// oneview の専用カラム（Fixed タグ）
+    Fixed(Col),
+    /// oneview の汎用ラベルカラム＋タグ名（Basic タグ）
+    Basic { column: Col, tag_type: String },
+    /// 他のタグに展開される論理タグ（Composite タグ）
+    Composite,
 }
 
 impl StorageMapping {
     /// このストレージマッピングに基づき、ラベル値を SELECT する SQL を生成します。
-    /// Virtual の場合は None を返します。
+    /// Composite の場合は None を返します。
     pub fn to_label_select(
         &self,
         ids_sql: sea_query::SelectStatement,
     ) -> Option<sea_query::SelectStatement> {
         use crate::query::sql::schema_pieces::{
-            build_lens_select_column, build_lens_select_row_tag,
+            build_lens_select_column, build_lens_select_tag,
         };
         match self {
-            StorageMapping::Column(col) => {
+            StorageMapping::Fixed(col) => {
                 Some(build_lens_select_column(*col, ids_sql))
             }
-            StorageMapping::RowTag { column, tag_type } => {
-                Some(build_lens_select_row_tag(*column, tag_type, ids_sql))
+            StorageMapping::Basic { column, tag_type } => {
+                Some(build_lens_select_tag(*column, tag_type, ids_sql))
             }
-            StorageMapping::Virtual => None,
+            StorageMapping::Composite => None,
         }
     }
 
@@ -49,15 +49,15 @@ impl StorageMapping {
         sql_type: crate::db::SqlType,
     ) -> Condition {
         match self {
-            StorageMapping::Column(col) => {
+            StorageMapping::Fixed(col) => {
                 build_column_condition(*col, op, label, sql_type, false)
             }
-            StorageMapping::RowTag { column, tag_type } => {
+            StorageMapping::Basic { column, tag_type } => {
                 Condition::all().add(check_tag_match(tag_type)).add(
                     build_column_condition(*column, op, label, sql_type, true),
                 )
             }
-            StorageMapping::Virtual => Condition::any(),
+            StorageMapping::Composite => Condition::any(),
         }
     }
 }
@@ -83,32 +83,32 @@ fn build_column_condition(
 ) -> Condition {
     let bin_op = to_bin_op(op);
 
-    // 汎用カラムか？ (oneviewのRowTag用カラム)
-    let is_generic_row_col = col == Col::LabelStr
+    // 汎用ラベルカラムか？ (Basic タグの EAV カラム)
+    let is_eav_col = col == Col::LabelStr
         || col == Col::LabelInt
         || col == Col::LabelDouble
         || col == Col::LabelBool;
 
     match label.value() {
         LabelValue::Integer(i) => {
-            build_int_condition(col, bin_op, i, is_generic_row_col)
+            build_int_condition(col, bin_op, i, is_eav_col)
         }
         LabelValue::Boolean(b) => build_str_condition(
             col,
             bin_op,
             &b.to_string(),
             sql_type,
-            is_generic_row_col,
+            is_eav_col,
         ),
         LabelValue::Double(bits) => {
             schema_pieces::build_double_condition(bin_op, bits)
         }
         LabelValue::Null => schema_pieces::build_null_condition(),
         LabelValue::String(s) => {
-            build_str_condition(col, bin_op, &s, sql_type, is_generic_row_col)
+            build_str_condition(col, bin_op, &s, sql_type, is_eav_col)
         }
         LabelValue::Literal(s) => {
-            build_literal_condition(col, bin_op, &s, is_generic_row_col)
+            build_literal_condition(col, bin_op, &s, is_eav_col)
         }
     }
 }
@@ -341,7 +341,7 @@ impl Lens {
             let desc = match q.logical_role() {
                 LogicalRole::Composite => TagDescriptor {
                     tag_type,
-                    storage: StorageMapping::Virtual,
+                    storage: StorageMapping::Composite,
                     logical_type: q.logical_type(),
                     logical_function: Some(func.clone()),
                 },
@@ -349,7 +349,7 @@ impl Lens {
                     let col = logical_type_to_col(q.logical_type());
                     TagDescriptor {
                         tag_type,
-                        storage: StorageMapping::RowTag {
+                        storage: StorageMapping::Basic {
                             column: col,
                             tag_type: key,
                         },
@@ -361,7 +361,7 @@ impl Lens {
                     // 物理ストレージは base_column_descriptors で登録済み
                     // Virtual として登録することで Column 定義を上書きしない
                     tag_type,
-                    storage: StorageMapping::Virtual,
+                    storage: StorageMapping::Composite,
                     logical_type: q.logical_type(),
                     logical_function: Some(func.clone()),
                 },
@@ -378,7 +378,7 @@ impl Lens {
     pub fn register(&mut self, descriptor: TagDescriptor) {
         if let Some(existing) = self.registry.get_mut(&descriptor.tag_type) {
             // 物理ストレージ定義があれば上書き（Virtual は物理を上書きしない）
-            if descriptor.storage != StorageMapping::Virtual {
+            if descriptor.storage != StorageMapping::Composite {
                 existing.storage = descriptor.storage;
                 existing.logical_type = descriptor.logical_type;
             }
@@ -397,7 +397,7 @@ impl Lens {
         self.registry.get(tag)
     }
 
-    /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの RowTag 定義を返します。
+    /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの Basic 定義を返します。
     /// 未知のタグは Any 型として扱い、算術演算を許容します（実行時に DB がチェック）。
     pub fn look_up_or_default(&self, tag: &TagType) -> TagDescriptor {
         if let Some(desc) = self.registry.get(tag) {
@@ -405,7 +405,7 @@ impl Lens {
         }
         TagDescriptor {
             tag_type: tag.clone(),
-            storage: StorageMapping::RowTag {
+            storage: StorageMapping::Basic {
                 column: crate::db::Col::LabelStr,
                 tag_type: tag.as_str().to_string(),
             },
@@ -423,7 +423,7 @@ impl Lens {
         let desc = self.look_up(&tag).ok_or_else(|| {
             anyhow::anyhow!("Tag definition not found: {:?}", tag)
         })?;
-        if let StorageMapping::Column(col) = desc.storage {
+        if let StorageMapping::Fixed(col) = desc.storage {
             Ok(col)
         } else {
             Err(anyhow::anyhow!(
@@ -441,10 +441,10 @@ impl Lens {
         map: &duckdb::types::OrderedMap<String, Value>,
     ) -> Option<Label> {
         let from_storage = |desc: &TagDescriptor| match &desc.storage {
-            StorageMapping::Column(col) => {
+            StorageMapping::Fixed(col) => {
                 map.get(&col.name()).and_then(val_to_label_value)
             }
-            StorageMapping::RowTag { column, tag_type } => {
+            StorageMapping::Basic { column, tag_type } => {
                 let type_val = map.get(&SType::Type.name())?;
                 if type_val.as_str() == Some(tag_type) {
                     map.get(&column.name()).and_then(val_to_label_value)
@@ -452,7 +452,7 @@ impl Lens {
                     None
                 }
             }
-            StorageMapping::Virtual => None,
+            StorageMapping::Composite => None,
         };
 
         let from_fallback = || {
@@ -552,7 +552,7 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
     cols.into_iter()
         .map(|(stype, col)| TagDescriptor {
             tag_type: TagType::Base(stype),
-            storage: StorageMapping::Column(col),
+            storage: StorageMapping::Fixed(col),
             logical_type: sql_to_logical(col.sql_type()),
             logical_function: None,
         })
@@ -580,7 +580,7 @@ mod tests {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Rank)).unwrap();
         // マージ論理により、Column 定義が Virtual を上書きしているはず
-        assert_eq!(found.storage, StorageMapping::Column(Col::Rank));
+        assert_eq!(found.storage, StorageMapping::Fixed(Col::Rank));
         assert!(found.logical_function.is_some());
     }
 
@@ -588,7 +588,7 @@ mod tests {
     fn test_lens_with_standard_includes_origin() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Origin)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Column(Col::Origin));
+        assert_eq!(found.storage, StorageMapping::Fixed(Col::Origin));
         assert!(found.logical_function.is_some());
     }
 
@@ -596,11 +596,11 @@ mod tests {
     fn test_lens_with_standard_includes_size() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Size)).unwrap();
-        if let StorageMapping::RowTag { column, tag_type } = &found.storage {
+        if let StorageMapping::Basic { column, tag_type } = &found.storage {
             assert_eq!(*column, Col::LabelInt);
             assert_eq!(tag_type, "size");
         } else {
-            panic!("Expected RowTag mapping for size, got {:?}", found.storage);
+            panic!("Expected Basic mapping for size, got {:?}", found.storage);
         }
         assert!(found.logical_function.is_some());
     }
@@ -609,7 +609,7 @@ mod tests {
     fn test_lens_with_standard_includes_directory_as_virtual() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Directory)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Virtual);
+        assert_eq!(found.storage, StorageMapping::Composite);
         assert!(found.logical_function.is_some());
     }
 
@@ -624,10 +624,10 @@ mod tests {
     fn test_lens_filename_is_virtual() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Filename)).unwrap();
-        if let StorageMapping::RowTag { tag_type, .. } = &found.storage {
+        if let StorageMapping::Basic { tag_type, .. } = &found.storage {
             assert_eq!(tag_type, "name");
         } else {
-            panic!("Expected RowTag for filename, got {:?}", found.storage);
+            panic!("Expected Basic for filename, got {:?}", found.storage);
         }
         assert!(found.logical_function.is_some());
     }

@@ -289,7 +289,7 @@ mod tests {
 
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
-            storage: StorageMapping::Column(Col::Name),
+            storage: StorageMapping::Fixed(Col::Name),
             sql_type: crate::db::SqlType::VARCHAR,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
@@ -341,7 +341,7 @@ mod tests {
 
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
-            storage: StorageMapping::Column(Col::Name),
+            storage: StorageMapping::Fixed(Col::Name),
             sql_type: crate::db::SqlType::VARCHAR,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
@@ -397,7 +397,7 @@ mod tests {
             ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![
                 ResolvedNode::Match {
                     tag_type: TagType::Base(SType::Extension),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: "extension".to_string(),
                     },
@@ -429,7 +429,7 @@ mod tests {
             inner: Box::new(ResolvedNode::Nest {
                 keys: vec![ResolvedOperand::TagRef {
                     tag_type: TagType::Base(SType::Size),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelInt,
                         tag_type: "size".to_string(),
                     },
@@ -466,7 +466,7 @@ mod tests {
                 ResolvedNode::Nest {
                     keys: vec![ResolvedOperand::TagRef {
                         tag_type: TagType::Base(SType::Size),
-                        storage: StorageMapping::Column(Col::Size),
+                        storage: StorageMapping::Fixed(Col::Size),
                         sql_type: crate::db::SqlType::BIGINT,
                     }],
                     nvalue: None,
@@ -474,7 +474,7 @@ mod tests {
                 },
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: "project".to_string(),
                     },
@@ -570,7 +570,7 @@ mod tests {
         // 2. Boolean TagRef -> CAST(... AS BIGINT)
         let tag_bool = ResolvedOperand::TagRef {
             tag_type: TagType::from("is_dir"),
-            storage: crate::query::lens_schema::StorageMapping::Column(
+            storage: crate::query::lens_schema::StorageMapping::Fixed(
                 crate::db::Col::LabelBool,
             ),
             sql_type: SqlType::BOOLEAN,

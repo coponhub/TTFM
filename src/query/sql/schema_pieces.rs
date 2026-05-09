@@ -21,8 +21,8 @@ pub(crate) fn build_lens_select_column(
     s
 }
 
-/// RowTag ストレージ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
-pub(crate) fn build_lens_select_row_tag(
+/// タグ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
+pub(crate) fn build_lens_select_tag(
     col: Col,
     tag_type: &str,
     ids_sql: SelectStatement,
@@ -111,14 +111,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_lens_select_row_tag_has_type_filter() {
+    fn test_build_lens_select_tag_has_type_filter() {
         use sea_query::SqliteQueryBuilder;
         let sql =
-            build_lens_select_row_tag(Col::LabelStr, "parentdir", dummy_ids())
+            build_lens_select_tag(Col::LabelStr, "parentdir", dummy_ids())
                 .to_string(SqliteQueryBuilder);
         assert!(
             sql.contains("parentdir"),
-            "RowTag select must filter by tag_type"
+            "tag select must filter by tag_type"
         );
         assert!(sql.contains("CAST("), "must CAST to VARCHAR");
     }

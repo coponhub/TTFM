@@ -115,7 +115,7 @@ pub(super) fn build_multi_key_labels_sql(
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef {
-                storage: StorageMapping::RowTag { tag_type, column },
+                storage: StorageMapping::Basic { tag_type, column },
                 ..
             } => {
                 type_filters.insert(tag_type.as_str().to_string());
@@ -131,7 +131,7 @@ pub(super) fn build_multi_key_labels_sql(
                 pivot.and_having(max_expr.is_not_null());
             }
             ResolvedOperand::TagRef {
-                storage: StorageMapping::Column(col),
+                storage: StorageMapping::Fixed(col),
                 ..
             } => {
                 let max_expr = Expr::col(*col).max();
@@ -171,12 +171,12 @@ pub(super) fn build_multi_key_labels_sql(
 
 // ── Nest match SQL ─────────────────────────────────────────────────────────
 
-fn get_required_row_tags(node: &ResolvedNode) -> Vec<String> {
+fn required_tag_types(node: &ResolvedNode) -> Vec<String> {
     node.walk()
         .into_iter()
         .filter_map(|n| {
             if let ResolvedNode::Match {
-                storage: StorageMapping::RowTag { tag_type, .. },
+                storage: StorageMapping::Basic { tag_type, .. },
                 ..
             } = n
             {
@@ -194,7 +194,7 @@ fn resolve_simple_filter_condition<T: sea_query::Iden + Clone + 'static>(
 ) -> Option<Condition> {
     node.fold(&|n, child_results: Vec<Option<Condition>>| match n {
         ResolvedNode::Match { storage, label, .. } => {
-            if let StorageMapping::RowTag { tag_type, .. } = storage {
+            if let StorageMapping::Basic { tag_type, .. } = storage {
                 let s_val = label.as_str();
                 let mut cond = Condition::all();
                 if tag_type.as_str() != "*" {
@@ -221,7 +221,7 @@ fn resolve_simple_filter_condition<T: sea_query::Iden + Clone + 'static>(
             )
         }
         ResolvedNode::And(_) => {
-            let mut required_tags = get_required_row_tags(n);
+            let mut required_tags = required_tag_types(n);
             required_tags.sort();
             required_tags.dedup();
             if required_tags.len() > 1 {
@@ -274,7 +274,7 @@ fn build_merged_nvalue_agg_expr(
                         .into()
                 };
                 Expr::expr(case_expr).count_distinct().into()
-            } else if let Some(StorageMapping::RowTag { tag_type, .. }) =
+            } else if let Some(StorageMapping::Basic { tag_type, .. }) =
                 inner_tag
             {
                 let cond = Condition::all()
@@ -320,7 +320,7 @@ fn build_merged_nvalue_agg_expr(
                 let in_expr =
                     Expr::col((View, Col::ItemId)).in_subquery(filter_sub);
                 let case_expr: SimpleExpr =
-                    if let Some(StorageMapping::RowTag { tag_type, .. }) =
+                    if let Some(StorageMapping::Basic { tag_type, .. }) =
                         inner_tag
                     {
                         let combined_cond = Condition::all()
@@ -338,7 +338,7 @@ fn build_merged_nvalue_agg_expr(
                             .into()
                     };
                 apply_arithmetic_agg(op, case_expr, is_string)
-            } else if let Some(StorageMapping::RowTag { tag_type, .. }) =
+            } else if let Some(StorageMapping::Basic { tag_type, .. }) =
                 inner_tag
             {
                 let cond = Condition::all()
@@ -377,11 +377,11 @@ pub(super) fn build_nest_having_sql(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let (proj_col, proj_tag_type) = match key.get_storage() {
-        Some(StorageMapping::RowTag { column, tag_type }) => {
+        Some(StorageMapping::Basic { column, tag_type }) => {
             (*column, Some(tag_type.as_str()))
         }
-        Some(StorageMapping::Column(col)) => (*col, None),
-        _ => panic!("NestMatch key must have RowTag or Column storage"),
+        Some(StorageMapping::Fixed(col)) => (*col, None),
+        _ => panic!("NestMatch key must have Basic or Fixed storage"),
     };
 
     let mut nfilter = Query::select();
@@ -454,11 +454,11 @@ pub(super) fn build_nest_match_sql(
         nfilter.and_where(Expr::col(Nvalue).binary(bin_op, label_expr));
 
         let (proj_col, proj_tag_type) = match keys[0].get_storage() {
-            Some(StorageMapping::RowTag { column, tag_type }) => {
+            Some(StorageMapping::Basic { column, tag_type }) => {
                 (*column, Some(tag_type.as_str()))
             }
-            Some(StorageMapping::Column(col)) => (*col, None),
-            _ => panic!("NestMatch key must have RowTag or Column storage"),
+            Some(StorageMapping::Fixed(col)) => (*col, None),
+            _ => panic!("NestMatch key must have Basic or Fixed storage"),
         };
         let mut stmt = Query::select();
         stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
@@ -599,8 +599,8 @@ pub(super) fn build_nest_nest_match_sql(
                 )
                 .to_owned();
             let proj_col = match left_keys[0].get_storage() {
-                Some(StorageMapping::RowTag { column, .. }) => column,
-                Some(StorageMapping::Column(col)) => col,
+                Some(StorageMapping::Basic { column, .. }) => column,
+                Some(StorageMapping::Fixed(col)) => col,
                 _ => panic!(
                     "unexpected NestNestMatch with non-TagRef keys: {:?}",
                     left_keys
@@ -757,7 +757,7 @@ fn build_nest_pivot_multi_nv_cte(
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef { storage, .. } => match storage {
-                StorageMapping::RowTag { tag_type, column } => {
+                StorageMapping::Basic { tag_type, column } => {
                     let case_expr = Expr::case(
                         Expr::col(Col::Type).eq(tag_type.as_str()),
                         Expr::col(*column),
@@ -767,7 +767,7 @@ fn build_nest_pivot_multi_nv_cte(
                         Alias::new(&format!("key{}", i)),
                     );
                 }
-                StorageMapping::Column(col) => {
+                StorageMapping::Fixed(col) => {
                     stmt.expr_as(
                         Expr::col(*col).max(),
                         Alias::new(&format!("key{}", i)),
@@ -836,8 +836,8 @@ pub(super) fn nest(
         })?;
     let desc = resolver.lens().look_up_or_default(&proj_type);
     let col_iden = match &desc.storage {
-        StorageMapping::Column(col) => *col,
-        StorageMapping::RowTag { column, .. } => *column,
+        StorageMapping::Fixed(col) => *col,
+        StorageMapping::Basic { column, .. } => *column,
         _ => anyhow::bail!(
             "Unsupported storage for projection: {:?}",
             desc.storage
@@ -920,7 +920,7 @@ pub(super) fn nest(
         with_clause.cte(pivot_cte);
         ("key0".to_string(), "pivot".to_string(), false)
     } else if let Some(calc) = calc_node {
-        if calc.contains_row_tag() {
+        if calc.contains_tag() {
             let calc_expr = if calc.contains_aggregation() {
                 let agg_ctx = pick.agg_ctx().expect(
                     "AggregationContext required for EAV+agg calculation CTE",
@@ -1030,7 +1030,7 @@ pub(super) fn nest(
 
     if need_extra_filter {
         all_hits_q.and_where(Expr::col(label_col.clone()).is_not_null());
-        if let StorageMapping::RowTag { tag_type, .. } = &desc.storage {
+        if let StorageMapping::Basic { tag_type, .. } = &desc.storage {
             all_hits_q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
         }
     }
@@ -1799,7 +1799,7 @@ mod tests {
     fn test_build_pick_sql_multi_key_nest_includes_all_keys() {
         let make_tag_ref = |name: &str| ResolvedOperand::TagRef {
             tag_type: TagType::from(name),
-            storage: StorageMapping::RowTag {
+            storage: StorageMapping::Basic {
                 column: crate::db::Col::LabelStr,
                 tag_type: name.to_string(),
             },
@@ -1831,7 +1831,7 @@ mod tests {
         let nest_one_key = ResolvedNode::Nest {
             keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::from("tagA"),
-                storage: StorageMapping::RowTag {
+                storage: StorageMapping::Basic {
                     column: crate::db::Col::LabelStr,
                     tag_type: "tagA".to_string(),
                 },
@@ -1861,7 +1861,7 @@ mod tests {
         ResolvedNode::Nest {
             keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::from(tag),
-                storage: StorageMapping::RowTag {
+                storage: StorageMapping::Basic {
                     column: crate::db::Col::LabelStr,
                     tag_type: tag.to_string(),
                 },

@@ -4,7 +4,7 @@
 //!
 //! ## 責務
 //!
-//! 1. **StorageMappingの決定**: Column/RowTag/Virtual の判定
+//! 1. **StorageMappingの決定: Fixed/Basic/Composite の判定
 //! 2. **SQL型の解決**: タグに対応する物理的なSQL型を決定
 //! 3. **物理解決済みノードの生成**: ResolvedNode への変換
 //!
@@ -254,13 +254,13 @@ impl ResolvedOperand {
         }
     }
 
-    /// RowTag への参照が含まれているかチェックします（EAV 計算比較用）。
-    pub fn contains_row_tag(&self) -> bool {
+    /// タグ参照が含まれているかチェックします（EAV 計算比較用）。
+    pub fn contains_tag(&self) -> bool {
         match self {
             ResolvedOperand::TagRef { storage, .. } => {
-                matches!(storage, StorageMapping::RowTag { .. })
+                matches!(storage, StorageMapping::Basic { .. })
             }
-            ResolvedOperand::Calculation(calc) => calc.contains_row_tag(),
+            ResolvedOperand::Calculation(calc) => calc.contains_tag(),
             _ => false,
         }
     }
@@ -372,9 +372,9 @@ impl ResolvedCalculationNode {
         self.left.contains_aggregation() || self.right.contains_aggregation()
     }
 
-    /// RowTag への参照が含まれているかチェックします（EAV 計算比較用）。
-    pub fn contains_row_tag(&self) -> bool {
-        self.left.contains_row_tag() || self.right.contains_row_tag()
+    /// タグ参照が含まれているかチェックします（EAV 計算比較用）。
+    pub fn contains_tag(&self) -> bool {
+        self.left.contains_tag() || self.right.contains_tag()
     }
 
     pub fn to_condition(&self) -> Condition {
@@ -974,13 +974,13 @@ fn cond_or(nodes: &[ResolvedNode]) -> Condition {
 fn cond_projection(storage: &StorageMapping) -> Condition {
     // Nest は「存在する」ことが条件
     match storage {
-        StorageMapping::Column(col) => {
+        StorageMapping::Fixed(col) => {
             Condition::all().add(Expr::col(*col).is_not_null())
         }
-        StorageMapping::RowTag { tag_type, .. } => {
+        StorageMapping::Basic { tag_type, .. } => {
             Condition::all().add(check_tag_match(tag_type))
         }
-        StorageMapping::Virtual => Condition::any(),
+        StorageMapping::Composite => Condition::any(),
     }
 }
 
@@ -1046,7 +1046,7 @@ fn resolve_type_ref_operand(
     let (storage, sql_type) = match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
-            StorageMapping::RowTag {
+            StorageMapping::Basic {
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
@@ -1145,7 +1145,7 @@ pub(crate) fn resolve_query_node(
             let (storage, sql_type) = match lens.look_up(&tag_type) {
                 Some(desc) => (desc.storage.clone(), desc.sql_type()),
                 None => (
-                    StorageMapping::RowTag {
+                    StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: tag_type.as_str().to_string(),
                     },
@@ -2390,7 +2390,7 @@ fn get_storage_and_type(
     match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
-            StorageMapping::RowTag {
+            StorageMapping::Basic {
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
@@ -2551,7 +2551,7 @@ mod tests {
         // TagRef is NOT pure scalar
         let tag = ResolvedOperand::TagRef {
             tag_type: TagType::Base(SType::Size),
-            storage: StorageMapping::Column(crate::db::Col::LabelInt),
+            storage: StorageMapping::Fixed(crate::db::Col::LabelInt),
             sql_type: SqlType::BIGINT,
         };
         assert!(!tag.is_pure_scalar());
@@ -2625,7 +2625,7 @@ mod tests {
         let projection = ResolvedNode::Nest {
             keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::Base(SType::Size),
-                storage: StorageMapping::Column(Col::Size),
+                storage: StorageMapping::Fixed(Col::Size),
                 sql_type: SqlType::BIGINT,
             }],
             nvalue: None,
@@ -2645,7 +2645,7 @@ mod tests {
         assert!(storage.is_some(), "Storage should be extracted");
         assert_eq!(
             storage.unwrap(),
-            &StorageMapping::Column(Col::Size),
+            &StorageMapping::Fixed(Col::Size),
             "Storage content mismatch"
         );
 
@@ -2702,8 +2702,8 @@ mod tests {
                 tag_type, storage, ..
             } => {
                 assert_eq!(*tag_type, TagType::Base(SType::Size));
-                // size:はRowTagとして保存されている
-                assert!(matches!(storage, StorageMapping::RowTag { .. }));
+                // size: は Basic（EAV）として保存されている
+                assert!(matches!(storage, StorageMapping::Basic { .. }));
             }
             _ => panic!("Expected TagRef"),
         }
@@ -2917,7 +2917,7 @@ mod tests {
         // 修正後の期待値: (Some(storage), None, Some(operand))
         let (storage, filter, res_op) = node.extract_agg_parts();
         assert!(storage.is_some());
-        assert!(matches!(storage.unwrap(), StorageMapping::RowTag { .. }));
+        assert!(matches!(storage.unwrap(), StorageMapping::Basic { .. }));
         assert!(filter.is_none());
         assert!(res_op.is_some());
         assert_eq!(res_op.unwrap(), &operand);
@@ -3390,7 +3390,7 @@ mod tests_integration {
         use crate::query::lens_schema::StorageMapping;
         let make_key = |t: &str| ResolvedOperand::TagRef {
             tag_type: crate::types::TagType::from(t),
-            storage: StorageMapping::RowTag {
+            storage: StorageMapping::Basic {
                 column: crate::db::Col::LabelStr,
                 tag_type: t.to_string(),
             },
@@ -3503,7 +3503,7 @@ mod tests_integration {
 
         let filter = ResolvedNode::Match {
             tag_type: crate::types::TagType::from("path"),
-            storage: StorageMapping::RowTag {
+            storage: StorageMapping::Basic {
                 column: crate::db::Col::LabelStr,
                 tag_type: "path".to_string(),
             },

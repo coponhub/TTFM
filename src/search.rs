@@ -2,7 +2,7 @@ use crate::db::TargetTable;
 use crate::db::{Col, Pronoun::*, VCol};
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{ItemKind, Progress, TagType};
-use crate::{FileManager, FunctionRegistry};
+use crate::FileManager;
 use anyhow::Result;
 use duckdb::Connection;
 use sea_query::{Expr, PostgresQueryBuilder, Query};
@@ -476,8 +476,7 @@ impl FileManager {
                 let fetcher =
                     crate::query::fetcher::Fetcher::new(&resolver, &conn);
 
-                let registry_full = FunctionRegistry::with_standard();
-                let all_columns = registry_full.get_all_columns();
+                let all_columns = crate::tag::TagRegistry::with_standard().get_all_columns();
 
                 crate::oneview::OneView::recreate(
                     &conn,

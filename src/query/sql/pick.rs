@@ -121,14 +121,14 @@ impl BuildPick for PickNode<'_> {
     }
 }
 
-/// CalculationNodeに含まれるRowTagのtypeフィルタをWHERE句に追加します。
+/// タグの typeフィルタをWHERE句に追加します。
 fn add_type_filters(
     stmt: &mut SelectStatement,
     calc: &ResolvedCalculationNode,
 ) {
     for op in calc.left.walk().into_iter().chain(calc.right.walk()) {
         if let ResolvedOperand::TagRef {
-            storage: StorageMapping::RowTag { tag_type, .. },
+            storage: StorageMapping::Basic { tag_type, .. },
             ..
         } = op
         {
@@ -310,7 +310,7 @@ fn build_calculation_match_sql(
     label: &Label,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    if calc.contains_row_tag() {
+    if calc.contains_tag() {
         let mut stmt = Query::select();
         stmt.column(Col::ItemId)
             .from(Tbl::OneView)
@@ -347,8 +347,8 @@ fn build_tag_calculation_match_sql(
     calc: &ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let needs_eav = calc.contains_row_tag()
-        || matches!(storage, StorageMapping::RowTag { .. });
+    let needs_eav = calc.contains_tag()
+        || matches!(storage, StorageMapping::Basic { .. });
     if needs_eav {
         build_tag_calc_match_eav_sql(storage, sql_type, op, calc, agg_ctx)
     } else {
@@ -469,7 +469,7 @@ fn build_agg_tag_match(
     let agg_expr = subquery(build_agg(agg, agg_ctx));
     let tag_expr = build_storage_column_expr(storage, sql_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
-    if let StorageMapping::RowTag { tag_type, .. } = storage {
+    if let StorageMapping::Basic { tag_type, .. } = storage {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
     }
     stmt
@@ -489,7 +489,7 @@ fn build_agg_tag_match_nest(
     let agg_expr = subquery(build_agg_nest(agg, agg_ctx, nest_ctx));
     let tag_expr = build_storage_column_expr(storage, sql_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
-    if let StorageMapping::RowTag { tag_type, .. } = storage {
+    if let StorageMapping::Basic { tag_type, .. } = storage {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
     }
     stmt
@@ -542,11 +542,11 @@ fn decompose_agg(
             let tag_type;
             let expr = if let Some(s) = storage {
                 let col = match s {
-                    StorageMapping::Column(c) => {
+                    StorageMapping::Fixed(c) => {
                         tag_type = None;
                         *c
                     }
-                    StorageMapping::RowTag {
+                    StorageMapping::Basic {
                         column,
                         tag_type: key,
                     } => {
@@ -568,7 +568,7 @@ fn decompose_agg(
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let (storage, cond, operand) = inner.extract_agg_parts();
             let tag_type = match &storage {
-                Some(StorageMapping::RowTag { tag_type: key, .. }) => {
+                Some(StorageMapping::Basic { tag_type: key, .. }) => {
                     Some(key.clone())
                 }
                 _ => None,
@@ -655,13 +655,13 @@ fn build_tag_value_eav_row_expr(
     sql_type: crate::db::SqlType,
 ) -> SimpleExpr {
     match storage {
-        StorageMapping::RowTag { tag_type, .. } => {
+        StorageMapping::Basic { tag_type, .. } => {
             let col_expr = build_storage_column_expr(storage, sql_type);
             Expr::case(Expr::col(Col::Type).eq(tag_type.as_str()), col_expr)
                 .finally(Expr::val(None::<f64>))
                 .into()
         }
-        StorageMapping::Column(col) => Expr::col(*col).into(),
-        StorageMapping::Virtual => Expr::val(None::<f64>).into(),
+        StorageMapping::Fixed(col) => Expr::col(*col).into(),
+        StorageMapping::Composite => Expr::val(None::<f64>).into(),
     }
 }
