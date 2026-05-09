@@ -327,13 +327,19 @@ impl Lens {
     /// 標準的なタグ定義を登録済みの Lens を返します。
     /// クエリ解釈を行わない、辞書単体としての Lens が必要な場合に使用します。
     pub fn base_standard() -> Self {
+        let registry = crate::tag::TagRegistry::with_standard();
+        Self::from_registry(&registry)
+    }
+
+    /// 既存の TagRegistry から Lens を構築します。
+    /// FileManager など、すでに TagRegistry を保持している場合に使用します。
+    pub fn from_registry(registry: &crate::tag::TagRegistry) -> Self {
         let mut lens = Self::new_empty();
         // Fixed タグ: 専用 DB カラム定義（手動管理のまま）
         for desc in base_column_descriptors() {
             lens.register(desc);
         }
         // Composite / Basic / Fixed タグ: TagRegistry から自動生成
-        let registry = crate::tag::TagRegistry::with_standard();
         for func in registry.iter_arcs() {
             let Some(q) = func.query() else { continue };
             let tag_type = TagType::from(func.name());
@@ -359,7 +365,7 @@ impl Lens {
                 }
                 LogicalRole::Fixed => TagDescriptor {
                     // 物理ストレージは base_column_descriptors で登録済み
-                    // Virtual として登録することで Column 定義を上書きしない
+                    // Composite として登録することで Fixed 定義を上書きしない
                     tag_type,
                     storage: StorageMapping::Composite,
                     logical_type: q.logical_type(),

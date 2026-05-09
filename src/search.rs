@@ -1,5 +1,6 @@
 use crate::db::TargetTable;
 use crate::db::{Col, Pronoun::*, VCol};
+use crate::query::lens_schema::Lens;
 use crate::response::{RawTagRow, SearchResponse, SearchResult};
 use crate::types::{ItemKind, Progress, TagType};
 use crate::FileManager;
@@ -277,8 +278,12 @@ impl FileManager {
         n: usize,
         offset: usize,
     ) -> Result<Vec<(crate::types::Label, usize)>> {
+        let storage = Lens::from_registry(&self.registry)
+            .look_up_or_default(proj_type)
+            .storage;
         let label_query = crate::cache_search_sql::build_label_counts(
             proj_type,
+            &storage,
             from_table,
             path_str.as_deref(),
             n,
@@ -307,11 +312,15 @@ impl FileManager {
         labels: &[(crate::types::Label, usize)],
     ) -> Result<Vec<(i64, Option<(crate::types::Label, usize)>)>> {
         let mut entries = Vec::new();
+        let storage = Lens::from_registry(&self.registry)
+            .look_up_or_default(proj_type)
+            .storage;
 
         for (label, count) in labels {
             let id_query = crate::cache_search_sql::build_label_expansion_sql(
                 proj_type,
                 label,
+                &storage,
                 from_table,
                 path_str.as_deref(),
             );

@@ -1,10 +1,12 @@
-use crate::db::{Col, Pronoun::*, Tbl, VCol};
-use crate::types::{Label, SType, TagType};
+use crate::db::{Col, Pronoun::*, SqlType, Tbl, VCol};
+use crate::query::lens_schema::StorageMapping;
+use crate::types::{Label, LabelValue, TagType};
 use sea_query::{Expr, Query, SelectStatement};
 
 /// 指定されたタグタイプについて、ユニークなラベル値と件数を取得します。
 pub fn build_label_counts(
     proj_type: &TagType,
+    storage: &StorageMapping,
     from_table: bool,
     path_str: Option<&str>,
     n: usize,
@@ -12,26 +14,33 @@ pub fn build_label_counts(
 ) -> SelectStatement {
     let mut q = Query::select();
 
-    // SType に応じて、どのカラムを LabelStr/Int 等にマッピングするかを決定
-    let (col_str, col_int, col_double, col_bool) = match proj_type {
-        TagType::Base(SType::TypedTag) => (
-            Expr::col(Col::TypedTag),
-            Expr::val(Option::<i64>::None),
-            Expr::val(Option::<f64>::None),
-            Expr::val(Option::<bool>::None),
-        ),
-        TagType::Base(SType::Origin) => (
-            Expr::col(Col::Origin),
-            Expr::val(Option::<i64>::None),
-            Expr::val(Option::<f64>::None),
-            Expr::val(Option::<bool>::None),
-        ),
-        TagType::Base(SType::Rank) => (
-            Expr::val(Option::<String>::None),
-            Expr::col(Col::Rank),
-            Expr::val(Option::<f64>::None),
-            Expr::val(Option::<bool>::None),
-        ),
+    let (col_str, col_int, col_double, col_bool) = match storage {
+        StorageMapping::Fixed(col) => match col.sql_type() {
+            SqlType::BIGINT => (
+                Expr::val(Option::<String>::None),
+                Expr::col(*col),
+                Expr::val(Option::<f64>::None),
+                Expr::val(Option::<bool>::None),
+            ),
+            SqlType::BOOLEAN => (
+                Expr::val(Option::<String>::None),
+                Expr::val(Option::<i64>::None),
+                Expr::val(Option::<f64>::None),
+                Expr::col(*col),
+            ),
+            SqlType::DOUBLE => (
+                Expr::val(Option::<String>::None),
+                Expr::val(Option::<i64>::None),
+                Expr::col(*col),
+                Expr::val(Option::<bool>::None),
+            ),
+            _ => (
+                Expr::col(*col),
+                Expr::val(Option::<i64>::None),
+                Expr::val(Option::<f64>::None),
+                Expr::val(Option::<bool>::None),
+            ),
+        },
         _ => (
             Expr::col(Col::LabelStr),
             Expr::col(Col::LabelInt),
@@ -59,25 +68,13 @@ pub fn build_label_counts(
         );
     }
 
-    match proj_type {
-        TagType::Base(SType::TypedTag)
-        | TagType::Base(SType::Origin)
-        | TagType::Base(SType::Rank)
-        | TagType::Base(SType::Label) => {}
-        _ => {
-            q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
-        }
+    if let StorageMapping::Basic { tag_type, .. } = storage {
+        q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
     }
 
-    match proj_type {
-        TagType::Base(SType::TypedTag) => {
-            q.group_by_col(Col::TypedTag);
-        }
-        TagType::Base(SType::Origin) => {
-            q.group_by_col(Col::Origin);
-        }
-        TagType::Base(SType::Rank) => {
-            q.group_by_col(Col::Rank);
+    match storage {
+        StorageMapping::Fixed(col) => {
+            q.group_by_col(*col);
         }
         _ => {
             q.group_by_columns([
@@ -98,6 +95,7 @@ pub fn build_label_counts(
         q.offset(offset as u64);
     }
 
+    let _ = proj_type;
     q
 }
 
@@ -105,6 +103,7 @@ pub fn build_label_counts(
 pub fn build_label_expansion_sql(
     proj_type: &TagType,
     label: &Label,
+    storage: &StorageMapping,
     from_table: bool,
     path_str: Option<&str>,
 ) -> SelectStatement {
@@ -124,65 +123,39 @@ pub fn build_label_expansion_sql(
         );
     }
 
-    match proj_type {
-        TagType::Base(SType::TypedTag) => {
-            q.and_where(Expr::col(Col::TypedTag).eq(label.as_str()));
+    match storage {
+        StorageMapping::Fixed(col) => {
+            apply_label_filter(&mut q, *col, label);
         }
-        TagType::Base(SType::Origin) => {
-            q.and_where(Expr::col(Col::Origin).eq(label.as_str()));
+        StorageMapping::Basic { tag_type, column } => {
+            q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            apply_label_filter(&mut q, *column, label);
         }
-        TagType::Base(SType::Rank) => match label.value() {
-            crate::types::LabelValue::Integer(i) => {
-                q.and_where(Expr::col(Col::Rank).eq(i));
-            }
-            _ => {
-                q.and_where(Expr::val(1).eq(0));
-            }
-        },
-        TagType::Base(SType::Label) => match label.value() {
-            crate::types::LabelValue::String(s)
-            | crate::types::LabelValue::Literal(s) => {
-                q.and_where(Expr::col(Col::LabelStr).eq(s));
-            }
-            crate::types::LabelValue::Integer(i) => {
-                q.and_where(Expr::col(Col::LabelInt).eq(i));
-            }
-            crate::types::LabelValue::Boolean(b) => {
-                q.and_where(Expr::col(Col::LabelBool).eq(b));
-            }
-            crate::types::LabelValue::Double(bits) => {
-                q.and_where(
-                    Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
-                );
-            }
-            crate::types::LabelValue::Null => {
-                q.and_where(Expr::col(Col::LabelStr).is_null());
-            }
-        },
-        _ => {
-            q.and_where(Expr::col(Col::Type).eq(proj_type.as_str()));
-            match label.value() {
-                crate::types::LabelValue::String(s)
-                | crate::types::LabelValue::Literal(s) => {
-                    q.and_where(Expr::col(Col::LabelStr).eq(s));
-                }
-                crate::types::LabelValue::Integer(i) => {
-                    q.and_where(Expr::col(Col::LabelInt).eq(i));
-                }
-                crate::types::LabelValue::Boolean(b) => {
-                    q.and_where(Expr::col(Col::LabelBool).eq(b));
-                }
-                crate::types::LabelValue::Double(bits) => {
-                    q.and_where(
-                        Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)),
-                    );
-                }
-                crate::types::LabelValue::Null => {
-                    q.and_where(Expr::col(Col::LabelStr).is_null());
-                }
-            }
+        StorageMapping::Composite => {
+            q.and_where(Expr::val(1).eq(0));
         }
     }
 
+    let _ = proj_type;
     q
+}
+
+fn apply_label_filter(q: &mut SelectStatement, col: Col, label: &Label) {
+    match label.value() {
+        LabelValue::Integer(i) => {
+            q.and_where(Expr::col(col).eq(i));
+        }
+        LabelValue::Boolean(b) => {
+            q.and_where(Expr::col(col).eq(b));
+        }
+        LabelValue::Double(bits) => {
+            q.and_where(Expr::col(col).eq(f64::from_bits(bits)));
+        }
+        LabelValue::Null => {
+            q.and_where(Expr::col(col).is_null());
+        }
+        LabelValue::String(s) | LabelValue::Literal(s) => {
+            q.and_where(Expr::col(col).eq(s));
+        }
+    }
 }

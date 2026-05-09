@@ -16,14 +16,7 @@ pub use lens_resolver::*;
 pub use parser::*;
 pub use sql::*;
 
-// Restore impl QueryNode methods to maintain API compatibility
 impl QueryNode {
-    pub fn expand(self, registry: &QueryFunctionRegistry) -> QueryNode {
-        let res = functions::expand_query_node(self, registry);
-        eprintln!("DEBUG: QueryNode::expand result: {:?}", res);
-        res
-    }
-
     pub fn to_tag_condition(&self) -> sea_query::Condition {
         sql::to_tag_condition(self)
     }
