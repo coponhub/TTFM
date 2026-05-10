@@ -25,8 +25,6 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
 
     let err_msg = format!("{}", result.unwrap_err());
 
-    // 期待される詳細なエラーメッセージが含まれているか確認
-    // 注: 現時点では文法エラーなどで失敗するため、このアサーションは失敗する想定 (Red)
     assert!(
         err_msg.contains("Invalid operator '>'"),
         "Error message should point out the invalid operator"
@@ -68,18 +66,14 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
         "Simple projection arithmetic should succeed (Top level)"
     );
 
-    // 1.2 異常系: Nest 内での非集約タグ算術（Level 2 Nest は未実装）
-    let err_query2 = "(parentdir: &: (size: + mtime:)) :> 10";
-    let err_result2 = fm.search(err_query2, Default::default());
+    // 1.2 Nest 内での非集約タグ算術: 仕様上は最後の値（Calculation）を使って比較する
+    // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
+    let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
+    let result2 = fm.search(query2, Default::default());
     assert!(
-        err_result2.is_err(),
-        "Arithmetic over non-aggregated tags within Nest should fail (not yet implemented)"
-    );
-    let err_msg2 = format!("{}", err_result2.unwrap_err());
-    assert!(
-        err_msg2.contains("not yet implemented"),
-        "Error should mention 'not yet implemented', got: {}",
-        err_msg2
+        result2.is_ok(),
+        "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
+        result2.err()
     );
 
     // 2. Phase 3 以降: 異なるキーを持つ Nest 同士の算術は Level 3+ Nest として解決される

@@ -1464,7 +1464,6 @@ define_cases! {
         },
     },
     // ケース⑧ Proj & Proj → SearchResponse.warnings に警告を生成する
-    // NOTE: warnings フィールドは Phase 1 で追加。Phase 0 ではコンパイルエラー（意図的 Red）。
     label_set_intersect_warns: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
@@ -2303,6 +2302,37 @@ define_cases! {
             let txt_group = res.results.iter().find(|r| r.name.contains("txt")).expect("txt group");
             assert_eq!(get_nvalue_f64(rs_group), Some(17.0));
             assert_eq!(get_nvalue_f64(txt_group), Some(5.0));
+            Ok(())
+        },
+    },
+    // Issue 1: nvalue なし Nest への比較は最後のキーが比較値として機能する
+    // nvalue は「最後のキー」を明示的に上書きするもの。nvalue がなければ最後のキーを直接使う。
+    // 修正前は "Comparison on Nest without nvalue is not supported" エラーになる
+    nest_no_nvalue_comparison_last_key: {
+        setup: |dir| {
+            let big = dir.join("big");
+            let small = dir.join("small");
+            std::fs::create_dir_all(&big)?;
+            std::fs::create_dir_all(&small)?;
+            std::fs::write(big.join("large.txt"), vec![0u8; 200])?;
+            std::fs::write(small.join("tiny.txt"), vec![0u8; 10])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(parentdir: &: size:) :> 100",
+        assert: |res, _dir| {
+            // NestMatch はファイルアイテムを返す（nvalue タグなし）
+            assert!(!has_item_tags(&res.results));
+            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
+            assert!(
+                names.contains(&"large.txt"),
+                "big/large.txt (200B) should be included: {:?}", names
+            );
+            assert!(
+                !names.contains(&"tiny.txt"),
+                "small/tiny.txt (10B) should be excluded: {:?}", names
+            );
             Ok(())
         },
     },

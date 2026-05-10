@@ -20,10 +20,6 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     // Our post-processor should catch it.
     let res = fm.search("size: > 100", Default::default());
 
-    // CURRENT LOGIC (Loose): This is VALID and returns Ok (empty or not).
-    // FUTURE LOGIC (Strict): This will be Invalid (Parse Error) caught by map_grammar_error.
-    // So initially this assertion will FAIL (res.is_ok()), which is what we want for Red state.
-
     if res.is_ok() {
         // Fail the test if it unexpectedly succeeds (Loose grammar state)
         panic!("Expected error, but search succeeded. Grammar is too loose.");

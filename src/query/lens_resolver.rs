@@ -2261,18 +2261,22 @@ fn resolve_single_match(
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
                 ResolvedNode::Nest {
-                    keys,
-                    nvalue: Some(nv),
+                    mut keys,
+                    nvalue,
                     context,
-                } => Ok(ResolvedNode::NestMatch {
-                    keys,
-                    nvalue: nv,
-                    op,
-                    label: lit,
-                    context,
-                }),
-                ResolvedNode::Nest { .. } => {
-                    bail!("not yet implemented: Comparison on Nest without nvalue is not supported as label comparison")
+                } => {
+                    // 比較値は常に Nest の「最後の値」。
+                    // nvalue はその最後の値を明示したもの。ない場合は keys の最後が最後の値。
+                    let nv = nvalue.unwrap_or_else(|| {
+                        keys.pop().expect("Nest must have at least one key")
+                    });
+                    Ok(ResolvedNode::NestMatch {
+                        keys,
+                        nvalue: nv,
+                        op,
+                        label: lit,
+                        context,
+                    })
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
@@ -2289,18 +2293,20 @@ fn resolve_single_match(
             let resolved = resolve_query_node(lens, *node)?;
             match resolved {
                 ResolvedNode::Nest {
-                    keys,
-                    nvalue: Some(nv),
+                    mut keys,
+                    nvalue,
                     context,
-                } => Ok(ResolvedNode::NestMatch {
-                    keys,
-                    nvalue: nv,
-                    op: flip_op(op),
-                    label: lit,
-                    context,
-                }),
-                ResolvedNode::Nest { .. } => {
-                    bail!("not yet implemented: Comparison on Nest without nvalue is not supported as label comparison")
+                } => {
+                    let nv = nvalue.unwrap_or_else(|| {
+                        keys.pop().expect("Nest must have at least one key")
+                    });
+                    Ok(ResolvedNode::NestMatch {
+                        keys,
+                        nvalue: nv,
+                        op: flip_op(op),
+                        label: lit,
+                        context,
+                    })
                 }
                 ResolvedNode::And(ref nodes)
                     if nodes.iter().any(|n| n.get_projection().is_some()) =>
