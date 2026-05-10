@@ -451,6 +451,10 @@ impl FileManager {
         crate::rank::get_rank_by_name(&self.registry, name)
     }
 
+    pub fn format_tag_display(&self, tag_name: &str, raw: &str) -> String {
+        self.registry.format_display(tag_name, raw)
+    }
+
     pub fn get_or_create_item(&self, kind: &str, content: &str) -> Result<i64> {
         let path = self.path_for_target(TargetTable::ItemReferences);
         let query = Query::select()

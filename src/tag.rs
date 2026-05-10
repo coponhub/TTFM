@@ -6,6 +6,7 @@ use crate::taggers::TagValue;
 use crate::types::{DBType, Label, LabelValue, Rank, SType, TagType, TypedTag};
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
+use chrono::TimeZone as _;
 use path_slash::PathExt as _;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -411,6 +412,21 @@ impl TagRegistry {
 
     pub fn register_plugin(&mut self, func: impl TagFunction + 'static) {
         self.register(func);
+    }
+
+    /// タグ名とDB生値から、デフォルトDisplayフォーマットで表示用文字列を返す。
+    /// Display impl がなければ生値をそのまま返す。
+    pub fn format_display(&self, tag_name: &str, raw: &str) -> String {
+        let Some(func) = self.get(tag_name) else {
+            return raw.to_string();
+        };
+        let Some(disp) = func.display() else {
+            return raw.to_string();
+        };
+        let lv = raw.parse::<i64>()
+            .map(LabelValue::Integer)
+            .unwrap_or_else(|_| LabelValue::String(raw.to_string()));
+        disp.show(&lv, disp.formats().default)
     }
 }
 
@@ -901,6 +917,9 @@ impl TagFunction for SizeFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn display(&self) -> Option<&dyn Display> {
+        Some(self)
+    }
 }
 impl Scan for SizeFn {
     fn name() -> &'static str { "size" }
@@ -939,6 +958,55 @@ impl Query for SizeFn {
         QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
     }
 }
+impl Display for SizeFn {
+    fn formats(&self) -> DisplayFormats {
+        DisplayFormats {
+            default: DisplayFormat { id: "si",     label: "KB / MB" },
+            options: vec![
+                DisplayFormat { id: "si",     label: "KB / MB" },
+                DisplayFormat { id: "binary", label: "KiB / MiB" },
+            ],
+        }
+    }
+    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+        let bytes = match value {
+            LabelValue::Integer(i) => *i,
+            _ => return value.as_display_name(),
+        };
+        match format.id {
+            "binary" => format_size_binary(bytes),
+            _ => format_size_si(bytes),
+        }
+    }
+}
+
+fn format_size_si(bytes: i64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1024 {
+        return format!("{}B", bytes);
+    }
+    let mut val = bytes as f64;
+    let mut idx = 0;
+    while val >= 1024.0 && idx < UNITS.len() - 1 {
+        val /= 1024.0;
+        idx += 1;
+    }
+    format!("{:.1}{}", val, UNITS[idx])
+}
+
+fn format_size_binary(bytes: i64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{}B", bytes);
+    }
+    let mut val = bytes as f64;
+    let mut idx = 0;
+    while val >= 1024.0 && idx < UNITS.len() - 1 {
+        val /= 1024.0;
+        idx += 1;
+    }
+    format!("{:.1}{}", val, UNITS[idx])
+}
 
 // --- MtimeFn ---
 pub struct MtimeFn;
@@ -950,6 +1018,9 @@ impl TagFunction for MtimeFn {
         Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
+        Some(self)
+    }
+    fn display(&self) -> Option<&dyn Display> {
         Some(self)
     }
 }
@@ -1016,6 +1087,62 @@ fn mtime_range_op(first: &Operand, op: ComparisonOp, range: DatetimeRange) -> Ve
         })],
     }
 }
+impl Display for MtimeFn {
+    fn formats(&self) -> DisplayFormats {
+        DisplayFormats {
+            default: DisplayFormat { id: "human", label: "Human Readable" },
+            options: vec![
+                DisplayFormat { id: "human",    label: "Human Readable" },
+                DisplayFormat { id: "relative", label: "Relative" },
+                DisplayFormat { id: "iso",      label: "ISO 8601" },
+                DisplayFormat { id: "raw",      label: "Raw" },
+            ],
+        }
+    }
+    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+        let secs = match value {
+            LabelValue::Integer(i) => *i,
+            _ => return value.as_display_name(),
+        };
+        match format.id {
+            "raw" => secs.to_string(),
+            "iso" => chrono::DateTime::from_timestamp(secs, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| secs.to_string()),
+            "relative" => format_mtime_relative(secs),
+            _ => chrono::Local
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| secs.to_string()),
+        }
+    }
+}
+
+fn format_mtime_relative(secs: i64) -> String {
+    let diff = chrono::Local::now().timestamp() - secs;
+    let abs = diff.unsigned_abs();
+    let (val, unit) = if abs < 60 {
+        (abs, "second")
+    } else if abs < 3600 {
+        (abs / 60, "minute")
+    } else if abs < 86400 {
+        (abs / 3600, "hour")
+    } else if abs < 86400 * 30 {
+        (abs / 86400, "day")
+    } else if abs < 86400 * 365 {
+        (abs / (86400 * 30), "month")
+    } else {
+        (abs / (86400 * 365), "year")
+    };
+    let s = if val == 1 { "" } else { "s" };
+    if diff >= 0 {
+        format!("{} {}{} ago", val, unit, s)
+    } else {
+        format!("in {} {}{}", val, unit, s)
+    }
+}
+
 impl Query for MtimeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Integer

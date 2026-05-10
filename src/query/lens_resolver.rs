@@ -2098,6 +2098,7 @@ fn resolve_single_match(
         }
         // (1 + 2) :> size:
         (Operand::Calculation(calc), Operand::Literal(lab)) => {
+            crate::query::error::check_label_calc_not_scalar(&calc, &op)?;
             let res_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::CalculationMatch {
                 calc: res_calc,

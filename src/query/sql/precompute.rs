@@ -1,10 +1,15 @@
 use super::{
-    resolve_count_target, try_dispatch_common, AggregationContext, NestContext,
+    apply_arithmetic_op, build_agg, build_resolved_literal_expr,
+    build_tag_value_agg_expr, label_to_unit_aware_expr, resolve_count_target,
+    subquery, try_dispatch_common, AggregationContext, NestContext,
 };
+use crate::db::{Col, Tbl};
 use crate::query::lens_resolver::{
-    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
+    ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
+    ResolvedOperand,
 };
-use sea_query::SelectStatement;
+use crate::query::lens_schema::to_bin_op;
+use sea_query::{Expr, Query, SelectStatement, SimpleExpr};
 
 pub fn needs_aggregation_context(node: &ResolvedNode) -> bool {
     node.walk().into_iter().any(|n| {
@@ -254,9 +259,97 @@ fn build_filter_sql(node: &ResolvedNode) -> SelectStatement {
     node.fold(&|node, child_sqls: Vec<SelectStatement>| {
         match try_dispatch_common(node, child_sqls) {
             Ok(sql) => sql,
-            Err(_) => unreachable!(
-                "build_filter_sql: filter/context nodes must not contain aggregation or nest nodes"
-            ),
+            Err(_) => build_filter_node_sql(node),
         }
+    })
+}
+
+fn build_filter_node_sql(node: &ResolvedNode) -> SelectStatement {
+    // 集約を含む calc のために agg_ctx を事前計算する。
+    // build_filter_operand_expr はタグを EAV で、集約をスカラーサブクエリで展開する。
+    let agg_ctx = build_aggregation_context(node);
+    match node {
+        ResolvedNode::CalculationMatch { calc, op, label } => {
+            let mut stmt = Query::select();
+            stmt.column(Col::ItemId)
+                .from(Tbl::OneView)
+                .group_by_col(Col::ItemId);
+            let calc_expr = build_filter_calc_expr(calc, &agg_ctx);
+            let label_expr = label_to_unit_aware_expr(label);
+            stmt.and_having(
+                Expr::expr(calc_expr).binary(to_bin_op(*op), label_expr),
+            );
+            stmt
+        }
+        ResolvedNode::TagCalculationMatch {
+            storage,
+            sql_type,
+            op,
+            calc,
+            ..
+        } => {
+            let mut stmt = Query::select();
+            stmt.column(Col::ItemId)
+                .from(Tbl::OneView)
+                .group_by_col(Col::ItemId);
+            let tag_expr = build_tag_value_agg_expr(storage, *sql_type);
+            let calc_expr = build_filter_calc_expr(calc, &agg_ctx);
+            stmt.and_having(
+                Expr::expr(tag_expr).binary(to_bin_op(*op), calc_expr),
+            );
+            stmt
+        }
+        ResolvedNode::CalculationCalculationMatch {
+            left_calc,
+            op,
+            right_calc,
+        } => {
+            let mut stmt = Query::select();
+            stmt.column(Col::ItemId)
+                .from(Tbl::OneView)
+                .group_by_col(Col::ItemId);
+            let left_expr = build_filter_calc_expr(left_calc, &agg_ctx);
+            let right_expr = build_filter_calc_expr(right_calc, &agg_ctx);
+            stmt.and_having(
+                Expr::expr(left_expr).binary(to_bin_op(*op), right_expr),
+            );
+            stmt
+        }
+        _ => unreachable!(
+            "build_filter_sql: filter/context nodes must not contain aggregation or nest nodes"
+        ),
+    }
+}
+
+/// フィルター文脈用の算術演算式を構築する。
+/// タグ参照は EAV 集約（item_id GROUP BY 配下で機能）、
+/// 集約ノードはスカラーサブクエリとして展開する（再帰的）。
+fn build_filter_calc_expr(
+    calc: &ResolvedCalculationNode,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    let left = build_filter_operand_expr(&calc.left, agg_ctx);
+    let right = build_filter_operand_expr(&calc.right, agg_ctx);
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
+    apply_arithmetic_op(&calc.op, left, right, is_string)
+}
+
+fn build_filter_operand_expr(
+    operand: &ResolvedOperand,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
+        ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
+        ResolvedOperand::TagRef { storage, sql_type, .. } => {
+            build_tag_value_agg_expr(storage, *sql_type)
+        }
+        ResolvedOperand::Calculation(calc) => {
+            let [left, right]: [SimpleExpr; 2] =
+                child_results.try_into().unwrap();
+            let is_string =
+                calc.left.is_string_type() && calc.right.is_string_type();
+            apply_arithmetic_op(&calc.op, left, right, is_string)
+        }
+        ResolvedOperand::Aggregation(agg) => subquery(build_agg(agg, agg_ctx)),
     })
 }

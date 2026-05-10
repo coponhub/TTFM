@@ -81,10 +81,22 @@ comparison = {
 
 // Label comparison: operand (including projection) followed by label-style operator
 // Specification: Proj :Op Scalar | Scalar :Op Proj | Scalar :Op Proj :Op Scalar ...
+// First path: colon-prefix operators (:>, :=, …) allow full `calculation` on LHS, which may
+// contain aggregation — e.g. (size: - sum(rs)) :> 100KB. Pure-scalar calcs are caught in resolver.
+// Second path: stuck operators (>, < …) only allow `label_calc` (no aggregation) on LHS so that
+// (sum(size:) + 100) > 1000 falls through to scalar_comparison.
+// nest_parenthesized_expr allows ((nest_expr)) with arbitrary parenthesis depth.
 label_comparison = ${
-    ( (nest_expr | type_ref | calculation | parenthesized_expr) ~ (WHITESPACE+ ~ label_op | stuck_op_step) ~ (WHITESPACE+ ~ label_op)* )
-  | ( (number | quoted_string | unquoted_string | unquoted_tag_string | calculation) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
+    ( (nest_expr | nest_parenthesized_expr | type_ref | calculation | label_calc) ~ (WHITESPACE+ ~ label_op)+ )
+  | ( (nest_expr | nest_parenthesized_expr | type_ref | label_calc) ~ stuck_op_step ~ (WHITESPACE+ ~ label_op)* )
+  | ( (number | quoted_string | unquoted_string | unquoted_tag_string | label_calc) ~ (WHITESPACE+ ~ label_op_to_proj) ~ (WHITESPACE+ ~ label_op)* )
 }
+
+// Allows arbitrarily nested parentheses around a nest_expr on label_comparison left side.
+// e.g., ((parentdir: &: count(size:))) — any depth of parens wrapping a nest_expr.
+// This accepts ((nest_expr)) while NOT accepting ((aggregation_arithmetic))
+// since the innermost content must be a nest_expr (requires &:).
+nest_parenthesized_expr = { "(" ~ WHITESPACE* ~ (nest_parenthesized_expr | nest_expr) ~ WHITESPACE* ~ ")" }
 
 // Label colon operator: :=, :^, :^=, :>, :>=, :<, :<=
 // DESIGN.md:71 - Label equality uses single "=" not "=="
@@ -171,6 +183,15 @@ arith_op = @{ WHITESPACE+ ~ arithmetic_operator ~ WHITESPACE+ }
 
 // Calc operands (to avoid ambiguity)
 operand_calc = { aggregation | type_ref | label | calculation | parenthesized_expr }
+
+// Label calculation: arithmetic over projections/literals only (no aggregation allowed).
+// Used as the left operand of label_comparison stuck-op path to ensure aggregation-containing
+// expressions fall through to scalar_comparison or are caught by check_label_op_misuse.
+// Calculations with aggregation are allowed via `calculation` in the label_op path of
+// label_comparison (e.g. (size: - sum(rs)) :> 100KB), but only with colon-prefix operators.
+label_calc = { "(" ~ label_calc_inner ~ ")" }
+label_calc_inner = ${ WHITESPACE* ~ label_operand_calc ~ (arith_op ~ label_operand_calc)+ ~ WHITESPACE* }
+label_operand_calc = { type_ref | label | label_calc | parenthesized_expr }
 
 // Parenthesized expression: allows set operations as arithmetic operands
 // e.g., sum((is_dir:false & size:) + 1000)
