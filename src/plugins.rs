@@ -37,8 +37,9 @@ impl WasiView for WasmStore {
 }
 
 // スレッドローカルなインスタンスキャッシュ。
+// キーは (WasmPlugin ポインタ, プラグイン名) — 同名でも異なるコンポーネントを区別する。
 thread_local! {
-    static INSTANCE_CACHE: RefCell<HashMap<String, (Store<WasmStore>, Plugin)>> =
+    static INSTANCE_CACHE: RefCell<HashMap<(*const WasmPlugin, String), (Store<WasmStore>, Plugin)>> =
         RefCell::new(HashMap::new());
 }
 
@@ -52,19 +53,25 @@ pub struct WasmPlugin {
 impl WasmPlugin {
     /// 指定されたWasmファイルからプラグインをロードします。
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        let (engine, linker) = Self::create_engine_and_linker()?;
+        let component = Component::from_file(&engine, path)?;
+        Ok(Self { engine, component, linker })
+    }
+
+    /// バイト列からプラグインをロードします（ビルトインプラグイン用）。
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let (engine, linker) = Self::create_engine_and_linker()?;
+        let component = Component::from_binary(&engine, bytes)?;
+        Ok(Self { engine, component, linker })
+    }
+
+    fn create_engine_and_linker() -> Result<(Engine, Linker<WasmStore>)> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         let engine = Engine::new(&config)?;
-        let component = Component::from_file(&engine, path)?;
-
         let mut linker: Linker<WasmStore> = Linker::new(&engine);
         wasmtime_wasi::add_to_linker_sync(&mut linker)?;
-
-        Ok(Self {
-            engine,
-            component,
-            linker,
-        })
+        Ok((engine, linker))
     }
 
     /// プラグインを実行可能なアダプターに変換します。
@@ -157,18 +164,19 @@ impl Index for WasmPluginAdapter {
         let results = INSTANCE_CACHE.with(|cache| -> Result<Vec<WasmVal>> {
             let mut cache = cache.borrow_mut();
 
-            if !cache.contains_key(&self.name) {
+            let cache_key = (Arc::as_ptr(&self.plugin), self.name.clone());
+            if !cache.contains_key(&cache_key) {
                 let mut store = self.plugin.create_store()?;
                 let plugin = Plugin::instantiate(
                     &mut store,
                     &self.plugin.component,
                     &self.plugin.linker,
                 )?;
-                cache.insert(self.name.clone(), (store, plugin));
+                cache.insert(cache_key.clone(), (store, plugin));
             }
 
             let (store, plugin) =
-                cache.get_mut(&self.name).ok_or_else(|| {
+                cache.get_mut(&cache_key).ok_or_else(|| {
                     anyhow::anyhow!("Plugin instance missing from cache")
                 })?;
             let interface = plugin.ttfm_plugin_indexing_function();

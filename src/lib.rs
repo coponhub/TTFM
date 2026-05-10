@@ -111,23 +111,13 @@ impl FileManager {
         let home = get_ttfm_home()?;
         let plugins_dir = home.join("plugins");
 
-        // ホームディレクトリの準備
+        // ユーザープラグイン用ディレクトリの準備
         if !plugins_dir.exists() {
             std::fs::create_dir_all(&plugins_dir).with_context(|| {
                 format!(
                     "Failed to create plugins directory at {:?}",
                     plugins_dir
                 )
-            })?;
-        }
-
-        // デフォルトプラグインの展開
-        let mimetype_path = plugins_dir.join("mimetype_plugin.component.wasm");
-        if !mimetype_path.exists() {
-            let bytes =
-                include_bytes!("../plugins/mimetype_plugin.component.wasm");
-            std::fs::write(&mimetype_path, bytes).with_context(|| {
-                format!("Failed to setup default plugin at {:?}", mimetype_path)
             })?;
         }
 
@@ -555,29 +545,20 @@ impl FileManager {
                     Ok(plugin) => {
                         let adapter = plugin.into_adapter()?;
 
-                        // 個別設定のチェック
                         let is_enabled =
                             *status.get(&adapter.name).unwrap_or(&true);
-                        if is_enabled {
-                            if cfg!(debug_assertions)
-                                && std::env::var("TTFM_DEBUG").is_ok()
-                            {
-                                println!(
-                                    "Loaded plugin: {} from {:?}",
-                                    adapter.name, path
-                                );
-                            }
-                            self.registry.register_plugin(adapter);
-                        } else {
-                            if cfg!(debug_assertions)
-                                && std::env::var("TTFM_DEBUG").is_ok()
-                            {
-                                println!(
-                                    "Plugin {} is disabled via config. Skipping.",
-                                    adapter.name
-                                );
-                            }
+                        if !is_enabled {
+                            continue;
                         }
+                        // パッケージ名が既に登録済みの場合はスキップ（ファイル名でなくパッケージ名で判定）
+                        if self.registry.get(&adapter.name).is_some() {
+                            eprintln!(
+                                "Warning: Plugin with name '{}' already registered. Skipping {:?}.",
+                                adapter.name, path
+                            );
+                            continue;
+                        }
+                        self.registry.register_plugin(adapter);
                     }
                     Err(e) => {
                         eprintln!(
@@ -585,6 +566,39 @@ impl FileManager {
                             path, e
                         );
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// ビルトインプラグインをバイト列から直接ロードし、レジストリに登録します。
+    /// ユーザープラグインと同名のものが既に登録されている場合はスキップします。
+    pub fn load_builtin_plugins(
+        &mut self,
+        status: &std::collections::HashMap<String, bool>,
+    ) -> Result<()> {
+        let builtins: &[&[u8]] = &[
+            include_bytes!("../plugins/mimetype_plugin.component.wasm"),
+        ];
+
+        for bytes in builtins {
+            match crate::plugins::WasmPlugin::from_bytes(bytes) {
+                Ok(plugin) => {
+                    let adapter = plugin.into_adapter()?;
+                    let is_enabled =
+                        *status.get(&adapter.name).unwrap_or(&true);
+                    if !is_enabled {
+                        continue;
+                    }
+                    // ユーザープラグインが同名で登録済みならスキップ
+                    if self.registry.get(&adapter.name).is_some() {
+                        continue;
+                    }
+                    self.registry.register_plugin(adapter);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load built-in plugin: {}", e);
                 }
             }
         }

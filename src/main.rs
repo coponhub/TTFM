@@ -133,10 +133,11 @@ fn main() -> Result<()> {
     // 設定ファイルの読み込み
     let config = Config::load();
 
-    // プラグインが有効な場合のみロード
+    // プラグインが有効な場合のみロード（ユーザー → ビルトインの順、同名はユーザーが優先）
     if config.plugins.enabled {
         let plugins_dir = ttfm::get_ttfm_plugins_dir()?;
         fm.load_plugins(plugins_dir, &config.plugins.status)?;
+        fm.load_builtin_plugins(&config.plugins.status)?;
     }
 
     match &cli.command {
