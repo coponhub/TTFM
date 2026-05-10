@@ -1,5 +1,5 @@
 use crate::db::{Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl};
-use crate::indexing::functions::ScanEntry;
+use crate::indexing::ScanEntry;
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};

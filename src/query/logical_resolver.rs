@@ -21,40 +21,13 @@ use crate::query::ast::{
     ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
+use crate::tag::TagRegistry;
 use crate::types::{Label, LabelValue, TagType};
 use anyhow::{bail, Result};
 
 // ========== Logical Representation ==========
 
-/// クエリエンジンの論理レイヤーで扱う型。
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LogicalType {
-    Integer,
-    Float,
-    String,
-    Boolean,
-    Any,
-}
-
-impl LogicalType {
-    /// 数値計算が可能な型かどうかを返します。
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::Boolean)
-    }
-}
-
-/// 論理的なスキーマ情報を提供するインターフェース。
-pub trait LogicalSchema {
-    /// 指定されたタグの論理型を返します。
-    fn get_logical_type(&self, tag: &TagType) -> LogicalType;
-
-    /// タグの論理展開（Virtualタグの具体化など）を行います。
-    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode;
-
-    /// プロジェクションの論理展開を行います。
-    fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
-}
+pub use crate::tag::{LogicalSchema, LogicalType};
 
 /// QueryNodeを論理的に展開します（Virtual tag展開、日付範囲化など）
 ///
@@ -185,8 +158,8 @@ fn expand_comparison_with_recursion(
     cmp.rest = new_rest;
 
     // 標準の比較ノード展開（日付範囲化など）を実行
-    let reg = QueryFunctionRegistry::with_standard();
-    let expanded_node = expand_comparison_node(cmp, &reg);
+    let reg = TagRegistry::with_standard();
+    let expanded_node = reg.expand_comparison(cmp);
 
     // 抽出したフィルタがあれば Comparison 全体を And で包む
     if lifted_filters.is_empty() {

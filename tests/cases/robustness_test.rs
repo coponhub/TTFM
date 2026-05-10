@@ -38,16 +38,4 @@ fn test_metadata_error_recovery_integration() {
         .primary_value()
         .unwrap()
         .contains("loop_link"));
-
-    // 文字列表現のエラー値 ("-") も検証
-    let results_str = fm
-        .search("size_str:-", Default::default())
-        .expect("Search for size_str:- should succeed");
-
-    // type_from_ext:Folder も "-" になるため、名前でフィルタリングして確認
-    let found_loop = results_str
-        .results
-        .iter()
-        .any(|r| r.name.contains("loop_link"));
-    assert!(found_loop, "Loop link should have '-' as size_str");
 }

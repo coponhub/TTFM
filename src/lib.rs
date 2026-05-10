@@ -27,13 +27,6 @@ pub mod types;
 pub mod util;
 
 pub use db::TargetTable;
-use indexing::functions::{
-    ContentIndexingFunction, DirectoryFunction, ExtensionFunction,
-    FilenameFunction, IndexingFunction, InodeFunction, KindIndexingFunction,
-    ModifiedStrFunction, ModifiedTsFunction, NameIndexingFunction,
-    ParentDirFunction, PathFunction, SizeBytesFunction, SizeStrFunction,
-    StemFunction, TypeFromExtFunction,
-};
 pub use query::{parse, QueryNode};
 pub use response::{SearchResponse, SearchResult};
 pub use taggers::{ColumnDef, TagValue, Tagger};
@@ -95,92 +88,6 @@ pub fn get_ttfm_home() -> Result<std::path::PathBuf> {
 /// TTFMのプラグインディレクトリを取得します。
 pub fn get_ttfm_plugins_dir() -> Result<std::path::PathBuf> {
     Ok(get_ttfm_home()?.join("plugins"))
-}
-
-/// 全ての `IndexingFunction` を管理し、インデックス作成と検索の仲介を行うレジストリ。
-pub struct FunctionRegistry {
-    /// 登録されている機能のリスト
-    functions: Vec<Box<dyn IndexingFunction>>,
-}
-
-impl Default for FunctionRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FunctionRegistry {
-    /// 空のレジストリを作成します。
-    pub fn new() -> Self {
-        Self {
-            functions: Vec::new(),
-        }
-    }
-
-    /// 新しい機能（`IndexingFunction`）をレジストリに追加します。
-    /// 同名の機能が既に登録されている場合はスキップします。
-    pub fn register(&mut self, func: Box<dyn IndexingFunction>) {
-        let name = func.name();
-        if self.functions.iter().any(|f| f.name() == name) {
-            return;
-        }
-        self.functions.push(func);
-    }
-
-    /// 標準的な機能をすべて登録したレジストリを返します。
-    pub fn with_standard() -> Self {
-        let mut reg = Self::new();
-        // 登録順序が重要（カラム順序になるため）
-        reg.register(Box::new(InodeFunction::new()));
-        reg.register(Box::new(PathFunction::new()));
-        reg.register(Box::new(ParentDirFunction::new()));
-        reg.register(Box::new(FilenameFunction::new()));
-        reg.register(Box::new(StemFunction::new()));
-        reg.register(Box::new(ExtensionFunction::new()));
-        reg.register(Box::new(DirectoryFunction::new()));
-        reg.register(Box::new(SizeBytesFunction::new()));
-        reg.register(Box::new(ModifiedTsFunction::new()));
-        reg.register(Box::new(TypeFromExtFunction::new()));
-        reg.register(Box::new(SizeStrFunction::new()));
-        reg.register(Box::new(ModifiedStrFunction::new()));
-
-        // 定義のみの機能（ランク付けや検索用）
-        reg.register(Box::new(NameIndexingFunction));
-        reg.register(Box::new(KindIndexingFunction));
-        reg.register(Box::new(ContentIndexingFunction));
-
-        reg
-    }
-
-    /// 全ての登録済み関数への参照を返します。
-    pub fn all_functions(&self) -> &[Box<dyn IndexingFunction>] {
-        &self.functions
-    }
-
-    // --- Indexing Support ---
-
-    /// 登録されている全機能からデータベースのカラム定義を取得します。
-    pub fn get_all_columns(&self) -> Vec<ColumnDef> {
-        let mut cols = Vec::new();
-        for func in &self.functions {
-            if let Some(tagger) = func.tagger() {
-                cols.extend(tagger.get_columns());
-            }
-        }
-        cols
-    }
-
-    /// 指定されたファイルパスに対してタグ付けを実行し、1行分のデータを返します。
-    pub fn process_file(&self, path: &Path) -> Result<Vec<TagValue>> {
-        let mut row = Vec::new();
-        for func in &self.functions {
-            if let Some(tagger) = func.tagger() {
-                let values = tagger.tag_file(path)?;
-                row.extend(values);
-            }
-        }
-        Ok(row)
-    }
 }
 
 /// ファイル管理システムのメインインターフェース。

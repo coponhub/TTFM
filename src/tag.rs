@@ -1,14 +1,90 @@
-use crate::indexing::functions::ScanRole;
+use crate::db::{SqlType, TargetTable};
 use crate::query::ast::{
     BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
-use crate::query::logical_resolver::LogicalType;
-use crate::types::{Label, LabelValue, Rank, SType, TagType, TypedTag};
+use crate::taggers::TagValue;
+use crate::types::{DBType, Label, LabelValue, Rank, SType, TagType, TypedTag};
+use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
 use path_slash::PathExt as _;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
+
+// ============================================================
+// ScanRole / IndexingFunction (プラグイン互換ブリッジ、Phase 5 で削除予定)
+// ============================================================
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum ScanRole {
+    Location,
+    ScanId,
+    Integrity,
+    Other,
+    /// インデックス作成時の抽出対象外（定義とランクのみ提供）
+    DefinitionOnly,
+}
+
+/// プラグイン互換インターフェース。Phase 5 で TagFunction に統合予定。
+pub trait IndexingFunction: Send + Sync {
+    fn name(&self) -> crate::types::Name<'_>;
+    fn tagger(&self) -> Option<&dyn crate::taggers::Tagger> { None }
+    fn role(&self) -> ScanRole { ScanRole::Other }
+    fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
+    fn default_rank(&self) -> Rank { crate::rank::SystemRank::DEFAULT }
+}
+
+// ============================================================
+// Scan trait — スキャン時の型付きデータ取得 (Phase 4)
+// ============================================================
+
+pub struct ScanColumn {
+    pub name: &'static str,
+    pub sql_type: SqlType,
+    pub role: ScanRole,
+}
+
+/// スキャン時の型安全なフィールドコンテナ。
+pub struct ScanField<F: Scan> {
+    pub value: F::Value,
+}
+
+impl<F: Scan> std::fmt::Debug for ScanField<F>
+where
+    F::Value: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<F: Scan> PartialEq for ScanField<F>
+where
+    F::Value: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<F: Scan> Clone for ScanField<F>
+where
+    F::Value: Clone,
+{
+    fn clone(&self) -> Self {
+        Self { value: self.value.clone() }
+    }
+}
+
+/// スキャン時の型付きデータ取得トレイト。
+/// associated type を持つため object-safe ではなく、`define_scan_entry!` マクロ経由でのみ使用する。
+pub trait Scan {
+    fn name() -> &'static str;
+    type Value: DBType + Debug + PartialEq + Clone;
+    const SCAN_ROLE: ScanRole;
+    fn scan(path: &Path, metadata: &SafeMetadata) -> Result<Self::Value>;
+}
 
 // ============================================================
 // DisplayFormat / DisplayFormats
@@ -61,9 +137,58 @@ pub trait Index: Send + Sync {
         None
     }
 
-    fn default_rank(&self) -> Rank {
-        crate::rank::SystemRank::DEFAULT
+    /// DB カラムの SQL 型。
+    fn sql_type(&self) -> SqlType {
+        SqlType::VARCHAR
     }
+
+    /// 書き込み先テーブル。
+    fn target_table(&self) -> TargetTable {
+        TargetTable::Locations
+    }
+
+    /// インデックス保存用の TagValue を返す。UUID 等の特殊型はここをオーバーライド。
+    fn extract_tag_value(&self, path: &Path) -> Result<TagValue> {
+        match self.extract(path)? {
+            None => Ok(TagValue::Null),
+            Some(LabelValue::String(s)) | Some(LabelValue::Literal(s)) => {
+                Ok(TagValue::Text(s))
+            }
+            Some(LabelValue::Integer(i)) => Ok(TagValue::BigInt(i)),
+            Some(LabelValue::Boolean(b)) => Ok(TagValue::Boolean(b)),
+            Some(LabelValue::Double(bits)) => {
+                Ok(TagValue::Double(f64::from_bits(bits)))
+            }
+            Some(LabelValue::Null) => Ok(TagValue::Null),
+        }
+    }
+}
+
+// ============================================================
+// LogicalType / LogicalSchema
+// ============================================================
+
+/// クエリエンジンの論理レイヤーで扱う型。
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LogicalType {
+    Integer,
+    Float,
+    String,
+    Boolean,
+    Any,
+}
+
+impl LogicalType {
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, Self::Integer | Self::Float | Self::Boolean)
+    }
+}
+
+/// 論理的なスキーマ情報を提供するインターフェース。
+pub trait LogicalSchema {
+    fn get_logical_type(&self, tag: &TagType) -> LogicalType;
+    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode;
+    fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
 }
 
 // ============================================================
@@ -121,6 +246,20 @@ pub trait Query: Send + Sync {
     fn storage_key(&self) -> Option<&'static str> {
         None
     }
+
+    /// 比較ノードを展開する。デフォルトはリテラルを normalize_label して ComparisonNode を返す。
+    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+        let mut node = node;
+        if let Operand::Literal(label) = &mut node.first {
+            *label = self.normalize_label(label);
+        }
+        for (_, rhs) in &mut node.rest {
+            if let Operand::Literal(label) = rhs {
+                *label = self.normalize_label(label);
+            }
+        }
+        QueryNode::Comparison(node)
+    }
 }
 
 // ============================================================
@@ -156,6 +295,10 @@ pub trait TagFunction: Send + Sync {
     fn display(&self) -> Option<&dyn Display> {
         None
     }
+
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::DEFAULT
+    }
 }
 
 // ============================================================
@@ -165,8 +308,10 @@ pub trait TagFunction: Send + Sync {
 /// TagFunction を一括管理するレジストリ。
 pub struct TagRegistry {
     functions: HashMap<String, Arc<dyn TagFunction>>,
-    /// Phase 4 で削除予定: インデックス側ブリッジ
-    inner: crate::FunctionRegistry,
+    /// 登録順序を保持（カラムスキーマの安定のため）。
+    ordered: Vec<Arc<dyn TagFunction>>,
+    /// プラグイン互換ブリッジ（Phase 5 で削除予定）。
+    plugins: Vec<Box<dyn IndexingFunction>>,
 }
 
 impl Default for TagRegistry {
@@ -179,13 +324,15 @@ impl TagRegistry {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
-            inner: crate::FunctionRegistry::new(),
+            ordered: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 
     pub fn register(&mut self, func: impl TagFunction + 'static) {
-        self.functions
-            .insert(func.name().to_string(), Arc::new(func));
+        let arc = Arc::new(func);
+        self.functions.insert(arc.name().to_string(), arc.clone());
+        self.ordered.push(arc);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn TagFunction> {
@@ -199,60 +346,143 @@ impl TagRegistry {
     pub fn iter_arcs(
         &self,
     ) -> impl Iterator<Item = Arc<dyn TagFunction>> + '_ {
-        self.functions.values().cloned()
+        self.ordered.iter().cloned()
+    }
+
+    /// name・rank を含む全タグのイテレータ（標準 + プラグイン）。
+    pub fn iter_all_for_rank(
+        &self,
+    ) -> impl Iterator<Item = (&str, Rank)> + '_ {
+        let from_fns = self.ordered.iter().map(|f| (f.name(), f.default_rank()));
+        let from_plugins = self.plugins.iter().map(|p| (p.name(), p.default_rank()));
+        from_fns.chain(from_plugins)
     }
 
     /// 標準タグを全登録したレジストリを返す。
+    /// 最初の 9 つは Index 実装あり（カラム順序 = 旧 FunctionRegistry と同一）。
     pub fn with_standard() -> Self {
         let mut reg = Self::new();
-        reg.register(DirectoryFn);
-        reg.register(FilenameFn);
-        reg.register(ExtensionFn);
+        // --- インデックス関数（カラム順序を維持） ---
+        reg.register(FileIdFn);
         reg.register(PathFn);
         reg.register(ParentDirFn);
+        reg.register(FilenameFn);
         reg.register(StemFn);
+        reg.register(ExtensionFn);
         reg.register(IsDirFn);
-        reg.register(HashFn);
-        reg.register(ContentFn);
-        reg.register(FileIdFn);
-        reg.register(NameFn);
         reg.register(SizeFn);
         reg.register(MtimeFn);
+        // --- クエリ専用関数 ---
+        reg.register(DirectoryFn);
+        reg.register(HashFn);
+        reg.register(ContentFn);
+        reg.register(NameFn);
         reg.register(ItemKindFn);
         reg.register(RankFn);
         reg.register(OriginFn);
         reg.register(TypeFn);
         reg.register(LabelFn);
         reg.register(TypedTagFn);
-        reg.inner = crate::FunctionRegistry::with_standard();
         reg
     }
 
-    // ---- Phase 4 削除予定ブリッジメソッド ----
+    // ---- ブリッジメソッド（プラグインは Phase 5 で完全移行） ----
 
     pub fn get_all_columns(&self) -> Vec<crate::taggers::ColumnDef> {
-        self.inner.get_all_columns()
+        let mut cols: Vec<crate::taggers::ColumnDef> = self
+            .ordered
+            .iter()
+            .filter_map(|f| {
+                f.index().map(|idx| crate::taggers::ColumnDef {
+                    name: f.name().to_string(),
+                    sql_type: idx.sql_type(),
+                    target_table: idx.target_table(),
+                })
+            })
+            .collect();
+        for plugin in &self.plugins {
+            if let Some(tagger) = plugin.tagger() {
+                cols.extend(tagger.get_columns());
+            }
+        }
+        cols
     }
 
     pub fn process_file(
         &self,
         path: &Path,
     ) -> Result<Vec<crate::taggers::TagValue>> {
-        self.inner.process_file(path)
+        let mut row = Vec::new();
+        for func in &self.ordered {
+            if let Some(idx) = func.index() {
+                row.push(idx.extract_tag_value(path)?);
+            }
+        }
+        for plugin in &self.plugins {
+            if let Some(tagger) = plugin.tagger() {
+                row.extend(tagger.tag_file(path)?);
+            }
+        }
+        Ok(row)
     }
 
-    pub fn all_indexing_functions(
-        &self,
-    ) -> &[Box<dyn crate::indexing::functions::IndexingFunction>] {
-        self.inner.all_functions()
+    pub fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+        let name = find_tagtype_name_in_comparison(&node);
+        let Some(name) = name else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(func) = self.get(&name) else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(q) = func.query() else {
+            return QueryNode::Comparison(node);
+        };
+        q.expand_comparison(node)
     }
 
-    pub fn register_plugin(
-        &mut self,
-        func: Box<dyn crate::indexing::functions::IndexingFunction>,
-    ) {
-        self.inner.register(func);
+    pub fn register_plugin(&mut self, func: Box<dyn IndexingFunction>) {
+        self.plugins.push(func);
     }
+}
+
+fn find_tagtype_name_in_comparison(node: &ComparisonNode) -> Option<String> {
+    fn tagtype_name(tt: &TagType) -> Option<String> {
+        if let TagType::Base(stype) = tt {
+            let s: &'static str = (*stype).into();
+            Some(s.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn find_in_querynode(qnode: &QueryNode) -> Option<&TagType> {
+        match qnode {
+            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt),
+            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                nodes.iter().find_map(find_in_querynode)
+            }
+            QueryNode::Difference(l, _) => find_in_querynode(l),
+            _ => None,
+        }
+    }
+
+    fn find_in_operand(op: &Operand) -> Option<String> {
+        use crate::query::ast::AggregationNode;
+        match op {
+            Operand::TypeRef(tt) => tagtype_name(tt),
+            Operand::Aggregation(agg) => {
+                let inner = match agg.as_ref() {
+                    AggregationNode::Count(q) => q,
+                    AggregationNode::Arithmetic { inner, .. } => inner,
+                };
+                find_in_querynode(inner.as_ref()).and_then(tagtype_name)
+            }
+            _ => None,
+        }
+    }
+
+    find_in_operand(&node.first)
+        .or_else(|| node.rest.iter().find_map(|(_, op)| find_in_operand(op)))
 }
 
 // ============================================================
@@ -282,6 +512,15 @@ fn normalize_path_str(s: &str) -> String {
     Path::new(s).to_slash_lossy().to_string()
 }
 
+fn get_safe_meta(path: &Path) -> Result<SafeMetadata> {
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(SafeMetadata::new(&m)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(e.into()),
+        Err(_) => Ok(SafeMetadata::recovered()),
+    }
+}
+
+// --- DirectoryFn ---
 pub(crate) struct DirectoryFn;
 impl TagFunction for DirectoryFn {
     fn name(&self) -> &str {
@@ -317,13 +556,20 @@ impl Query for DirectoryFn {
     }
 }
 
+// --- FilenameFn ---
 pub(crate) struct FilenameFn;
 impl TagFunction for FilenameFn {
     fn name(&self) -> &str {
         SType::Filename.into()
     }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
+    }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::FILENAME
     }
 }
 impl Query for FilenameFn {
@@ -351,11 +597,28 @@ impl Query for FilenameFn {
         ])
     }
 }
+impl Index for FilenameFn {
+    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        get_safe_meta(path)?;
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        Ok(Some(LabelValue::String(name)))
+    }
+    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+        Some(LabelValue::String(
+            path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+        ))
+    }
+}
 
+// --- ExtensionFn ---
 pub(crate) struct ExtensionFn;
 impl TagFunction for ExtensionFn {
     fn name(&self) -> &str {
         SType::Extension.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -389,14 +652,30 @@ impl Query for ExtensionFn {
         ])
     }
 }
+impl Index for ExtensionFn {
+    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        Ok(path.extension().map(|e| LabelValue::String(e.to_string_lossy().to_lowercase())))
+    }
+    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+        path.extension().map(|e| LabelValue::String(e.to_string_lossy().to_lowercase()))
+    }
+}
 
-pub(crate) struct PathFn;
+// --- PathFn ---
+pub struct PathFn;
 impl TagFunction for PathFn {
     fn name(&self) -> &str {
         SType::Path.into()
     }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
+    }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::PATH
     }
 }
 impl Query for PathFn {
@@ -417,14 +696,38 @@ impl Query for PathFn {
         QueryNode::TypedTag(TypedTag::new(SType::Path, lv))
     }
 }
+impl Index for PathFn {
+    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        Ok(Some(LabelValue::String(path.to_slash_lossy().to_string())))
+    }
+    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+        Some(LabelValue::String(path.to_slash_lossy().to_string()))
+    }
+}
+impl Scan for PathFn {
+    fn name() -> &'static str { "path" }
+    type Value = String;
+    const SCAN_ROLE: ScanRole = ScanRole::Location;
+    fn scan(path: &Path, _: &SafeMetadata) -> Result<String> {
+        Ok(path.to_slash_lossy().to_string())
+    }
+}
 
+// --- ParentDirFn ---
 pub(crate) struct ParentDirFn;
 impl TagFunction for ParentDirFn {
     fn name(&self) -> &str {
         SType::Parentdir.into()
     }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
+    }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::PARENT_DIR
     }
 }
 impl Query for ParentDirFn {
@@ -445,11 +748,27 @@ impl Query for ParentDirFn {
         QueryNode::TypedTag(TypedTag::new(SType::Parentdir, lv))
     }
 }
+impl Index for ParentDirFn {
+    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let parent = path.parent()
+            .map(|p| p.to_slash_lossy().to_string())
+            .unwrap_or_default();
+        Ok(Some(LabelValue::String(parent)))
+    }
+    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+        path.parent().map(|p| LabelValue::String(p.to_slash_lossy().to_string()))
+    }
+}
 
+// --- StemFn ---
 pub(crate) struct StemFn;
 impl TagFunction for StemFn {
     fn name(&self) -> &str {
         SType::Stem.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -460,11 +779,24 @@ impl Query for StemFn {
         LogicalType::String
     }
 }
+impl Index for StemFn {
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let stem = path.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        Ok(Some(LabelValue::String(stem)))
+    }
+    fn target_table(&self) -> TargetTable { TargetTable::BaseTags }
+}
 
+// --- IsDirFn ---
 pub(crate) struct IsDirFn;
 impl TagFunction for IsDirFn {
     fn name(&self) -> &str {
         SType::IsDir.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -475,7 +807,16 @@ impl Query for IsDirFn {
         LogicalType::Boolean
     }
 }
+impl Index for IsDirFn {
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let m = get_safe_meta(path)?;
+        Ok(Some(LabelValue::Boolean(m.is_dir())))
+    }
+    fn sql_type(&self) -> SqlType { SqlType::BOOLEAN }
+    fn target_table(&self) -> TargetTable { TargetTable::BaseTags }
+}
 
+// --- HashFn ---
 pub(crate) struct HashFn;
 impl TagFunction for HashFn {
     fn name(&self) -> &str {
@@ -491,6 +832,7 @@ impl Query for HashFn {
     }
 }
 
+// --- ContentFn ---
 pub(crate) struct ContentFn;
 impl TagFunction for ContentFn {
     fn name(&self) -> &str {
@@ -499,6 +841,9 @@ impl TagFunction for ContentFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::CONTENT
+    }
 }
 impl Query for ContentFn {
     fn logical_type(&self) -> LogicalType {
@@ -506,10 +851,14 @@ impl Query for ContentFn {
     }
 }
 
-pub(crate) struct FileIdFn;
+// --- FileIdFn ---
+pub struct FileIdFn;
 impl TagFunction for FileIdFn {
     fn name(&self) -> &str {
         SType::FileId.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -520,7 +869,31 @@ impl Query for FileIdFn {
         LogicalType::String
     }
 }
+impl Index for FileIdFn {
+    fn role(&self) -> ScanRole { ScanRole::ScanId }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let r = crate::get_file_ref(path)?;
+        Ok(Some(LabelValue::String(r.to_string())))
+    }
+    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+        crate::get_file_ref(path).ok().map(|r| LabelValue::String(r.to_string()))
+    }
+    fn sql_type(&self) -> SqlType { SqlType::UUID }
+    fn target_table(&self) -> TargetTable { TargetTable::FileReferences }
+    fn extract_tag_value(&self, path: &Path) -> Result<TagValue> {
+        Ok(TagValue::Uuid(crate::get_file_ref(path)?))
+    }
+}
+impl Scan for FileIdFn {
+    fn name() -> &'static str { "file_id" }
+    type Value = crate::types::FileRef;
+    const SCAN_ROLE: ScanRole = ScanRole::ScanId;
+    fn scan(path: &Path, _: &SafeMetadata) -> Result<crate::types::FileRef> {
+        crate::get_file_ref(path)
+    }
+}
 
+// --- NameFn ---
 pub(crate) struct NameFn;
 impl TagFunction for NameFn {
     fn name(&self) -> &str {
@@ -528,6 +901,9 @@ impl TagFunction for NameFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::NAME
     }
 }
 impl Query for NameFn {
@@ -544,10 +920,14 @@ impl Query for NameFn {
     }
 }
 
-pub(crate) struct SizeFn;
+// --- SizeFn ---
+pub struct SizeFn;
 impl TagFunction for SizeFn {
     fn name(&self) -> &str {
         SType::Size.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -574,11 +954,31 @@ impl Query for SizeFn {
         QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
     }
 }
+impl Index for SizeFn {
+    fn role(&self) -> ScanRole { ScanRole::Integrity }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let m = get_safe_meta(path)?;
+        Ok(Some(LabelValue::Integer(m.len())))
+    }
+    fn sql_type(&self) -> SqlType { SqlType::BIGINT }
+}
+impl Scan for SizeFn {
+    fn name() -> &'static str { "size" }
+    type Value = crate::types::FileSize;
+    const SCAN_ROLE: ScanRole = ScanRole::Integrity;
+    fn scan(_: &Path, meta: &SafeMetadata) -> Result<crate::types::FileSize> {
+        Ok(crate::types::FileSize(meta.len()))
+    }
+}
 
-pub(crate) struct MtimeFn;
+// --- MtimeFn ---
+pub struct MtimeFn;
 impl TagFunction for MtimeFn {
     fn name(&self) -> &str {
         SType::Mtime.into()
+    }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
@@ -622,8 +1022,103 @@ impl Query for MtimeFn {
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
     }
+
+    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+        let mut first = node.first.clone();
+        let rest = node.rest;
+
+        if let Operand::Literal(label) = &mut first {
+            if let Some(range) = parse_datetime(&label.as_str()) {
+                *label = Label::Mtime(range.start);
+            }
+        }
+
+        let mut conditions = Vec::new();
+        for (op, rhs) in rest {
+            if let Operand::Literal(label) = &rhs {
+                if let Some(range) = parse_datetime(&label.as_str()) {
+                    conditions.extend(mtime_range_op(&first, op, range));
+                    continue;
+                }
+            }
+            conditions.push(QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, rhs)],
+            }));
+        }
+
+        match conditions.len() {
+            1 => conditions.remove(0),
+            _ => QueryNode::And(conditions),
+        }
+    }
 }
 
+fn mtime_range_op(first: &Operand, op: ComparisonOp, range: DatetimeRange) -> Vec<QueryNode> {
+    let basic_op = match op {
+        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+    };
+    let make_op = |b: BasicOp| match op {
+        ComparisonOp::Label(_) => ComparisonOp::Label(b),
+        ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
+    };
+    match basic_op {
+        BasicOp::Eq => vec![
+            QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(make_op(BasicOp::Ge), Operand::Literal(Label::Mtime(range.start)))],
+            }),
+            QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(make_op(BasicOp::Le), Operand::Literal(Label::Mtime(range.end)))],
+            }),
+        ],
+        BasicOp::Ne => vec![QueryNode::Or(vec![
+            QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(make_op(BasicOp::Lt), Operand::Literal(Label::Mtime(range.start)))],
+            }),
+            QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(make_op(BasicOp::Gt), Operand::Literal(Label::Mtime(range.end)))],
+            }),
+        ])],
+        BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(make_op(BasicOp::Gt), Operand::Literal(Label::Mtime(range.end)))],
+        })],
+        BasicOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(make_op(BasicOp::Ge), Operand::Literal(Label::Mtime(range.start)))],
+        })],
+        BasicOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(make_op(BasicOp::Lt), Operand::Literal(Label::Mtime(range.start)))],
+        })],
+        BasicOp::Le => vec![QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(make_op(BasicOp::Le), Operand::Literal(Label::Mtime(range.end)))],
+        })],
+    }
+}
+impl Index for MtimeFn {
+    fn role(&self) -> ScanRole { ScanRole::Integrity }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+        let m = get_safe_meta(path)?;
+        Ok(Some(LabelValue::Integer(m.modified())))
+    }
+    fn sql_type(&self) -> SqlType { SqlType::BIGINT }
+}
+impl Scan for MtimeFn {
+    fn name() -> &'static str { "mtime" }
+    type Value = crate::types::FileTimestamp;
+    const SCAN_ROLE: ScanRole = ScanRole::Integrity;
+    fn scan(_: &Path, meta: &SafeMetadata) -> Result<crate::types::FileTimestamp> {
+        Ok(crate::types::FileTimestamp(meta.modified()))
+    }
+}
+
+// --- ItemKindFn ---
 pub(crate) struct ItemKindFn;
 impl TagFunction for ItemKindFn {
     fn name(&self) -> &str {
@@ -631,6 +1126,9 @@ impl TagFunction for ItemKindFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::ITEM_KIND
     }
 }
 impl Query for ItemKindFn {
@@ -653,6 +1151,7 @@ impl Query for ItemKindFn {
     }
 }
 
+// --- RankFn ---
 pub(crate) struct RankFn;
 impl TagFunction for RankFn {
     fn name(&self) -> &str {
@@ -679,6 +1178,7 @@ impl Query for RankFn {
     }
 }
 
+// --- OriginFn ---
 pub(crate) struct OriginFn;
 impl TagFunction for OriginFn {
     fn name(&self) -> &str {
@@ -711,6 +1211,7 @@ impl Query for OriginFn {
     }
 }
 
+// --- TypeFn ---
 pub(crate) struct TypeFn;
 impl TagFunction for TypeFn {
     fn name(&self) -> &str {
@@ -743,6 +1244,7 @@ impl Query for TypeFn {
     }
 }
 
+// --- LabelFn ---
 pub(crate) struct LabelFn;
 impl TagFunction for LabelFn {
     fn name(&self) -> &str {
@@ -775,6 +1277,7 @@ impl Query for LabelFn {
     }
 }
 
+// --- TypedTagFn ---
 pub(crate) struct TypedTagFn;
 impl TagFunction for TypedTagFn {
     fn name(&self) -> &str {
@@ -811,7 +1314,6 @@ impl Query for TypedTagFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexing::functions::ScanRole;
     use std::path::Path;
 
     struct SimpleTag;
@@ -829,6 +1331,9 @@ mod tests {
         fn index(&self) -> Option<&dyn Index> {
             Some(self)
         }
+        fn default_rank(&self) -> Rank {
+            42
+        }
     }
     impl Index for IndexedTag {
         fn extract(&self, _path: &Path) -> Result<Option<LabelValue>> {
@@ -836,9 +1341,6 @@ mod tests {
         }
         fn role(&self) -> ScanRole {
             ScanRole::Location
-        }
-        fn default_rank(&self) -> Rank {
-            42
         }
     }
 
@@ -908,9 +1410,8 @@ mod tests {
     #[test]
     fn test_index_role_and_rank() {
         let f = IndexedTag;
-        let idx = f.index().unwrap();
-        assert_eq!(idx.role(), ScanRole::Location);
-        assert_eq!(idx.default_rank(), 42);
+        assert_eq!(f.index().unwrap().role(), ScanRole::Location);
+        assert_eq!(f.default_rank(), 42);
     }
 
     #[test]

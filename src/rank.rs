@@ -19,10 +19,10 @@ impl SystemRank {
     pub const PATH: Rank = -1;
 }
 
-/// FunctionRegistry の情報に基づき、ランク決定用の SQL 式を構築します。
+/// TagRegistry の情報に基づき、ランク決定用の SQL 式を構築します。
 ///
 /// # Arguments
-/// * `registry` - IndexingFunction の定義（名前とデフォルトランク）を持つレジストリ
+/// * `registry` - タグ定義（名前とデフォルトランク）を持つレジストリ
 /// * `guard_condition` - ランク付けルールを適用するための条件（例: `ItemKind == "type"`）
 /// * `key_expr` - ランク決定のキーとなる値を持つ式（例: `Content`）
 /// * `default_rank` - 条件に合致しない、またはキーに対応するランクがない場合のデフォルト値
@@ -35,19 +35,14 @@ pub fn build_rank_expr(
     let key: SimpleExpr = key_expr.into();
     let mut key_case = CaseStatement::new();
 
-    // 1. Registryからランク情報を収集してCASE文を構築
-    for func in registry.all_indexing_functions() {
-        let rank = func.default_rank();
-        // 0 (デフォルト) 以外の場合のみ明示的にルール化
+    for (name, rank) in registry.iter_all_for_rank() {
         if rank != 0 {
-            key_case = key_case.case(key.clone().eq(func.name()), rank);
+            key_case = key_case.case(key.clone().eq(name), rank);
         }
     }
 
-    // 2. キーに対するCASE文を完成させる
     let key_rank_expr = key_case.finally(default_rank);
 
-    // 3. ガード条件で包む
     CaseStatement::new()
         .case(guard_condition, key_rank_expr)
         .finally(default_rank)
@@ -55,12 +50,10 @@ pub fn build_rank_expr(
 }
 
 /// 指定されたタグ名に対応するデフォルトランクを取得します。
-/// CLI (main.rs) 等で、単一のランク値を知りたい場合に使用します。
 pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
-    // Registry内を検索
-    for func in registry.all_indexing_functions() {
-        if func.name() == name {
-            return func.default_rank();
+    for (n, rank) in registry.iter_all_for_rank() {
+        if n == name {
+            return rank;
         }
     }
     0
@@ -70,7 +63,7 @@ pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
 mod tests {
     use super::*;
     use crate::db::{Col, Pronoun::*};
-    use crate::indexing::functions::IndexingFunction;
+    use crate::tag::IndexingFunction;
     use crate::taggers::{ColumnDef, TagValue, Tagger};
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 

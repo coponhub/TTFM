@@ -1,5 +1,5 @@
 use crate::db::Col;
-use crate::indexing::functions::{Field, ScanColumn, TagDefinition};
+use crate::tag::{Scan, ScanColumn, ScanField};
 use crate::types::DBType;
 use crate::util::alias_from;
 use anyhow::Result;
@@ -14,37 +14,37 @@ pub fn name_to_iden(name: &str) -> sea_query::DynIden {
         .unwrap_or_else(|| alias_from(name))
 }
 
-/// TagDefinition から ScanColumn 情報を取得します。
-pub fn get_column_def<F: TagDefinition>() -> ScanColumn {
+/// Scan から ScanColumn 情報を取得します。
+pub fn get_column_def<F: Scan>() -> ScanColumn {
     ScanColumn {
         name: F::name(),
-        sql_type: <<F as TagDefinition>::RustType as DBType>::db_type(),
-        role: F::ROLE,
+        sql_type: <<F as Scan>::Value as DBType>::db_type(),
+        role: F::SCAN_ROLE,
     }
 }
 
-/// パスとメタデータから Field を生成します。
-pub fn generate_field<F: TagDefinition>(
+/// パスとメタデータから ScanField を生成します。
+pub fn generate_field<F: Scan>(
     path: &Path,
     metadata: &crate::util::SafeMetadata,
-) -> Result<Field<F>> {
-    Ok(Field {
-        value: F::generate(path, metadata)?,
+) -> Result<ScanField<F>> {
+    Ok(ScanField {
+        value: F::scan(path, metadata)?,
     })
 }
 
 /// DuckDB の Row からフィールドを順次読み込み、インデックスを更新します。
 /// マクロ内での初期化をフラットにするためのヘルパーです。
-pub fn read_next_field<F: TagDefinition>(
+pub fn read_next_field<F: Scan>(
     row: &duckdb::Row,
     idx: &mut usize,
-) -> duckdb::Result<Field<F>>
+) -> duckdb::Result<ScanField<F>>
 where
-    <F as TagDefinition>::RustType: FromSql,
+    <F as Scan>::Value: FromSql,
 {
     let val = row.get(*idx)?;
     *idx += 1;
-    Ok(Field { value: val })
+    Ok(ScanField { value: val })
 }
 
 /// ScanEntry構造体とそのスキーマ、およびDuckDBの行からの変換ロジックを定義するマクロ。
@@ -53,7 +53,7 @@ macro_rules! define_scan_entry {
     ( $( $name:ident : $func:ty ),* $(,)? ) => {
         /// スキャン時に取得されるファイルの基本情報の構造体。
         pub struct ScanEntry {
-            $( pub $name: $crate::indexing::functions::Field<$func>, )*
+            $( pub $name: $crate::tag::ScanField<$func>, )*
         }
 
         impl std::fmt::Debug for ScanEntry {
@@ -101,7 +101,7 @@ macro_rules! define_scan_entry {
             }
 
             /// スキャン時に作成される `temp_scan` テーブルのカラム構成を定義します。
-            pub fn schema() -> Vec<$crate::indexing::functions::ScanColumn> {
+            pub fn schema() -> Vec<$crate::tag::ScanColumn> {
                 vec![ $( $crate::macros::get_column_def::<$func>() ),* ]
             }
 

@@ -246,7 +246,7 @@ impl TriageAccumulator {
 mod tests {
     use super::*;
     use crate::db::SqlType;
-    use crate::indexing::functions::ScanEntry;
+    use crate::indexing::ScanEntry;
     use crate::indexing::indexer::calc_scanhash;
     use crate::util::SafeMetadata;
 
