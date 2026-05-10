@@ -1,4 +1,3 @@
-use crate::util::DotOk;
 use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,8 +8,8 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::db::{SqlType, TargetTable};
-use crate::tag::IndexingFunction;
-use crate::taggers::{ColumnDef, TagValue, Tagger};
+use crate::tag::{Index, ScanRole, TagFunction};
+use crate::types::{LabelValue, Rank};
 
 // WIT定義から自動生成
 bindgen!({
@@ -19,11 +18,10 @@ bindgen!({
 });
 
 // 生成された型のパスを短縮
-use exports::ttfm::plugin::core::PluginKind;
+use exports::ttfm::plugin::core::{PluginKind, ValueType};
 use exports::ttfm::plugin::indexing_function::TagValue as WasmVal;
 
 /// Wasmプラグインを管理するための共有ストア。
-/// WASIの実行コンテキストとリソーステーブルを保持します。
 struct WasmStore {
     wasi_ctx: WasiCtx,
     resource_table: ResourceTable,
@@ -39,7 +37,6 @@ impl WasiView for WasmStore {
 }
 
 // スレッドローカルなインスタンスキャッシュ。
-// (Plugin名, (Store, Pluginインスタンス)) の形式で保持します。
 thread_local! {
     static INSTANCE_CACHE: RefCell<HashMap<String, (Store<WasmStore>, Plugin)>> =
         RefCell::new(HashMap::new());
@@ -61,7 +58,6 @@ impl WasmPlugin {
         let component = Component::from_file(&engine, path)?;
 
         let mut linker: Linker<WasmStore> = Linker::new(&engine);
-        // WASI (Preview 2) の機能をリンカーに追加
         wasmtime_wasi::add_to_linker_sync(&mut linker)?;
 
         Ok(Self {
@@ -73,7 +69,6 @@ impl WasmPlugin {
 
     /// プラグインを実行可能なアダプターに変換します。
     pub fn into_adapter(self) -> Result<WasmPluginAdapter> {
-        // カラム情報を取得するために一度だけインスタンス化
         let mut store = self
             .create_store()
             .context("Failed to create store for introspection")?;
@@ -85,37 +80,22 @@ impl WasmPlugin {
             .call_get_info(&mut store)
             .context("Failed to call get_info")?;
 
-        let interface = plugin.ttfm_plugin_indexing_function();
-        let wasm_cols = interface
-            .call_get_columns(&mut store)
-            .context("Failed to call get_columns")?;
-
-        let mut columns = Vec::new();
-        for c in wasm_cols {
-            let sql_type = match c.sql_type.to_uppercase().as_str() {
-                "BIGINT" | "INTEGER" | "INT" => SqlType::BIGINT,
-                "HUGEINT" | "UUID" => SqlType::UUID,
-                "BOOLEAN" | "BOOL" => SqlType::BOOLEAN,
-                "VARCHAR" | "TEXT" | "STRING" => SqlType::VARCHAR,
-                _ => SqlType::VARCHAR,
-            };
-
-            columns.push(ColumnDef {
-                name: c.name,
-                sql_type,
-                target_table: TargetTable::BaseTags,
-            });
-        }
+        let sql_type = match info.value_type {
+            ValueType::Text => SqlType::VARCHAR,
+            ValueType::BigInt => SqlType::BIGINT,
+            ValueType::Boolean => SqlType::BOOLEAN,
+            ValueType::Double => SqlType::DOUBLE,
+        };
 
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),
             name: info.name,
+            #[allow(dead_code)]
             kind: info.kind,
-            columns,
+            sql_type,
         })
     }
 
-    /// WASIコンテキストを含む新しいStoreを作成します。
     fn create_store(&self) -> Result<Store<WasmStore>> {
         let wasi_ctx = WasiCtxBuilder::new()
             .inherit_stdout()
@@ -139,28 +119,41 @@ impl WasmPlugin {
     }
 }
 
-/// Wasmプラグインを `IndexingFunction` として扱うためのアダプター。
+/// Wasmプラグインを `TagFunction` として扱うためのアダプター。
 pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
-    /// プラグインの名前（タグ名）
     pub name: String,
-    #[allow(dead_code)]
     kind: PluginKind,
-    /// キャッシュされたカラム定義
-    columns: Vec<ColumnDef>,
+    sql_type: SqlType,
 }
 
-impl Tagger for WasmPluginAdapter {
-    fn get_columns(&self) -> Vec<ColumnDef> {
-        self.columns.clone()
+impl TagFunction for WasmPluginAdapter {
+    fn name(&self) -> &str {
+        &self.name
     }
+    fn index(&self) -> Option<&dyn Index> {
+        Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::DEFAULT
+    }
+}
 
-    fn tag_file(&self, path: &Path) -> Result<Vec<TagValue>> {
+impl Index for WasmPluginAdapter {
+    fn role(&self) -> ScanRole {
+        ScanRole::Other
+    }
+    fn sql_type(&self) -> SqlType {
+        self.sql_type
+    }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::BaseTags
+    }
+    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         let abs_path =
             std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let path_str = abs_path.to_string_lossy().to_string();
 
-        // スレッドローカルキャッシュからインスタンスを取得、なければ作成
         let results = INSTANCE_CACHE.with(|cache| -> Result<Vec<WasmVal>> {
             let mut cache = cache.borrow_mut();
 
@@ -185,30 +178,17 @@ impl Tagger for WasmPluginAdapter {
             })
         })?;
 
-        results
-            .into_iter()
-            .map(convert_tag_value)
-            .collect::<Vec<_>>()
-            .to_ok()
+        Ok(results.into_iter().find_map(convert_wasm_val))
     }
 }
 
-impl IndexingFunction for WasmPluginAdapter {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn tagger(&self) -> Option<&dyn Tagger> {
-        Some(self)
-    }
-}
-
-/// Wasm側の `TagValue` をホスト側の `TagValue` に変換します。
-fn convert_tag_value(v: WasmVal) -> TagValue {
+/// Wasm側の `TagValue` をホスト側の `LabelValue` に変換します。
+fn convert_wasm_val(v: WasmVal) -> Option<LabelValue> {
     match v {
-        WasmVal::Text(s) => TagValue::Text(s),
-        WasmVal::BigInt(i) => TagValue::BigInt(i),
-        WasmVal::Boolean(b) => TagValue::Boolean(b),
-        WasmVal::Empty => TagValue::Null,
+        WasmVal::Text(s) => Some(LabelValue::String(s)),
+        WasmVal::BigInt(i) => Some(LabelValue::Integer(i)),
+        WasmVal::Boolean(b) => Some(LabelValue::Boolean(b)),
+        WasmVal::Double(f) => Some(LabelValue::Double(f.to_bits())),
+        WasmVal::Empty => None,
     }
 }

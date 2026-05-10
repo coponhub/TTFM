@@ -567,7 +567,7 @@ impl FileManager {
                                     adapter.name, path
                                 );
                             }
-                            self.registry.register_plugin(Box::new(adapter));
+                            self.registry.register_plugin(adapter);
                         } else {
                             if cfg!(debug_assertions)
                                 && std::env::var("TTFM_DEBUG").is_ok()

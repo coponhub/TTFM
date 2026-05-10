@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 // ============================================================
-// ScanRole / IndexingFunction (プラグイン互換ブリッジ、Phase 5 で削除予定)
+// ScanRole
 // ============================================================
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -24,15 +24,6 @@ pub enum ScanRole {
     Other,
     /// インデックス作成時の抽出対象外（定義とランクのみ提供）
     DefinitionOnly,
-}
-
-/// プラグイン互換インターフェース。Phase 5 で TagFunction に統合予定。
-pub trait IndexingFunction: Send + Sync {
-    fn name(&self) -> crate::types::Name<'_>;
-    fn tagger(&self) -> Option<&dyn crate::taggers::Tagger> { None }
-    fn role(&self) -> ScanRole { ScanRole::Other }
-    fn generate_from_path(&self, _path: &Path) -> Option<TagValue> { None }
-    fn default_rank(&self) -> Rank { crate::rank::SystemRank::DEFAULT }
 }
 
 // ============================================================
@@ -310,8 +301,6 @@ pub struct TagRegistry {
     functions: HashMap<String, Arc<dyn TagFunction>>,
     /// 登録順序を保持（カラムスキーマの安定のため）。
     ordered: Vec<Arc<dyn TagFunction>>,
-    /// プラグイン互換ブリッジ（Phase 5 で削除予定）。
-    plugins: Vec<Box<dyn IndexingFunction>>,
 }
 
 impl Default for TagRegistry {
@@ -325,7 +314,6 @@ impl TagRegistry {
         Self {
             functions: HashMap::new(),
             ordered: Vec::new(),
-            plugins: Vec::new(),
         }
     }
 
@@ -349,13 +337,10 @@ impl TagRegistry {
         self.ordered.iter().cloned()
     }
 
-    /// name・rank を含む全タグのイテレータ（標準 + プラグイン）。
     pub fn iter_all_for_rank(
         &self,
     ) -> impl Iterator<Item = (&str, Rank)> + '_ {
-        let from_fns = self.ordered.iter().map(|f| (f.name(), f.default_rank()));
-        let from_plugins = self.plugins.iter().map(|p| (p.name(), p.default_rank()));
-        from_fns.chain(from_plugins)
+        self.ordered.iter().map(|f| (f.name(), f.default_rank()))
     }
 
     /// 標準タグを全登録したレジストリを返す。
@@ -386,11 +371,8 @@ impl TagRegistry {
         reg
     }
 
-    // ---- ブリッジメソッド（プラグインは Phase 5 で完全移行） ----
-
     pub fn get_all_columns(&self) -> Vec<crate::taggers::ColumnDef> {
-        let mut cols: Vec<crate::taggers::ColumnDef> = self
-            .ordered
+        self.ordered
             .iter()
             .filter_map(|f| {
                 f.index().map(|idx| crate::taggers::ColumnDef {
@@ -399,31 +381,18 @@ impl TagRegistry {
                     target_table: idx.target_table(),
                 })
             })
-            .collect();
-        for plugin in &self.plugins {
-            if let Some(tagger) = plugin.tagger() {
-                cols.extend(tagger.get_columns());
-            }
-        }
-        cols
+            .collect()
     }
 
     pub fn process_file(
         &self,
         path: &Path,
     ) -> Result<Vec<crate::taggers::TagValue>> {
-        let mut row = Vec::new();
-        for func in &self.ordered {
-            if let Some(idx) = func.index() {
-                row.push(idx.extract_tag_value(path)?);
-            }
-        }
-        for plugin in &self.plugins {
-            if let Some(tagger) = plugin.tagger() {
-                row.extend(tagger.tag_file(path)?);
-            }
-        }
-        Ok(row)
+        self.ordered
+            .iter()
+            .filter_map(|f| f.index())
+            .map(|idx| idx.extract_tag_value(path))
+            .collect()
     }
 
     pub fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
@@ -440,8 +409,8 @@ impl TagRegistry {
         q.expand_comparison(node)
     }
 
-    pub fn register_plugin(&mut self, func: Box<dyn IndexingFunction>) {
-        self.plugins.push(func);
+    pub fn register_plugin(&mut self, func: impl TagFunction + 'static) {
+        self.register(func);
     }
 }
 

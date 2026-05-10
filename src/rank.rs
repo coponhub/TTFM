@@ -63,34 +63,16 @@ pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
 mod tests {
     use super::*;
     use crate::db::{Col, Pronoun::*};
-    use crate::tag::IndexingFunction;
-    use crate::taggers::{ColumnDef, TagValue, Tagger};
+    use crate::tag::TagFunction;
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 
-    // Mock IndexingFunction implementation
-    struct MockTagger;
-    impl Tagger for MockTagger {
-        fn get_columns(&self) -> Vec<ColumnDef> {
-            vec![]
-        }
-        fn tag_file(
-            &self,
-            _path: &std::path::Path,
-        ) -> anyhow::Result<Vec<TagValue>> {
-            Ok(vec![])
-        }
-    }
-
     struct MockFunc {
-        name: String,
+        name: &'static str,
         rank: Rank,
     }
-    impl IndexingFunction for MockFunc {
+    impl TagFunction for MockFunc {
         fn name(&self) -> &str {
-            &self.name
-        }
-        fn tagger(&self) -> Option<&dyn Tagger> {
-            Some(&MockTagger)
+            self.name
         }
         fn default_rank(&self) -> Rank {
             self.rank
@@ -99,27 +81,11 @@ mod tests {
 
     fn create_registry() -> TagRegistry {
         let mut reg = TagRegistry::new();
-        reg.register_plugin(Box::new(MockFunc {
-            name: "high".to_string(),
-            rank: 100,
-        }));
-        reg.register_plugin(Box::new(MockFunc {
-            name: "low".to_string(),
-            rank: 1,
-        }));
-        reg.register_plugin(Box::new(MockFunc {
-            name: "zero".to_string(),
-            rank: 0,
-        }));
-        // Add system defaults for testing
-        reg.register_plugin(Box::new(MockFunc {
-            name: "name".to_string(),
-            rank: 10,
-        }));
-        reg.register_plugin(Box::new(MockFunc {
-            name: "kind".to_string(),
-            rank: 5,
-        }));
+        reg.register_plugin(MockFunc { name: "high", rank: 100 });
+        reg.register_plugin(MockFunc { name: "low", rank: 1 });
+        reg.register_plugin(MockFunc { name: "zero", rank: 0 });
+        reg.register_plugin(MockFunc { name: "name", rank: 10 });
+        reg.register_plugin(MockFunc { name: "kind", rank: 5 });
         reg
     }
 

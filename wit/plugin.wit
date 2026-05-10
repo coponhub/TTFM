@@ -6,10 +6,19 @@ interface core {
         indexing-function,
     }
 
+    // プラグインが返す値の型（ホストがDBスキーマを決定するために使用）
+    enum value-type {
+        text,
+        big-int,
+        boolean,
+        double,
+    }
+
     record plugin-info {
         name: string,
         version: string,
         kind: plugin-kind,
+        value-type: value-type,
     }
 
     // プラグインの種別やバージョンを返す
@@ -18,23 +27,15 @@ interface core {
 
 // IndexingFunction (メタデータ抽出) 固有のインターフェース
 interface indexing-function {
-    // カラム定義の型
-    record column-def {
-        name: string,
-        sql-type: string,
-    }
-    
-    // 提供するカラムのリスト
-    get-columns: func() -> list<column-def>;
-    
     // 値のバリアント
     variant tag-value {
         text(string),
         big-int(s64),
         boolean(bool),
+        double(f64),
         empty,
     }
-    
+
     // 指定されたファイルのパスを受け取り、タグ値を返す
     tag-file: func(path: string) -> list<tag-value>;
 }

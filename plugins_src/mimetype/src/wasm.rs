@@ -13,18 +13,12 @@ impl exports::ttfm::plugin::core::Guest for MimetypePlugin {
             name: "mimetype".to_string(),
             version: "0.2.3".to_string(),
             kind: exports::ttfm::plugin::core::PluginKind::IndexingFunction,
+            value_type: exports::ttfm::plugin::core::ValueType::Text,
         }
     }
 }
 
 impl exports::ttfm::plugin::indexing_function::Guest for MimetypePlugin {
-    fn get_columns() -> Vec<exports::ttfm::plugin::indexing_function::ColumnDef> {
-        vec![exports::ttfm::plugin::indexing_function::ColumnDef {
-            name: "mimetype".to_string(),
-            sql_type: "TEXT".to_string(),
-        }]
-    }
-
     fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing_function::TagValue> {
         let mime = logic::detect_mime(&path);
         if mime == "empty" {
