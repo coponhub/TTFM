@@ -1,3 +1,4 @@
+use crate::db::Src;
 use crate::query::lens_resolver::Resolver;
 use crate::query::sql::PickNode;
 use crate::response::{RawTagRow, SearchResult};
@@ -21,10 +22,19 @@ impl<'a> Fetcher<'a> {
     ///
     /// `n` は要求件数（0 = 全件）。内部で n+1 件取得して has_more 判定を呼び出し側に委ねる。
     pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<SearchResult>> {
+        self.fetch_from(&Src::OneView, n, offset)
+    }
+
+    pub fn fetch_from(
+        &self,
+        src: &Src,
+        n: usize,
+        offset: usize,
+    ) -> Result<Vec<SearchResult>> {
         use sea_query::PostgresQueryBuilder;
         let resolver = &self.resolver;
 
-        let sql = crate::query::sql::build_fetch_sql(resolver, n, offset)?;
+        let sql = crate::query::sql::build_fetch_sql(src, resolver, n, offset)?;
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         if std::env::var("TTFM_DEBUG").is_ok() {
@@ -61,8 +71,9 @@ impl<'a> Fetcher<'a> {
     ) -> Result<Vec<RawTagRow>> {
         use sea_query::PostgresQueryBuilder;
         let pick =
-            crate::query::sql::PickNode::new(&self.resolver.resolved_query);
+            crate::query::sql::PickNode::new(&Src::OneView, &self.resolver.resolved_query);
         let select_sql = crate::query::sql::build_flat_table_sql(
+            &Src::OneView,
             &pick,
             &self.resolver.expanded_query,
             limit,
@@ -86,8 +97,9 @@ impl<'a> Fetcher<'a> {
         path: &Path,
         metadata: Option<&HashMap<String, String>>,
     ) -> Result<()> {
-        let pick = PickNode::new(&self.resolver.resolved_query);
+        let pick = PickNode::new(&Src::OneView, &self.resolver.resolved_query);
         let select_sql = crate::query::sql::build_flat_table_sql(
+            &Src::OneView,
             &pick,
             &self.resolver.expanded_query,
             None,
@@ -121,7 +133,7 @@ impl<'a> Fetcher<'a> {
 
     /// DuckDB の Row から Projection (Nest) 結果の SearchResult を構築します。
     /// name タグは res.name にセットするが tags.entries には追加しない。
-    /// projected_label タグは res.projected_label に移動する。
+    /// item_count タグは res.item_count に移動する。
     fn decode_nest_item_from_row(
         &self,
         row: &duckdb::Row,
@@ -143,11 +155,11 @@ impl<'a> Fetcher<'a> {
                             .unwrap_or(s);
                     }
                 }
-                "projected_label" => {
+                "item_count" => {
                     let lv = LabelValue::from(tag_row.value);
                     if !matches!(lv, LabelValue::Null) {
-                        res.projected_label = Some(Label::resolve(
-                            TagType::from("projected_label"),
+                        res.item_count = Some(Label::resolve(
+                            TagType::from("item_count"),
                             lv,
                         ));
                     }

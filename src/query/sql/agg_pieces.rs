@@ -4,7 +4,7 @@ use super::{
     build_tag_value_agg_expr, fold_simple_operand, label_to_simple_expr,
     subquery, wrap_to_item_ids, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, Src, Tbl};
 use crate::query::ast::ArithmeticAggOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
@@ -34,6 +34,7 @@ pub(super) fn resolve_count_target(
 
 /// nvalue サブクエリ結果に item_id をアタッチしてラップします。
 pub(super) fn wrap_with_item_id(
+    src: &Src,
     agg_sub: SelectStatement,
     proj_col: Col,
     proj_tag_type: Option<&str>,
@@ -43,7 +44,7 @@ pub(super) fn wrap_with_item_id(
         .column((View, Col::ItemId))
         .expr_as(Expr::col((View, proj_col)), Group)
         .column((Agg, Nvalue))
-        .from_as(Tbl::OneView, View)
+        .from_as(src, View)
         .join_subquery(
             sea_query::JoinType::InnerJoin,
             agg_sub,
@@ -224,6 +225,7 @@ pub(super) fn build_agg_calc_eav_expr(
 
 /// オペランドをサブクエリ形式で構築します。
 pub(super) fn build_agg_operand_subquery(
+    src: &Src,
     operand: &ResolvedOperand,
     agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
@@ -234,12 +236,13 @@ pub(super) fn build_agg_operand_subquery(
         let ResolvedOperand::Aggregation(agg) = op else {
             unreachable!()
         };
-        subquery(build_agg(agg, agg_ctx))
+        subquery(build_agg(src, agg, agg_ctx))
     })
 }
 
 /// Nest コンテキストを参照する集約を含むオペランドをサブクエリ形式で構築します。
 pub(super) fn build_agg_operand_subquery_nest(
+    src: &Src,
     operand: &ResolvedOperand,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
@@ -251,29 +254,31 @@ pub(super) fn build_agg_operand_subquery_nest(
         let ResolvedOperand::Aggregation(agg) = op else {
             unreachable!()
         };
-        subquery(build_agg_nest(agg, agg_ctx, nest_ctx))
+        subquery(build_agg_nest(src, agg, agg_ctx, nest_ctx))
     })
 }
 
 /// 算術演算ノードをサブクエリ形式で構築します。
 pub(super) fn build_agg_calc_subquery(
+    src: &Src,
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SimpleExpr {
-    let left = build_agg_operand_subquery(&calc.left, agg_ctx);
-    let right = build_agg_operand_subquery(&calc.right, agg_ctx);
+    let left = build_agg_operand_subquery(src, &calc.left, agg_ctx);
+    let right = build_agg_operand_subquery(src, &calc.right, agg_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
 
 /// Nest コンテキストを参照する集約を含む算術演算ノードをサブクエリ形式で構築します。
 pub(super) fn build_agg_calc_subquery_nest(
+    src: &Src,
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SimpleExpr {
-    let left = build_agg_operand_subquery_nest(&calc.left, agg_ctx, nest_ctx);
-    let right = build_agg_operand_subquery_nest(&calc.right, agg_ctx, nest_ctx);
+    let left = build_agg_operand_subquery_nest(src, &calc.left, agg_ctx, nest_ctx);
+    let right = build_agg_operand_subquery_nest(src, &calc.right, agg_ctx, nest_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
@@ -384,6 +389,7 @@ pub(super) fn collect_tag_types_from_operand(
 
 /// Count 集約の nvalue SQL を生成する共通ヘルパー。
 pub(super) fn build_count_nvalue_sql(
+    src: &Src,
     proj_col: Col,
     proj_tag_type: Option<&str>,
     inner: &ResolvedNode,
@@ -399,7 +405,7 @@ pub(super) fn build_count_nvalue_sql(
     if let Some(tag_type) = inner_tag_type {
         stmt.expr_as(Expr::col((Proj, proj_col)), Group);
         stmt.expr_as(Expr::col((Tags, count_col)).count_distinct(), Nvalue);
-        stmt.from_as(Tbl::OneView, Proj);
+        stmt.from_as(src, Proj);
         stmt.join_as(
             sea_query::JoinType::InnerJoin,
             Tbl::OneView,
@@ -451,7 +457,7 @@ pub(super) fn build_count_nvalue_sql(
     } else {
         stmt.expr_as(Expr::col(proj_col), Group);
         stmt.expr_as(Expr::col(Col::ItemId).count_distinct(), Nvalue);
-        stmt.from(Tbl::OneView);
+        stmt.from(src);
         if let Some(tt) = proj_tag_type {
             stmt.and_where(Expr::col(Col::Type).eq(tt));
         }
@@ -493,7 +499,7 @@ pub(super) fn build_count_nvalue_sql(
     }
 
     if include_item_id {
-        wrap_with_item_id(stmt, proj_col, proj_tag_type)
+        wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
     } else {
         stmt
     }
@@ -501,6 +507,7 @@ pub(super) fn build_count_nvalue_sql(
 
 /// 同一アイテムの重複を排除した集計用サブクエリを構築します。
 pub(super) fn build_unique_agg(
+    src: &Src,
     inner: &ResolvedNode,
     context: Option<&ResolvedNode>,
     agg_ctx: &AggregationContext,
@@ -515,7 +522,7 @@ pub(super) fn build_unique_agg(
     let mut sub = Query::select();
     sub.column(Col::ItemId)
         .expr_as(CustomFunc::any_value(operand_expr), Val)
-        .from(Tbl::OneView);
+        .from(src);
     if let Some(op_node) = operand {
         let mut keys = Vec::new();
         collect_tag_types(op_node, &mut keys);
@@ -554,6 +561,7 @@ pub(super) fn build_unique_agg(
 
 /// nvalue サブクエリ（スタンドアロン版）。
 pub(super) fn build_nvalue_standalone_subquery(
+    src: &Src,
     proj_operand: &ResolvedOperand,
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
@@ -575,6 +583,7 @@ pub(super) fn build_nvalue_standalone_subquery(
     nvalue.fold(&|op, child_results: Vec<SelectStatement>| match op {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             build_count_nvalue_sql(
+                src,
                 proj_col,
                 proj_tag_type,
                 inner,
@@ -589,7 +598,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(inner, context, agg_ctx, nest_ctx);
+            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
             stmt.expr_as(Expr::col((Proj, proj_col)), Group);
             stmt.expr_as(
@@ -600,7 +609,7 @@ pub(super) fn build_nvalue_standalone_subquery(
                 ),
                 Nvalue,
             );
-            stmt.from_as(Tbl::OneView, Proj);
+            stmt.from_as(src, Proj);
             stmt.join_subquery(
                 sea_query::JoinType::InnerJoin,
                 deduped,
@@ -612,7 +621,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             }
             stmt.group_by_col((Proj, proj_col));
             if include_item_id {
-                wrap_with_item_id(stmt, proj_col, proj_tag_type)
+                wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
             } else {
                 stmt
             }
@@ -622,7 +631,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             let mut stmt = Query::select();
             stmt.expr_as(Expr::col(proj_col), Group);
             stmt.expr_as(val, Nvalue);
-            stmt.from(Tbl::OneView);
+            stmt.from(src);
             if let Some(tt) = proj_tag_type {
                 stmt.and_where(Expr::col(Col::Type).eq(tt));
             }
@@ -695,7 +704,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             ..
         } => {
             let mut stmt = Query::select();
-            stmt.from_as(Tbl::OneView, Proj);
+            stmt.from_as(src, Proj);
             match nval_storage {
                 StorageMapping::Fixed(nv_col) => {
                     stmt.expr_as(Expr::col((Proj, proj_col)), Group);
@@ -714,7 +723,7 @@ pub(super) fn build_nvalue_standalone_subquery(
                             CustomFunc::try_cast_double(Expr::col(*nv_col)),
                             Val,
                         )
-                        .from(Tbl::OneView)
+                        .from(src)
                         .and_where(
                             Expr::col(Col::Type).eq(nv_tag_type.as_str()),
                         )
@@ -745,7 +754,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             }
             stmt.group_by_col((Proj, proj_col));
             if include_item_id {
-                wrap_with_item_id(stmt, proj_col, proj_tag_type)
+                wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
             } else {
                 stmt
             }
@@ -755,34 +764,37 @@ pub(super) fn build_nvalue_standalone_subquery(
 
 /// 集約 SQL を生成します（コンテキストなし）。
 pub(super) fn build_agg(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    build_agg_inner(agg, agg_ctx, None)
+    build_agg_inner(src, agg, agg_ctx, None)
 }
 
 /// 集約 SQL を生成します（Nest コンテキストあり）。
 pub(super) fn build_agg_nest(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SelectStatement {
-    build_agg_inner(agg, agg_ctx, Some(nest_ctx))
+    build_agg_inner(src, agg, agg_ctx, Some(nest_ctx))
 }
 
 fn build_agg_inner(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
-    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(agg, agg_ctx, nest_ctx)
+    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(src, agg, agg_ctx, nest_ctx)
     {
         return nvalue_agg_sql;
     }
     let mut stmt = Query::select();
     match agg {
         ResolvedAggregationNode::Count(inner) => {
-            stmt.from(Tbl::OneView);
+            stmt.from(src);
             let (_, cond, _) = inner.extract_agg_parts();
             let mut final_cond = Condition::all();
             let (count_col, inner_tag_type) = resolve_count_target(inner);
@@ -806,7 +818,7 @@ fn build_agg_inner(
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let is_string = agg.is_string_type();
-            let sub = build_unique_agg(inner, None, agg_ctx, nest_ctx);
+            let sub = build_unique_agg(src, inner, None, agg_ctx, nest_ctx);
             stmt.expr_as(
                 apply_arithmetic_agg(op, Expr::col(Val).into(), is_string),
                 Scalar,
@@ -818,6 +830,7 @@ fn build_agg_inner(
 }
 
 fn build_agg_over_nvalue(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
@@ -835,6 +848,7 @@ fn build_agg_over_nvalue(
 
     let source = if proj_operand.len() > 1 {
         let pivot_agg = build_nvalue_pivot_aggregate_sql(
+            src,
             proj_operand,
             nvalue,
             context,
@@ -854,6 +868,7 @@ fn build_agg_over_nvalue(
         }
     } else {
         let mut nvalue_sub = build_nvalue_standalone_subquery(
+            src,
             &proj_operand[0],
             nvalue,
             context,
@@ -894,16 +909,18 @@ fn build_agg_over_nvalue(
 
 /// nvalue集計用CTE（picked_ids 参照版）を構築します（コンテキストなし）。
 pub(super) fn build_nvalue_cte(
+    src: &Src,
     proj_operands: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    build_nvalue_cte_inner(proj_operands, nvalue, context, agg_ctx, None)
+    build_nvalue_cte_inner(src, proj_operands, nvalue, context, agg_ctx, None)
 }
 
 /// nvalue集計用CTE（picked_ids 参照版）を構築します（Nest コンテキストあり）。
 pub(super) fn build_nvalue_cte_nest(
+    src: &Src,
     proj_operands: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
@@ -911,6 +928,7 @@ pub(super) fn build_nvalue_cte_nest(
     nest_ctx: &NestContext,
 ) -> SelectStatement {
     build_nvalue_cte_inner(
+        src,
         proj_operands,
         nvalue,
         context,
@@ -920,6 +938,7 @@ pub(super) fn build_nvalue_cte_nest(
 }
 
 fn build_nvalue_cte_inner(
+    src: &Src,
     proj_operands: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
@@ -928,6 +947,7 @@ fn build_nvalue_cte_inner(
 ) -> SelectStatement {
     if proj_operands.len() > 1 {
         return build_nvalue_pivot_aggregate_sql(
+            src,
             proj_operands,
             nvalue,
             context,
@@ -954,6 +974,7 @@ fn build_nvalue_cte_inner(
     let inner_q = match nvalue {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             build_count_nvalue_sql(
+                src,
                 proj_col,
                 proj_tag_type,
                 inner,
@@ -973,7 +994,7 @@ fn build_nvalue_cte_inner(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(inner, context, agg_ctx, nest_ctx);
+            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
             stmt.expr_as(Expr::col((Proj, proj_col)), Group);
             stmt.expr_as(
@@ -984,7 +1005,7 @@ fn build_nvalue_cte_inner(
                 ),
                 Nvalue,
             );
-            stmt.from_as(Tbl::OneView, Proj);
+            stmt.from_as(src, Proj);
             stmt.join_subquery(
                 sea_query::JoinType::InnerJoin,
                 deduped,
@@ -1003,9 +1024,10 @@ fn build_nvalue_cte_inner(
                 stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
             }
             stmt.group_by_col((Proj, proj_col));
-            wrap_with_item_id(stmt, proj_col, proj_tag_type)
+            wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
         }
         _ => build_nvalue_standalone_subquery(
+            src,
             proj_operand,
             nvalue,
             context,
@@ -1031,6 +1053,7 @@ fn build_nvalue_cte_inner(
 /// Calculation キーの式生成だけをクロージャで差し替え可能にする。
 /// 戻り値: (構築途中の stmt, type_filters)
 fn build_pivot_keys_into_stmt(
+    src: &Src,
     keys: &[ResolvedOperand],
     calc_expr_fn: impl Fn(
         &crate::query::lens_resolver::ResolvedCalculationNode,
@@ -1043,7 +1066,7 @@ fn build_pivot_keys_into_stmt(
         CustomFunc::any_value(Expr::col(Col::ItemKind)),
         Col::ItemKind,
     );
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
 
     let mut type_filters = std::collections::HashSet::new();
 
@@ -1092,11 +1115,12 @@ fn build_pivot_keys_into_stmt(
 
 /// 集約あり多キー Nest 用の Pivot CTE を構築します。
 pub(super) fn build_nest_pivot_cte(
+    src: &Src,
     keys: &[ResolvedOperand],
     nvalue: Option<&ResolvedOperand>,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(keys, |calc| {
+    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
         build_agg_calc_eav_expr(calc, agg_ctx)
     });
 
@@ -1114,9 +1138,10 @@ pub(super) fn build_nest_pivot_cte(
 /// 集約なし多キー Nest 用の Pivot CTE を構築します。
 /// `agg_ctx` 不要。Calculation キーには `build_calculation_eav_expr` を使用します。
 pub(super) fn build_nest_pivot_cte_no_agg(
+    src: &Src,
     keys: &[ResolvedOperand],
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(keys, |calc| {
+    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
         build_calculation_eav_expr(calc)
     });
 
@@ -1130,6 +1155,7 @@ pub(super) fn build_nest_pivot_cte_no_agg(
 
 /// 多キー Nest の nvalue Pivot 集計 SQL を構築します。
 pub(super) fn build_nvalue_pivot_aggregate_sql(
+    src: &Src,
     keys: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     context: Option<&ResolvedNode>,
@@ -1138,11 +1164,11 @@ pub(super) fn build_nvalue_pivot_aggregate_sql(
 ) -> SelectStatement {
     if let ResolvedOperand::Calculation(calc) = nvalue {
         return build_mixed_key_calc_nvalue_sql(
-            keys, calc, context, agg_ctx, nest_ctx,
+            src, keys, calc, context, agg_ctx, nest_ctx,
         );
     }
 
-    let pivot_q = build_nest_pivot_cte(keys, Some(nvalue), agg_ctx);
+    let pivot_q = build_nest_pivot_cte(src, keys, Some(nvalue), agg_ctx);
     let mut stmt = Query::select();
     for i in 0..keys.len() {
         stmt.column(Alias::new(&format!("key{}", i)));
@@ -1196,6 +1222,7 @@ pub(super) fn count_nvalue_keys(nvalue: &ResolvedOperand) -> usize {
 }
 
 fn build_mixed_key_calc_nvalue_sql(
+    src: &Src,
     keys: &[ResolvedOperand],
     calc: &crate::query::lens_resolver::ResolvedCalculationNode,
     context: Option<&ResolvedNode>,
@@ -1204,9 +1231,10 @@ fn build_mixed_key_calc_nvalue_sql(
 ) -> SelectStatement {
     let n_left = count_nvalue_keys(&calc.left).max(1).min(keys.len() - 1);
     let left_sub = build_nvalue_standalone_subquery(
-        &keys[0], &calc.left, context, false, agg_ctx, nest_ctx,
+        src, &keys[0], &calc.left, context, false, agg_ctx, nest_ctx,
     );
     let right_sub = build_nvalue_standalone_subquery(
+        src,
         &keys[n_left],
         &calc.right,
         context,
@@ -1214,7 +1242,7 @@ fn build_mixed_key_calc_nvalue_sql(
         agg_ctx,
         nest_ctx,
     );
-    let pivot_sub = build_nest_pivot_cte(keys, None, agg_ctx);
+    let pivot_sub = build_nest_pivot_cte(src, keys, None, agg_ctx);
 
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     let l_nvalue: SimpleExpr = Func::coalesce([

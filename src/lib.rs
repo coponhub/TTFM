@@ -11,7 +11,6 @@ use file_id::get_file_id;
 use sea_query::{Expr, PostgresQueryBuilder, Query};
 use std::path::Path;
 
-pub mod cache_search_sql;
 pub mod config;
 pub mod db;
 pub mod indexing;

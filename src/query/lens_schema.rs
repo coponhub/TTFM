@@ -25,6 +25,7 @@ impl StorageMapping {
     /// Composite の場合は None を返します。
     pub fn to_label_select(
         &self,
+        src: &crate::db::Src,
         ids_sql: sea_query::SelectStatement,
     ) -> Option<sea_query::SelectStatement> {
         use crate::query::sql::schema_pieces::{
@@ -32,10 +33,10 @@ impl StorageMapping {
         };
         match self {
             StorageMapping::Fixed(col) => {
-                Some(build_lens_select_column(*col, ids_sql))
+                Some(build_lens_select_column(src, *col, ids_sql))
             }
             StorageMapping::Basic { column, tag_type } => {
-                Some(build_lens_select_tag(*column, tag_type, ids_sql))
+                Some(build_lens_select_tag(src, *column, tag_type, ids_sql))
             }
             StorageMapping::Composite => None,
         }

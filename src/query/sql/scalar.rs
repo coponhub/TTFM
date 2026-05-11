@@ -7,14 +7,14 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_unit_aware_expr, needs_nest_context,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, Src, SqlType};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
 use sea_query::{Alias, BinOper, Expr, Query, SelectStatement, SimpleExpr};
 
-pub(super) fn build_resolved_match_sql(
+pub(super) fn build_resolved_match_sql(src: &Src, 
     storage: &StorageMapping,
     sql_type: SqlType,
     op: ComparisonOp,
@@ -23,19 +23,19 @@ pub(super) fn build_resolved_match_sql(
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
-        .from(Tbl::OneView);
+        .from(src);
     q.cond_where(storage.to_condition(op, label, sql_type));
     q
 }
 
-pub(super) fn build_column_match_sql(
+pub(super) fn build_column_match_sql(src: &Src, 
     tag: SType,
     label: &Label,
 ) -> SelectStatement {
     let mut q = Query::select();
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
-        .from(Tbl::OneView);
+        .from(src);
     match label.value() {
         crate::types::LabelValue::Integer(i) => {
             let t = if matches!(tag, SType::Label) {
@@ -82,7 +82,7 @@ pub(super) fn build_column_match_sql(
     q
 }
 
-pub(super) fn build_resolved_tag_tag_match_sql(
+pub(super) fn build_resolved_tag_tag_match_sql(src: &Src, 
     left_storage: &StorageMapping,
     left_sql_type: SqlType,
     op: ComparisonOp,
@@ -91,7 +91,7 @@ pub(super) fn build_resolved_tag_tag_match_sql(
 ) -> SelectStatement {
     let mut q = Query::select();
     q.column(Col::ItemId)
-        .from(Tbl::OneView)
+        .from(src)
         .group_by_col(Col::ItemId);
     let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
     let right_expr = build_tag_value_agg_expr(right_storage, right_sql_type);
@@ -99,13 +99,13 @@ pub(super) fn build_resolved_tag_tag_match_sql(
     q
 }
 
-pub(super) fn build_scalar_match_sql(
+pub(super) fn build_scalar_match_sql(src: &Src, 
     left: &Label,
     op: ComparisonOp,
     right: &Label,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
     let cond = Expr::expr(label_to_unit_aware_expr(left))
         .binary(to_bin_op(op), label_to_unit_aware_expr(right));
@@ -114,17 +114,17 @@ pub(super) fn build_scalar_match_sql(
     stmt
 }
 
-pub(super) fn build_resolved_scalar_sql(
+pub(super) fn build_resolved_scalar_sql(src: &Src,
     op: &ResolvedOperand,
 ) -> SelectStatement {
-    let agg_ctx = build_aggregation_context_for_operand(op);
+    let agg_ctx = build_aggregation_context_for_operand(src, op);
     let inner = match op {
         ResolvedOperand::Aggregation(agg) => {
             if needs_nest_context(agg.inner_node()) {
-                let nest_ctx = build_nest_context(agg.inner_node());
-                build_agg_nest(agg, &agg_ctx, &nest_ctx)
+                let nest_ctx = build_nest_context(src, agg.inner_node());
+                build_agg_nest(src, agg, &agg_ctx, &nest_ctx)
             } else {
-                build_agg(agg, &agg_ctx)
+                build_agg(src, agg, &agg_ctx)
             }
         }
         _ => {
@@ -136,13 +136,13 @@ pub(super) fn build_resolved_scalar_sql(
                 }
             });
             let scalar_expr = if needs_nest {
-                let nest_ctx = build_nest_context_for_operand(op);
-                build_agg_operand_subquery_nest(op, &agg_ctx, &nest_ctx)
+                let nest_ctx = build_nest_context_for_operand(src, op);
+                build_agg_operand_subquery_nest(src, op, &agg_ctx, &nest_ctx)
             } else {
-                build_agg_operand_subquery(op, &agg_ctx)
+                build_agg_operand_subquery(src, op, &agg_ctx)
             };
             let mut stmt = Query::select();
-            stmt.from(Tbl::OneView);
+            stmt.from(src);
             stmt.expr_as(scalar_expr, Scalar);
             stmt.limit(1);
             stmt

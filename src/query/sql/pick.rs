@@ -8,7 +8,7 @@ use super::{
     label_to_unit_aware_expr, needs_aggregation_context, needs_nest_context,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src, SqlType};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
@@ -27,17 +27,20 @@ pub trait BuildPick {
 
 /// コンテキスト不要なクエリ用ノード。
 pub struct SimplePickNode<'a> {
+    pub src: &'a Src,
     pub node: &'a ResolvedNode,
 }
 
 /// 集約コンテキストが必要なクエリ用ノード。
 pub struct AggPickNode<'a> {
+    pub src: &'a Src,
     pub node: &'a ResolvedNode,
     pub agg_ctx: AggregationContext,
 }
 
 /// 集約コンテキストと Nest コンテキスト両方が必要なクエリ用ノード。
 pub struct NestPickNode<'a> {
+    pub src: &'a Src,
     pub node: &'a ResolvedNode,
     pub agg_ctx: AggregationContext,
     pub nest_ctx: NestContext,
@@ -45,19 +48,19 @@ pub struct NestPickNode<'a> {
 
 impl BuildPick for SimplePickNode<'_> {
     fn build_pick(&self) -> SelectStatement {
-        build_pick(self.node)
+        build_pick(self.src, self.node)
     }
 }
 
 impl BuildPick for AggPickNode<'_> {
     fn build_pick(&self) -> SelectStatement {
-        build_pick_agg(self.node, &self.agg_ctx)
+        build_pick_agg(self.src, self.node, &self.agg_ctx)
     }
 }
 
 impl BuildPick for NestPickNode<'_> {
     fn build_pick(&self) -> SelectStatement {
-        build_pick_nest(self.node, &self.agg_ctx, &self.nest_ctx)
+        build_pick_nest(self.src, self.node, &self.agg_ctx, &self.nest_ctx)
     }
 }
 
@@ -70,20 +73,21 @@ pub enum PickNode<'a> {
 
 impl<'a> PickNode<'a> {
     /// ノードを走査してコンテキストを事前計算し、適切な型で包みます。
-    pub fn new(node: &'a ResolvedNode) -> Self {
+    pub fn new(src: &'a Src, node: &'a ResolvedNode) -> Self {
         if needs_nest_context(node) {
-            let agg_ctx = build_aggregation_context(node);
-            let nest_ctx = build_nest_context(node);
+            let agg_ctx = build_aggregation_context(src, node);
+            let nest_ctx = build_nest_context(src, node);
             PickNode::Nest(NestPickNode {
+                src,
                 node,
                 agg_ctx,
                 nest_ctx,
             })
         } else if needs_aggregation_context(node) {
-            let agg_ctx = build_aggregation_context(node);
-            PickNode::Aggregation(AggPickNode { node, agg_ctx })
+            let agg_ctx = build_aggregation_context(src, node);
+            PickNode::Aggregation(AggPickNode { src, node, agg_ctx })
         } else {
-            PickNode::Simple(SimplePickNode { node })
+            PickNode::Simple(SimplePickNode { src, node })
         }
     }
 
@@ -138,9 +142,9 @@ fn add_type_filters(
 }
 
 /// コンテキストなしで SQL を生成します（集約・Nest ノードを含まないクエリ向け）。
-pub fn build_pick(node: &ResolvedNode) -> SelectStatement {
+pub fn build_pick(src: &Src, node: &ResolvedNode) -> SelectStatement {
     node.fold(&|node, child_sqls: Vec<SelectStatement>| {
-        match try_dispatch_common(node, child_sqls) {
+        match try_dispatch_common(src, node, child_sqls) {
             Ok(sql) => sql,
             Err(_) => unreachable!("build_pick called with aggregation or nest node: use build_pick_agg or build_pick_nest"),
         }
@@ -149,11 +153,12 @@ pub fn build_pick(node: &ResolvedNode) -> SelectStatement {
 
 /// 事前計算済み `AggregationContext` を使って SQL を生成します。
 pub fn build_pick_agg(
+    src: &Src,
     node: &ResolvedNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     node.fold(&|node, child_sqls: Vec<SelectStatement>| {
-        match try_dispatch_common(node, child_sqls) {
+        match try_dispatch_common(src, node, child_sqls) {
             Ok(sql) => sql,
             Err(_) => match node {
                 ResolvedNode::MergedNestMatch {
@@ -161,14 +166,14 @@ pub fn build_pick_agg(
                     matches,
                     is_or,
                 } => {
-                    build_merged_nest_match_sql(keys, matches, *is_or, agg_ctx)
+                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
                 }
-                ResolvedNode::Aggregation(agg) => build_agg(agg, agg_ctx),
+                ResolvedNode::Aggregation(agg) => build_agg(src, agg, agg_ctx),
                 ResolvedNode::AggregationMatch { agg, op, label } => {
-                    build_agg_match(agg, *op, label, agg_ctx)
+                    build_agg_match(src, agg, *op, label, agg_ctx)
                 }
                 ResolvedNode::CalculationMatch { calc, op, label } => {
-                    build_calculation_match_sql(calc, *op, label, agg_ctx)
+                    build_calculation_match_sql(src, calc, *op, label, agg_ctx)
                 }
                 ResolvedNode::TagCalculationMatch {
                     storage,
@@ -177,30 +182,30 @@ pub fn build_pick_agg(
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    storage, *sql_type, *op, calc, agg_ctx,
+                    src, storage, *sql_type, *op, calc, agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
-                    build_agg_calc_match(agg, *op, calc, agg_ctx)
+                    build_agg_calc_match(src, agg, *op, calc, agg_ctx)
                 }
                 ResolvedNode::CalculationCalculationMatch {
                     left_calc,
                     op,
                     right_calc,
                 } => build_calculation_calculation_match_sql(
-                    left_calc, *op, right_calc, agg_ctx,
+                    src, left_calc, *op, right_calc, agg_ctx,
                 ),
                 ResolvedNode::AggregationAggregationMatch {
                     left,
                     op,
                     right,
-                } => build_agg_agg_match(left, *op, right, agg_ctx),
+                } => build_agg_agg_match(src, left, *op, right, agg_ctx),
                 ResolvedNode::AggregationTagMatch {
                     agg,
                     op,
                     storage,
                     sql_type,
                     ..
-                } => build_agg_tag_match(agg, *op, storage, *sql_type, agg_ctx),
+                } => build_agg_tag_match(src, agg, *op, storage, *sql_type, agg_ctx),
                 _ => unreachable!(
                     "build_pick_agg called with nest node: use build_pick_nest"
                 ),
@@ -211,12 +216,13 @@ pub fn build_pick_agg(
 
 /// 事前計算済み `AggregationContext` と `NestContext` 両方を使って SQL を生成します。
 pub fn build_pick_nest(
+    src: &Src,
     node: &ResolvedNode,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SelectStatement {
     node.fold(&|node, child_sqls: Vec<SelectStatement>| {
-        match try_dispatch_common(node, child_sqls) {
+        match try_dispatch_common(src, node, child_sqls) {
             Ok(sql) => sql,
             Err(_) => match node {
                 ResolvedNode::MergedNestMatch {
@@ -224,16 +230,16 @@ pub fn build_pick_nest(
                     matches,
                     is_or,
                 } => {
-                    build_merged_nest_match_sql(keys, matches, *is_or, agg_ctx)
+                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
                 }
                 ResolvedNode::Aggregation(agg) => {
-                    build_agg_nest(agg, agg_ctx, nest_ctx)
+                    build_agg_nest(src, agg, agg_ctx, nest_ctx)
                 }
                 ResolvedNode::AggregationMatch { agg, op, label } => {
-                    build_agg_match(agg, *op, label, agg_ctx)
+                    build_agg_match(src, agg, *op, label, agg_ctx)
                 }
                 ResolvedNode::CalculationMatch { calc, op, label } => {
-                    build_calculation_match_sql(calc, *op, label, agg_ctx)
+                    build_calculation_match_sql(src, calc, *op, label, agg_ctx)
                 }
                 ResolvedNode::TagCalculationMatch {
                     storage,
@@ -242,24 +248,24 @@ pub fn build_pick_nest(
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    storage, *sql_type, *op, calc, agg_ctx,
+                    src, storage, *sql_type, *op, calc, agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
-                    build_agg_calc_match_nest(agg, *op, calc, agg_ctx, nest_ctx)
+                    build_agg_calc_match_nest(src, agg, *op, calc, agg_ctx, nest_ctx)
                 }
                 ResolvedNode::CalculationCalculationMatch {
                     left_calc,
                     op,
                     right_calc,
                 } => build_calculation_calculation_match_sql(
-                    left_calc, *op, right_calc, agg_ctx,
+                    src, left_calc, *op, right_calc, agg_ctx,
                 ),
                 ResolvedNode::AggregationAggregationMatch {
                     left,
                     op,
                     right,
                 } => build_agg_agg_match_nest(
-                    left, *op, right, agg_ctx, nest_ctx,
+                    src, left, *op, right, agg_ctx, nest_ctx,
                 ),
                 ResolvedNode::AggregationTagMatch {
                     agg,
@@ -268,7 +274,7 @@ pub fn build_pick_nest(
                     sql_type,
                     ..
                 } => build_agg_tag_match_nest(
-                    agg, *op, storage, *sql_type, agg_ctx, nest_ctx,
+                    src, agg, *op, storage, *sql_type, agg_ctx, nest_ctx,
                 ),
                 ResolvedNode::NestMatch {
                     keys,
@@ -277,7 +283,7 @@ pub fn build_pick_nest(
                     label,
                     context,
                 } => build_nest_match_sql(
-                    keys, nvalue, *op, label, context, agg_ctx, nest_ctx,
+                    src, keys, nvalue, *op, label, context, agg_ctx, nest_ctx,
                 ),
                 ResolvedNode::NestNestMatch {
                     left_keys,
@@ -288,6 +294,7 @@ pub fn build_pick_nest(
                     right_nvalue,
                     right_context,
                 } => build_nest_nest_match_sql(
+                    src,
                     left_keys,
                     left_nvalue,
                     left_context,
@@ -305,6 +312,7 @@ pub fn build_pick_nest(
 }
 
 fn build_calculation_match_sql(
+    src: &Src,
     calc: &ResolvedCalculationNode,
     op: ComparisonOp,
     label: &Label,
@@ -313,7 +321,7 @@ fn build_calculation_match_sql(
     if calc.contains_tag() {
         let mut stmt = Query::select();
         stmt.column(Col::ItemId)
-            .from(Tbl::OneView)
+            .from(src)
             .group_by_col(Col::ItemId);
         let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
         let label_expr = label_to_unit_aware_expr(label);
@@ -323,10 +331,10 @@ fn build_calculation_match_sql(
         stmt
     } else {
         let mut stmt = Query::select();
-        stmt.from(Tbl::OneView);
+        stmt.from(src);
         stmt.column(Col::ItemId);
         let calc_expr = if calc.contains_aggregation() {
-            build_agg_calc_subquery(calc, agg_ctx)
+            build_agg_calc_subquery(src, calc, agg_ctx)
         } else {
             build_agg_calc_expr(calc, agg_ctx)
         };
@@ -341,6 +349,7 @@ fn build_calculation_match_sql(
 }
 
 fn build_tag_calculation_match_sql(
+    src: &Src,
     storage: &StorageMapping,
     sql_type: SqlType,
     op: ComparisonOp,
@@ -350,14 +359,14 @@ fn build_tag_calculation_match_sql(
     let needs_eav = calc.contains_tag()
         || matches!(storage, StorageMapping::Basic { .. });
     if needs_eav {
-        build_tag_calc_match_eav_sql(storage, sql_type, op, calc, agg_ctx)
+        build_tag_calc_match_eav_sql(src, storage, sql_type, op, calc, agg_ctx)
     } else {
         let mut stmt = Query::select();
-        stmt.from(Tbl::OneView);
+        stmt.from(src);
         stmt.column(Col::ItemId);
         let tag_expr = build_storage_column_expr(storage, sql_type);
         let calc_expr = if calc.contains_aggregation() {
-            build_agg_calc_subquery(calc, agg_ctx)
+            build_agg_calc_subquery(src, calc, agg_ctx)
         } else {
             build_agg_calc_expr(calc, agg_ctx)
         };
@@ -371,17 +380,18 @@ fn build_tag_calculation_match_sql(
 }
 
 fn build_agg_calc_match(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     calc: &ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let agg_expr = subquery(build_agg(agg, agg_ctx));
+    let agg_expr = subquery(build_agg(src, agg, agg_ctx));
     let calc_expr = if calc.contains_aggregation() {
-        build_agg_calc_subquery(calc, agg_ctx)
+        build_agg_calc_subquery(src, calc, agg_ctx)
     } else {
         build_agg_calc_expr(calc, agg_ctx)
     };
@@ -390,6 +400,7 @@ fn build_agg_calc_match(
 }
 
 fn build_agg_calc_match_nest(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     calc: &ResolvedCalculationNode,
@@ -397,11 +408,11 @@ fn build_agg_calc_match_nest(
     nest_ctx: &NestContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let agg_expr = subquery(build_agg_nest(agg, agg_ctx, nest_ctx));
+    let agg_expr = subquery(build_agg_nest(src, agg, agg_ctx, nest_ctx));
     let calc_expr = if calc.contains_aggregation() {
-        build_agg_calc_subquery_nest(calc, agg_ctx, nest_ctx)
+        build_agg_calc_subquery_nest(src, calc, agg_ctx, nest_ctx)
     } else {
         build_agg_calc_expr(calc, agg_ctx)
     };
@@ -410,6 +421,7 @@ fn build_agg_calc_match_nest(
 }
 
 fn build_calculation_calculation_match_sql(
+    src: &Src,
     left_calc: &ResolvedCalculationNode,
     op: ComparisonOp,
     right_calc: &ResolvedCalculationNode,
@@ -417,7 +429,7 @@ fn build_calculation_calculation_match_sql(
 ) -> SelectStatement {
     let mut stmt = Query::select();
     stmt.column(Col::ItemId)
-        .from(Tbl::OneView)
+        .from(src)
         .group_by_col(Col::ItemId);
     let left_expr = build_agg_calc_eav_expr(left_calc, agg_ctx);
     let right_expr = build_agg_calc_eav_expr(right_calc, agg_ctx);
@@ -426,21 +438,23 @@ fn build_calculation_calculation_match_sql(
 }
 
 fn build_agg_agg_match(
+    src: &Src,
     left: &ResolvedAggregationNode,
     op: ComparisonOp,
     right: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let left_expr = subquery(build_agg(left, agg_ctx));
-    let right_expr = subquery(build_agg(right, agg_ctx));
+    let left_expr = subquery(build_agg(src, left, agg_ctx));
+    let right_expr = subquery(build_agg(src, right, agg_ctx));
     stmt.cond_where(Expr::expr(left_expr).binary(to_bin_op(op), right_expr));
     stmt
 }
 
 fn build_agg_agg_match_nest(
+    src: &Src,
     left: &ResolvedAggregationNode,
     op: ComparisonOp,
     right: &ResolvedAggregationNode,
@@ -448,15 +462,16 @@ fn build_agg_agg_match_nest(
     nest_ctx: &NestContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let left_expr = subquery(build_agg_nest(left, agg_ctx, nest_ctx));
-    let right_expr = subquery(build_agg_nest(right, agg_ctx, nest_ctx));
+    let left_expr = subquery(build_agg_nest(src, left, agg_ctx, nest_ctx));
+    let right_expr = subquery(build_agg_nest(src, right, agg_ctx, nest_ctx));
     stmt.cond_where(Expr::expr(left_expr).binary(to_bin_op(op), right_expr));
     stmt
 }
 
 fn build_agg_tag_match(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     storage: &StorageMapping,
@@ -464,9 +479,9 @@ fn build_agg_tag_match(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let agg_expr = subquery(build_agg(agg, agg_ctx));
+    let agg_expr = subquery(build_agg(src, agg, agg_ctx));
     let tag_expr = build_storage_column_expr(storage, sql_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
     if let StorageMapping::Basic { tag_type, .. } = storage {
@@ -476,6 +491,7 @@ fn build_agg_tag_match(
 }
 
 fn build_agg_tag_match_nest(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     storage: &StorageMapping,
@@ -484,9 +500,9 @@ fn build_agg_tag_match_nest(
     nest_ctx: &NestContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     stmt.column(Col::ItemId);
-    let agg_expr = subquery(build_agg_nest(agg, agg_ctx, nest_ctx));
+    let agg_expr = subquery(build_agg_nest(src, agg, agg_ctx, nest_ctx));
     let tag_expr = build_storage_column_expr(storage, sql_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
     if let StorageMapping::Basic { tag_type, .. } = storage {
@@ -496,6 +512,7 @@ fn build_agg_tag_match_nest(
 }
 
 fn build_tag_calc_match_eav_sql(
+    src: &Src,
     left_storage: &StorageMapping,
     left_sql_type: SqlType,
     op: ComparisonOp,
@@ -504,7 +521,7 @@ fn build_tag_calc_match_eav_sql(
 ) -> SelectStatement {
     let mut q = Query::select();
     q.column(Col::ItemId)
-        .from(Tbl::OneView)
+        .from(src)
         .group_by_col(Col::ItemId);
     let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
     let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
@@ -591,6 +608,7 @@ fn decompose_agg(
 }
 
 fn build_agg_match(
+    src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     label: &Label,
@@ -598,7 +616,7 @@ fn build_agg_match(
 ) -> SelectStatement {
     let (agg_expr, cond, tag_type) = decompose_agg(agg, agg_ctx);
     let mut stmt = Query::select();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
 
     let op_bin = to_bin_op(op);
     let rhs = Expr::val(label.as_i64());
@@ -614,7 +632,7 @@ fn build_agg_match(
     let mut final_cond = Condition::all();
     if let Some(key) = tag_type {
         final_cond =
-            final_cond.add(Expr::col((Tbl::OneView, Col::Type)).eq(key));
+            final_cond.add(Expr::col(Col::Type).eq(key));
     }
 
     if cond.is_some() {

@@ -19,7 +19,7 @@ pub struct SearchResult {
     /// アイテムに紐づく動的なタグの集合
     pub tags: Tags,
     /// プロジェクション時に、この結果が代表しているラベル
-    pub projected_label: Option<crate::types::Label>,
+    pub item_count: Option<crate::types::Label>,
 }
 
 /// データベースから取得した生のタグ情報の断片。
@@ -256,7 +256,7 @@ impl SearchResult {
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
-            projected_label: None,
+            item_count: None,
         }
     }
 
@@ -517,7 +517,7 @@ mod tests {
                 hash: None,
             },
             tags,
-            projected_label: None,
+            item_count: None,
         }
     }
 

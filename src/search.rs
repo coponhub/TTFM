@@ -1,8 +1,7 @@
 use crate::db::TargetTable;
-use crate::db::{Col, Pronoun::*, VCol};
-use crate::query::lens_schema::Lens;
-use crate::response::{RawTagRow, SearchResponse, SearchResult};
-use crate::types::{ItemKind, Progress, TagType};
+use crate::db::Pronoun::*;
+use crate::response::SearchResponse;
+use crate::types::Progress;
 use crate::FileManager;
 use anyhow::Result;
 use duckdb::Connection;
@@ -143,327 +142,43 @@ impl FileManager {
     ) -> Result<SearchResponse> {
         let n = options.n.unwrap_or(100);
         let offset = options.offset.unwrap_or(0);
-        let limit = if options.n.is_some() || n > 0 {
-            n + 1
-        } else {
-            0
-        };
         let path_str = path.to_string_lossy().to_string();
 
-        // キャッシュメタデータから元のクエリを復元してプロジェクションを判定
         let meta = self.read_cache_metadata(cid)?;
         let query = meta
             .get(crate::cache::META_QUERY)
             .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
-        let projection: Option<String> = if query.trim().is_empty() {
-            None
-        } else {
-            let resolver = crate::query::lens_resolver::Resolver::new(query)?;
-            let is_projection_display = resolver.get_projection().is_some()
-                && (resolver.get_label_set_op_node().is_some()
-                    || resolver.get_nvalue_condition().is_none());
-            if is_projection_display {
-                resolver.get_projection().map(|t| t.as_str().to_string())
-            } else {
-                None
-            }
-        };
 
-        let (target_entries, has_more) = if let Some(ref proj_name) = projection
-        {
-            let proj_type = TagType::from(proj_name.as_str());
-            let labels = self.get_unique_labels(
-                false,
-                Some(path_str.clone()),
-                &proj_type,
-                n,
-                offset,
-            )?;
-            let has_more = n > 0 && labels.len() > n;
-            let final_labels =
-                if has_more { &labels[..n] } else { &labels[..] };
+        let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+        let fetcher =
+            crate::query::fetcher::Fetcher::new(&resolver, &self.conn);
+        let src = crate::db::Src::Parquet(path_str);
 
-            let entries = self.expand_labels_to_entries(
-                false,
-                Some(path_str.clone()),
-                &proj_type,
-                final_labels,
-            )?;
-            (entries, has_more)
-        } else {
-            let mut id_query = Query::select();
-            id_query
-                .distinct()
-                .columns([Col::ItemId, Col::Rank])
-                .from_function(
-                    sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
-                        .arg(Expr::val(path_str.clone())),
-                    Diff,
-                )
-                .order_by_expr(
-                    Expr::col(Col::Rank).into(),
-                    sea_query::Order::Desc,
-                )
-                .order_by_expr(
-                    Expr::col(Col::ItemId).into(),
-                    sea_query::Order::Desc,
-                );
-
-            if limit > 0 {
-                id_query.limit(limit as u64);
-            }
-            if offset > 0 {
-                id_query.offset(offset as u64);
-            }
-
-            let id_rows = self
-                .conn
-                .prepare(&id_query.to_string(PostgresQueryBuilder))?
-                .query_map([], |r| r.get::<_, i64>(0))?
-                .collect::<Result<Vec<i64>, _>>()?;
-
-            let has_more = n > 0 && id_rows.len() > n;
-            let mut target_ids = id_rows;
-            if has_more {
-                target_ids.truncate(n);
-            }
-            (
-                target_ids.into_iter().map(|id| (id, None)).collect(),
-                has_more,
-            )
-        };
-
-        if target_entries.is_empty() {
-            return Ok(SearchResponse::new_empty(
-                Some(cid.to_string()),
-                has_more,
-            ));
+        let mut all_results = fetcher.fetch_from(&src, n, offset)?;
+        let has_more = n > 0 && all_results.len() > n;
+        if has_more {
+            all_results.truncate(n);
         }
 
-        let fetch_ids: Vec<i64> =
-            target_entries.iter().map(|(id, _)| *id).collect();
-
-        let mut fetch_query = Query::select();
-        fetch_query
-            .column(sea_query::Asterisk)
-            .from_function(
-                sea_query::Func::cust(crate::db::DuckDbFunc::ReadParquet)
-                    .arg(Expr::val(path_str)),
-                Diff,
-            )
-            .and_where(Expr::col(Col::ItemId).is_in(fetch_ids));
-
-        let mut response = self.fetch_and_build(
-            target_entries,
-            fetch_query.to_string(PostgresQueryBuilder),
-            Some(cid.to_string()),
-            has_more,
-            n,
-            projection.as_ref(),
-        )?;
-
-        // キャッシュから読み込んだ場合、生成自体は完了している（または進行中状態を正しく反映する）
-        // fetch_and_build はデフォルトで current=results.len(), total=None を設定してしまうため、
-        // CacheManager から正しい進捗状態を取得して上書きする。
+        let current_n = all_results.len();
+        let mut response = if all_results.is_empty() {
+            SearchResponse::new_empty(Some(cid.to_string()), has_more)
+        } else {
+            SearchResponse {
+                results: all_results,
+                cid: Some(cid.to_string()),
+                has_more,
+                total_count: None,
+                progress: Progress {
+                    current: current_n,
+                    total: None,
+                    is_done: !has_more,
+                },
+                warnings: Vec::new(),
+            }
+        };
         response.progress = self.cache_manager.get_progress(cid)?;
-
         Ok(response)
-    }
-
-    fn get_unique_labels(
-        &self,
-        from_table: bool,
-        path_str: Option<String>,
-        proj_type: &TagType,
-        n: usize,
-        offset: usize,
-    ) -> Result<Vec<(crate::types::Label, usize)>> {
-        let storage = Lens::from_registry(&self.registry)
-            .look_up_or_default(proj_type)
-            .storage;
-        let label_query = crate::cache_search_sql::build_label_counts(
-            proj_type,
-            &storage,
-            from_table,
-            path_str.as_deref(),
-            n,
-            offset,
-        );
-
-        let labels = self
-            .conn
-            .prepare(&label_query.to_string(PostgresQueryBuilder))?
-            .query_map([], |r| {
-                let label =
-                    crate::types::Label::from_raw_row(proj_type.clone(), r, 0);
-                let count: i64 = r.get(VCol::Total.as_ref())?;
-                Ok((label, count as usize))
-            })?
-            .collect::<Result<Vec<(crate::types::Label, usize)>, _>>()?;
-
-        Ok(labels)
-    }
-
-    fn expand_labels_to_entries(
-        &self,
-        from_table: bool,
-        path_str: Option<String>,
-        proj_type: &TagType,
-        labels: &[(crate::types::Label, usize)],
-    ) -> Result<Vec<(i64, Option<(crate::types::Label, usize)>)>> {
-        let mut entries = Vec::new();
-        let storage = Lens::from_registry(&self.registry)
-            .look_up_or_default(proj_type)
-            .storage;
-
-        for (label, count) in labels {
-            let id_query = crate::cache_search_sql::build_label_expansion_sql(
-                proj_type,
-                label,
-                &storage,
-                from_table,
-                path_str.as_deref(),
-            );
-
-            let ids = self
-                .conn
-                .prepare(&id_query.to_string(PostgresQueryBuilder))?
-                .query_map([], |r| r.get::<_, i64>(0))?
-                .collect::<Result<Vec<i64>, _>>()?;
-
-            for id in ids {
-                entries.push((id, Some((label.clone(), *count))));
-            }
-        }
-        Ok(entries)
-    }
-
-    fn fetch_and_build(
-        &self,
-        target_entries: Vec<(i64, Option<(crate::types::Label, usize)>)>,
-        fetch_sql: String,
-        cid: Option<String>,
-        has_more: bool,
-        current_n: usize,
-        projection: Option<&String>,
-    ) -> Result<SearchResponse> {
-        use crate::types::{Origin, TagEntry};
-
-        let raw_results = self
-            .conn
-            .prepare(&fetch_sql)?
-            .query_map([], |r| RawTagRow::from_row(r))?
-            .collect::<Result<Vec<RawTagRow>, _>>()?;
-
-        let mut tag_cache: HashMap<i64, Vec<RawTagRow>> = HashMap::new();
-        for row in raw_results {
-            tag_cache.entry(row.id.as_i64()).or_default().push(row);
-        }
-
-        let mut label_map: std::collections::BTreeMap<
-            (crate::types::Label, usize),
-            Vec<SearchResult>,
-        > = std::collections::BTreeMap::new();
-
-        let final_results: Vec<SearchResult> = target_entries
-            .into_iter()
-            .map(
-                |(id, label_info): (
-                    i64,
-                    Option<(crate::types::Label, usize)>,
-                )| {
-                    let mut res = SearchResult::new_empty(
-                        id.into(),
-                        ItemKind::Volatile,
-                        String::new(),
-                    );
-                    if let Some((ref l, _)) = label_info {
-                        res.projected_label = Some(l.clone());
-                    }
-                    if let Some(tags) = tag_cache.get(&id) {
-                        for tag in tags {
-                            #[allow(deprecated)]
-                            res.apply_raw_tag(tag.clone());
-                        }
-                    }
-                    if let Some(info) = label_info {
-                        label_map.entry(info).or_default().push(res.clone());
-                    }
-                    res
-                },
-            )
-            .collect();
-
-        if projection.is_some() {
-            // 転置形式: ラベルを ID とする SearchResult を構築
-            let transposed_results: Vec<SearchResult> = label_map
-                .into_iter()
-                .map(|((label, count), items)| {
-                    let label_str = label.as_str().to_string();
-                    let label_id = crate::types::ItemId::new_volatile();
-                    let mut res = SearchResult::new_empty(
-                        label_id,
-                        ItemKind::Volatile,
-                        label_str,
-                    );
-
-                    // 正確な型情報を type: タグとして注入
-                    res.apply_tag(
-                        crate::types::Label::resolve(
-                            crate::types::TagType::Base(
-                                crate::types::SType::Type,
-                            ),
-                            crate::types::LabelValue::String(
-                                "label".to_string(),
-                            ),
-                        ),
-                        Origin::System,
-                    );
-
-                    // 各アイテムを "item:name#id" タグとして格納
-                    for item in items.into_iter().take(200) {
-                        let typed_tag = crate::types::TypedTag::new(
-                            "item",
-                            format!("{}#{}", item.name, item.id),
-                        );
-                        res.tags.entries.push(TagEntry {
-                            label: typed_tag.label,
-                            origin: Origin::System,
-                        });
-                    }
-                    // そのラベルを持つアイテム総数
-                    res.projected_label =
-                        Some(crate::types::Label::from(count.to_string()));
-                    res
-                })
-                .collect();
-
-            Ok(SearchResponse {
-                results: transposed_results,
-                cid,
-                has_more,
-                total_count: None,
-                progress: Progress {
-                    current: current_n,
-                    total: None,
-                    is_done: !has_more,
-                },
-                warnings: Vec::new(),
-            })
-        } else {
-            Ok(SearchResponse {
-                results: final_results,
-                cid,
-                has_more,
-                total_count: None,
-                progress: Progress {
-                    current: current_n,
-                    total: None,
-                    is_done: !has_more,
-                },
-                warnings: Vec::new(),
-            })
-        }
     }
 
     /// 非同期に全件検索結果を Parquet キャッシュとして書き出します。
@@ -555,6 +270,7 @@ impl FileManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ItemKind;
     use std::fs::File;
     use tempfile::tempdir;
 

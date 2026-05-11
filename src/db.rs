@@ -1,6 +1,7 @@
 use crate::taggers::ColumnDef;
 use sea_query::{
-    ColumnDef as SeaColumnDef, Iden, IntoIden, Table, TableCreateStatement,
+    Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
+    IntoTableRef, Table, TableCreateStatement, TableRef,
 };
 use std::path::PathBuf;
 use strum::{Display, EnumIter};
@@ -73,6 +74,38 @@ pub enum Tbl {
     IdItem,
     Target,
     Master,
+}
+
+/// SQL クエリのデータソース（OneView テーブルまたは Parquet ファイル）。
+#[derive(Clone, Debug)]
+pub enum Src {
+    OneView,
+    Parquet(String),
+}
+
+impl Src {
+    /// format! 内でテーブル式として使う文字列を返す。
+    pub fn table_str(&self) -> String {
+        match self {
+            Src::OneView => Iden::to_string(&Tbl::OneView),
+            Src::Parquet(path) => {
+                format!("read_parquet('{}')", path.replace('\'', "''"))
+            }
+        }
+    }
+}
+
+impl IntoTableRef for &Src {
+    fn into_table_ref(self) -> TableRef {
+        match self {
+            Src::OneView => TableRef::Table(Tbl::OneView.into_iden()),
+            Src::Parquet(path) => TableRef::FunctionCall(
+                Func::cust(DuckDbFunc::ReadParquet)
+                    .arg(Expr::val(path.as_str())),
+                Alias::new("src").into_iden(),
+            ),
+        }
+    }
 }
 
 /// SQL 内部で使われる中間的な識別子（サブクエリエイリアス・中間カラム名）。

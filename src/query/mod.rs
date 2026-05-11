@@ -143,11 +143,12 @@ mod tests {
 
     #[test]
     fn test_query_to_sql_ranking() {
+        use crate::db::Src;
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
         let resolver = Resolver::new("extension:rs").unwrap();
-        let sql = PickNode::new(&resolver.resolved_query)
+        let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);
 
@@ -170,11 +171,12 @@ mod tests {
 
     #[test]
     fn test_query_to_sql_and_precedence() {
+        use crate::db::Src;
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
         let resolver = Resolver::new("type:file & extension:rs").unwrap();
-        let sql = PickNode::new(&resolver.resolved_query)
+        let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);
 

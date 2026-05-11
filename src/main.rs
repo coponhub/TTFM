@@ -327,7 +327,7 @@ fn print_results(
 
     // item: タグが注入されている場合は Projection グループ表示
     if response.has_projection_results() {
-        print_compact_projections(fm, response, query, current_n, writer);
+        print_compact_projections(response, query, current_n, writer);
         return;
     }
 
@@ -460,7 +460,6 @@ fn print_results(
 
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
 fn print_compact_projections(
-    fm: &FileManager,
     response: &ttfm::SearchResponse,
     query: &str,
     _current_n: usize,
@@ -468,51 +467,29 @@ fn print_compact_projections(
 ) {
     let term_width = get_terminal_width();
 
-    // クエリからプロジェクションタグ名を抽出して Display フォーマット適用に使う
-    // "mtime:"                        → "mtime"
-    // "parentdir: &: count(*:*) > 0" → "parentdir"  (Nest 左辺)
-    // "extension:rs & size:"          → "size"       (AND 末尾の bare タグ)
-    let proj_tag = {
-        let before_comma = query.split(',').next().unwrap_or(query);
-        // Nest (&:) の左辺のみ見る（右辺は nvalue 条件）
-        let before_nest = before_comma.split("&:").next().unwrap_or(before_comma);
-        // 空白区切りで "word:" 形式の bare タグを探し、最後のものをプロジェクションとする
-        before_nest
-            .split_whitespace()
-            .filter(|s| {
-                s.ends_with(':')
-                    && s[..s.len() - 1].chars().all(|c| c.is_alphanumeric() || c == '_')
-            })
-            .last()
-            .map(|s| &s[..s.len() - 1])
-            .unwrap_or("")
-    };
-
     // Phase 2: results には label items（転置）が格納されている
     for label_item in &response.results {
-        // total_count を projected_label から取得
+        // total_count を item_count から取得
         let total_count = label_item
-            .projected_label
+            .item_count
             .as_ref()
             .and_then(|l| l.as_str().parse::<usize>().ok())
             .unwrap_or(label_item.tags.entries.len());
 
-        // nvalue タグの取得（proj_tag と同じ Display を適用）
+        // nvalue タグの取得
         let nvalue_str = label_item
             .tags
             .entries
             .iter()
             .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
-            .map(|e| fm.format_tag_display(proj_tag, e.label.as_str()));
-
-        let formatted_name = fm.format_tag_display(proj_tag, &label_item.name);
+            .map(|e| e.label.as_str());
 
         // 1行目: ヘッダー (ラベル値 - nvalue (X items))
         if let Some(nv) = &nvalue_str {
             writeln!(
                 writer,
                 "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
-                formatted_name,
+                label_item.name,
                 nv,
                 total_count
             ).unwrap_or(());
@@ -520,7 +497,7 @@ fn print_compact_projections(
             writeln!(
                 writer,
                 "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-                formatted_name,
+                label_item.name,
                 total_count
             ).unwrap_or(());
         }
@@ -661,8 +638,8 @@ mod tests {
         std::env::remove_var("COLUMNS");
 
         let output = String::from_utf8(out).unwrap();
-        // size は "1.0 KB" と表示され、生の "1024" は出てこない
-        assert!(output.contains("1.0 KB"), "size should show '1.0 KB', got:\n{}", output);
+        // size は "1.0KB" と表示され、生の "1024" は出てこない
+        assert!(output.contains("1.0KB"), "size should show '1.0KB', got:\n{}", output);
     }
 
     #[test]
@@ -693,64 +670,6 @@ mod tests {
             "mtime should show year, got:\n{}",
             output
         );
-    }
-
-    // --- print_compact_projections の display フォーマット確認 ---
-
-    #[test]
-    fn test_print_results_projection_formats_mtime() {
-        let _guard = COLUMNS_MUTEX.lock().unwrap();
-        std::env::set_var("COLUMNS", "500");
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_dir = dir.path().join("db");
-        let fm = ttfm::FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        let test_file = dir.path().join("dated.txt");
-        std::fs::write(&test_file, b"hi").unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-
-        let response = fm.search("mtime:", ttfm::SearchOptions::default()).unwrap();
-        assert!(!response.results.is_empty());
-        assert!(response.has_projection_results(), "mtime: should be a projection query");
-
-        let mut out = Vec::<u8>::new();
-        print_results(&fm, &response, "mtime:", 100, &mut out);
-        std::env::remove_var("COLUMNS");
-
-        let output = String::from_utf8(out).unwrap();
-        // projection ラベルは "2026-05-..." のように年を含み、10桁のタイムスタンプではない
-        assert!(
-            output.contains("2026") || output.contains("2025"),
-            "projection mtime should show year, got:\n{}",
-            output
-        );
-    }
-
-    #[test]
-    fn test_print_results_projection_formats_size() {
-        let _guard = COLUMNS_MUTEX.lock().unwrap();
-        std::env::set_var("COLUMNS", "500");
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_dir = dir.path().join("db");
-        let fm = ttfm::FileManager::new_with_db_dir(&db_dir).unwrap();
-
-        let test_file = dir.path().join("sized.bin");
-        std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-
-        let response = fm.search("size:", ttfm::SearchOptions::default()).unwrap();
-        assert!(!response.results.is_empty());
-        assert!(response.has_projection_results(), "size: should be a projection query");
-
-        let mut out = Vec::<u8>::new();
-        print_results(&fm, &response, "size:", 100, &mut out);
-        std::env::remove_var("COLUMNS");
-
-        let output = String::from_utf8(out).unwrap();
-        // projection ラベルは "1.0 KB" と表示され、生の "1024" は出てこない
-        assert!(output.contains("1.0 KB"), "projection size should show '1.0 KB', got:\n{}", output);
     }
 
     #[test]

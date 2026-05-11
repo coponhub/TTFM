@@ -426,17 +426,17 @@ fn test_projection_returns_label_volatile_items() {
                 item.tags.entries.iter().map(|e| format!("{}:{}", e.label.tag_type().as_str(), e.label.as_str())).collect::<Vec<_>>()
             );
 
-            // 検証7: projected_label に total_count が保存されている
+            // 検証7: item_count に total_count が保存されている
             assert!(
-                item.projected_label.is_some(),
-                "Label volatile item should have projected_label (total_count)"
+                item.item_count.is_some(),
+                "Label volatile item should have item_count (total_count)"
             );
 
             let total_count_str =
-                item.projected_label.as_ref().unwrap().as_str();
+                item.item_count.as_ref().unwrap().as_str();
             let total_count: usize = total_count_str
                 .parse()
-                .expect("projected_label should be parseable as usize");
+                .expect("item_count should be parseable as usize");
             assert!(total_count > 0, "total_count should be greater than 0");
 
             // 検証8: tagsの数が100件以下である（100件制限）かつtotal_count以下である

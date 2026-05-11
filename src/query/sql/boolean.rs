@@ -5,7 +5,7 @@ use super::{
     build_aggregation_context, label_to_unit_aware_expr, subquery,
     wrap_in_subquery, BuildPick, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, Src, SqlType};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
@@ -85,22 +85,24 @@ pub(super) fn reduce_with_union(
 }
 
 pub(super) fn build_resolved_and_sql(
+    src: &Src,
     child_sqls: Vec<SelectStatement>,
 ) -> SelectStatement {
     let fallback = Query::select()
         .columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
-        .from(Tbl::OneView)
+        .from(src)
         .to_owned();
     reduce_with_union(child_sqls, sea_query::UnionType::Intersect, fallback)
 }
 
 pub(super) fn build_resolved_or_sql(
+    src: &Src,
     child_sqls: Vec<SelectStatement>,
 ) -> SelectStatement {
     let fallback = Query::select()
         .columns([Col::ItemId, Col::Rank, Col::ItemKind])
-        .from(Tbl::OneView)
+        .from(src)
         .and_where(Expr::val(1).eq(0))
         .to_owned();
     reduce_with_union(child_sqls, sea_query::UnionType::Distinct, fallback)
@@ -141,37 +143,37 @@ pub(super) fn build_label_set_op_pick_sql(
     }
 }
 
-pub(super) fn build_boolean_sql(node: &ResolvedNode) -> SelectStatement {
-    let agg_ctx = build_aggregation_context(node);
+pub(super) fn build_boolean_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
+    let agg_ctx = build_aggregation_context(src, node);
     match node {
         ResolvedNode::AggregationMatch { agg, op, label } => {
             build_boolean_comparison_sql(
-                subquery(build_agg(agg, &agg_ctx)),
+                subquery(build_agg(src, agg, &agg_ctx)),
                 *op,
                 label_to_unit_aware_expr(label),
             )
         }
         ResolvedNode::AggregationAggregationMatch { left, op, right } => {
             build_boolean_comparison_sql(
-                subquery(build_agg(left, &agg_ctx)),
+                subquery(build_agg(src, left, &agg_ctx)),
                 *op,
-                subquery(build_agg(right, &agg_ctx)),
+                subquery(build_agg(src, right, &agg_ctx)),
             )
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
             let calc_expr = if calc.contains_aggregation() {
-                build_agg_calc_subquery(calc, &agg_ctx)
+                build_agg_calc_subquery(src, calc, &agg_ctx)
             } else {
                 build_agg_calc_expr(calc, &agg_ctx)
             };
             build_boolean_comparison_sql(
-                subquery(build_agg(agg, &agg_ctx)),
+                subquery(build_agg(src, agg, &agg_ctx)),
                 *op,
                 calc_expr,
             )
         }
         ResolvedNode::AggregationTagMatch { .. } => {
-            let pick_sql = PickNode::new(node).build_pick();
+            let pick_sql = PickNode::new(src, node).build_pick();
             build_boolean_existence_sql(pick_sql)
         }
         ResolvedNode::ScalarMatch { left, op, right } => {
@@ -182,7 +184,7 @@ pub(super) fn build_boolean_sql(node: &ResolvedNode) -> SelectStatement {
             )
         }
         _ => {
-            let pick_sql = PickNode::new(node).build_pick();
+            let pick_sql = PickNode::new(src, node).build_pick();
             build_boolean_existence_sql(pick_sql)
         }
     }
@@ -225,7 +227,7 @@ mod tests {
     fn test_build_boolean_existence_sql_volatile_row() {
         let pick_sql = Query::select()
             .column(Col::ItemId)
-            .from(crate::db::Tbl::OneView)
+            .from(&Src::OneView)
             .to_owned();
         let sql = build_boolean_existence_sql(pick_sql);
         let s = sql.to_string(PostgresQueryBuilder);

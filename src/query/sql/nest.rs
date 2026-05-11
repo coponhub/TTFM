@@ -7,7 +7,7 @@ use super::{
     build_pick, label_to_simple_expr, label_to_unit_aware_expr,
     wrap_to_item_ids, AggregationContext, BuildPick, NestContext, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, Src, SqlType, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
     LabelSetOpKind, NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
@@ -23,6 +23,7 @@ use sea_query::{
 // ── Projection SQL ─────────────────────────────────────────────────────────
 
 pub(super) fn build_resolved_projection_sql(
+    src: &Src,
     op: &ResolvedOperand,
 ) -> SelectStatement {
     op.fold(&|op, child_results: Vec<SelectStatement>| match op {
@@ -30,7 +31,7 @@ pub(super) fn build_resolved_projection_sql(
             let mut q = Query::select();
             q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
                 .distinct()
-                .from(Tbl::OneView);
+                .from(src);
             let cond = ResolvedNode::Nest {
                 keys: vec![op.clone()],
                 nvalue: None,
@@ -54,20 +55,21 @@ pub(super) fn build_resolved_projection_sql(
         _ => Query::select()
             .columns([Col::ItemId, Col::Rank, Col::ItemKind])
             .distinct()
-            .from(Tbl::OneView)
+            .from(src)
             .to_owned(),
     })
 }
 
 pub(super) fn filter(
+    src: &Src,
     keys: &[ResolvedOperand],
     ctx_sql: Option<SelectStatement>,
 ) -> SelectStatement {
-    let mut stmt = build_resolved_projection_sql(keys.first().unwrap());
+    let mut stmt = build_resolved_projection_sql(src, keys.first().unwrap());
     for key in keys.iter().skip(1) {
         let key_sub = Query::select()
             .column(Col::ItemId)
-            .from_subquery(build_resolved_projection_sql(key), Key)
+            .from_subquery(build_resolved_projection_sql(src, key), Key)
             .to_owned();
         stmt.and_where(Expr::col(Col::ItemId).in_subquery(key_sub));
     }
@@ -105,6 +107,7 @@ pub(super) fn extract_multi_key_nest_operands(
 }
 
 pub(super) fn build_multi_key_labels_sql(
+    src: &Src,
     keys: &[ResolvedOperand],
     ids_sql: SelectStatement,
 ) -> anyhow::Result<SelectStatement> {
@@ -149,7 +152,7 @@ pub(super) fn build_multi_key_labels_sql(
             }
         }
     }
-    pivot.from(Tbl::OneView);
+    pivot.from(src);
     if !type_filters.is_empty() {
         pivot.and_where(Expr::col(Col::Type).is_in(type_filters));
     }
@@ -371,6 +374,7 @@ fn build_merged_nvalue_agg_expr(
 }
 
 pub(super) fn build_nest_having_sql(
+    src: &Src,
     key: &ResolvedOperand,
     conditions: &[(&ResolvedOperand, ComparisonOp, &ResolvedOperand)],
     is_or: bool,
@@ -386,7 +390,7 @@ pub(super) fn build_nest_having_sql(
 
     let mut nfilter = Query::select();
     nfilter.expr_as(Expr::col((Proj, proj_col)), Group);
-    nfilter.from_as(Tbl::OneView, Proj);
+    nfilter.from_as(src, Proj);
     nfilter.join_as(
         sea_query::JoinType::InnerJoin,
         Tbl::OneView,
@@ -419,7 +423,7 @@ pub(super) fn build_nest_having_sql(
     let mut stmt = Query::select();
     stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
     stmt.distinct();
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
     if let Some(tag_type) = proj_tag_type {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type));
     }
@@ -428,6 +432,7 @@ pub(super) fn build_nest_having_sql(
 }
 
 pub(super) fn build_nest_match_sql(
+    src: &Src,
     keys: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     comparison_op: ComparisonOp,
@@ -438,6 +443,7 @@ pub(super) fn build_nest_match_sql(
 ) -> SelectStatement {
     if keys.len() == 1 {
         let nvalue_sub = build_nvalue_standalone_subquery(
+            src,
             &keys[0],
             nvalue,
             context.as_deref(),
@@ -463,14 +469,14 @@ pub(super) fn build_nest_match_sql(
         let mut stmt = Query::select();
         stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
         stmt.distinct();
-        stmt.from(Tbl::OneView);
+        stmt.from(src);
         if let Some(tag_type) = proj_tag_type {
             stmt.and_where(Expr::col(Col::Type).eq(tag_type));
         }
         stmt.and_where(Expr::col(proj_col).in_subquery(nfilter));
         stmt
     } else {
-        let pivot_sub = build_nest_pivot_cte(keys, Some(nvalue), agg_ctx);
+        let pivot_sub = build_nest_pivot_cte(src, keys, Some(nvalue), agg_ctx);
 
         let mut stmt = Query::select();
         stmt.column(Col::ItemId);
@@ -535,6 +541,7 @@ pub(super) fn build_nest_match_sql(
 }
 
 pub(super) fn build_nest_nest_match_sql(
+    src: &Src,
     left_keys: &[ResolvedOperand],
     left_nvalue: &ResolvedOperand,
     left_context: &Option<Box<ResolvedNode>>,
@@ -559,6 +566,7 @@ pub(super) fn build_nest_nest_match_sql(
                     .map(|(op, rhs)| (left_nvalue, *op, *rhs))
                     .collect();
                 return build_nest_having_sql(
+                    src,
                     &left_keys[0],
                     &conds,
                     false,
@@ -566,8 +574,9 @@ pub(super) fn build_nest_nest_match_sql(
                 );
             }
 
-            let mut stmt = build_resolved_projection_sql(&left_keys[0]);
+            let mut stmt = build_resolved_projection_sql(src, &left_keys[0]);
             let sub_l = build_nvalue_standalone_subquery(
+                src,
                 &left_keys[0],
                 left_nvalue,
                 left_context.as_deref(),
@@ -576,6 +585,7 @@ pub(super) fn build_nest_nest_match_sql(
                 Some(nest_ctx),
             );
             let sub_r = build_nvalue_standalone_subquery(
+                src,
                 &right_keys[0],
                 right_nvalue,
                 right_context.as_deref(),
@@ -613,6 +623,7 @@ pub(super) fn build_nest_nest_match_sql(
 }
 
 pub(super) fn build_merged_nest_match_sql(
+    src: &Src,
     keys: &[ResolvedOperand],
     matches: &[NestMatchCondition],
     is_or: bool,
@@ -626,7 +637,7 @@ pub(super) fn build_merged_nest_match_sql(
                 (&m.nvalue, cmp_op, &m.right)
             })
             .collect();
-        build_nest_having_sql(&keys[0], &conditions, is_or, agg_ctx)
+        build_nest_having_sql(src, &keys[0], &conditions, is_or, agg_ctx)
     } else {
         let mut all_nv_ops: Vec<&ResolvedOperand> = Vec::new();
         for m in matches {
@@ -641,7 +652,7 @@ pub(super) fn build_merged_nest_match_sql(
         }
 
         let pivot_sub =
-            build_nest_pivot_multi_nv_cte(keys, &all_nv_ops, agg_ctx);
+            build_nest_pivot_multi_nv_cte(src, keys, &all_nv_ops, agg_ctx);
 
         let mut stmt = Query::select();
         stmt.column(Col::ItemId);
@@ -738,6 +749,7 @@ pub(super) fn build_merged_nest_match_sql(
 }
 
 fn build_nest_pivot_multi_nv_cte(
+    src: &Src,
     keys: &[ResolvedOperand],
     nvalues: &[&ResolvedOperand],
     agg_ctx: &AggregationContext,
@@ -752,7 +764,7 @@ fn build_nest_pivot_multi_nv_cte(
         crate::db::CustomFunc::any_value(Expr::col(Col::ItemKind)),
         Col::ItemKind,
     );
-    stmt.from(Tbl::OneView);
+    stmt.from(src);
 
     for (i, key) in keys.iter().enumerate() {
         match key {
@@ -795,15 +807,16 @@ fn build_nest_pivot_multi_nv_cte(
 // ── Nest + LabelSetOp high-level SQL ──────────────────────────────────────
 
 pub(super) fn build_fetch_nest_sql(
+    src: &Src,
     resolver: &crate::query::lens_resolver::Resolver,
     limit: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     if let Some(node) = resolver.get_label_set_op_node() {
-        label_set_op_sql(node, limit, offset)
+        label_set_op_sql(src, node, limit, offset)
     } else {
-        let pick = PickNode::new(&resolver.resolved_query);
-        nest(&pick, resolver, limit, offset)
+        let pick = PickNode::new(src, &resolver.resolved_query);
+        nest(src, &pick, resolver, limit, offset)
     }
 }
 
@@ -820,6 +833,7 @@ fn make_tag_struct_pack(
 }
 
 pub(super) fn nest(
+    src: &Src,
     pick: &PickNode<'_>,
     resolver: &crate::query::lens_resolver::Resolver,
     limit: usize,
@@ -864,6 +878,7 @@ pub(super) fn nest(
                 (pick.agg_ctx(), pick.nest_ctx())
             {
                 build_nvalue_cte_nest(
+                    src,
                     proj_operands,
                     nv,
                     context,
@@ -871,8 +886,8 @@ pub(super) fn nest(
                     nest_ctx,
                 )
             } else {
-                computed_agg_ctx = build_aggregation_context_for_operand(nv);
-                build_nvalue_cte(proj_operands, nv, context, &computed_agg_ctx)
+                computed_agg_ctx = build_aggregation_context_for_operand(src, nv);
+                build_nvalue_cte(src, proj_operands, nv, context, &computed_agg_ctx)
             };
             if let Some((op, value)) = nvalue_condition {
                 let bin_op = to_bin_op(*op);
@@ -905,20 +920,20 @@ pub(super) fn nest(
         _ => None,
     };
 
-    let (label_col_name, all_hits_source, need_extra_filter) = if proj_operands
+    let (label_col_name, all_hits_source_cte, need_extra_filter) = if proj_operands
         .len()
         > 1
     {
         let pivot_q = match pick.agg_ctx() {
-            Some(agg_ctx) => build_nest_pivot_cte(proj_operands, None, agg_ctx),
-            None => build_nest_pivot_cte_no_agg(proj_operands),
+            Some(agg_ctx) => build_nest_pivot_cte(src, proj_operands, None, agg_ctx),
+            None => build_nest_pivot_cte_no_agg(src, proj_operands),
         };
         let pivot_cte = CommonTableExpression::new()
             .query(pivot_q)
             .table_name(Pivot)
             .to_owned();
         with_clause.cte(pivot_cte);
-        ("key0".to_string(), "pivot".to_string(), false)
+        ("key0".to_string(), Some("pivot".to_string()), false)
     } else if let Some(calc) = calc_node {
         if calc.contains_tag() {
             let calc_expr = if calc.contains_aggregation() {
@@ -934,7 +949,7 @@ pub(super) fn nest(
                 .column(Col::ItemId)
                 .expr_as(calc_expr, Alias::new("calc_value"))
                 .expr_as(CustomFunc::any_value(Expr::col(Col::Rank)), Col::Rank)
-                .from(Tbl::OneView)
+                .from(src)
                 .and_where(
                     Expr::col(Col::ItemId).in_subquery(
                         Query::select()
@@ -949,7 +964,7 @@ pub(super) fn nest(
                 .table_name(Alias::new("computed"))
                 .to_owned();
             with_clause.cte(computed_cte);
-            ("calc_value".to_string(), "computed".to_string(), false)
+            ("calc_value".to_string(), Some("computed".to_string()), false)
         } else {
             let calc_expr = if calc.contains_aggregation() {
                 let agg_ctx = pick
@@ -964,7 +979,7 @@ pub(super) fn nest(
                 .column(Col::ItemId)
                 .expr_as(calc_expr, Alias::new("calc_value"))
                 .column(Col::Rank)
-                .from(Tbl::OneView)
+                .from(src)
                 .and_where(
                     Expr::col(Col::ItemId).in_subquery(
                         Query::select()
@@ -978,14 +993,10 @@ pub(super) fn nest(
                 .table_name(Alias::new("computed"))
                 .to_owned();
             with_clause.cte(computed_cte);
-            ("calc_value".to_string(), "computed".to_string(), false)
+            ("calc_value".to_string(), Some("computed".to_string()), false)
         }
     } else {
-        (
-            Iden::to_string(&col_iden),
-            Iden::to_string(&Tbl::OneView),
-            true,
-        )
+        (Iden::to_string(&col_iden), None::<String>, true)
     };
 
     let label_col = Alias::new(&label_col_name);
@@ -1017,9 +1028,12 @@ pub(super) fn nest(
             Rn,
         )
         .expr_as(CustomFunc::count_over_multi(&partition_cols), GroupTotal)
-        .distinct()
-        .from(Alias::new(&all_hits_source))
-        .and_where(
+        .distinct();
+    match &all_hits_source_cte {
+        Some(cte_name) => all_hits_q.from(Alias::new(cte_name.as_str())),
+        None => all_hits_q.from(src),
+    };
+    all_hits_q.and_where(
             Expr::col(Col::ItemId).in_subquery(
                 Query::select()
                     .column(Col::ItemId)
@@ -1123,7 +1137,7 @@ pub(super) fn nest(
     let name_subquery = format!(
         "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
         Iden::to_string(&Col::LabelStr),
-        Iden::to_string(&Tbl::OneView),
+        src.table_str(),
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&TopItems),
         Iden::to_string(&Col::ItemId),
@@ -1152,7 +1166,7 @@ pub(super) fn nest(
     );
 
     let proj_label_sp = make_tag_struct_pack(
-        "projected_label",
+        "item_count",
         SqlType::BIGINT,
         Expr::cust(format!(
             "ANY_VALUE({}.{})::BIGINT",
@@ -1240,6 +1254,7 @@ pub(super) fn nest(
 }
 
 fn label_set_op_sql(
+    src: &Src,
     label_set_op: &ResolvedNode,
     limit: usize,
     offset: usize,
@@ -1260,11 +1275,11 @@ fn label_set_op_sql(
         .map(|i| format!("labels_{}", i))
         .collect();
     for (i, operand) in operands.iter().enumerate() {
-        let ids_sql = wrap_to_item_ids(build_pick(operand));
+        let ids_sql = wrap_to_item_ids(build_pick(src, operand));
 
         let labels_sql = if matches!(op, LabelSetOpKind::Union) {
             if let Some(keys) = extract_multi_key_nest_operands(operand) {
-                build_multi_key_labels_sql(&keys, ids_sql)?
+                build_multi_key_labels_sql(src, &keys, ids_sql)?
             } else {
                 let storage =
                     extract_primary_storage_from_node(operand).ok_or_else(|| {
@@ -1272,7 +1287,7 @@ fn label_set_op_sql(
                             "label_set_op_sql: cannot determine label type from operand {}", i
                         )
                     })?;
-                storage.to_label_select(ids_sql).ok_or_else(|| {
+                storage.to_label_select(src, ids_sql).ok_or_else(|| {
                     anyhow::anyhow!(
                         "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
                     )
@@ -1285,7 +1300,7 @@ fn label_set_op_sql(
                         "label_set_op_sql: cannot determine label type from operand {}", i
                     )
                 })?;
-            storage.to_label_select(ids_sql).ok_or_else(|| {
+            storage.to_label_select(src, ids_sql).ok_or_else(|| {
                 anyhow::anyhow!(
                     "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
                 )
@@ -1304,7 +1319,7 @@ fn label_set_op_sql(
         && extract_multi_key_nest_operands(operands.first().unwrap()).is_some();
 
     if use_item_level_except {
-        let right_ids_sql = wrap_to_item_ids(build_pick(&operands[1]));
+        let right_ids_sql = wrap_to_item_ids(build_pick(src, &operands[1]));
 
         let mut labels_sql = Query::select();
         labels_sql
@@ -1433,7 +1448,7 @@ fn label_set_op_sql(
     let name_subquery = format!(
         "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
         Iden::to_string(&Col::LabelStr),
-        Iden::to_string(&Tbl::OneView),
+        src.table_str(),
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&TopItems),
         Iden::to_string(&Col::ItemId),
@@ -1460,7 +1475,7 @@ fn label_set_op_sql(
     );
 
     let proj_label_sp = make_tag_struct_pack(
-        "projected_label",
+        "item_count",
         SqlType::BIGINT,
         Expr::cust(format!(
             "ANY_VALUE({}.{})::BIGINT",
@@ -1505,7 +1520,7 @@ mod tests {
         let query_str = "extension:";
         let resolver = Resolver::new(query_str).expect("Failed to resolve");
 
-        let sql = build_fetch_nest_sql(&resolver, 100, 0)
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
             .expect("Failed to build SQL");
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
@@ -1520,7 +1535,7 @@ mod tests {
             sql_str
         );
         assert!(
-            sql_str.contains("projected_label"),
+            sql_str.contains("item_count"),
             "SQL should contain projected_label tag: {}",
             sql_str
         );
@@ -1536,7 +1551,7 @@ mod tests {
             "Should have nvalue for nest query"
         );
 
-        let sql = build_fetch_nest_sql(&resolver, 100, 0).unwrap();
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         assert!(
@@ -1564,7 +1579,7 @@ mod tests {
             "Should have nvalue for nest query"
         );
 
-        let sql = build_fetch_nest_sql(&resolver, 100, 0).unwrap();
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         assert!(
@@ -1593,7 +1608,7 @@ mod tests {
             "Normal projection should NOT have nvalue"
         );
 
-        let sql = build_fetch_nest_sql(&resolver, 100, 0).unwrap();
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         assert!(
@@ -1610,7 +1625,7 @@ mod tests {
 
         assert!(resolver.get_nvalue_condition().is_some());
 
-        let sql = build_fetch_nest_sql(&resolver, 100, 0).unwrap();
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         assert!(
@@ -1648,6 +1663,7 @@ mod tests {
                 .expect("Should have nvalue");
 
             let sql = build_nvalue_standalone_subquery(
+                &Src::OneView,
                 proj_operand,
                 &nvalue,
                 resolver.resolved_query.get_context(),
@@ -1695,7 +1711,7 @@ mod tests {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver = Resolver::new(&query).unwrap();
 
-            let sql = build_fetch_nest_sql(&resolver, 100, 0).unwrap();
+            let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
             let sql_str = sql.to_string(PostgresQueryBuilder);
 
             assert!(
@@ -1742,6 +1758,7 @@ mod tests {
                 .expect("Should have nvalue");
 
             let sql = build_nvalue_standalone_subquery(
+                &Src::OneView,
                 proj_operand,
                 &nvalue,
                 resolver.resolved_query.get_context(),
@@ -1776,7 +1793,7 @@ mod tests {
             crate::query::lens_resolver::Resolver::new(query_str).unwrap();
         let optimized =
             crate::query::lens_optimizer::optimize(resolver.resolved_query);
-        let sql = PickNode::new(&optimized).build_pick();
+        let sql = PickNode::new(&Src::OneView, &optimized).build_pick();
         println!(
             "Generated FETCH ITEMS SQL: {}",
             sql.to_string(sea_query::PostgresQueryBuilder)
@@ -1785,7 +1802,7 @@ mod tests {
         if optimized.get_projection().is_some() {
             let resolver2 =
                 crate::query::lens_resolver::Resolver::new(query_str).unwrap();
-            let label_sql = build_fetch_nest_sql(&resolver2, 100, 0).unwrap();
+            let label_sql = build_fetch_nest_sql(&Src::OneView, &resolver2, 100, 0).unwrap();
             println!(
                 "Generated LABEL GROUPS SQL: {}",
                 label_sql.to_string(sea_query::PostgresQueryBuilder)
@@ -1812,7 +1829,7 @@ mod tests {
             context: None,
         };
 
-        let sql = build_pick(&nest_two_keys).to_string(PostgresQueryBuilder);
+        let sql = build_pick(&Src::OneView, &nest_two_keys).to_string(PostgresQueryBuilder);
 
         assert!(
             sql.contains("'tagA'"),
@@ -1841,7 +1858,7 @@ mod tests {
             context: None,
         };
 
-        let sql = build_pick(&nest_one_key).to_string(PostgresQueryBuilder);
+        let sql = build_pick(&Src::OneView, &nest_one_key).to_string(PostgresQueryBuilder);
 
         assert!(
             sql.contains("'tagA'"),
@@ -1879,7 +1896,7 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = label_set_op_sql(&node, 100, 0)
+        let sql = label_set_op_sql(&Src::OneView, &node, 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
@@ -1927,7 +1944,7 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = label_set_op_sql(&node, 100, 0)
+        let sql = label_set_op_sql(&Src::OneView, &node, 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
