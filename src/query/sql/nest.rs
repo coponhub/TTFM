@@ -97,6 +97,18 @@ pub(super) fn extract_primary_storage_from_node(
     })
 }
 
+fn extract_primary_tag_type_from_node(node: &ResolvedNode) -> Option<String> {
+    node.walk().into_iter().find_map(|n| match n {
+        ResolvedNode::Nest { keys, .. } => match keys.first()? {
+            ResolvedOperand::TagRef { tag_type, .. } => {
+                Some(tag_type.as_str().to_string())
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
 pub(super) fn extract_multi_key_nest_operands(
     node: &ResolvedNode,
 ) -> Option<Vec<ResolvedOperand>> {
@@ -160,13 +172,17 @@ pub(super) fn build_multi_key_labels_sql(
         .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql))
         .group_by_col(Col::ItemId);
 
-    let composite_str = (0..keys.len())
-        .map(|i| format!("CAST(\"key{}\" AS VARCHAR)", i))
-        .collect::<Vec<_>>()
-        .join(" || ' &: ' || ");
+    let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+    let repr_expr = Expr::cust(format!(
+        "list_value({})",
+        (0..keys.len())
+            .map(|i| format!("CAST(\"key{}\" AS {})", i, union_type))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     let mut outer = Query::select();
     outer
-        .expr_as(Expr::cust(&composite_str), Cast)
+        .expr_as(repr_expr, Representative)
         .column(Col::ItemId)
         .from_subquery(pivot, Alias::new("pivot_sub"));
     Ok(outer)
@@ -389,7 +405,7 @@ pub(super) fn build_nest_having_sql(
     };
 
     let mut nfilter = Query::select();
-    nfilter.expr_as(Expr::col((Proj, proj_col)), Group);
+    nfilter.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
     nfilter.from_as(src, Proj);
     nfilter.join_as(
         sea_query::JoinType::InnerJoin,
@@ -427,7 +443,7 @@ pub(super) fn build_nest_having_sql(
     if let Some(tag_type) = proj_tag_type {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type));
     }
-    stmt.and_where(Expr::col(proj_col).in_subquery(group_label_sub));
+    stmt.and_where(CustomFunc::as_representative(Expr::col(proj_col)).in_subquery(group_label_sub));
     stmt
 }
 
@@ -473,7 +489,7 @@ pub(super) fn build_nest_match_sql(
         if let Some(tag_type) = proj_tag_type {
             stmt.and_where(Expr::col(Col::Type).eq(tag_type));
         }
-        stmt.and_where(Expr::col(proj_col).in_subquery(nfilter));
+        stmt.and_where(CustomFunc::as_representative(Expr::col(proj_col)).in_subquery(nfilter));
         stmt
     } else {
         let pivot_sub = build_nest_pivot_cte(src, keys, Some(nvalue), agg_ctx);
@@ -616,7 +632,7 @@ pub(super) fn build_nest_nest_match_sql(
                     left_keys
                 ),
             };
-            stmt.and_where(Expr::col(*proj_col).in_subquery(join_sql));
+            stmt.and_where(CustomFunc::as_representative(Expr::col(*proj_col)).in_subquery(join_sql));
             stmt
         }
     }
@@ -1061,12 +1077,13 @@ pub(super) fn nest(
             )));
         } else {
             all_hits_q.and_where(
-                Expr::col(label_col.clone()).in_subquery(
-                    Query::select()
-                        .column(Group)
-                        .from(Alias::new("nvalue_agg"))
-                        .to_owned(),
-                ),
+                CustomFunc::as_representative(Expr::col(label_col.clone()))
+                    .in_subquery(
+                        Query::select()
+                            .column(Group)
+                            .from(Alias::new("nvalue_agg"))
+                            .to_owned(),
+                    ),
             );
         }
     }
@@ -1098,23 +1115,35 @@ pub(super) fn nest(
         .to_owned();
     with_clause.cte(top_items_cte);
 
-    let label_ref = if proj_operands.len() > 1 {
-        (0..proj_operands.len())
-            .map(|i| {
-                format!(
-                    "CAST({}.key{} AS VARCHAR)",
+
+    // 複数のオペランドを一つのリストにまとめる。
+    // 各オペランドが既にリスト型（Representative）である可能性があるため、
+    // list_value で包む前に、スカラーかリストかを判断して適切に処理する必要がある。
+    // ここでは DuckDB の flatten() または list_append/list_concat 的な振る舞いを目指す。
+
+    let repr_expr = if proj_operands.len() > 1 {
+        // 全要素が既にリスト(key0, key1...)であることが保証されているため、単純に flatten する。
+        Expr::cust(format!(
+            "flatten(list_value({}))",
+            (0..proj_operands.len())
+                .map(|i| format!(
+                    "{}.\"key{}\"",
                     Iden::to_string(&TopItems),
-                    i
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" || ' &: ' || ")
+                    i,
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     } else {
-        format!(
-            "CAST({}.{} AS VARCHAR)",
-            Iden::to_string(&TopItems),
-            label_col_name
-        )
+        if label_col_name == Iden::to_string(&crate::db::Pronoun::Representative) {
+            Expr::cust(format!(
+                "{}.{}",
+                Iden::to_string(&TopItems),
+                label_col_name
+            ))
+        } else {
+            CustomFunc::as_representative(Expr::col((TopItems, label_col.clone())))
+        }
     };
 
     let partition_order = if proj_operands.len() > 1 {
@@ -1127,12 +1156,6 @@ pub(super) fn nest(
     };
     let volatile_id_expr =
         format!("row_number() OVER (ORDER BY {})", partition_order);
-
-    let name_sp = make_tag_struct_pack(
-        "name",
-        SqlType::VARCHAR,
-        Expr::cust(format!("({})", label_ref)),
-    );
 
     let name_subquery = format!(
         "(SELECT {} FROM {} WHERE {} = {}.{} AND {} = 'name' LIMIT 1)",
@@ -1176,12 +1199,12 @@ pub(super) fn nest(
     );
 
     let mut tags_expr: SimpleExpr = Expr::cust_with_exprs(
-        "list_value($1) || $2 || list_value($3)",
-        [name_sp, item_list_expr, proj_label_sp],
+        "$1 || list_value($2)",
+        [item_list_expr, proj_label_sp],
     );
 
     if has_nvalue {
-        let nvalue_subq = if proj_operands.len() > 1 {
+        let nvalue_subq_expr = if proj_operands.len() > 1 {
             let mut join_cond = "TRUE".to_string();
             for i in 0..proj_operands.len() {
                 join_cond.push_str(&format!(
@@ -1191,21 +1214,21 @@ pub(super) fn nest(
                     i
                 ));
             }
-            format!(
-                "(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE {})",
-                join_cond
-            )
+            Expr::cust(format!("(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE {})", join_cond))
         } else {
-            format!(
-                "(SELECT \"nvalue\" FROM \"nvalue_agg\" WHERE \"group\" = {}.{})",
-                Iden::to_string(&TopItems),
-                &label_col_name,
-            )
+            let mut sub = Query::select();
+            sub.column(Nvalue).from(Alias::new("nvalue_agg"));
+            if label_col_name == Iden::to_string(&crate::db::Pronoun::Representative) {
+                sub.and_where(Expr::col(Group).eq(Expr::col((TopItems, Alias::new(&label_col_name)))));
+            } else {
+                sub.and_where(Expr::col(Group).eq(CustomFunc::as_representative(Expr::col((TopItems, Alias::new(&label_col_name))))));
+            }
+            crate::query::sql::subquery(sub.to_owned())
         };
         let nvalue_sp = make_tag_struct_pack(
             "nvalue",
             SqlType::DOUBLE,
-            Expr::cust(format!("CAST(({}) AS DOUBLE)", nvalue_subq)),
+            Expr::cust_with_exprs("CAST(($1) AS DOUBLE)", [nvalue_subq_expr]),
         );
         tags_expr = Expr::cust_with_exprs(
             "$1 || list_value($2)",
@@ -1226,6 +1249,7 @@ pub(super) fn nest(
     );
     q.expr_as(Expr::val("volatile"), Col::ItemKind);
     q.expr_as(tags_expr, crate::db::QueryResultCol::Tags);
+    q.expr_as(repr_expr, Representative);
     q.from(TopItems);
 
     if proj_operands.len() > 1 {
@@ -1323,7 +1347,7 @@ fn label_set_op_sql(
 
         let mut labels_sql = Query::select();
         labels_sql
-            .expr_as(Expr::col(Cast), Label)
+            .expr_as(Expr::col(Representative), Label)
             .column(Col::ItemId)
             .from(Alias::new(&cte_names[0]))
             .and_where(Expr::col(Col::ItemId).not_in_subquery(right_ids_sql));
@@ -1340,12 +1364,12 @@ fn label_set_op_sql(
             LabelSetOpKind::Except => sea_query::UnionType::Except,
         };
         let mut op_labels_sql = Query::select()
-            .column(Cast)
+            .column(Representative)
             .from(Alias::new(&cte_names[0]))
             .to_owned();
         for name in &cte_names[1..] {
             let other = Query::select()
-                .column(Cast)
+                .column(Representative)
                 .from(Alias::new(name))
                 .to_owned();
             op_labels_sql.union(set_op_type, other);
@@ -1358,13 +1382,13 @@ fn label_set_op_sql(
         );
 
         let mut all_op_items_sql = Query::select()
-            .column(Cast)
+            .column(Representative)
             .column(Col::ItemId)
             .from(Alias::new(&cte_names[0]))
             .to_owned();
         for name in &cte_names[1..] {
             let other = Query::select()
-                .column(Cast)
+                .column(Representative)
                 .column(Col::ItemId)
                 .from(Alias::new(name))
                 .to_owned();
@@ -1379,13 +1403,13 @@ fn label_set_op_sql(
 
         let mut labels_sql = Query::select();
         labels_sql
-            .expr_as(Expr::col(Cast), Label)
+            .expr_as(Expr::col(Representative), Label)
             .column(Col::ItemId)
             .from(Alias::new("all_op_items"))
             .and_where(
-                Expr::col(Cast).in_subquery(
+                Expr::col(Representative).in_subquery(
                     Query::select()
-                        .column(Cast)
+                        .column(Representative)
                         .from(Alias::new("op_labels"))
                         .to_owned(),
                 ),
@@ -1432,17 +1456,13 @@ fn label_set_op_sql(
             .to_owned(),
     );
 
-    let label_ref =
-        format!("CAST({}.label AS VARCHAR)", Iden::to_string(&TopItems));
+    let repr_expr = Expr::cust(format!(
+        "list_value({}.label)",
+        Iden::to_string(&TopItems)
+    ));
     let volatile_id_expr = format!(
         "row_number() OVER (ORDER BY {}.label)",
         Iden::to_string(&TopItems)
-    );
-
-    let name_sp = make_tag_struct_pack(
-        "name",
-        SqlType::VARCHAR,
-        Expr::cust(format!("({})", label_ref)),
     );
 
     let name_subquery = format!(
@@ -1485,8 +1505,8 @@ fn label_set_op_sql(
     );
 
     let tags_expr: SimpleExpr = Expr::cust_with_exprs(
-        "list_value($1) || $2 || list_value($3)",
-        [name_sp, item_list_expr, proj_label_sp],
+        "$1 || list_value($2)",
+        [item_list_expr, proj_label_sp],
     );
 
     let mut q = Query::select();
@@ -1495,6 +1515,7 @@ fn label_set_op_sql(
     q.expr_as(Expr::val(0i64), Col::Rank);
     q.expr_as(Expr::val("volatile"), Col::ItemKind);
     q.expr_as(tags_expr, crate::db::QueryResultCol::Tags);
+    q.expr_as(repr_expr, Representative);
     q.from(TopItems)
         .group_by_col((TopItems, Label))
         .order_by((TopItems, Label), sea_query::Order::Asc);

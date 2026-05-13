@@ -126,7 +126,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     println!("Testing '200 :< size: :< 800'...");
     let res = fm.search("200 :< size: :< 800", Default::default())?;
     assert_eq!(res.results.len(), 1);
-    assert!(res.results[0].name.contains("medium.txt"));
+    assert!(res.results[0].raw_repr().contains("medium.txt"));
 
     // 3. カスタムタグ (TRY_CAST 経由)
     println!("Testing custom tag with TRY_CAST...");
@@ -141,7 +141,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     println!("Testing multiple conditions...");
     let res = fm.search("size: :> 300 & width: :> 500", Default::default())?;
     assert_eq!(res.results.len(), 1);
-    assert_eq!(res.results[0].name, "medium.txt");
+    assert_eq!(res.results[0].raw_repr(), "medium.txt");
 
     // 5. スペースなしフォーマット
     println!("Testing 'width:>500' (no spaces)...");
@@ -217,18 +217,18 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     println!("Testing 'mtime:yesterday'...");
     let res = fm.search("mtime:yesterday", Default::default())?;
     assert!(
-        res.results.iter().any(|r| r.name == "past.txt"),
+        res.results.iter().any(|r| r.raw_repr() == "past.txt"),
         "Should match past.txt by 'yesterday'"
     );
 
     println!("Testing 'mtime:<today'...");
     let res = fm.search("mtime:<today", Default::default())?;
     assert!(
-        res.results.iter().any(|r| r.name == "past.txt"),
+        res.results.iter().any(|r| r.raw_repr() == "past.txt"),
         "Should match past.txt by '<today'"
     );
     assert!(
-        res.results.iter().all(|r| r.name != "small.txt"),
+        res.results.iter().all(|r| r.raw_repr() != "small.txt"),
         "Should NOT match files created today"
     );
 
@@ -339,7 +339,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
         .search("filename:project_alph?.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].name, "project_alpha.pdf");
+    assert_eq!(results.results[0].raw_repr(), "project_alpha.pdf");
 
     // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
     let results = fm
@@ -416,7 +416,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
         .search(r"filename:\[WIP\]_*", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].name, "[WIP]_test.txt");
+    assert_eq!(results.results[0].raw_repr(), "[WIP]_test.txt");
 
     Ok(())
 }
@@ -474,11 +474,11 @@ fn test_complex_search_combinations() {
         .unwrap();
     // Verify correct items are present (ignoring extra matches)
     assert!(
-        results.results.iter().any(|r| r.name == "Cargo.toml"),
+        results.results.iter().any(|r| r.raw_repr() == "Cargo.toml"),
         "Should find Cargo.toml"
     );
     assert!(
-        results.results.iter().any(|r| r.name == "LICENSE"),
+        results.results.iter().any(|r| r.raw_repr() == "LICENSE"),
         "Should find LICENSE"
     );
 
@@ -496,7 +496,7 @@ fn test_complex_search_combinations() {
         all_rs - 1,
         "Difference should remove mod.rs"
     );
-    assert!(results_diff.results.iter().all(|r| r.name != "mod.rs"));
+    assert!(results_diff.results.iter().all(|r| r.raw_repr() != "mod.rs"));
 
     // 5. Grouping + Glob Types + Comparison
     // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
@@ -504,19 +504,19 @@ fn test_complex_search_combinations() {
         .search("(exte*:rs | exte*:toml) & size:>0", Default::default())
         .unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.iter().all(|r| r.raw_repr() == "main.rs"));
 
     // 6. Value Glob + Value Prefix AND (name:*.rs & name:mai*)
     let results = fm
         .search("name:*.rs & name:mai*", Default::default())
         .unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.iter().all(|r| r.raw_repr() == "main.rs"));
 
     // 7. Bracket Glob (name:[m]ain.rs)
     let results = fm.search("name:[m]ain.rs", Default::default()).unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().any(|r| r.name == "main.rs"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "main.rs"));
 
     // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
     let results = fm.search("exte*:r?", Default::default()).unwrap();
@@ -556,21 +556,21 @@ fn test_escaping_behavior() {
         .search(r"name:colon\:file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped colon");
-    assert!(res.results.iter().any(|r| r.name == "colon:file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "colon:file.txt"));
 
     // 2. Escaped Space
     let res = fm
         .search(r"name:space\ file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped space");
-    assert!(res.results.iter().any(|r| r.name == "space file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "space file.txt"));
 
     // 3. Escaped Caret
     let res = fm
         .search(r"name:caret\^file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped caret");
-    assert!(res.results.iter().any(|r| r.name == "caret^file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "caret^file.txt"));
 
     // 4. Quoted Colon
     let res = fm
@@ -639,14 +639,14 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
 
     // もし "sub_folder" がヒットしているなら、extension判定がバグっている
     let sub_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or_default();
+        let val = p.raw_repr();
         val.contains("sub_folder") && !val.ends_with(".rs")
     });
     assert!(!sub_hits, "'sub_folder' directory found in results!");
 
     // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
     let strange_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or_default();
+        let val = p.raw_repr();
         val.contains("strange.rs") && !val.ends_with("ignored.txt")
     });
     assert!(!strange_hits, "'strange.rs' directory found in results!");

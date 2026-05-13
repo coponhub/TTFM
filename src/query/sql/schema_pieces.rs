@@ -1,19 +1,16 @@
-use crate::db::{Col, Pronoun::*, Src};
+use crate::db::{Col, Pronoun::Representative, Src};
 use sea_query::{BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
 
 // ── to_label_select 用 ────────────────────────────────────────────────────
 
 /// Column ストレージ用ラベル SELECT。`WHERE type = ?` フィルタなし。
-pub(crate) fn build_lens_select_column(src: &Src, 
+pub(crate) fn build_lens_select_column(src: &Src,
     col: Col,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
-    let cast_expr = Expr::cust_with_exprs(
-        "CAST($1 AS VARCHAR)",
-        vec![Expr::col(col).into()],
-    );
+    let cast_expr = crate::db::CustomFunc::as_representative(Expr::col(col));
     let mut s = Query::select();
-    s.expr_as(cast_expr, Cast)
+    s.expr_as(cast_expr, Representative)
         .column(Col::ItemId)
         .from(src)
         .and_where(Expr::col(col).is_not_null())
@@ -22,17 +19,14 @@ pub(crate) fn build_lens_select_column(src: &Src,
 }
 
 /// タグ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
-pub(crate) fn build_lens_select_tag(src: &Src, 
+pub(crate) fn build_lens_select_tag(src: &Src,
     col: Col,
     tag_type: &str,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
-    let cast_expr = Expr::cust_with_exprs(
-        "CAST($1 AS VARCHAR)",
-        vec![Expr::col(col).into()],
-    );
+    let cast_expr = crate::db::CustomFunc::as_representative(Expr::col(col));
     let mut s = Query::select();
-    s.expr_as(cast_expr, Cast)
+    s.expr_as(cast_expr, Representative)
         .column(Col::ItemId)
         .from(src)
         .and_where(Expr::col(Col::Type).eq(tag_type))

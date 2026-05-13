@@ -16,7 +16,7 @@ define_cases! {
         query: "mtime:2024/01/01",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should match file with slash date");
-            assert_eq!(res.results[0].name, "date_test.txt");
+            assert_eq!(res.results[0].raw_repr(), "date_test.txt");
             Ok(())
         },
     },
@@ -35,7 +35,7 @@ define_cases! {
         query: "mtime:2024-01-01",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should match file with hyphen date");
-            assert_eq!(res.results[0].name, "date_test.txt");
+            assert_eq!(res.results[0].raw_repr(), "date_test.txt");
             Ok(())
         },
     },
@@ -54,7 +54,7 @@ define_cases! {
         query: "max(mtime:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            let val: f64 = res.results[0].name.parse()?;
+            let val: f64 = res.results[0].raw_repr().parse()?;
             assert!(val > 0.0);
             Ok(())
         },
@@ -74,7 +74,7 @@ define_cases! {
         query: "min(mtime:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            let val: f64 = res.results[0].name.parse()?;
+            let val: f64 = res.results[0].raw_repr().parse()?;
             assert!(val > 0.0);
             Ok(())
         },
@@ -96,7 +96,7 @@ define_cases! {
         query: "mtime:12:00",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should match file with unquoted time '12:00'");
-            assert_eq!(res.results[0].name, "time_test.txt");
+            assert_eq!(res.results[0].raw_repr(), "time_test.txt");
             Ok(())
         },
     },

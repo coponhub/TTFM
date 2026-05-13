@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(res.results.len(), 2);
 
         let names: Vec<String> =
-            res.results.iter().map(|r| r.name.clone()).collect();
+            res.results.iter().map(|r| r.raw_repr()).collect();
         assert!(names.contains(&"readme.md".to_string()));
         assert!(names.contains(&"test.rs".to_string()));
 
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(res.results.len(), 1);
 
         let item = &res.results[0];
-        assert_eq!(item.name, "test.bin");
+        assert_eq!(item.raw_repr(), "test.bin");
         // Size 属性が正しくマッピングされているか
         assert_eq!(item.intrinsic.size.unwrap().0, 123);
 
@@ -654,8 +654,8 @@ mod tests {
                 i
             );
             assert_eq!(
-                db_item.name, cache_item.name,
-                "name mismatch at index {}",
+                db_item.raw_repr(), cache_item.raw_repr(),
+                "representative mismatch at index {}",
                 i
             );
             if !db_item.id.is_volatile() {

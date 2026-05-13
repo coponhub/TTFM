@@ -24,11 +24,11 @@ mod tests {
             .unwrap();
 
         let res_comp = fm.search("count()", SearchOptions::default()).unwrap();
-        println!("count() result: {}", res_comp.results[0].name);
+        println!("count() result: {}", res_comp.results[0].raw_repr());
 
         let res_wild =
             fm.search("count(*:*)", SearchOptions::default()).unwrap();
-        println!("count(*:*) result: {}", res_wild.results[0].name);
+        println!("count(*:*) result: {}", res_wild.results[0].raw_repr());
 
         let items = fm.search("path:", SearchOptions::default()).unwrap();
         println!(

@@ -27,13 +27,13 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let files_only: Vec<_> = all_items
         .results
         .iter()
-        .filter(|r| r.item_kind == ttfm::ItemKind::File && r.name != "data")
+        .filter(|r| r.item_kind == ttfm::ItemKind::File && r.raw_repr() != "data")
         .collect();
     assert_eq!(
         files_only.len(),
         3,
         "Total file items should be 3. Found: {:?}",
-        files_only.iter().map(|r| &r.name).collect::<Vec<_>>()
+        files_only.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
     );
 
     // 1. Boolean の sum 集計 (TRUE=1, FALSE=0)
@@ -41,7 +41,7 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let query_sum = "sum(is_dir:)";
     let res_sum = fm.search(query_sum, Default::default())?;
     assert_eq!(
-        res_sum.results[0].name, "2",
+        res_sum.results[0].raw_repr(), "2",
         "sum(is_dir:) should be 2 (data and subdir)"
     );
 
@@ -49,7 +49,7 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let query_sum_filter = "sum(name:subdir & is_dir:)";
     let res_sum_filter = fm.search(query_sum_filter, Default::default())?;
     assert_eq!(
-        res_sum_filter.results[0].name, "1",
+        res_sum_filter.results[0].raw_repr(), "1",
         "sum(name:subdir & is_dir:) should be 1"
     );
 
@@ -59,9 +59,9 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let query_calc = "sum(is_dir: + 1)";
     let res_calc = fm.search(query_calc, Default::default())?;
     assert_eq!(
-        res_calc.results[0].name, "6",
+        res_calc.results[0].raw_repr(), "6",
         "sum(is_dir: + 1) should be 6. Found: {}",
-        res_calc.results[0].name
+        res_calc.results[0].raw_repr()
     );
 
     // 3. Boolean 同士の比較 (is_dir:true)
@@ -72,7 +72,7 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
         res_cmp.results.len(),
         2,
         "2 directories should match. Found: {:?}",
-        res_cmp.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        res_cmp.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
     );
 
     Ok(())

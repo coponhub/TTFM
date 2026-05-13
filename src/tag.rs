@@ -920,6 +920,9 @@ impl TagFunction for SizeFn {
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
     }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::SIZE
+    }
 }
 impl Scan for SizeFn {
     fn name() -> &'static str { "size" }
@@ -1022,6 +1025,9 @@ impl TagFunction for MtimeFn {
     }
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
+    }
+    fn default_rank(&self) -> Rank {
+        crate::rank::SystemRank::MTIME
     }
 }
 impl Scan for MtimeFn {

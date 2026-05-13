@@ -134,7 +134,7 @@ pub enum Pronoun {
     // --- 中間カラム ---
     Nvalue,
     Group,
-    Cast,
+    Representative,
     Label,
     Scalar,
     // --- 追加分 ---
@@ -555,6 +555,17 @@ impl CustomFunc {
         sea_query::Func::cust(DuckDbFunc::ListValue)
             .args(exprs)
             .into()
+    }
+
+    /// スカラー値を代表値リスト型 LIST(UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)) に変換します。
+    pub fn as_representative<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+        sea_query::Expr::cust_with_exprs(
+            &format!("list_value(CAST($1 AS {}))", union_type),
+            [expr.into()],
+        )
     }
 
     /// typeof(expr) を生成します。

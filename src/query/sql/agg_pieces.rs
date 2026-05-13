@@ -11,7 +11,7 @@ use crate::query::lens_resolver::{
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use sea_query::{
-    Alias, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr,
+    Alias, Condition, Expr, ExprTrait, Func, Iden, Query, SelectStatement, SimpleExpr,
 };
 
 // ── 低レベルユーティリティ ──────────────────────────────────────────────────
@@ -39,17 +39,19 @@ pub(super) fn wrap_with_item_id(
     proj_col: Col,
     proj_tag_type: Option<&str>,
 ) -> SelectStatement {
+
     let mut wrapped = Query::select();
     wrapped
         .column((View, Col::ItemId))
-        .expr_as(Expr::col((View, proj_col)), Group)
+        .expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group)
         .column((Agg, Nvalue))
         .from_as(src, View)
         .join_subquery(
             sea_query::JoinType::InnerJoin,
             agg_sub,
             Agg,
-            Expr::col((View, proj_col)).eq(Expr::col((Agg, Group))),
+            CustomFunc::as_representative(Expr::col((View, proj_col)))
+                .eq(Expr::col((Agg, Group))),
         );
     if let Some(tag_type) = proj_tag_type {
         wrapped.and_where(Expr::col((View, Col::Type)).eq(tag_type));
@@ -402,8 +404,9 @@ pub(super) fn build_count_nvalue_sql(
     let (count_col, inner_tag_type) = resolve_count_target(inner);
     let mut stmt = Query::select();
 
+
     if let Some(tag_type) = inner_tag_type {
-        stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+                    stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
         stmt.expr_as(Expr::col((Tags, count_col)).count_distinct(), Nvalue);
         stmt.from_as(src, Proj);
         stmt.join_as(
@@ -453,9 +456,9 @@ pub(super) fn build_count_nvalue_sql(
                 ),
             );
         }
-        stmt.group_by_col((Proj, proj_col));
+        stmt.group_by_col(Alias::new("Group"));
     } else {
-        stmt.expr_as(Expr::col(proj_col), Group);
+        stmt.expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group);
         stmt.expr_as(Expr::col(Col::ItemId).count_distinct(), Nvalue);
         stmt.from(src);
         if let Some(tt) = proj_tag_type {
@@ -495,7 +498,7 @@ pub(super) fn build_count_nvalue_sql(
                 ),
             );
         }
-        stmt.group_by_col(proj_col);
+        stmt.group_by_col(Alias::new("Group"));
     }
 
     if include_item_id {
@@ -599,8 +602,9 @@ pub(super) fn build_nvalue_standalone_subquery(
         ) => {
             let is_string = agg.is_string_type();
             let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
+        
             let mut stmt = Query::select();
-            stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+                        stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -619,7 +623,7 @@ pub(super) fn build_nvalue_standalone_subquery(
             if let Some(tt) = proj_tag_type {
                 stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
             }
-            stmt.group_by_col((Proj, proj_col));
+            stmt.group_by_col(Alias::new("Group"));
             if include_item_id {
                 wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
             } else {
@@ -629,7 +633,7 @@ pub(super) fn build_nvalue_standalone_subquery(
         ResolvedOperand::Literal(label) => {
             let val = label_to_simple_expr(label);
             let mut stmt = Query::select();
-            stmt.expr_as(Expr::col(proj_col), Group);
+            stmt.expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group);
             stmt.expr_as(val, Nvalue);
             stmt.from(src);
             if let Some(tt) = proj_tag_type {
@@ -637,10 +641,10 @@ pub(super) fn build_nvalue_standalone_subquery(
             }
             if include_item_id {
                 stmt.column(Col::ItemId);
-                stmt.group_by_col(proj_col);
+                stmt.group_by_col(Alias::new("Group"));
                 stmt.group_by_col(Col::ItemId);
             } else {
-                stmt.group_by_col(proj_col);
+                stmt.group_by_col(Alias::new("Group"));
             }
             stmt
         }
@@ -707,7 +711,8 @@ pub(super) fn build_nvalue_standalone_subquery(
             stmt.from_as(src, Proj);
             match nval_storage {
                 StorageMapping::Fixed(nv_col) => {
-                    stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+                
+                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
                     stmt.expr_as(
                         CustomFunc::any_value(Expr::col((Proj, *nv_col))),
                         Nvalue,
@@ -732,10 +737,10 @@ pub(super) fn build_nvalue_standalone_subquery(
                         sea_query::JoinType::LeftJoin,
                         nv_sub,
                         Sub,
-                        Expr::col((Proj, Col::ItemId))
-                            .equals((Sub, Col::ItemId)),
+                        Expr::col((Proj, Col::ItemId)).equals((Sub, Col::ItemId)),
                     );
-                    stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+                
+                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
                     stmt.expr_as(
                         CustomFunc::any_value(Func::coalesce([
                             Expr::col((Sub, Val)).into(),
@@ -745,14 +750,15 @@ pub(super) fn build_nvalue_standalone_subquery(
                     );
                 }
                 StorageMapping::Composite => {
-                    stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+                
+                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
                     stmt.expr_as(Expr::val(0.0f64), Nvalue);
                 }
             }
             if let Some(tt) = proj_tag_type {
                 stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
             }
-            stmt.group_by_col((Proj, proj_col));
+            stmt.group_by_col(Alias::new("Group"));
             if include_item_id {
                 wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
             } else {
@@ -996,7 +1002,7 @@ fn build_nvalue_cte_inner(
             let is_string = agg.is_string_type();
             let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
-            stmt.expr_as(Expr::col((Proj, proj_col)), Group);
+            stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -1070,6 +1076,7 @@ fn build_pivot_keys_into_stmt(
 
     let mut type_filters = std::collections::HashSet::new();
 
+    let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef { storage, .. } => match storage {
@@ -1081,7 +1088,7 @@ fn build_pivot_keys_into_stmt(
                     );
                     let max_expr: SimpleExpr = Func::max(case_expr).into();
                     stmt.expr_as(
-                        max_expr.clone(),
+                        CustomFunc::as_representative(max_expr.clone()),
                         Alias::new(&format!("key{}", i)),
                     );
                     stmt.and_having(max_expr.is_not_null());
@@ -1089,19 +1096,27 @@ fn build_pivot_keys_into_stmt(
                 StorageMapping::Fixed(col) => {
                     let max_expr = Expr::col(*col).max();
                     stmt.expr_as(
-                        max_expr.clone(),
+                        CustomFunc::as_representative(max_expr.clone()),
                         Alias::new(&format!("key{}", i)),
                     );
                     stmt.and_having(max_expr.is_not_null());
                 }
-                _ => {}
+                StorageMapping::Composite => {
+                    // Representative は既にリストなのでそのまま（または UNION[] キャスト）
+                    stmt.expr_as(
+                        Expr::cust(format!("CAST(\"{}\" AS {}[])", sea_query::Iden::to_string(&crate::db::Pronoun::Representative), union_type)),
+                        Alias::new(&format!("key{}", i))
+                    );
+                    // NULLチェック
+                    stmt.and_having(Expr::col(crate::db::Pronoun::Representative).is_not_null());
+                }
             },
             ResolvedOperand::Calculation(calc) => {
                 collect_tag_types_from_operand(&calc.left, &mut type_filters);
                 collect_tag_types_from_operand(&calc.right, &mut type_filters);
                 let calc_expr = calc_expr_fn(calc);
                 stmt.expr_as(
-                    calc_expr.clone(),
+                    CustomFunc::as_representative(calc_expr.clone()),
                     Alias::new(&format!("key{}", i)),
                 );
                 stmt.and_having(calc_expr.is_not_null());

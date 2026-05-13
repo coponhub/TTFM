@@ -365,6 +365,15 @@ impl From<duckdb::types::Value> for LabelValue {
             Value::Double(d) => LabelValue::Double(d.to_bits()),
             Value::Text(s) => LabelValue::String(s),
             Value::Null => LabelValue::Null,
+            Value::List(l) => {
+                // LabelValue はスカラーなので、リストが来たら最初の要素を取り出す（保険的措置）
+                // 本来的には Fetcher 側で分解されるべき。
+                if let Some(first) = l.into_iter().next() {
+                    LabelValue::from(first)
+                } else {
+                    LabelValue::Null
+                }
+            }
             _ => LabelValue::String(format!("{:?}", v)),
         }
     }

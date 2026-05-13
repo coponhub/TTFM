@@ -21,8 +21,8 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(extension:)",
         assert: |res, _dir| {
-            let dira = res.results.iter().find(|r| r.name.contains("dirA")).expect("dirA");
-            let dirb = res.results.iter().find(|r| r.name.contains("dirB")).expect("dirB");
+            let dira = res.results.iter().find(|r| r.raw_repr().contains("dirA")).expect("dirA");
+            let dirb = res.results.iter().find(|r| r.raw_repr().contains("dirB")).expect("dirB");
             assert_eq!(get_nvalue_f64(dira), Some(1.0), "dirA: 1 extension type (txt only)");
             assert_eq!(get_nvalue_f64(dirb), Some(3.0), "dirB: 3 extension types (txt, html, rs)");
             Ok(())
@@ -48,8 +48,8 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(extension:txt)",
         assert: |res, _dir| {
-            let dira = res.results.iter().find(|r| r.name.contains("dirA")).expect("dirA");
-            let dirb = res.results.iter().find(|r| r.name.contains("dirB")).expect("dirB");
+            let dira = res.results.iter().find(|r| r.raw_repr().contains("dirA")).expect("dirA");
+            let dirb = res.results.iter().find(|r| r.raw_repr().contains("dirB")).expect("dirB");
             assert_eq!(get_nvalue_f64(dira), Some(5.0), "dirA: 5 txt files");
             assert_eq!(get_nvalue_f64(dirb), Some(2.0), "dirB: 2 txt files");
             Ok(())

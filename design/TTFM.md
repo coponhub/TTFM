@@ -213,13 +213,12 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 #### システムデフォルト優先度 (SystemRank)
 インデックス作成時、標準的なタグ型には以下の優先度が割り当てられる。
 - 7: `filename` (最優先)
-- 6: `type_from_ext`
-- 5: `size_str`
-- 4: `modified_str`
-- 3: `parentdir`
-- 2: `content`
-- 1: その他システムタグ
-- 0: 初期値（ユーザータグ等）
+- 6: `size`
+- 5: `mtime`
+- 4: `parentdir`
+- 3: `content`
+- 2: その他システムタグ
+- 1: 初期値（ユーザータグ等）
 
 ## 6. **プラグインシステム**
 詳細なプラグインシステムの設計については `PLUGIN.md` を参照。

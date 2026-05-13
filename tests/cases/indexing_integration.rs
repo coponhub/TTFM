@@ -139,9 +139,9 @@ fn test_incremental_indexing_full_flow() {
 
     /* TODO: Fix hardlink indexing/search consistency.
     // 検証：1つの実体に対して a.txt と c.txt の 2つの場所がヒットすること
-    let names: Vec<_> = files_inode.iter().map(|r| r.name.as_str()).collect();
-    assert!(names.contains(&"a.txt"));
-    assert!(names.contains(&"c.txt"));
+    let names: Vec<_> = files_inode.iter().map(|r| r.raw_repr()).collect();
+    assert!(names.contains(&"a.txt".to_string()));
+    assert!(names.contains(&"c.txt".to_string()));
     assert_eq!(
         files_inode[0].id, files_inode[1].id,
         "Both results must share the same Item ID"
@@ -182,7 +182,7 @@ fn test_system_items_registration() {
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     // 転置: results には label items が格納されるため、name が "extension:txt" であることを確認
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.item_kind == ttfm::ItemKind::Volatile && r.name == "extension:txt"
+        r.item_kind == ttfm::ItemKind::Volatile && r.raw_repr() == "extension:txt"
     });
     assert!(
         has_target_val,
@@ -198,7 +198,7 @@ fn test_system_items_registration() {
     let system_label = results_origin
         .results
         .iter()
-        .find(|r| r.name == "system")
+        .find(|r| r.raw_repr() == "system")
         .expect("system label not found for origin check");
     assert_eq!(
         system_label.item_kind,
@@ -234,7 +234,7 @@ fn test_typedtag_listing_via_type_query() {
         .results
         .iter()
         .filter(|r| {
-            r.item_kind == ttfm::ItemKind::Tag && r.name == "extension:txt"
+            r.item_kind == ttfm::ItemKind::Tag && r.raw_repr() == "extension:txt"
         })
         .collect();
     assert_eq!(

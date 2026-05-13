@@ -8,9 +8,8 @@ pub struct SystemRank;
 
 impl SystemRank {
     pub const NAME: Rank = 10;
-    pub const TYPE_FROM_EXT: Rank = 9;
-    pub const SIZE_STR: Rank = 8;
-    pub const MODIFIED_STR: Rank = 7;
+    pub const SIZE: Rank = 8;
+    pub const MTIME: Rank = 7;
     pub const PARENT_DIR: Rank = 6;
     pub const ITEM_KIND: Rank = 5;
     pub const CONTENT: Rank = 4;

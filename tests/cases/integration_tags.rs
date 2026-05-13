@@ -99,7 +99,7 @@ fn test_system_item_metadata_integration() {
 
     let ext_list = fm.search("type:extension", Default::default()).unwrap();
     assert!(
-        !ext_list.results.iter().any(|r| r.name == "extension:"),
+        !ext_list.results.iter().any(|r| r.raw_repr() == "extension:"),
         "Empty extension tag should not exist"
     );
 
@@ -119,7 +119,7 @@ fn test_system_item_metadata_integration() {
     let rs_label = results_proj
         .results
         .iter()
-        .find(|r| r.name == "rs")
+        .find(|r| r.raw_repr() == "rs")
         .expect("rs label not found");
     assert_eq!(
         rs_label.item_kind,

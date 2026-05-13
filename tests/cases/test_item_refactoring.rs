@@ -28,7 +28,7 @@ fn test_item_id_and_kind_refactoring() {
     assert_eq!(res.results.len(), 1);
     // name may vary depending on env, so we just ensure it's a number > 0
     let count: i64 = res.results[0]
-        .name
+        .raw_repr()
         .parse()
         .expect("Count should be numeric");
     assert!(count > 0, "Count should be positive");

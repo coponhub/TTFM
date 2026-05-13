@@ -70,8 +70,10 @@ impl<'a> Fetcher<'a> {
         offset: Option<usize>,
     ) -> Result<Vec<RawTagRow>> {
         use sea_query::PostgresQueryBuilder;
-        let pick =
-            crate::query::sql::PickNode::new(&Src::OneView, &self.resolver.resolved_query);
+        let pick = crate::query::sql::PickNode::new(
+            &Src::OneView,
+            &self.resolver.resolved_query,
+        );
         let select_sql = crate::query::sql::build_flat_table_sql(
             &Src::OneView,
             &pick,
@@ -113,15 +115,16 @@ impl<'a> Fetcher<'a> {
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<SearchResult> {
-        use crate::types::LabelValue;
+        use crate::types::{Label, LabelValue};
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
             if tag_row.tag_type == "name" {
                 let lv = LabelValue::from(tag_row.value);
                 if !matches!(lv, LabelValue::Null) {
                     let s = lv.as_display_name();
-                    res.name =
+                    let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                    res.representative = vec![Label::Name(s)];
                 }
             } else {
                 #[allow(deprecated)]
@@ -132,29 +135,48 @@ impl<'a> Fetcher<'a> {
     }
 
     /// DuckDB の Row から Projection (Nest) 結果の SearchResult を構築します。
-    /// name タグは res.name にセットするが tags.entries には追加しない。
+    /// Representative カラムから代表値リストを取得し、型付き Label に変換する。
     /// item_count タグは res.item_count に移動する。
     fn decode_nest_item_from_row(
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<SearchResult> {
         use crate::types::{Label, LabelValue, TagType};
+        use duckdb::types::Value;
 
         let (mut res, raw_tags) = read_base_from_row(row)?;
-        for tag_row in raw_tags {
-            match tag_row.tag_type.as_str() {
-                "name" => {
-                    let lv = LabelValue::from(tag_row.value);
-                    if !matches!(lv, LabelValue::Null) {
-                        let s = lv.as_display_name();
-                        // DuckDB の CAST(double AS VARCHAR) は "8.0" を返すが、
-                        // Rust の f64::to_string は "8" を返す。
-                        res.name = s
-                            .parse::<f64>()
-                            .map(|f| f.to_string())
-                            .unwrap_or(s);
+
+        // Representative カラムから代表値リストを取得
+        let repr_col = sea_query::Iden::to_string(&crate::db::Pronoun::Representative);
+        if let Ok(Value::List(values)) = row.get::<_, Value>(repr_col.as_str()) {
+            let operands = self.resolver.resolved_query.get_projection_operands();
+
+            let mut representative = Vec::new();
+            for (i, v) in values.into_iter().enumerate() {
+                // LabelValue::from は内部で Value::Union を再帰的に解く
+                let lv = LabelValue::from(v);
+                
+                if let Some(ops) = operands {
+                    if let Some(op) = ops.get(i) {
+                        if let crate::query::lens_resolver::ResolvedOperand::TagRef {
+                            tag_type,
+                            ..
+                        } = op
+                        {
+                            // 型情報がある場合はそれを尊重する
+                            representative.push(Label::resolve(tag_type.clone(), lv));
+                            continue;
+                        }
                     }
                 }
+                // 型情報が不明な場合は Name タグとして扱う (Lv.1 互換)
+                representative.push(Label::Name(lv.as_display_name()));
+            }
+            res.representative = representative;
+        }
+
+        for tag_row in raw_tags {
+            match tag_row.tag_type.as_str() {
                 "item_count" => {
                     let lv = LabelValue::from(tag_row.value);
                     if !matches!(lv, LabelValue::Null) {
@@ -163,6 +185,19 @@ impl<'a> Fetcher<'a> {
                             lv,
                         ));
                     }
+                }
+                "name" => {
+                    // Lv.1 互換: representative が空の場合のみセット
+                    if res.representative.is_empty() {
+                        let lv = LabelValue::from(tag_row.value.clone());
+                        if !matches!(lv, LabelValue::Null) {
+                            let s = lv.as_display_name();
+                            let s = s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
+                            res.representative = vec![Label::Name(s)];
+                        }
+                    }
+                    #[allow(deprecated)]
+                    res.apply_raw_tag(tag_row);
                 }
                 _ => {
                     #[allow(deprecated)]
@@ -193,8 +228,7 @@ fn read_base_from_row(
         ItemId::Stored(id_val)
     };
 
-    let mut res =
-        crate::response::SearchResult::new_empty(id, kind, String::new());
+    let mut res = crate::response::SearchResult::new_empty(id, kind);
     res.rank = row
         .get::<_, Option<i64>>(SType::Rank.name().as_str())?
         .unwrap_or(0);
@@ -424,7 +458,7 @@ mod tests {
         let mut results = fetcher.fetch(100, 0).unwrap();
         let res = results.remove(0);
         assert!(res.id.is_volatile());
-        assert_eq!(res.name, "NULL"); // NULL (データがないので判定不能)
+        assert_eq!(res.raw_repr(), "NULL"); // NULL (データがないので判定不能)
 
         // データ投入
         conn.execute(
@@ -440,7 +474,7 @@ mod tests {
         let mut results2 = fetcher.fetch(100, 0).unwrap();
         let res2 = results2.remove(0);
         assert!(res2.id.is_volatile());
-        assert_eq!(res2.name, "TRUE"); // TRUE
+        assert_eq!(res2.raw_repr(), "TRUE"); // TRUE
     }
 
     #[test]
@@ -531,12 +565,12 @@ mod tests {
             assert!(
                 nvalue_tag.is_some(),
                 "Label '{}' should have nvalue tag",
-                item.name
+                item.raw_repr()
             );
         }
 
         // docs: jpg 1件, src: jpg 1件
-        let docs = results.iter().find(|r| r.name == "docs").unwrap();
+        let docs = results.iter().find(|r| r.raw_repr() == "docs").unwrap();
         let docs_nvalue = docs
             .tags
             .entries
@@ -551,7 +585,7 @@ mod tests {
             "docs should have 1 jpg file"
         );
 
-        let src = results.iter().find(|r| r.name == "src").unwrap();
+        let src = results.iter().find(|r| r.raw_repr() == "src").unwrap();
         let src_nvalue = src
             .tags
             .entries
@@ -699,7 +733,7 @@ mod tests {
             assert!(
                 has_item_tag,
                 "Projection result '{}' should have item: tags",
-                r.name
+                r.raw_repr()
             );
         }
     }
@@ -752,7 +786,8 @@ mod tests {
         // count(rs) > 0 を満たすのは src のみ → src 内のファイル (Lv.1 フラットリスト)
         assert_eq!(results.len(), 1, "Only src has rs files");
         assert_eq!(
-            results[0].name, "main.rs",
+            results[0].raw_repr(),
+            "main.rs",
             "Items path returns filename, not group label"
         );
         // items パスを通るので item: タグは存在しない

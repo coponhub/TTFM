@@ -29,7 +29,7 @@ define_cases! {
         query: "(extension:rs & size:) * 2",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "should return results");
-            assert_eq!(res.results[0].name, "200", "size(100) * 2 = 200");
+            assert_eq!(res.results[0].raw_repr(), "200", "size(100) * 2 = 200");
             Ok(())
         },
     },

@@ -15,7 +15,7 @@ fn test_toplevel_arithmetic_without_parens(
     // 1. Aggregation - Aggregation
     // count() - count() = 0
     let res = fm.search("count() - count()", Default::default())?;
-    assert_eq!(res.results[0].name, "0");
+    assert_eq!(res.results[0].raw_repr(), "0");
 
     // 2. Projection - Scalar
     // type: (file=0) - 0 = 0. (assuming type:file maps to 0 or similar if internal value exposed,

@@ -187,7 +187,7 @@ fn main() -> Result<()> {
             };
             let response = fm.search(query, opts)?;
             if *short {
-                print_simple_results(&response);
+                print_simple_results(&fm, &response);
             } else {
                 print_results(&fm, &response, query, n.unwrap_or(100), &mut std::io::stdout());
             }
@@ -208,7 +208,7 @@ fn main() -> Result<()> {
             };
             let response = fm.search("", opts)?;
             if *short {
-                print_simple_results(&response);
+                print_simple_results(&fm, &response);
             } else {
                 print_results(&fm, &response, "list", n.unwrap_or(100), &mut std::io::stdout());
             }
@@ -327,7 +327,7 @@ fn print_results(
 
     // item: タグが注入されている場合は Projection グループ表示
     if response.has_projection_results() {
-        print_compact_projections(response, query, current_n, writer);
+        print_compact_projections(fm, response, query, current_n, writer);
         return;
     }
 
@@ -458,8 +458,18 @@ fn print_results(
     }
 }
 
+/// representative の各 Label を型に応じたフォーマットで表示用文字列にします。
+fn format_representative(fm: &FileManager, res: &ttfm::SearchResult) -> String {
+    res.representative
+        .iter()
+        .map(|l| fm.format_tag_display(l.tag_type().as_str(), &l.as_str()))
+        .collect::<Vec<_>>()
+        .join(" &: ")
+}
+
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
 fn print_compact_projections(
+    fm: &FileManager,
     response: &ttfm::SearchResponse,
     query: &str,
     _current_n: usize,
@@ -484,12 +494,14 @@ fn print_compact_projections(
             .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
             .map(|e| e.label.as_str());
 
+        let repr_display = format_representative(fm, label_item);
+
         // 1行目: ヘッダー (ラベル値 - nvalue (X items))
         if let Some(nv) = &nvalue_str {
             writeln!(
                 writer,
                 "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
-                label_item.name,
+                repr_display,
                 nv,
                 total_count
             ).unwrap_or(());
@@ -497,7 +509,7 @@ fn print_compact_projections(
             writeln!(
                 writer,
                 "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-                label_item.name,
+                repr_display,
                 total_count
             ).unwrap_or(());
         }
@@ -542,21 +554,21 @@ fn print_compact_projections(
 }
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
-fn print_simple_results(response: &ttfm::SearchResponse) {
+fn print_simple_results(fm: &FileManager, response: &ttfm::SearchResponse) {
     if response.has_projection_results() {
         for label_item in &response.results {
-            safe_println!("{}", format_short_result(label_item));
+            safe_println!("{}", format_short_result(fm, label_item));
         }
     } else {
         for res in &response.results {
-            let line = res.primary_value().unwrap_or_else(|| res.name.clone());
+            let line = res.primary_value().unwrap_or_else(|| res.raw_repr());
             safe_println!("{}", line);
         }
     }
 }
 
 /// --short 時のアイテム表示に必要な文字列を生成します。
-fn format_short_result(res: &ttfm::SearchResult) -> String {
+fn format_short_result(fm: &FileManager, res: &ttfm::SearchResult) -> String {
     let nvalue_str = res
         .tags
         .entries
@@ -564,10 +576,11 @@ fn format_short_result(res: &ttfm::SearchResult) -> String {
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
 
+    let repr = format_representative(fm, res);
     if let Some(nv) = nvalue_str {
-        format!("{} {}", res.name, nv)
+        format!("{} {}", repr, nv)
     } else {
-        res.name.clone()
+        repr
     }
 }
 
@@ -587,27 +600,31 @@ mod tests {
         let mut res_with_nvalue = SearchResult::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
-            "test_label".to_string(),
         );
+        res_with_nvalue.representative = vec![Label::Name("test_label".to_string())];
         res_with_nvalue.apply_tag(
             Label::resolve(TagType::from("nvalue"), LabelValue::Integer(9986)),
             Origin::System,
         );
 
-        let output = format_short_result(&res_with_nvalue);
+        let dir = tempfile::tempdir().unwrap();
+        let fm = ttfm::FileManager::new_with_db_dir(dir.path().join("db")).unwrap();
+        let output = format_short_result(&fm, &res_with_nvalue);
         assert_eq!(output, "test_label 9986");
     }
 
     #[test]
     fn test_short_format_without_nvalue() {
         // nvalueを持たないダミーダミーデータを作成
-        let res_without_nvalue = SearchResult::new_empty(
+        let mut res_without_nvalue = SearchResult::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
-            "test_label_no_nv".to_string(),
         );
+        res_without_nvalue.representative = vec![Label::Name("test_label_no_nv".to_string())];
 
-        let output = format_short_result(&res_without_nvalue);
+        let dir = tempfile::tempdir().unwrap();
+        let fm = ttfm::FileManager::new_with_db_dir(dir.path().join("db")).unwrap();
+        let output = format_short_result(&fm, &res_without_nvalue);
         assert_eq!(output, "test_label_no_nv");
     }
 

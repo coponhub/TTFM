@@ -12,7 +12,7 @@ define_cases! {
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "1100");
+            assert_eq!(res.results[0].raw_repr(), "1100");
             Ok(())
         },
     },
@@ -26,7 +26,7 @@ define_cases! {
         query: "sum(size:) > 50",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },
@@ -42,7 +42,7 @@ define_cases! {
         query: "sum(extension:rs & size:) > 0",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "TRUE", "Should be TRUE even if matched ID is not 1");
+            assert_eq!(res.results[0].raw_repr(), "TRUE", "Should be TRUE even if matched ID is not 1");
             Ok(())
         },
     },
@@ -57,7 +57,7 @@ define_cases! {
         query: "count(extension:txt) == 2",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },
@@ -71,7 +71,7 @@ define_cases! {
         query: "avg(size:) == avg(size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },

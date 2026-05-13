@@ -74,7 +74,7 @@ define_cases! {
         query: "width: :> (height: * 2)",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1, "Should find exactly 1 item");
-            assert!(res.results[0].name.contains("wide"), "Should find wide_image, got: {}", res.results[0].name);
+            assert!(res.results[0].raw_repr().contains("wide"), "Should find wide_image, got: {}", res.results[0].raw_repr());
             Ok(())
         },
     },

@@ -23,14 +23,14 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     let res = fm.search("extension:", Default::default())?;
 
     assert!(
-        res.results.iter().any(|r| r.name == "txt"),
+        res.results.iter().any(|r| r.raw_repr() == "txt"),
         "Output should contain 'txt' label for file_with_ext.txt"
     );
-    let has_empty = res.results.iter().any(|r| r.name.is_empty());
+    let has_empty = res.results.iter().any(|r| r.raw_repr().is_empty());
     assert!(
         !has_empty,
         "Output should NOT contain empty label name. Found labels: {:?}",
-        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
     );
     Ok(())
 }
@@ -53,12 +53,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "size: + mtime: should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             for &v in &vals {
                 assert!(v > 0.0, "calc value should be > 0, got: {}", v);
@@ -87,12 +87,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "mtime: - size: should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             for &v in &vals {
                 assert!(v > 0.0, "mtime - size should be > 0 (timestamp >> file size), got: {}", v);
@@ -121,12 +121,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "size: / 1024 should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             let has_pair_with_diff = vals
                 .iter()
@@ -157,7 +157,7 @@ define_cases! {
             assert!(
                 res.has_projection_results(),
                 "extension: &: count() (Lv.2 projection) should be routed as projection. names={:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -176,7 +176,7 @@ define_cases! {
             assert!(
                 !res.has_projection_results(),
                 "parentdir: &: count() :> 1 (Lv.1 flat list) should NOT be projection. names={:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -206,31 +206,31 @@ fn test_projection_queries() {
     let results = fm.search("extension:", Default::default()).unwrap();
     println!(
         "Matches for 'extension:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     assert_eq!(
         results.results.len(),
         2,
         "extension: should return 2 label values (rs, txt). Found: {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: results には label items が格納される（name="rs", name="txt"）
-    assert!(results.results.iter().any(|r| r.name == "rs"));
-    assert!(results.results.iter().any(|r| r.name == "txt"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "rs"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "txt"));
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
     let results = fm.search("directory:", Default::default()).unwrap();
     println!(
         "Matches for 'directory:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（test_dir など）
     assert!(
         results.results.len() >= 1,
         "directory: should return at least 1 label (test_dir filename)"
     );
-    assert!(results.results.iter().any(|r| r.name == "test_dir"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "test_dir"));
     // 仮想ラベル directory: は内部で filename を投影する
     assert!(has_item_tags(&results.results));
 
@@ -238,14 +238,14 @@ fn test_projection_queries() {
     let results = fm.search("filename:", Default::default()).unwrap();
     println!(
         "Matches for 'filename:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（:test.rs, :test.txt）
     assert_eq!(
         results.results.len(),
         2,
         "filename: should return 2 label values (test.rs, test.txt). Found: {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置後は全て label items
     assert!(results
@@ -279,7 +279,7 @@ fn test_projection_queries() {
     // 結果に含まれる全てのタグタイプ（label の name）を収集
     let mut found_types = std::collections::HashSet::new();
     for r in &results.results {
-        found_types.insert(r.name.clone());
+        found_types.insert(r.raw_repr().clone());
     }
 
     // 主要なSTypeが含まれているか確認
@@ -314,7 +314,7 @@ fn test_projection_queries() {
     let ext_results = fm.search("extension:", Default::default()).unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
-        if r.name == "test.rs" {
+        if r.raw_repr() == "test.rs" {
             let ext = r
                 .get_tag_value("extension")
                 .expect("test.rs should have extension tag");
@@ -354,7 +354,7 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
     // 転置: results には label items が格納され、name が "important" であることを確認
     let has_val = results.results.iter().any(|r| {
-        r.item_kind == ttfm::ItemKind::Volatile && r.name == "important"
+        r.item_kind == ttfm::ItemKind::Volatile && r.raw_repr() == "important"
     });
     assert!(has_val, "Should find 'important' category label");
 
@@ -410,7 +410,7 @@ fn test_projection_returns_label_volatile_items() {
 
             // 検証5: name が空ではない（ラベル値）
             assert!(
-                !item.name.is_empty(),
+                !item.raw_repr().is_empty(),
                 "Label volatile item name should not be empty"
             );
 
@@ -460,7 +460,7 @@ fn test_projection_returns_label_volatile_items() {
     }
 
     // 検証9: "rs" ラベルが存在する（test.rs, another.rs）
-    let rs_label = results.results.iter().find(|item| item.name == "rs");
+    let rs_label = results.results.iter().find(|item| item.raw_repr() == "rs");
     assert!(
         rs_label.is_some(),
         "Should find 'rs' label in projection results"
