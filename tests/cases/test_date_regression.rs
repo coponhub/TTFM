@@ -54,7 +54,9 @@ define_cases! {
         query: "max(mtime:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            let val: f64 = res.results[0].raw_repr().parse()?;
+            // raw_repr() is now mtime-formatted ("YYYY-MM-DD HH:MM"); use value tag for numeric check
+            let value_strs = res.results[0].get_all_values("value");
+            let val: f64 = value_strs[0].parse()?;
             assert!(val > 0.0);
             Ok(())
         },
@@ -74,7 +76,9 @@ define_cases! {
         query: "min(mtime:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            let val: f64 = res.results[0].raw_repr().parse()?;
+            // raw_repr() is now mtime-formatted ("YYYY-MM-DD HH:MM"); use value tag for numeric check
+            let value_strs = res.results[0].get_all_values("value");
+            let val: f64 = value_strs[0].parse()?;
             assert!(val > 0.0);
             Ok(())
         },

@@ -46,7 +46,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].raw_repr(), "1100");
+            assert_eq!(res.results[0].raw_repr(), "1.1KB");
             Ok(())
         },
     },
@@ -428,7 +428,8 @@ fn test_max_mtime_with_year_filter() {
 
     let res = context.search("max(extension:rs & mtime:2025 & mtime:)");
     assert!(!res.results.is_empty());
-    let scalar: f64 = res.results[0].raw_repr().parse().unwrap();
+    let value_strs = res.results[0].get_all_values("value");
+    let scalar: f64 = value_strs[0].parse().unwrap();
     assert!(scalar > 1700000000.0);
 }
 

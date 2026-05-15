@@ -68,7 +68,7 @@ define_cases! {
         query: "sum((100 :< size: :<= 500) & size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].raw_repr(), "200", "Sum of medium file size should be 200");
+            assert_eq!(res.results[0].raw_repr(), "200B", "Sum of medium file size should be 200B");
             Ok(())
         },
     },

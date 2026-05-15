@@ -867,6 +867,37 @@ impl ResolvedNode {
         }
     }
 
+    /// スカラー集計・計算の結果ラベル型を返す。
+    /// 集計に使用したラベルが単一種類の場合のみ Some(TagType) を返す。
+    /// count() / Literal は型を伝播しない。
+    pub fn get_scalar_result_label_type(&self) -> Option<TagType> {
+        match self {
+            ResolvedNode::Aggregation(ResolvedAggregationNode::Count(_)) => None,
+            ResolvedNode::Aggregation(ResolvedAggregationNode::Arithmetic {
+                inner, ..
+            }) => {
+                let (_, _, operand) = inner.extract_agg_parts();
+                let operand = operand?;
+                let mut types = collect_tag_types_from_operand(operand);
+                types.sort();
+                types.dedup();
+                if types.len() == 1 { Some(types.remove(0)) } else { None }
+            }
+            // sum(size:) + count() 等、top-level Nest{keys:[Calculation(Agg,...)]}
+            ResolvedNode::Nest { keys, nvalue: None, .. } => {
+                let op = keys.first()?;
+                if !op.contains_aggregation() && !op.is_pure_scalar() {
+                    return None;
+                }
+                let mut types = collect_tag_types_from_operand(op);
+                types.sort();
+                types.dedup();
+                if types.len() == 1 { Some(types.remove(0)) } else { None }
+            }
+            _ => None,
+        }
+    }
+
     /// このノードがラベル集合演算（LabelSetOp）かどうかを返します。
     pub fn is_label_set_op(&self) -> bool {
         matches!(self, ResolvedNode::LabelSetOp { .. })
@@ -953,6 +984,38 @@ fn extract_storage_from_operand(
         }
         _ => None,
     }
+}
+
+/// Operand ツリーに含まれる TagRef のタグ型を収集する。
+/// - Calculation: 左右を展開してキューに積む
+/// - Aggregation(Arithmetic): extract_agg_parts() で内部 operand を取り出してキューに積む
+/// - Aggregation(Count) / Literal: 型を持たないため空
+fn collect_tag_types_from_operand(root: &ResolvedOperand) -> Vec<TagType> {
+    let mut result = Vec::new();
+    let mut queue: Vec<ResolvedOperand> = vec![root.clone()];
+
+    while let Some(op) = queue.pop() {
+        match op {
+            ResolvedOperand::TagRef { tag_type, .. } => {
+                result.push(tag_type);
+            }
+            ResolvedOperand::Calculation(calc) => {
+                queue.push(calc.left.clone());
+                queue.push(calc.right.clone());
+            }
+            ResolvedOperand::Aggregation(
+                ResolvedAggregationNode::Arithmetic { ref inner, .. },
+            ) => {
+                if let (_, _, Some(operand)) = inner.extract_agg_parts() {
+                    queue.push(operand.clone());
+                }
+            }
+            ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(_))
+            | ResolvedOperand::Literal(_) => {}
+        }
+    }
+
+    result
 }
 
 fn cond_and(nodes: &[ResolvedNode]) -> Condition {
@@ -2538,6 +2601,12 @@ impl Resolver {
     pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
         self.resolved_query.get_nvalue_condition()
     }
+
+    /// スカラー集計結果のラベル型を返す。
+    /// 集計に使用したラベルが単一種類の場合のみ Some(TagType) を返す。
+    pub fn get_scalar_result_label_type(&self) -> Option<TagType> {
+        self.resolved_query.get_scalar_result_label_type()
+    }
 }
 
 #[cfg(test)]
@@ -3901,5 +3970,96 @@ mod tests_walk_fold {
             _ => {}
         });
         assert_eq!(*order.borrow(), vec!["1", "2", "calc"]);
+    }
+
+    // ─── get_scalar_result_label_type ───────────────────────────────────────
+
+    #[test]
+    fn test_get_scalar_result_label_type_size() {
+        use crate::types::{SType, TagType};
+        let r = Resolver::new("sum(size:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Size)),
+            "sum(size:) should yield Some(Size)"
+        );
+        let r = Resolver::new("avg(size:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Size)),
+            "avg(size:) should yield Some(Size)"
+        );
+        let r = Resolver::new("min(size:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Size)),
+            "min(size:) should yield Some(Size)"
+        );
+    }
+
+    #[test]
+    fn test_get_scalar_result_label_type_mtime() {
+        use crate::types::{SType, TagType};
+        let r = Resolver::new("max(mtime:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Mtime)),
+            "max(mtime:) should yield Some(Mtime)"
+        );
+    }
+
+    #[test]
+    fn test_get_scalar_result_label_type_count_is_none() {
+        let r = Resolver::new("count(extension:rs)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            None,
+            "count() should yield None (no type propagation)"
+        );
+        let r = Resolver::new("count()").unwrap();
+        assert_eq!(r.get_scalar_result_label_type(), None);
+    }
+
+    #[test]
+    fn test_get_scalar_result_label_type_mixed_is_none() {
+        // sum(size: + mtime:) — two different tag types → None
+        // Note: arithmetic inside sum() does not require extra parens
+        let r = Resolver::new("sum(size: + mtime:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            None,
+            "sum(size: + mtime:) should yield None (2 types)"
+        );
+    }
+
+    #[test]
+    fn test_get_scalar_result_label_type_calc_with_literal() {
+        use crate::types::{SType, TagType};
+        // sum(size: - 1000) — Calculation(TagRef{size}, Literal) → size only
+        let r = Resolver::new("sum(size: - 1000)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Size)),
+            "sum(size: - 1000) should yield Some(Size)"
+        );
+    }
+
+    #[test]
+    fn test_get_scalar_result_label_type_outer_calc() {
+        use crate::types::{SType, TagType};
+        // sum(size:) + count() — Calculation of Agg{size} + Agg{Count} → size only
+        let r = Resolver::new("sum(size:) + count()").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            Some(TagType::Base(SType::Size)),
+            "sum(size:) + count() should yield Some(Size)"
+        );
+        // sum(size:) + sum(mtime:) → None (2 types)
+        let r = Resolver::new("sum(size:) + sum(mtime:)").unwrap();
+        assert_eq!(
+            r.get_scalar_result_label_type(),
+            None,
+            "sum(size:) + sum(mtime:) should yield None"
+        );
     }
 }

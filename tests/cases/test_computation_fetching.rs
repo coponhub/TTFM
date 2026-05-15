@@ -12,7 +12,7 @@ define_cases! {
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].raw_repr(), "1100");
+            assert_eq!(res.results[0].raw_repr(), "1.1KB");
             Ok(())
         },
     },

@@ -13,7 +13,7 @@ impl SystemRank {
     pub const PARENT_DIR: Rank = 6;
     pub const ITEM_KIND: Rank = 5;
     pub const CONTENT: Rank = 4;
-    pub const FILENAME: Rank = 1;
+    pub const FILENAME: Rank = 9;
     pub const DEFAULT: Rank = 0;
     pub const PATH: Rank = -1;
 }

@@ -1048,7 +1048,7 @@ define_cases! {
         query: "sum(extension:rs & size:)",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            assert_eq!(res.results[0].raw_repr(), "17", "sum=17");
+            assert_eq!(res.results[0].raw_repr(), "17B", "sum=17B");
             Ok(())
         },
     },
@@ -1118,7 +1118,9 @@ define_cases! {
         query: "sum(sum(parentdir: &: extension: &: size:))",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            let val: f64 = res.results[0].raw_repr().parse().expect("numeric");
+            // raw_repr() is size-formatted; use value tag for numeric check
+            let value_strs = res.results[0].get_all_values("value");
+            let val: f64 = value_strs[0].parse().expect("numeric value tag");
             assert_eq!(val, 22.0, "22.0, got {}", val);
             Ok(())
         },

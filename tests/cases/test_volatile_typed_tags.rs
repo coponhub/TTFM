@@ -11,7 +11,7 @@ define_cases! {
         query: "sum(name:a.txt & size:)",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1);
-            assert_eq!(res.results[0].raw_repr(), "123");
+            assert_eq!(res.results[0].raw_repr(), "123B");
             assert!(res.results[0].get_all_values("type").contains(&"integer".to_string()));
             assert!(res.results[0].get_all_values("value").contains(&"123".to_string()));
             Ok(())
@@ -28,7 +28,7 @@ define_cases! {
         query: "avg((name:a.txt | name:b.txt) & size:)",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1);
-            assert!(res.results[0].raw_repr().contains("150"));
+            assert_eq!(res.results[0].raw_repr(), "150B");
             assert!(res.results[0].get_all_values("type").contains(&"double".to_string()));
             assert!(res.results[0].get_all_values("value").iter().any(|v| v.contains("150")));
             Ok(())

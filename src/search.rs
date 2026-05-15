@@ -56,6 +56,35 @@ impl FileManager {
         };
 
         let mut results = fetcher.fetch(n, offset)?;
+
+        // スカラー集計結果のラベル型フォーマット後処理
+        if let Some(tt) = resolver.get_scalar_result_label_type() {
+            use crate::types::{Label, LabelValue, Origin};
+            for result in &mut results {
+                let raw = result
+                    .tags
+                    .entries
+                    .iter()
+                    .find(|e| e.label.tag_type().as_str() == "value")
+                    .and_then(|e| match e.label.value() {
+                        LabelValue::Integer(i) => Some(i.to_string()),
+                        LabelValue::Double(bits) => {
+                            Some((f64::from_bits(bits) as i64).to_string())
+                        }
+                        _ => None,
+                    });
+                if let Some(raw) = raw {
+                    let formatted =
+                        self.registry.format_display(tt.as_str(), &raw);
+                    result.representative =
+                        vec![Label::Name(formatted.clone())];
+                    result
+                        .tags
+                        .push(Label::Name(formatted), Origin::System);
+                }
+            }
+        }
+
         let has_more = n > 0 && results.len() > n;
         if has_more {
             results.truncate(n);

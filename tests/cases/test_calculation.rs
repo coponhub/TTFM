@@ -228,8 +228,10 @@ define_cases! {
         query: "sum(size: - 100)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should return a scalar result");
-            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(f64::NAN);
-            assert!(!val.is_nan(), "Result should be a number, got: {}", res.results[0].raw_repr());
+            // raw_repr() is now size-formatted; use value tag to check numeric result
+            let value_strs = res.results[0].get_all_values("value");
+            let val: i64 = value_strs[0].parse().unwrap_or(-1);
+            assert!(val > 0, "Result should be a positive number, got value: {:?}", value_strs);
             Ok(())
         },
     },
@@ -259,8 +261,10 @@ define_cases! {
         query: "sum(size: + 100 - 50)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should return a scalar result");
-            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(f64::NAN);
-            assert!(!val.is_nan(), "Result should be a number, got: {}", res.results[0].raw_repr());
+            // raw_repr() is now size-formatted; use value tag to check numeric result
+            let value_strs = res.results[0].get_all_values("value");
+            let val: i64 = value_strs[0].parse().unwrap_or(-1);
+            assert!(val > 0, "Result should be a positive number, got value: {:?}", value_strs);
             Ok(())
         },
     },

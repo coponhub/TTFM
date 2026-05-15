@@ -335,6 +335,14 @@ fn print_results(
     let type_ranks = fm.get_type_ranks().unwrap_or_default();
     let term_width = get_terminal_width();
 
+    // volatile スカラー結果のフォーマット済み representative をテーブル上部に表示
+    if let Some(res) = response.results.iter()
+        .find(|r| r.id.is_volatile() && !r.representative.is_empty())
+    {
+        let repr = format_representative(fm, res);
+        writeln!(writer, "\x1b[1m{}\x1b[0m", repr).unwrap_or(());
+    }
+
     // TypeGroup ごとに表示を行う
     for group in response.iter_type_groups() {
         // カラム（TagType）をランク順に並び替え
@@ -342,10 +350,12 @@ fn print_results(
         sorted_keys.sort_by(|a, b| {
             let r_a = type_ranks
                 .get(a.as_str())
+                .filter(|&&r| r != 0)
                 .cloned()
                 .unwrap_or_else(|| fm.get_default_rank(a.as_str()));
             let r_b = type_ranks
                 .get(b.as_str())
+                .filter(|&&r| r != 0)
                 .cloned()
                 .unwrap_or_else(|| fm.get_default_rank(b.as_str()));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))

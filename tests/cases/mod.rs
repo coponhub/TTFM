@@ -279,6 +279,7 @@ pub mod test_optimize_sql;
 pub mod test_projection;
 pub mod test_query_full;
 pub mod test_reverse_patterns;
+pub mod test_scalar_format;
 pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
