@@ -1,6 +1,5 @@
 use tempfile::tempdir;
 use ttfm::db::TargetTable;
-use ttfm::FileManager;
 
 #[test]
 fn test_parquet_physical_order() {
@@ -15,17 +14,20 @@ fn test_parquet_physical_order() {
     std::fs::write(root.join("z.txt"), "content").unwrap();
     std::fs::write(root.join("a.rs"), "content").unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, _cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // Verify base_tags.parquet order
-    let path = fm.path_for_target(TargetTable::BaseTags);
+    let path = store.path_for_target(TargetTable::BaseTags);
 
     // Read raw rows without ORDER BY
     // DuckDB read_parquet typically follows physical order.
     // We extract type and label_str.
-    let rows: Vec<(String, Option<String>)> = fm
-        .get_connection()
+    let rows: Vec<(String, Option<String>)> = store.conn
         .prepare(&format!(
             "SELECT type, label_str FROM read_parquet('{}')",
             path.to_string_lossy()

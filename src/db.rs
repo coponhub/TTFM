@@ -1,9 +1,11 @@
 use crate::taggers::ColumnDef;
+use anyhow::{Context, Result};
+use duckdb::Connection;
 use sea_query::{
     Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
     IntoTableRef, Table, TableCreateStatement, TableRef,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::{Display, EnumIter};
 
 /// カラムが所属すべきテーブル。
@@ -19,14 +21,52 @@ pub enum TargetTable {
     DataTypes,
 }
 
-/// データベースの物理ストレージ（Parquetファイル）へのパスを管理する構造体。
+/// DB接続とParquetファイルのパスを管理する構造体（設計書4.4 IndexStore）。
 pub struct Store {
+    pub conn: Connection,
     pub db_dir: PathBuf,
 }
 
 impl Store {
-    pub fn new(db_dir: PathBuf) -> Self {
-        Self { db_dir }
+    /// db_dir を準備しインメモリDB接続を開く。
+    /// テーブル初期化は呼び出し元が `Indexer::new(store, registry).initialize_tables()` で行う。
+    pub fn open(db_dir: impl AsRef<Path>) -> Result<Self> {
+        let db_dir = db_dir.as_ref().to_path_buf();
+        if !db_dir.exists() {
+            std::fs::create_dir_all(&db_dir)
+                .with_context(|| format!("Failed to create db dir: {:?}", db_dir))?;
+        }
+        let conn = Connection::open_in_memory()
+            .context("Failed to open in-memory DuckDB connection")?;
+        Ok(Self { conn, db_dir })
+    }
+
+    /// 同一インメモリDBを共有するクローンを返す（テスト用）。
+    /// テーブルはすでに共有されるため initialize_tables は不要。
+    pub fn try_clone(&self) -> Result<Self> {
+        let conn = self.conn.try_clone()
+            .context("Failed to clone DuckDB connection")?;
+        Ok(Self { conn, db_dir: self.db_dir.clone() })
+    }
+
+    /// 指定されたディレクトリを物理削除する（Clear コマンド用）。
+    pub fn delete_database(db_dir: &Path) -> Result<()> {
+        if db_dir.exists() {
+            std::fs::remove_dir_all(db_dir)
+                .with_context(|| format!("Failed to remove db dir: {:?}", db_dir))?;
+        }
+        Ok(())
+    }
+
+    /// インデックスをクリアしてディレクトリを空に再作成する。
+    pub fn clear(&self) -> Result<()> {
+        if self.db_dir.exists() {
+            std::fs::remove_dir_all(&self.db_dir)
+                .context("Failed to clear database directory")?;
+        }
+        std::fs::create_dir_all(&self.db_dir)
+            .context("Failed to recreate database directory")?;
+        Ok(())
     }
 
     /// ターゲットテーブルに対応するパスを生成します。

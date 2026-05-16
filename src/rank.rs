@@ -48,6 +48,124 @@ pub fn build_rank_expr(
         .into()
 }
 
+/// 検索結果リストに対して優先度を一括設定し、OneView を再構築します。
+pub fn update_ranks(
+    store: &crate::db::Store,
+    registry: &TagRegistry,
+    results: &[crate::response::SearchResult],
+    rank: i64,
+) -> anyhow::Result<()> {
+    let file_ids: Vec<i64> = results
+        .iter()
+        .filter(|r| r.item_kind == crate::types::ItemKind::File)
+        .map(|r| r.id.as_i64())
+        .collect();
+    let item_ids: Vec<i64> = results
+        .iter()
+        .filter(|r| r.item_kind != crate::types::ItemKind::File)
+        .map(|r| r.id.as_i64())
+        .collect();
+
+    if !file_ids.is_empty() {
+        batch_update_rank(store, &file_ids, true, rank)?;
+    }
+    if !item_ids.is_empty() {
+        batch_update_rank(store, &item_ids, false, rank)?;
+    }
+    let all_columns = registry.get_all_columns();
+    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    Ok(())
+}
+
+/// IDを指定して優先度を設定します。
+pub fn set_rank_by_id(
+    store: &crate::db::Store,
+    registry: &TagRegistry,
+    id: i64,
+    is_file: bool,
+    rank: i64,
+) -> anyhow::Result<()> {
+    batch_update_rank(store, &[id], is_file, rank)?;
+    let all_columns = registry.get_all_columns();
+    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    Ok(())
+}
+
+/// 全てのタグ型の優先度（RANK）を取得します。
+pub fn get_type_ranks(
+    store: &crate::db::Store,
+) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    use crate::db::{Col, Tbl};
+    use crate::util;
+    use sea_query::{Expr, PostgresQueryBuilder, Query};
+
+    let path = store.path_for_target(crate::db::TargetTable::ItemReferences);
+    if !path.exists() {
+        return Ok(Default::default());
+    }
+
+    let query = Query::select()
+        .column(Col::Content)
+        .column(Col::Rank)
+        .from_subquery(
+            util::parquet_query(&path.to_string_lossy()),
+            Tbl::ItemReferences,
+        )
+        .and_where(Expr::col(Col::ItemKind).eq("type"))
+        .to_string(PostgresQueryBuilder);
+
+    let mut stmt = store.conn.prepare(&query)?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (name, r) = row?;
+        map.insert(name, r);
+    }
+    Ok(map)
+}
+
+fn batch_update_rank(
+    store: &crate::db::Store,
+    ids: &[i64],
+    is_file: bool,
+    rank: i64,
+) -> anyhow::Result<()> {
+    use crate::db::{Col, Tbl, TargetTable};
+    use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+    use sea_query::{Expr, Query};
+
+    let path = if is_file {
+        store.path_for_target(TargetTable::FileReferences)
+    } else {
+        store.path_for_target(TargetTable::ItemReferences)
+    };
+
+    let path_str = path.to_string_lossy();
+    let temp_table = Tbl::Target;
+
+    util::parquet_query(&path_str).create_table_as(&store.conn, temp_table)?;
+
+    Query::update()
+        .table(temp_table)
+        .values([(Col::Rank, rank.into())])
+        .and_where(
+            Expr::col(Col::ItemId).is_in(
+                ids.iter()
+                    .cloned()
+                    .map(sea_query::Value::from)
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .execute(&store.conn)?;
+
+    temp_table.write_parquet(&store.conn, &path)?;
+    temp_table.drop_table(&store.conn)?;
+    Ok(())
+}
+
 /// 指定されたタグ名に対応するデフォルトランクを取得します。
 pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
     for (n, rank) in registry.iter_all_for_rank() {

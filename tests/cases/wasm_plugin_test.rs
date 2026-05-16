@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use tempfile::tempdir;
+use ttfm::search;
 use ttfm::plugins::WasmPlugin;
 use ttfm::tag::{Index, TagFunction};
-use ttfm::{FileManager, SearchOptions};
+use ttfm::SearchOptions;
 
 #[test]
 fn test_wasm_plugin_mimetype() {
@@ -51,11 +52,14 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
     // ユーザープラグインあり: オーバーライドプラグインが優先される
     let with_override = {
         let db_dir = dir.path().join("db_override");
-        let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-        fm.load_plugins(&user_plugins_dir, &status).unwrap();
-        fm.load_builtin_plugins(&status).unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-        fm.search("mimetype:application/x-test-override", SearchOptions::default())
+        let mut registry = ttfm::tag::TagRegistry::with_standard();
+        let store = ttfm::db::Store::open(&db_dir).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+        registry.load_from_dir(&user_plugins_dir, &status).unwrap();
+        registry.load_builtins(&status).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
             .unwrap()
             .results
     };
@@ -63,10 +67,13 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
     // ユーザープラグインなし: ビルトインが使われる
     let without_override = {
         let db_dir = dir.path().join("db_builtin");
-        let mut fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-        fm.load_builtin_plugins(&status).unwrap();
-        fm.index_directory(dir.path(), None::<&fn(usize)>, false).unwrap();
-        fm.search("mimetype:application/x-test-override", SearchOptions::default())
+        let mut registry = ttfm::tag::TagRegistry::with_standard();
+        let store = ttfm::db::Store::open(&db_dir).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+        registry.load_builtins(&status).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
             .unwrap()
             .results
     };

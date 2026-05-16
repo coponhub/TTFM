@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_diff_auditor_initial() {
         let dir = tempdir().unwrap();
-        let store = Store::new(dir.path().to_path_buf());
+        let store = Store::open(dir.path()).unwrap();
         let auditor = DiffAuditor::new(&store);
         assert!(auditor.is_initial());
     }

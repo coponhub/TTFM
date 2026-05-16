@@ -428,6 +428,72 @@ impl TagRegistry {
             .unwrap_or_else(|_| LabelValue::String(raw.to_string()));
         disp.show(&lv, disp.formats().default)
     }
+
+    /// ディレクトリから `.wasm` プラグインをロードし登録する。
+    pub fn load_from_dir(
+        &mut self,
+        dir: impl AsRef<std::path::Path>,
+        status: &std::collections::HashMap<String, bool>,
+    ) -> Result<()> {
+        let dir = dir.as_ref();
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
+                match crate::plugins::WasmPlugin::new(&path) {
+                    Ok(plugin) => {
+                        let adapter = plugin.into_adapter()?;
+                        if !*status.get(&adapter.name).unwrap_or(&true) {
+                            continue;
+                        }
+                        if self.get(&adapter.name).is_some() {
+                            eprintln!(
+                                "Warning: Plugin with name '{}' already registered. Skipping {:?}.",
+                                adapter.name, path
+                            );
+                            continue;
+                        }
+                        self.register_plugin(adapter);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load plugin {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// ビルトインWasmプラグインをロードし登録する。
+    pub fn load_builtins(
+        &mut self,
+        status: &std::collections::HashMap<String, bool>,
+    ) -> Result<()> {
+        let builtins: &[&[u8]] = &[
+            include_bytes!("../plugins/mimetype_plugin.component.wasm"),
+        ];
+        for bytes in builtins {
+            match crate::plugins::WasmPlugin::from_bytes(bytes) {
+                Ok(plugin) => {
+                    let adapter = plugin.into_adapter()?;
+                    if !*status.get(&adapter.name).unwrap_or(&true) {
+                        continue;
+                    }
+                    if self.get(&adapter.name).is_some() {
+                        continue;
+                    }
+                    self.register_plugin(adapter);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load built-in plugin: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn find_tagtype_name_in_comparison(node: &ComparisonNode) -> Option<String> {

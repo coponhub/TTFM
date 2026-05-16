@@ -1,8 +1,8 @@
+use ttfm::search;
 use super::default_scope;
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 define_cases! {
     size_large_gt_1pb: {
@@ -38,8 +38,12 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
 
     File::create(root.join("empty.txt"))?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
     let cases = vec![
         ("size: :>= 512KB & is_dir:false", 3),
@@ -55,7 +59,7 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
     ];
 
     for (query, expected) in cases {
-        let results = fm.search(query, Default::default())?;
+        let results = search::search(&store, &registry, &cache, query, Default::default())?;
         assert_eq!(
             results.results.len(),
             expected,

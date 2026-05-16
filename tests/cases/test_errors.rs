@@ -1,6 +1,6 @@
+use ttfm::search;
 use anyhow::Result;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 #[test]
 fn test_mismatched_comparison_error_message() -> Result<()> {
@@ -12,11 +12,15 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
 
     std::fs::write(files_dir.join("test.txt"), "content")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&files_dir, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
 
     // size: > 100 という形式（本来は :> であるべき）を実行
-    let result = fm.search("size: > 100", Default::default());
+    let result = search::search(&store, &registry, &cache, "size: > 100", Default::default());
 
     assert!(
         result.is_err(),
@@ -51,13 +55,17 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
 
     std::fs::write(files_dir.join("test.txt"), "content")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&files_dir, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
 
     // --- Investigation ---
     // 1.1 正常系: プレーンなプロジェクション同士の演算（size: + mtime:）
     let ok_query1 = "(size: + mtime:) :> 10";
-    let ok_result1 = fm.search(ok_query1, Default::default());
+    let ok_result1 = search::search(&store, &registry, &cache, ok_query1, Default::default());
     if let Err(e) = &ok_result1 {
         println!("QUERY 1 ERROR: {:?}", e);
     }
@@ -69,7 +77,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // 1.2 Nest 内での非集約タグ算術: 仕様上は最後の値（Calculation）を使って比較する
     // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
     let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
-    let result2 = fm.search(query2, Default::default());
+    let result2 = search::search(&store, &registry, &cache, query2, Default::default());
     assert!(
         result2.is_ok(),
         "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
@@ -80,7 +88,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // (parentdir: &: count()) / (extension: &: count()) はエラーではなく、
     // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
-    let result = fm.search(query, Default::default());
+    let result = search::search(&store, &registry, &cache, query, Default::default());
 
     assert!(
         result.is_ok(),

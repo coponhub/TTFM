@@ -4,7 +4,7 @@ use super::{
     inject_path_scope, scope_path_from_dir,
 };
 use tempfile::tempdir;
-use ttfm::FileManager;
+use ttfm::{search, tagging};
 
 // ──────────────────────────────────────────────
 // 全E2Eテストケースの定義
@@ -1237,18 +1237,18 @@ define_cases! {
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        modify: Some(|fm, dir| {
+        modify: Some(|store, registry, dir| {
             let file_path = dir.join("dir1").join("a.rs");
-            fm.tag_item(&file_path.to_string_lossy(), "width:10")?;
-            fm.tag_item(&file_path.to_string_lossy(), "height:20")?;
+            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "width:10")?;
+            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "height:20")?;
 
             let file_path2 = dir.join("dir2").join("b.rs");
-            fm.tag_item(&file_path2.to_string_lossy(), "width:15")?;
-            fm.tag_item(&file_path2.to_string_lossy(), "height:30")?;
+            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "width:15")?;
+            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "height:30")?;
 
             let file_path3 = dir.join("dir2").join("c.rs");
-            fm.tag_item(&file_path3.to_string_lossy(), "width:5")?;
-            fm.tag_item(&file_path3.to_string_lossy(), "height:6")?;
+            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "width:5")?;
+            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "height:6")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1282,11 +1282,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:three")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:three")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1327,11 +1327,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagX:alpha")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagX:alpha")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1368,11 +1368,11 @@ define_cases! {
             std::fs::write(dir.join("also_apple.txt"), "d")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
-            fm.tag_item(&dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
-            fm.tag_item(&dir.join("cherry.txt").to_string_lossy(), "fruit:cherry")?;
-            fm.tag_item(&dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
+            tagging::tag_item(store, registry, &dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
+            tagging::tag_item(store, registry, &dir.join("cherry.txt").to_string_lossy(), "fruit:cherry")?;
+            tagging::tag_item(store, registry, &dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1407,10 +1407,10 @@ define_cases! {
             std::fs::write(dir_b.join("file2.txt"), "content")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
-            fm.tag_item(&dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
+            tagging::tag_item(store, registry, &dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1482,10 +1482,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1592,14 +1592,14 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "grade:A")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:one")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "grade:A")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:one")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "grade:A")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1669,13 +1669,13 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "grade:A")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
             // a.txt: grade:A あり → Nest 結果に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
             // b.txt: grade:A なし → 除外される
             Ok(())
         }),
@@ -1708,11 +1708,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: cat/flavor のみ
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade:A のみ
             // c.txt: タグなし → どちらにも属さない
             Ok(())
@@ -1747,16 +1747,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: grade:A なし → 除外されない
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:sour")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:sour")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade:A あり → 除外される
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
             // c.txt: grade:A なし → 除外されない
             Ok(())
         }),
@@ -1794,11 +1794,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
             // a.txt: tagA: & Nest 両方に属す
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
             // b.txt: tagA: のみ（tagB: なし）→ Nest に非存在 → 除外
             Ok(())
         }),
@@ -1828,16 +1828,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: 両 Nest に存在 → 積集合に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC なし → 第2 Nest に非存在 → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
@@ -1877,18 +1877,18 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
             // a.txt: 両 Nest に存在 → 積集合に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC/tagD なし → 第2 Nest に非存在 → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
@@ -1980,11 +1980,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             // a.txt: tagA のみ（tagB なし）→ tagA: に存在するが Nest には非存在
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:1")?;
             // b.txt: tagA + tagB → 両方に存在
             Ok(())
         }),
@@ -2018,17 +2018,17 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: 第1 Nest のみ
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "shape:round")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "color:red")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "shape:round")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "color:red")?;
             // b.txt: 第2 Nest のみ
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "shape:square")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "color:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "shape:square")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "color:blue")?;
             // c.txt: 両 Nest に存在
             Ok(())
         }),
@@ -2067,11 +2067,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
             // a.txt: Nest に存在 → tagA: 結果から除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
             // b.txt: tagB なし → Nest に非存在 → tagA: 結果に残る
             Ok(())
         }),
@@ -2113,13 +2113,13 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: grade: なし → Nest に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade: あり → grade: Proj に存在 → Nest から除外
             Ok(())
         }),
@@ -2162,16 +2162,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: 両 Nest に存在 → 第1 Nest から除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC なし → 第2 Nest に非存在 → 第1 Nest に残る
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
@@ -2210,19 +2210,19 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: grade: なし → 残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade: あり → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:green")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:green")?;
             // c.txt: grade: なし → 残る
             Ok(())
         }),
@@ -2260,19 +2260,19 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
             // a.txt: 両 Nest に存在 → 除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
             // b.txt: tagD なし → 第2 Nest に非存在 → 残る
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
             // c.txt: tagC なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
@@ -2612,11 +2612,13 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
     std::fs::write(dir1.join("b.txt"), "world")?;
     std::fs::write(dir2.join("c.rs"), "foo")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res =
-        fm.search("parentdir: &: extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "parentdir: &: extension:", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2631,11 +2633,13 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir1)?;
     std::fs::write(dir1.join("a.rs"), "hello")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res =
-        fm.search("parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2654,17 +2658,18 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     std::fs::write(dir1.join("b.txt"), "world")?;
     std::fs::write(dir2.join("c.rs"), "foo")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res =
-        fm.search("type: & parentdir:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "type: & parentdir:", ttfm::SearchOptions::default())?;
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res =
-        fm.search("type: | extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "type: | extension:", ttfm::SearchOptions::default())?;
     assert!(
         !res.results.is_empty(),
         "type: | extension: should return labels from both"

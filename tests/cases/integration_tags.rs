@@ -1,7 +1,7 @@
 use std::fs::File;
 use tempfile::tempdir;
 use ttfm::types::ItemId;
-use ttfm::FileManager;
+use ttfm::{search, tagging};
 
 define_cases! {
     integration_file_tagging: {
@@ -9,12 +9,13 @@ define_cases! {
             File::create(dir.join("doc.txt"))?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
+        modify: Some(|store, registry, dir| {
+            let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
             let query = format!("extension:txt & path:{}/*", dir.to_string_lossy());
-            let res = fm.search(&query, Default::default())?;
+            let res = search::search(store, registry, &cache, &query, Default::default())?;
             anyhow::ensure!(!res.results.is_empty(), "No txt file found in case dir");
             let item = res.results[0].primary_value().unwrap_or_default();
-            fm.tag_item(&item, "status:reviewed")?;
+            tagging::tag_item(store, registry, &item, "status:reviewed")?;
             Ok(())
         }),
         format_query: super::default_scope,
@@ -32,9 +33,9 @@ define_cases! {
     },
     integration_note_tagging: {
         setup: |_dir| Ok(()),
-        modify: Some(|fm, _dir| {
-            let note_id = fm.add_item("note", "Meeting Memo")?;
-            fm.tag_item(&note_id.to_string(), "category:meeting")?;
+        modify: Some(|store, registry, _dir| {
+            let note_id = tagging::add_item(store, registry, "note", "Meeting Memo")?;
+            tagging::tag_item(store, registry, &note_id.to_string(), "category:meeting")?;
             Ok(())
         }),
         format_query: |q, _| q.to_string(),
@@ -56,29 +57,31 @@ define_cases! {
 fn test_integration_tag_tagging() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join(".ttfm/db");
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let file_path = dir.path().join("dummy.txt");
     File::create(&file_path).unwrap();
-    fm.index_directory(dir.path(), None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
     let registered_paths =
-        fm.search("extension:txt", Default::default()).unwrap();
+        search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
-    fm.tag_item(&item, "project:mars").unwrap();
+    tagging::tag_item(&store, &registry, &item, "project:mars").unwrap();
 
-    let tag_id = fm.get_or_create_item("tag", "project:mars").unwrap();
-    fm.tag_item(&tag_id.to_string(), "priority:high").unwrap();
+    let tag_id = tagging::get_or_create_item(&store, &registry, "tag", "project:mars").unwrap();
+    tagging::tag_item(&store, &registry, &tag_id.to_string(), "priority:high").unwrap();
 
-    let results = fm
-        .search("priority:high & item_kind:tag", Default::default())
-        .unwrap();
+    let results = search::search(&store, &registry, &cache, "priority:high & item_kind:tag", Default::default()).unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, ItemId::from(tag_id));
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
-    let file_results = fm.search("project:mars", Default::default()).unwrap();
+    let file_results = search::search(&store, &registry, &cache, "project:mars", Default::default()).unwrap();
     assert!(file_results
         .results
         .iter()
@@ -89,29 +92,31 @@ fn test_integration_tag_tagging() {
 fn test_system_item_metadata_integration() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join(".ttfm/db");
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     File::create(dir.path().join("test.rs")).unwrap();
     File::create(dir.path().join("no_ext")).unwrap();
 
-    fm.index_directory(dir.path(), None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let ext_list = fm.search("type:extension", Default::default()).unwrap();
+    let ext_list = search::search(&store, &registry, &cache, "type:extension", Default::default()).unwrap();
     assert!(
         !ext_list.results.iter().any(|r| r.raw_repr() == "extension:"),
         "Empty extension tag should not exist"
     );
 
-    let results_physical = fm
-        .search("item_kind:tag & label:rs", Default::default())
-        .unwrap();
+    let results_physical = search::search(&store, &registry, &cache, "item_kind:tag & label:rs", Default::default()).unwrap();
     assert!(
         results_physical.results.is_empty(),
         "Physical tag item should NOT be created automatically"
     );
 
-    let results_proj = fm.search("extension:", Default::default()).unwrap();
+    let results_proj = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
     assert!(
         !results_proj.results.is_empty(),
         "Should find label items via projection"

@@ -1,15 +1,14 @@
 use crate::db::{Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl};
 use crate::indexing::ScanEntry;
+use crate::tag::TagRegistry;
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
-use crate::tag::TagRegistry;
 use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
-use duckdb::Connection;
 use rustc_hash::FxHashMap;
 use sea_query::{Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::diff;
 use super::merge::{self, MergeQueryParts};
@@ -47,22 +46,13 @@ pub struct TagRow {
 // ========================================================
 
 pub struct Indexer<'a> {
-    pub(crate) conn: &'a Connection,
+    pub(crate) store: &'a Store,
     pub(crate) registry: &'a TagRegistry,
-    pub(crate) store: Store,
 }
 
 impl<'a> Indexer<'a> {
-    pub fn new(
-        conn: &'a Connection,
-        registry: &'a TagRegistry,
-        db_dir: PathBuf,
-    ) -> Self {
-        Self {
-            conn,
-            registry,
-            store: Store::new(db_dir),
-        }
+    pub fn new(store: &'a Store, registry: &'a TagRegistry) -> Self {
+        Self { store, registry }
     }
 
     /// インデックス作成の全体ワークフローを実行します。
@@ -81,7 +71,7 @@ impl<'a> Indexer<'a> {
 
         // 1. Scan Phase
         let count = scan::run_scan(
-            self.conn,
+            &self.store.conn,
             &self.store.db_dir,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
@@ -96,7 +86,7 @@ impl<'a> Indexer<'a> {
         }
 
         // 2. Diff Phase
-        let diff = diff::run_diff(self.conn, &self.store)?;
+        let diff = diff::run_diff(&self.store.conn, &self.store)?;
 
         // 3. Triage Phase
         let (results, moved_rows) =
@@ -106,7 +96,7 @@ impl<'a> Indexer<'a> {
 
         // 4. Merge Phase
         merge::run_merge(
-            self.conn,
+            &self.store.conn,
             self.registry,
             &self.store,
             results,
@@ -137,7 +127,7 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self
-            .conn
+            .store.conn
             .prepare(&sql)
             .context("Failed to prepare cache load query")?;
 
@@ -170,7 +160,7 @@ impl<'a> Indexer<'a> {
         }
 
         crate::oneview::OneView::recreate(
-            self.conn,
+            &self.store.conn,
             &all_cols,
             &self.store.db_dir,
         )?;
@@ -198,7 +188,7 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let count: i64 = self
-            .conn
+            .store.conn
             .query_row(&count_sql, [], |r| r.get(0))
             .unwrap_or(0);
 
@@ -232,13 +222,13 @@ impl<'a> Indexer<'a> {
         }
 
         util::parquet_query(&path.to_string_lossy())
-            .create_table_as(self.conn, Tbl::DataTypes)?;
+            .create_table_as(&self.store.conn, Tbl::DataTypes)?;
 
         // Append (though table is empty/newly created, we use insert)
-        insert.execute(self.conn)?;
+        insert.execute(&self.store.conn)?;
 
-        Tbl::DataTypes.write_parquet(self.conn, &path)?;
-        Tbl::DataTypes.drop_table(self.conn)?;
+        Tbl::DataTypes.write_parquet(&self.store.conn, &path)?;
+        Tbl::DataTypes.drop_table(&self.store.conn)?;
 
         Ok(())
     }
@@ -254,14 +244,14 @@ impl<'a> Indexer<'a> {
         }
         let table = Tbl::Master;
         crate::db::Schema::build_table(target, table, columns)
-            .execute(self.conn)?;
+            .execute(&self.store.conn)?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        table.write_parquet(self.conn, path)?;
-        Table::drop().table(table).execute(self.conn).ok();
+        table.write_parquet(&self.store.conn, path)?;
+        Table::drop().table(table).execute(&self.store.conn).ok();
         Ok(())
     }
 
@@ -283,10 +273,10 @@ impl<'a> Indexer<'a> {
         }
 
         MergeQueryParts::filter_new(all_candidates, &items_str)
-            .create_temp_table_as(self.conn, Tbl::Item)?;
+            .create_temp_table_as(&self.store.conn, Tbl::Item)?;
 
         if self.count_table(Tbl::Item)? == 0 {
-            Tbl::Item.drop_table(self.conn)?;
+            Tbl::Item.drop_table(&self.store.conn)?;
             return Ok(());
         }
 
@@ -295,7 +285,7 @@ impl<'a> Indexer<'a> {
         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
 
         MergeQueryParts::assign_ids(start_id)
-            .create_temp_table_as(self.conn, Tbl::IdItem)?;
+            .create_temp_table_as(&self.store.conn, Tbl::IdItem)?;
 
         // query_union.union(sea_query::UnionType::All, ...);
 
@@ -314,7 +304,7 @@ impl<'a> Indexer<'a> {
                 .from(Tbl::IdItem)
                 .to_owned(),
         );
-        query_union.save_parquet(self.conn, &tmp_items)?;
+        query_union.save_parquet(&self.store.conn, &tmp_items)?;
         // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
         let p1 = Query::select()
             .column(sea_query::Asterisk)
@@ -358,7 +348,7 @@ impl<'a> Indexer<'a> {
             &p3.to_string(PostgresQueryBuilder),
         );
 
-        self.conn.execute(
+        self.store.conn.execute(
             &format!(
                 "COPY ({}) TO '{}' (FORMAT PARQUET)",
                 ordered_sql,
@@ -392,7 +382,7 @@ impl<'a> Indexer<'a> {
             .from_subquery(util::parquet_query(&ents_str), Tbl::FileReferences)
             .to_string(PostgresQueryBuilder);
 
-        self.conn
+        self.store.conn
             .query_row(&query, [], |r| r.get(0))
             .map_err(Into::into)
     }
@@ -407,7 +397,7 @@ impl<'a> Indexer<'a> {
             .from_subquery(util::parquet_query(items_path), Tbl::ItemReferences)
             .to_string(PostgresQueryBuilder);
 
-        let min_id: i64 = self.conn.query_row(&query_min, [], |r| r.get(0))?;
+        let min_id: i64 = self.store.conn.query_row(&query_min, [], |r| r.get(0))?;
         Ok(if min_id > -1 { -1 } else { min_id - 1 })
     }
 
@@ -420,7 +410,7 @@ impl<'a> Indexer<'a> {
             .expr(Expr::cust("COUNT(*)"))
             .from(table)
             .to_string(PostgresQueryBuilder);
-        self.conn
+        self.store.conn
             .query_row(&sql, [], |r| r.get(0))
             .map_err(Into::into)
     }
@@ -434,8 +424,8 @@ impl<'a> Indexer<'a> {
     ) -> Result<()> {
         std::fs::rename(tmp_items, items_path)?;
         std::fs::rename(tmp_stags, stags_path)?;
-        Tbl::Item.drop_table(self.conn)?;
-        Tbl::IdItem.drop_table(self.conn)?;
+        Tbl::Item.drop_table(&self.store.conn)?;
+        Tbl::IdItem.drop_table(&self.store.conn)?;
         Ok(())
     }
 
@@ -579,9 +569,9 @@ mod tests {
     fn test_load_metadata_cache_empty() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().to_path_buf();
-        let conn = Connection::open_in_memory().unwrap();
         let registry = TagRegistry::with_standard();
-        let indexer = Indexer::new(&conn, &registry, db_dir);
+        let store = Store::open(&db_dir).unwrap();
+        let indexer = Indexer::new(&store, &registry);
 
         // まだファイルがない状態でのロード
         let cache = indexer.load_metadata_cache().unwrap();
@@ -595,9 +585,9 @@ mod tests {
     fn test_load_metadata_cache_with_data() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().to_path_buf();
-        let conn = Connection::open_in_memory().unwrap();
         let registry = TagRegistry::with_standard();
-        let indexer = Indexer::new(&conn, &registry, db_dir);
+        let store = Store::open(&db_dir).unwrap();
+        let indexer = Indexer::new(&store, &registry);
 
         // 1. テーブルを初期化
         indexer.initialize_tables().unwrap();
@@ -605,14 +595,14 @@ mod tests {
         // 2. ダミーデータを直接 locations に書き込む (scan_hash 込み)
         let hash_val = ScanHash(123456789);
         let item_id: ItemId = ItemId::from(1);
-        let locs_path = indexer.store.path_for_target(TargetTable::Locations);
+        let locs_path = store.path_for_target(TargetTable::Locations);
 
-        conn.execute(
+        store.conn.execute(
             "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
             [item_id.as_i64(), hash_val.0],
         )
         .unwrap();
-        conn.execute(
+        store.conn.execute(
             &format!(
                 "COPY temp_locs TO '{}' (FORMAT PARQUET)",
                 locs_path.to_string_lossy()
@@ -635,10 +625,9 @@ mod tests {
     fn test_initialize_tables() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join(".ttfm/db");
-        let conn = Connection::open_in_memory().unwrap();
         let registry = TagRegistry::with_standard();
-        let indexer = Indexer::new(&conn, &registry, db_dir.clone());
-        indexer.initialize_tables().unwrap();
+        let store = Store::open(&db_dir).unwrap();
+        Indexer::new(&store, &registry).initialize_tables().unwrap();
         assert!(db_dir.join("file_references.parquet").exists());
     }
 

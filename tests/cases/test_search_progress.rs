@@ -1,17 +1,22 @@
 use anyhow::Result;
 use std::fs::File;
 use tempfile::tempdir;
-use ttfm::{FileManager, SearchOptions};
+use ttfm::search;
+use ttfm::{SearchOptions};
 
 #[test]
 fn test_search_progress_zero_results() -> Result<()> {
     let dir = tempdir()?;
     let db_dir = dir.path().join("db");
     std::fs::create_dir(&db_dir)?;
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
 
     // 0件検索 (name:non-existent)
-    let res = fm.search("name:non_existent", SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "name:non_existent", SearchOptions::default())?;
 
     // 期待値:
     // 1. total_count が Some(0) であること
@@ -44,11 +49,15 @@ fn test_search_progress_finished_small_results() -> Result<()> {
     // データ作成
     File::create(root.join("test.txt"))?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
     // 少数ヒット (1件)
-    let res = fm.search("extension:txt", SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "extension:txt", SearchOptions::default())?;
 
     assert_eq!(res.results.len(), 1);
 

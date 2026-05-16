@@ -1,7 +1,8 @@
+use ttfm::{search, tagging};
+use ttfm::types::ItemId;
 use crate::cases::has_item_tags;
 use std::fs::File;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 // ──────────────────────────────────────────────
 // スタンドアロン: bare クエリの挙動確認
@@ -17,10 +18,13 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     File::create(root.join("file_with_ext.txt"))?;
     File::create(root.join("file_no_ext"))?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("extension:", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "extension:", Default::default())?;
 
     assert!(
         res.results.iter().any(|r| r.raw_repr() == "txt"),
@@ -198,12 +202,15 @@ fn test_projection_queries() {
     File::create(root.join("test.txt")).unwrap();
     std::fs::create_dir(root.join("test_dir")).unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. extension: (投影 - 転置: Label → Items)
     // 投影結果はラベル値（rs, txt）のリストとして返される
-    let results = fm.search("extension:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
     println!(
         "Matches for 'extension:': {:?}",
         results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
@@ -220,7 +227,7 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
-    let results = fm.search("directory:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "directory:", Default::default()).unwrap();
     println!(
         "Matches for 'directory:': {:?}",
         results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
@@ -235,7 +242,7 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
-    let results = fm.search("filename:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "filename:", Default::default()).unwrap();
     println!(
         "Matches for 'filename:': {:?}",
         results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
@@ -257,12 +264,11 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results = fm.search("origin:system", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "origin:system", Default::default()).unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
-    let results = fm
-        .search("extension: & directory:", Default::default())
+    let results = search::search(&store, &registry, &cache, "extension: & directory:", Default::default())
         .unwrap();
     assert_eq!(
         results.results.len(),
@@ -271,7 +277,7 @@ fn test_projection_queries() {
     );
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
-    let results = fm.search("type:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "type:", Default::default()).unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
 
@@ -295,7 +301,7 @@ fn test_projection_queries() {
     }
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
-    let results = fm.search("tag:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "tag:", Default::default()).unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
     assert!(has_item_tags(&results.results));
@@ -311,7 +317,7 @@ fn test_projection_queries() {
     );
 
     // 追加検証: extension: 結果の中身
-    let ext_results = fm.search("extension:", Default::default()).unwrap();
+    let ext_results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.raw_repr() == "test.rs" {
@@ -324,7 +330,7 @@ fn test_projection_queries() {
     // 8. rank: (投影 -> rank column)
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
-    let results = fm.search("rank:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "rank:", Default::default()).unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
     println!("Matches for 'rank:': {} items", results.results.len());
@@ -342,11 +348,11 @@ fn test_projection_queries() {
     // 9. category: (投影 -> type='category')
     // label は SType::Label (仮想タグ) として予約されているため、
     // 任意のタグ名のテストには category を使用する。
-    let note_id = fm.add_item("note", "Category Test Note").unwrap();
-    fm.tag_item(&note_id.to_string(), "category:important")
+    let note_id = tagging::add_item(&store, &registry, "note", "Category Test Note").unwrap();
+    tagging::tag_item(&store, &registry, &note_id.to_string(), "category:important")
         .unwrap();
 
-    let results = fm.search("category:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "category:", Default::default()).unwrap();
     assert!(
         results.results.len() >= 1,
         "category: should match items with category tag"
@@ -360,7 +366,7 @@ fn test_projection_queries() {
 
     // 10. label: (Volatile Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
-    let results = fm.search("label:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "label:", Default::default()).unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
     assert!(
         results.results.len() >= 3,
@@ -371,8 +377,6 @@ fn test_projection_queries() {
 
 #[test]
 fn test_projection_returns_label_volatile_items() {
-    use ttfm::types::ItemId;
-
     let dir = tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
@@ -382,11 +386,14 @@ fn test_projection_returns_label_volatile_items() {
     File::create(root.join("test.txt")).unwrap();
     File::create(root.join("another.rs")).unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // extension: で投影
-    let results = fm.search("extension:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
 
     // 検証1: type_for_projection が設定されている
     assert!(has_item_tags(&results.results));

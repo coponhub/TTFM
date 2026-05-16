@@ -1,8 +1,8 @@
+use ttfm::search;
 /// 算術演算 (Calculation) 機能の統合テスト
 use super::default_scope;
 use super::inject_path_scope;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 define_cases! {
     calc_literal_simple: {
@@ -298,16 +298,20 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     std::fs::write(root.join("a.txt"), vec![0u8; 200])?;
     std::fs::write(root.join("b.txt"), vec![0u8; 300])?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res_explicit = fm.search("sum((size: - 100))", Default::default())?;
+    let res_explicit = search::search(&store, &registry, &cache, "sum((size: - 100))", Default::default())?;
     assert!(
         !res_explicit.results.is_empty(),
         "Explicit paren should work"
     );
 
-    let res_bare = fm.search("sum(size: - 100)", Default::default())?;
+    let res_bare = search::search(&store, &registry, &cache, "sum(size: - 100)", Default::default())?;
     assert!(!res_bare.results.is_empty(), "Bare calc should work");
 
     assert_eq!(
