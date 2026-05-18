@@ -161,6 +161,20 @@ pub fn build_flat_table_sql(
     q
 }
 
+/// ノードがスカラー boolean として扱われるべきかを判定する。
+/// CalculationMatch はタグ参照を含む場合はアイテムフィルタとして扱う。
+fn is_boolean_only_node(n: &ResolvedNode) -> bool {
+    match n {
+        ResolvedNode::AggregationMatch { .. }
+        | ResolvedNode::AggregationAggregationMatch { .. }
+        | ResolvedNode::AggregationCalculationMatch { .. }
+        | ResolvedNode::AggregationTagMatch { .. }
+        | ResolvedNode::ScalarMatch { .. } => true,
+        ResolvedNode::CalculationMatch { calc, .. } => !calc.contains_tag(),
+        _ => false,
+    }
+}
+
 /// すべてのクエリ種別に対する統一 SQL エントリポイント。
 /// ResolvedNode の構造を直接見てディスパッチする。
 ///   - LabelSetOp またはnvalue比較なしのProjection → build_fetch_nest_sql (Lv.2)
@@ -205,11 +219,15 @@ pub fn build_fetch_sql(
         | ResolvedNode::AggregationAggregationMatch { .. }
         | ResolvedNode::AggregationCalculationMatch { .. }
         | ResolvedNode::AggregationTagMatch { .. }
-        | ResolvedNode::CalculationMatch { .. }
         | ResolvedNode::ScalarMatch { .. }
         | ResolvedNode::NestMatch { .. }
         | ResolvedNode::MergedNestMatch { .. }) => {
             return Ok(build_boolean_sql(src, node));
+        }
+        // CalculationMatch: タグ参照なし（純スカラー・集約のみ）→ boolean
+        // タグ参照を含む場合（例: (size: / 1024) :> 100）はアイテムフィルタへ fall-through
+        ResolvedNode::CalculationMatch { calc, .. } if !calc.contains_tag() => {
+            return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
         // NestNestMatch のうち Comparison + Literal 右辺は存在確認ブーリアン
         ResolvedNode::NestNestMatch {
@@ -222,18 +240,7 @@ pub fn build_fetch_sql(
         // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
         // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
         ResolvedNode::And(nodes) | ResolvedNode::Or(nodes)
-            if !nodes.is_empty()
-                && nodes.iter().all(|n| {
-                    matches!(
-                        n,
-                        ResolvedNode::AggregationMatch { .. }
-                            | ResolvedNode::AggregationAggregationMatch { .. }
-                            | ResolvedNode::AggregationCalculationMatch { .. }
-                            | ResolvedNode::AggregationTagMatch { .. }
-                            | ResolvedNode::CalculationMatch { .. }
-                            | ResolvedNode::ScalarMatch { .. }
-                    )
-                }) =>
+            if !nodes.is_empty() && nodes.iter().all(|n| is_boolean_only_node(n)) =>
         {
             return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }

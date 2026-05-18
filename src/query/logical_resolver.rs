@@ -1041,10 +1041,20 @@ fn expand_aggregation(
     match agg {
         AggregationNode::Count(node) => {
             let expanded = expand_query_node(schema, *node)?;
+            if let QueryNode::Aggregation(ref inner) = expanded {
+                return Err(error::invalid_aggregation_over_scalar(
+                    "count", inner,
+                ));
+            }
             Ok(AggregationNode::Count(Box::new(expanded)))
         }
         AggregationNode::Arithmetic { op, inner } => {
             let expanded = expand_query_node(schema, *inner)?;
+            if let QueryNode::Aggregation(ref inner) = expanded {
+                return Err(error::invalid_aggregation_over_scalar(
+                    error::agg_op_name(op), inner,
+                ));
+            }
             if matches!(expanded, QueryNode::Comparison(_)) {
                 return Err(error::invalid_aggregation_inner_item_set());
             }

@@ -654,6 +654,33 @@ pub fn invalid_nest_rhs_label_comparison() -> anyhow::Error {
     )
 }
 
+pub fn agg_op_name(op: ArithmeticAggOp) -> &'static str {
+    match op {
+        ArithmeticAggOp::Sum => "sum",
+        ArithmeticAggOp::Avg => "avg",
+        ArithmeticAggOp::Max => "max",
+        ArithmeticAggOp::Min => "min",
+    }
+}
+
+pub fn agg_node_name(agg: &AggregationNode) -> &'static str {
+    match agg {
+        AggregationNode::Count(_) => "count",
+        AggregationNode::Arithmetic { op, .. } => agg_op_name(*op),
+    }
+}
+
+pub fn invalid_aggregation_over_scalar(
+    outer: &str,
+    inner: &AggregationNode,
+) -> anyhow::Error {
+    let inner_name = agg_node_name(inner);
+    anyhow::anyhow!(
+        "Cannot aggregate a scalar: '{inner_name}(...)' returns a scalar value (Lv.0).\n\
+         '{outer}(...)' requires a Projection (e.g., size:) or Nest as input, not another aggregation."
+    )
+}
+
 pub fn invalid_aggregation_inner_item_set() -> anyhow::Error {
     anyhow::anyhow!(
         "Invalid argument to aggregation: the inner expression is a label comparison (':>', ':<', etc.) \

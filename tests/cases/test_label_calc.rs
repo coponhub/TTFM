@@ -53,6 +53,44 @@ define_cases! {
         query: "100MB :< (size: / 2)",
         assert: |_res, _dir| Ok(()),
     },
+    label_calc_tag_arith_label_cmp: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 100])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 200000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "(size: / 1024) :> 100",
+        assert: |res, _dir| {
+            assert_eq!(
+                res.results.len(), 1,
+                "should return exactly 1 item (large.txt), got: {:?}", res.results
+            );
+            assert!(
+                res.results[0].raw_repr().contains("large.txt"),
+                "should return large.txt, got: {:?}", res.results
+            );
+            Ok(())
+        },
+    },
+    label_calc_tag_arith_and: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), vec![0u8; 200000])?;
+            std::fs::write(dir.join("b.txt"), vec![0u8; 200000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "(size: / 1024) :> 100 & extension:rs",
+        assert: |res, _dir| {
+            assert_eq!(
+                res.results.len(), 1,
+                "should return only a.rs, got: {:?}", res.results
+            );
+            Ok(())
+        },
+    },
 }
 
 /// 複合比較クエリ (成功/エラー混在のため移行不可)

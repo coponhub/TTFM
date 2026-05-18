@@ -2,6 +2,61 @@ use ttfm::search;
 use anyhow::Result;
 use tempfile::tempdir;
 
+// =========================================================================
+// Over-aggregation error tests (集約過剰エラー)
+// =========================================================================
+
+fn make_store_registry_cache(
+) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)>
+{
+    let dir = tempdir()?;
+    let db_dir = dir.path().join(".ttfm/db");
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache =
+        ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    // dir を drop させないためリーク（テスト内の短命な用途）
+    std::mem::forget(dir);
+    Ok((store, registry, cache))
+}
+
+fn assert_over_agg_error(query: &str) {
+    let (store, registry, cache) = make_store_registry_cache().unwrap();
+    let result =
+        search::search(&store, &registry, &cache, query, Default::default());
+    assert!(
+        result.is_err(),
+        "Expected error for over-aggregation query '{query}', but got Ok"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("scalar"),
+        "Error for '{query}' should mention 'scalar', got: {msg}"
+    );
+}
+
+#[test]
+fn test_over_aggregation_count_count() {
+    assert_over_agg_error("count(count())");
+}
+
+#[test]
+fn test_over_aggregation_sum_count() {
+    assert_over_agg_error("sum(count())");
+}
+
+#[test]
+fn test_over_aggregation_count_sum() {
+    assert_over_agg_error("count(sum(size:))");
+}
+
+#[test]
+fn test_over_aggregation_nested_with_nvalue() {
+    // ユーザーが実際に panic を確認したケース
+    assert_over_agg_error("sum(count(extension: &: count()))");
+}
+
 #[test]
 fn test_mismatched_comparison_error_message() -> Result<()> {
     let dir = tempdir()?;
