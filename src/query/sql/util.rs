@@ -37,6 +37,7 @@ pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
         LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
         LabelValue::Null => Expr::val(Option::<i32>::None).into(),
         LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s).into(),
+        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
     }
 }
 
@@ -55,6 +56,7 @@ pub(super) fn label_to_unit_aware_expr(label: &Label) -> SimpleExpr {
         LabelValue::Boolean(b) => Expr::val(b).into(),
         LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
         LabelValue::Null => Expr::val(None::<i32>).into(),
+        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
     }
 }
 
@@ -76,6 +78,9 @@ pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
             LabelValue::Boolean(b) => Expr::val(b).into(),
             LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
             LabelValue::Null => Expr::val(None::<i32>).into(),
+            LabelValue::Date(dt) => {
+                Expr::val(dt.to_timestamp()).cast_as(SqlType::DOUBLE).into()
+            }
         }
     }
 }

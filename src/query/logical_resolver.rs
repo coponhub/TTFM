@@ -380,11 +380,10 @@ fn expand_operand(
                 Ok(Operand::Literal(crate::types::Label::from(true)))
             } else if s == "false" {
                 Ok(Operand::Literal(crate::types::Label::from(false)))
-            } else if let Some(bytes) = crate::util::parse_size(&s) {
-                // サイズ単位付きリテラル ("1M", "10TB" 等) を数値に正規化
-                Ok(Operand::Literal(crate::types::Label::from(bytes)))
             } else {
-                Ok(Operand::Literal(label))
+                // サイズ・日付等の変換は TagFunction::normalize_label に委譲
+                let reg = TagRegistry::with_standard();
+                Ok(Operand::Literal(reg.normalize_label_any(&label)))
             }
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
@@ -1146,6 +1145,7 @@ fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
                 LogicalType::String
             }
         }
+        LabelValue::Date(_) => LogicalType::Integer,
     }
 }
 
@@ -2206,5 +2206,60 @@ mod tests {
             })),
         };
         assert!(is_unnestable_aggregation(&agg));
+    }
+
+    // --- Phase 4: expand_operand delegates size normalization via normalize_label_any ---
+
+    #[test]
+    fn test_expand_operand_size_literal_via_normalize() {
+        // "1MB" as unquoted string literal should be normalized to Label::Size(1_048_576)
+        // This tests that the delegation works (not hardcoded parse_size)
+        let lens = Lens::base_standard();
+        let op = Operand::Literal(crate::types::Label::from("1MB"));
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(label) => {
+                assert_eq!(label.as_i64(), 1_048_576, "1MB should be 1048576 bytes");
+            }
+            other => panic!("Expected Literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_operand_date_string_becomes_date_label() {
+        // "2026-02-01" as unquoted string literal should be normalized to Label::Date
+        let lens = Lens::base_standard();
+        let op = Operand::Literal(crate::types::Label::from("2026-02-01"));
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(label) => {
+                match label {
+                    crate::types::Label::Date(dt) => {
+                        assert!(
+                            matches!(dt, crate::types::DateTime::Date(_)),
+                            "Expected DateTime::Date, got {:?}", dt
+                        );
+                    }
+                    other => panic!("Expected Label::Date, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_operand_quoted_literal_unchanged() {
+        // Quoted ("literal") should NOT be normalized — stays as LabelValue::Literal
+        let lens = Lens::base_standard();
+        let label = crate::types::Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("1MB".to_string()),
+        );
+        let op = Operand::Literal(label.clone());
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(l) => assert_eq!(l, label),
+            other => panic!("Expected Literal unchanged, got {:?}", other),
+        }
     }
 }

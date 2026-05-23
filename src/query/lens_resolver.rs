@@ -1059,6 +1059,7 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
         crate::types::LabelValue::Null => Expr::val(None::<i32>),
         crate::types::LabelValue::String(s)
         | crate::types::LabelValue::Literal(s) => Expr::val(s),
+        crate::types::LabelValue::Date(dt) => Expr::val(dt.to_timestamp()),
     };
     // ColumnMatch の場合は型固有のルールは適用せず、単純にマッピング
     Condition::all().add(Expr::col(col).eq(val))

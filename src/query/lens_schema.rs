@@ -111,6 +111,9 @@ fn build_column_condition(
         LabelValue::Literal(s) => {
             build_literal_condition(col, bin_op, &s, is_eav_col)
         }
+        LabelValue::Date(dt) => {
+            build_int_condition(col, bin_op, dt.to_timestamp(), is_eav_col)
+        }
     }
 }
 

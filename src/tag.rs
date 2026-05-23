@@ -152,6 +152,7 @@ pub trait Index: Send + Sync {
                 Ok(TagValue::Double(f64::from_bits(bits)))
             }
             Some(LabelValue::Null) => Ok(TagValue::Null),
+            Some(LabelValue::Date(_)) => Ok(TagValue::Null),
         }
     }
 }
@@ -370,6 +371,38 @@ impl TagRegistry {
         reg.register(LabelFn);
         reg.register(TypedTagFn);
         reg
+    }
+
+    /// 指定タグ名の `TagFunction::normalize_label` を呼び出す。
+    /// `LabelValue::Literal` はどの関数にも委譲せずそのまま返す。
+    pub fn normalize_label(&self, tag_name: &str, label: &Label) -> Label {
+        if matches!(label.value(), LabelValue::Literal(_)) {
+            return label.clone();
+        }
+        if let Some(f) = self.get(tag_name) {
+            if let Some(q) = f.query() {
+                return q.normalize_label(label);
+            }
+        }
+        label.clone()
+    }
+
+    /// 全 TagFunction の `normalize_label` を登録の降順に試し、最初に変換された結果を返す。
+    /// タグ文脈によらず全リテラルに適用される変換（サイズ単位・日付文字列等）に使用。
+    /// `LabelValue::Literal` はどの関数にも委譲せずそのまま返す。
+    pub fn normalize_label_any(&self, label: &Label) -> Label {
+        if matches!(label.value(), LabelValue::Literal(_)) {
+            return label.clone();
+        }
+        for f in self.ordered.iter().rev() {
+            if let Some(q) = f.query() {
+                let normalized = q.normalize_label(label);
+                if normalized != *label {
+                    return normalized;
+                }
+            }
+        }
+        label.clone()
     }
 
     pub fn get_all_columns(&self) -> Vec<crate::taggers::ColumnDef> {
@@ -1077,6 +1110,51 @@ fn format_size_binary(bytes: i64) -> String {
     format!("{:.1}{}", val, UNITS[idx])
 }
 
+// ---------------------------------------------------------------------------
+// DateTime::to_range — tag.rs で impl（BasicOp との循環依存を避けるため）
+// ---------------------------------------------------------------------------
+impl crate::types::DateTime {
+    /// オペレータに応じた (BasicOp, timestamp) 条件リストを返す。
+    /// Eq  → [(Ge, floor_ts), (Le, ceil_ts)]
+    /// Gt  → [(Gt, ceil_ts)]
+    /// Ge  → [(Ge, floor_ts)]
+    /// Lt  → [(Lt, floor_ts)]
+    /// Le  → [(Le, ceil_ts)]
+    /// Ne  → [(Lt, floor_ts), (Gt, ceil_ts)]
+    pub fn to_range(
+        &self,
+        op: crate::query::ast::BasicOp,
+    ) -> Vec<(crate::query::ast::BasicOp, i64)> {
+        use crate::query::ast::BasicOp;
+        use crate::types::DateTime;
+        use chrono::{Local, TimeZone};
+
+        let to_ts = |ndt: chrono::NaiveDateTime| -> i64 {
+            Local
+                .from_local_datetime(&ndt)
+                .earliest()
+                .map(|t| t.timestamp())
+                .unwrap_or(0)
+        };
+
+        if let DateTime::Instant(instant) = self {
+            return vec![(op, instant.timestamp())];
+        }
+
+        let floor_ts = self.floor().map(to_ts).unwrap_or(0);
+        let ceil_ts = self.ceiling().map(to_ts).unwrap_or(0);
+
+        match op {
+            BasicOp::Eq => vec![(BasicOp::Ge, floor_ts), (BasicOp::Le, ceil_ts)],
+            BasicOp::Gt => vec![(BasicOp::Gt, ceil_ts)],
+            BasicOp::Ge => vec![(BasicOp::Ge, floor_ts)],
+            BasicOp::Lt => vec![(BasicOp::Lt, floor_ts)],
+            BasicOp::Le => vec![(BasicOp::Le, ceil_ts)],
+            BasicOp::Ne => vec![(BasicOp::Lt, floor_ts), (BasicOp::Gt, ceil_ts)],
+        }
+    }
+}
+
 // --- MtimeFn ---
 pub struct MtimeFn;
 impl TagFunction for MtimeFn {
@@ -1215,9 +1293,49 @@ fn format_mtime_relative(secs: i64) -> String {
     }
 }
 
+/// 構造化日付文字列（YYYY-MM-DD / YYYY-MM）のみを DateTime に変換する。
+/// 4桁年単体・自然言語は対象外（normalize_label 用）。
+fn parse_date_literal(s: &str) -> Option<crate::types::DateTime> {
+    use chrono::NaiveDate;
+    let s = s.trim();
+    let parts: Vec<&str> = s
+        .split(|c| c == '/' || c == '-')
+        .filter(|p| !p.is_empty())
+        .collect();
+    // YYYY-MM-DD / YYYY/MM/DD
+    if parts.len() == 3
+        && parts[0].len() == 4
+        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    {
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        let d: u32 = parts[2].parse().ok()?;
+        return NaiveDate::from_ymd_opt(y, m, d).map(crate::types::DateTime::Date);
+    }
+    // YYYY-MM / YYYY/MM
+    if parts.len() == 2
+        && parts[0].len() == 4
+        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+    {
+        let y: i32 = parts[0].parse().ok()?;
+        let m: u32 = parts[1].parse().ok()?;
+        NaiveDate::from_ymd_opt(y, m, 1)?;
+        return Some(crate::types::DateTime::YearMonth { year: y, month: m });
+    }
+    None
+}
+
 impl Query for MtimeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Integer
+    }
+    fn normalize_label(&self, label: &Label) -> Label {
+        if let LabelValue::String(s) = label.value() {
+            if let Some(dt) = parse_date_literal(&s) {
+                return Label::Date(dt);
+            }
+        }
+        label.clone()
     }
     fn expand(
         &self,
@@ -1225,6 +1343,19 @@ impl Query for MtimeFn {
         label: &Label,
         _tag: &TypedTag,
     ) -> QueryNode {
+        if let LabelValue::Date(dt) = label.value() {
+            let first = Operand::TypeRef(SType::Mtime.into());
+            let nodes: Vec<_> = dt.to_range(BasicOp::Eq).into_iter().map(|(b, ts)| {
+                QueryNode::Comparison(ComparisonNode {
+                    first: first.clone(),
+                    rest: vec![(ComparisonOp::Label(b), Operand::Literal(Label::Mtime(ts)))],
+                })
+            }).collect();
+            return match nodes.len() {
+                1 => nodes.into_iter().next().unwrap(),
+                _ => QueryNode::And(nodes),
+            };
+        }
         if let Some(range) = crate::util::parse_datetime(&label.as_str()) {
             if range.start == range.end {
                 QueryNode::TypedTag(TypedTag::new(SType::Mtime, range.start))
@@ -1266,6 +1397,23 @@ impl Query for MtimeFn {
         let mut conditions = Vec::new();
         for (op, rhs) in rest {
             if let Operand::Literal(label) = &rhs {
+                let basic_op = match op {
+                    ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+                };
+                let make_op = |b: BasicOp| match op {
+                    ComparisonOp::Label(_) => ComparisonOp::Label(b),
+                    ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
+                };
+                if let LabelValue::Date(dt) = label.value() {
+                    let nodes = dt.to_range(basic_op).into_iter().map(|(b, ts)| {
+                        QueryNode::Comparison(ComparisonNode {
+                            first: first.clone(),
+                            rest: vec![(make_op(b), Operand::Literal(Label::Mtime(ts)))],
+                        })
+                    });
+                    conditions.extend(nodes);
+                    continue;
+                }
                 if let Some(range) = parse_datetime(&label.as_str()) {
                     conditions.extend(mtime_range_op(&first, op, range));
                     continue;
@@ -1606,6 +1754,108 @@ mod tests {
         assert_eq!(normalized.as_str(), "HELLO");
     }
 
+    // --- Phase 3: normalize_label ---
+
+    #[test]
+    fn test_size_normalize_label_string_converts() {
+        let q = SizeFn;
+        let label = Label::Other(
+            TagType::from("size"),
+            LabelValue::String("1MB".to_string()),
+        );
+        let normalized = q.query().unwrap().normalize_label(&label);
+        assert_eq!(normalized, Label::Size(1_048_576));
+    }
+
+    #[test]
+    fn test_registry_normalize_label_literal_skipped() {
+        // Literal ("quoted") must bypass normalize_label entirely at registry level
+        let reg = TagRegistry::with_standard();
+        let label = Label::Other(
+            TagType::from("size"),
+            LabelValue::Literal("1MB".to_string()),
+        );
+        let normalized = reg.normalize_label("size", &label);
+        assert_eq!(normalized, label);
+    }
+
+    #[test]
+    fn test_mtime_normalize_label_date_string() {
+        let q = MtimeFn;
+        let label = Label::Other(
+            TagType::from("mtime"),
+            LabelValue::String("2026-02-01".to_string()),
+        );
+        let normalized = q.query().unwrap().normalize_label(&label);
+        match normalized {
+            Label::Date(crate::types::DateTime::Date(d)) => {
+                assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+            }
+            other => panic!("expected Label::Date(Date(_)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_mtime_normalize_label_year_string() {
+        // 4桁年単体は normalize_label の対象外（mtime expand_comparison で処理）
+        let q = MtimeFn;
+        let label = Label::Other(
+            TagType::from("mtime"),
+            LabelValue::String("2026".to_string()),
+        );
+        let normalized = q.query().unwrap().normalize_label(&label);
+        assert_eq!(normalized, label, "bare YYYY should be unchanged by normalize_label");
+    }
+
+    #[test]
+    fn test_mtime_normalize_label_non_date_unchanged() {
+        let q = MtimeFn;
+        let label = Label::Other(
+            TagType::from("mtime"),
+            LabelValue::String("not-a-date".to_string()),
+        );
+        let normalized = q.query().unwrap().normalize_label(&label);
+        assert_eq!(normalized, label);
+    }
+
+    #[test]
+    fn test_registry_normalize_label_size() {
+        let reg = TagRegistry::with_standard();
+        let label = Label::Other(
+            TagType::from("size"),
+            LabelValue::String("2MB".to_string()),
+        );
+        let normalized = reg.normalize_label("size", &label);
+        assert_eq!(normalized, Label::Size(2_097_152));
+    }
+
+    #[test]
+    fn test_registry_normalize_label_mtime() {
+        let reg = TagRegistry::with_standard();
+        let label = Label::Other(
+            TagType::from("mtime"),
+            LabelValue::String("2026-01-01".to_string()),
+        );
+        let normalized = reg.normalize_label("mtime", &label);
+        match normalized {
+            Label::Date(crate::types::DateTime::Date(d)) => {
+                assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+            }
+            other => panic!("expected Label::Date(Date(_)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_registry_normalize_label_unknown_unchanged() {
+        let reg = TagRegistry::with_standard();
+        let label = Label::Other(
+            TagType::from("custom"),
+            LabelValue::String("hello".to_string()),
+        );
+        let normalized = reg.normalize_label("custom", &label);
+        assert_eq!(normalized, label);
+    }
+
     // --- DisplayFormat / DisplayFormats ---
 
     #[test]
@@ -1641,5 +1891,124 @@ mod tests {
             QueryNode::TypedTag(_) | QueryNode::And(_) => {}
             other => panic!("Unexpected QueryNode: {:?}", other),
         }
+    }
+
+    // --- Phase 2: DateTime::to_range ---
+
+    #[test]
+    fn test_datetime_to_range_date_eq() {
+        use chrono::NaiveDate;
+        use crate::query::ast::BasicOp;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = crate::types::DateTime::Date(d);
+        let ranges = dt.to_range(BasicOp::Eq);
+        assert_eq!(ranges.len(), 2);
+        let ops: Vec<BasicOp> = ranges.iter().map(|(op, _)| *op).collect();
+        assert!(ops.contains(&BasicOp::Ge));
+        assert!(ops.contains(&BasicOp::Le));
+        let ge_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Ge).unwrap().1;
+        let le_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Le).unwrap().1;
+        assert!(ge_ts < le_ts);
+    }
+
+    #[test]
+    fn test_datetime_to_range_date_gt() {
+        use chrono::NaiveDate;
+        use crate::query::ast::BasicOp;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = crate::types::DateTime::Date(d);
+        let ranges = dt.to_range(BasicOp::Gt);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, BasicOp::Gt);
+    }
+
+    #[test]
+    fn test_datetime_to_range_year_eq() {
+        use crate::query::ast::BasicOp;
+        let dt = crate::types::DateTime::Year(2026);
+        let ranges = dt.to_range(BasicOp::Eq);
+        assert_eq!(ranges.len(), 2);
+        let ge_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Ge).unwrap().1;
+        let le_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Le).unwrap().1;
+        assert!(ge_ts < le_ts);
+    }
+
+    #[test]
+    fn test_datetime_to_range_instant_any_op() {
+        use chrono::{Local, TimeZone};
+        use crate::query::ast::BasicOp;
+        let local_dt = Local.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
+        let ts = local_dt.timestamp();
+        let dt = crate::types::DateTime::Instant(local_dt);
+        let ranges = dt.to_range(BasicOp::Gt);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].0, BasicOp::Gt);
+        assert_eq!(ranges[0].1, ts);
+    }
+
+    // --- Phase 6: MtimeFn::expand ---
+
+    #[test]
+    fn test_mtime_expand_date_label_becomes_range() {
+        use chrono::NaiveDate;
+        use crate::query::ast::{BasicOp, ComparisonOp};
+        use crate::types::{DateTime, Label, SType, TagType, TypedTag};
+        let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let label = Label::Date(DateTime::Date(date));
+        let tag_type = TagType::from(SType::Mtime);
+        let typed_tag = TypedTag::new(SType::Mtime, label.clone());
+        let result = MtimeFn.query().unwrap().expand(&tag_type, &label, &typed_tag);
+        // Date Eq → And([Ge(floor), Le(ceil)])
+        let QueryNode::And(nodes) = result else { panic!("expected And, got {:?}", result) };
+        assert_eq!(nodes.len(), 2);
+        let ops: Vec<_> = nodes.iter().map(|n| {
+            if let QueryNode::Comparison(c) = n { c.rest[0].0.clone() } else { panic!() }
+        }).collect();
+        assert!(ops.contains(&ComparisonOp::Label(BasicOp::Ge)));
+        assert!(ops.contains(&ComparisonOp::Label(BasicOp::Le)));
+    }
+
+    // --- Phase 5: MtimeFn::expand_comparison ---
+
+    #[test]
+    fn test_mtime_expand_comparison_date_label_gt() {
+        use chrono::NaiveDate;
+        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::types::{DateTime, Label, LabelValue, SType, TagType};
+        let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = DateTime::Date(date);
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::Mtime)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(Label::Date(dt.clone())),
+            )],
+        };
+        let result = MtimeFn.query().unwrap().expand_comparison(node);
+        // Gt → ceil_ts で単一条件
+        let QueryNode::Comparison(c) = result else { panic!("expected Comparison, got {:?}", result) };
+        let (op, rhs) = &c.rest[0];
+        assert_eq!(*op, ComparisonOp::Label(BasicOp::Gt));
+        let Operand::Literal(label) = rhs else { panic!() };
+        assert!(matches!(label.value(), LabelValue::Integer(_)), "should be Mtime(i64)");
+    }
+
+    #[test]
+    fn test_mtime_expand_comparison_date_label_eq_expands_to_and() {
+        use chrono::NaiveDate;
+        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::types::{DateTime, Label, SType, TagType};
+        let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = DateTime::Date(date);
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::Mtime)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Eq),
+                Operand::Literal(Label::Date(dt)),
+            )],
+        };
+        let result = MtimeFn.query().unwrap().expand_comparison(node);
+        // Eq → And([Ge, Le])
+        assert!(matches!(result, QueryNode::And(_)), "expected And for Eq, got {:?}", result);
     }
 }

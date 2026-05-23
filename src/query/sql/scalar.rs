@@ -78,6 +78,10 @@ pub(super) fn build_column_match_sql(src: &Src,
         crate::types::LabelValue::Null => {
             q.and_where(Expr::col(Col::LabelStr).is_null());
         }
+        crate::types::LabelValue::Date(dt) => {
+            let t = if matches!(tag, SType::Label) { Col::LabelInt.into() } else { tag };
+            q.and_where(Expr::col(t).eq(dt.to_timestamp()));
+        }
     }
     q
 }

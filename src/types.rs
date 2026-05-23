@@ -309,11 +309,159 @@ pub enum Label {
     ItemId(i64),
     FileId(Uuid),
     IsDir(bool),
+    /// 日付リテラル（normalize_label で生成される中間表現）
+    Date(DateTime),
 
     // --- 汎用・未解決型 ---
     /// 標準外のタグ、または明示的にドメインを特定しない汎用値。
     /// タグの型（TagType）を自律的に保持します。
     Other(TagType, LabelValue),
+}
+
+/// 日付リテラルの精度を保持する中間型。
+/// `chrono::DateTime` との衝突は完全修飾パスで区別する。
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+pub enum DateTime {
+    /// 年のみ（mtime コンテキストで Integer 由来）
+    Year(i32),
+    /// 年月（例: "2026-02"）
+    YearMonth { year: i32, month: u32 },
+    /// 年月日（例: "2026-02-01"）
+    Date(chrono::NaiveDate),
+    /// 時点（"today", "7d ago" など）
+    Instant(chrono::DateTime<chrono::Local>),
+}
+
+impl DateTime {
+    /// 期間の下限（開始時点）を NaiveDateTime で返す。
+    pub fn floor(&self) -> Option<chrono::NaiveDateTime> {
+        use chrono::{NaiveDate, TimeZone};
+        match self {
+            DateTime::Year(y) => NaiveDate::from_ymd_opt(*y, 1, 1)?.and_hms_opt(0, 0, 0),
+            DateTime::YearMonth { year, month } => {
+                NaiveDate::from_ymd_opt(*year, *month, 1)?.and_hms_opt(0, 0, 0)
+            }
+            DateTime::Date(d) => d.and_hms_opt(0, 0, 0),
+            DateTime::Instant(dt) => {
+                Some(chrono::Local.timestamp_opt(dt.timestamp(), 0).single()?.naive_local())
+            }
+        }
+    }
+
+    /// 期間の上限（終了時点）を NaiveDateTime で返す。
+    pub fn ceiling(&self) -> Option<chrono::NaiveDateTime> {
+        use chrono::{NaiveDate, TimeZone};
+        match self {
+            DateTime::Year(y) => {
+                NaiveDate::from_ymd_opt(*y, 12, 31)?.and_hms_opt(23, 59, 59)
+            }
+            DateTime::YearMonth { year, month } => {
+                let last_day = last_day_of_month(*year, *month)?;
+                NaiveDate::from_ymd_opt(*year, *month, last_day)?.and_hms_opt(23, 59, 59)
+            }
+            DateTime::Date(d) => d.and_hms_opt(23, 59, 59),
+            DateTime::Instant(dt) => {
+                Some(chrono::Local.timestamp_opt(dt.timestamp(), 0).single()?.naive_local())
+            }
+        }
+    }
+
+    pub fn as_display_str(&self) -> String {
+        match self {
+            DateTime::Year(y) => y.to_string(),
+            DateTime::YearMonth { year, month } => format!("{year}-{month:02}"),
+            DateTime::Date(d) => d.format("%Y-%m-%d").to_string(),
+            DateTime::Instant(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        }
+    }
+
+    /// 任意タイムゾーンの `chrono::DateTime` を `Instant` バリアントとして生成する。
+    pub fn from_localtime<Tz: chrono::TimeZone>(dt: chrono::DateTime<Tz>) -> Self {
+        DateTime::Instant(dt.with_timezone(&chrono::Local))
+    }
+
+    /// 期間の開始点を UNIX タイムスタンプ (i64) で返す。DB/SQL バインド用フォールバック。
+    pub fn to_timestamp(&self) -> i64 {
+        use chrono::{Local, TimeZone};
+        self.floor()
+            .and_then(|ndt| Local.from_local_datetime(&ndt).earliest())
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0)
+    }
+}
+
+impl std::str::FromStr for DateTime {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        use chrono::{Local, NaiveDate, TimeZone};
+
+        let s = s.trim();
+        let parts: Vec<&str> = s
+            .split(|c| c == '/' || c == '-')
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        // YYYY-MM-DD / YYYY/MM/DD
+        if parts.len() == 3
+            && parts[0].len() == 4
+            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+        {
+            let y: i32 = parts[0].parse().map_err(|_| ())?;
+            let m: u32 = parts[1].parse().map_err(|_| ())?;
+            let d: u32 = parts[2].parse().map_err(|_| ())?;
+            return NaiveDate::from_ymd_opt(y, m, d)
+                .map(DateTime::Date)
+                .ok_or(());
+        }
+
+        // YYYY-MM / YYYY/MM
+        if parts.len() == 2
+            && parts[0].len() == 4
+            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
+        {
+            let y: i32 = parts[0].parse().map_err(|_| ())?;
+            let m: u32 = parts[1].parse().map_err(|_| ())?;
+            NaiveDate::from_ymd_opt(y, m, 1).ok_or(())?;
+            return Ok(DateTime::YearMonth { year: y, month: m });
+        }
+
+        // YYYY（4桁年単体）
+        if parts.len() == 1
+            && parts[0].len() == 4
+            && parts[0].chars().all(|c| c.is_ascii_digit())
+        {
+            let y: i32 = parts[0].parse().map_err(|_| ())?;
+            if (1000..=9999).contains(&y) {
+                return Ok(DateTime::Year(y));
+            }
+            return Err(());
+        }
+
+        // 自然言語・相対日付（"today", "7d ago" 等）
+        let s_lower = s.to_lowercase();
+        let now = Local::now();
+        if let Ok(dt) =
+            chrono_english::parse_date_string(&s_lower, now, chrono_english::Dialect::Uk)
+        {
+            return Ok(DateTime::from_localtime(dt));
+        }
+        if let Ok(dt) = dateparser::parse_with_timezone(s, &Local) {
+            return Ok(DateTime::from_localtime(dt));
+        }
+
+        Err(())
+    }
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    use chrono::NaiveDate;
+    // 翌月の1日から1日引く
+    let next_month = if month == 12 { 1 } else { month + 1 };
+    let next_year = if month == 12 { year + 1 } else { year };
+    let first_of_next = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    use chrono::Datelike;
+    Some((first_of_next - chrono::Duration::days(1)).day())
 }
 
 /// Label が保持する生の値の種類。
@@ -331,11 +479,12 @@ pub enum Label {
 #[strum(serialize_all = "snake_case")]
 pub enum LabelValue {
     String(String),
-    Integer(i64),  // -> "integer"
-    Boolean(bool), // -> "boolean"
-    Double(u64),   // -> "double" (f64::to_bits() で保持)
-    Null,          // -> "null"
+    Integer(i64),   // -> "integer"
+    Boolean(bool),  // -> "boolean"
+    Double(u64),    // -> "double" (f64::to_bits() で保持)
+    Null,           // -> "null"
     Literal(String),
+    Date(DateTime), // -> "date"
 }
 
 impl LabelValue {
@@ -348,6 +497,7 @@ impl LabelValue {
             LabelValue::Boolean(false) => "FALSE".to_string(),
             LabelValue::Double(bits) => f64::from_bits(*bits).to_string(),
             LabelValue::Null => "NULL".to_string(),
+            LabelValue::Date(dt) => dt.as_display_str(),
         }
     }
 }
@@ -400,6 +550,7 @@ impl Label {
             | Label::ItemId(i) => i.to_string(),
             Label::FileId(u) => u.to_string(),
             Label::IsDir(b) => LabelValue::Boolean(*b).as_display_name(),
+            Label::Date(dt) => dt.as_display_str(),
             Label::Other(_, val) => val.as_display_name(),
         }
     }
@@ -416,6 +567,7 @@ impl Label {
                 f64::from_bits(*bits) as i64
             }
             Label::Other(_, LabelValue::Null) => 0,
+            Label::Date(_) => 0,
             _ => self.as_str().parse::<i64>().unwrap_or_default(),
         }
     }
@@ -434,6 +586,7 @@ impl Label {
             Label::ItemId(_) => TagType::Base(SType::ItemId),
             Label::FileId(_) => TagType::Base(SType::FileId),
             Label::IsDir(_) => TagType::Base(SType::IsDir),
+            Label::Date(_) => TagType::Base(SType::Mtime),
             Label::Other(tt, _) => tt.clone(),
         }
     }
@@ -469,6 +622,7 @@ impl Label {
             | Label::ItemId(i) => LabelValue::Integer(*i),
             Label::FileId(u) => LabelValue::String(u.to_string()),
             Label::IsDir(b) => LabelValue::Boolean(*b),
+            Label::Date(dt) => LabelValue::Date(dt.clone()),
             Label::Other(_, val) => val.clone(),
         }
     }
@@ -600,6 +754,7 @@ impl duckdb::ToSql for LabelValue {
             LabelValue::String(s) | LabelValue::Literal(s) => {
                 Value::Text(s.clone())
             }
+            LabelValue::Date(dt) => Value::BigInt(dt.to_timestamp()),
         };
         Ok(duckdb::types::ToSqlOutput::Owned(val))
     }
@@ -984,6 +1139,170 @@ mod tests_types {
         assert!(!kv.is_stored());
         assert!(kv.is_volatile());
         assert_eq!(kv.to_string(), "volatile");
+    }
+
+    // --- Phase 2: DateTime::FromStr ---
+
+    #[test]
+    fn test_datetime_from_str_ymd_hyphen() {
+        use chrono::NaiveDate;
+        let dt: DateTime = "2026-02-01".parse().unwrap();
+        assert_eq!(dt, DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+    }
+
+    #[test]
+    fn test_datetime_from_str_ymd_slash() {
+        use chrono::NaiveDate;
+        let dt: DateTime = "2026/02/01".parse().unwrap();
+        assert_eq!(dt, DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+    }
+
+    #[test]
+    fn test_datetime_from_str_year_month() {
+        let dt: DateTime = "2026-02".parse().unwrap();
+        assert_eq!(dt, DateTime::YearMonth { year: 2026, month: 2 });
+    }
+
+    #[test]
+    fn test_datetime_from_str_year_only() {
+        let dt: DateTime = "2026".parse().unwrap();
+        assert_eq!(dt, DateTime::Year(2026));
+    }
+
+    #[test]
+    fn test_datetime_from_str_today() {
+        let dt: DateTime = "today".parse().unwrap();
+        assert!(matches!(dt, DateTime::Instant(_)));
+    }
+
+    #[test]
+    fn test_datetime_from_str_relative() {
+        let dt: DateTime = "7d ago".parse().unwrap();
+        assert!(matches!(dt, DateTime::Instant(_)));
+    }
+
+    #[test]
+    fn test_datetime_from_str_unknown_returns_err() {
+        let result = "not_a_date".parse::<DateTime>();
+        assert!(result.is_err());
+    }
+
+    // --- Phase 1: DateTime / LabelValue::Date / Label::Date ---
+
+    #[test]
+    fn test_datetime_year_variant() {
+        let dt = DateTime::Year(2026);
+        assert!(matches!(dt, DateTime::Year(2026)));
+    }
+
+    #[test]
+    fn test_datetime_year_month_variant() {
+        let dt = DateTime::YearMonth { year: 2026, month: 2 };
+        assert!(matches!(dt, DateTime::YearMonth { year: 2026, month: 2 }));
+    }
+
+    #[test]
+    fn test_datetime_date_variant() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = DateTime::Date(d);
+        assert!(matches!(dt, DateTime::Date(_)));
+    }
+
+    #[test]
+    fn test_datetime_instant_variant() {
+        use chrono::Local;
+        let now = Local::now();
+        let dt = DateTime::Instant(now);
+        assert!(matches!(dt, DateTime::Instant(_)));
+    }
+
+    #[test]
+    fn test_label_value_date_as_display_name() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let lv = LabelValue::Date(DateTime::Date(d));
+        assert_eq!(lv.as_display_name(), "2026-02-01");
+    }
+
+    #[test]
+    fn test_label_value_date_year_as_display_name() {
+        let lv = LabelValue::Date(DateTime::Year(2026));
+        assert_eq!(lv.as_display_name(), "2026");
+    }
+
+    #[test]
+    fn test_label_value_date_year_month_as_display_name() {
+        let lv = LabelValue::Date(DateTime::YearMonth { year: 2026, month: 2 });
+        assert_eq!(lv.as_display_name(), "2026-02");
+    }
+
+    #[test]
+    fn test_label_date_value_returns_date_variant() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let label = Label::Date(DateTime::Date(d));
+        assert!(matches!(label.value(), LabelValue::Date(DateTime::Date(_))));
+    }
+
+    #[test]
+    fn test_label_date_as_str() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let label = Label::Date(DateTime::Date(d));
+        assert_eq!(label.as_str(), "2026-02-01");
+    }
+
+    #[test]
+    fn test_label_date_as_i64_returns_zero() {
+        let label = Label::Date(DateTime::Year(2026));
+        assert_eq!(label.as_i64(), 0);
+    }
+
+    #[test]
+    fn test_datetime_year_floor_ceiling() {
+        use chrono::NaiveDate;
+        let dt = DateTime::Year(2026);
+        let floor = dt.floor().unwrap();
+        let ceiling = dt.ceiling().unwrap();
+        assert_eq!(floor, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
+        assert_eq!(ceiling, NaiveDate::from_ymd_opt(2026, 12, 31).unwrap().and_hms_opt(23, 59, 59).unwrap());
+    }
+
+    #[test]
+    fn test_datetime_year_month_floor_ceiling() {
+        use chrono::NaiveDate;
+        let dt = DateTime::YearMonth { year: 2026, month: 2 };
+        let floor = dt.floor().unwrap();
+        let ceiling = dt.ceiling().unwrap();
+        assert_eq!(floor, NaiveDate::from_ymd_opt(2026, 2, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
+        assert_eq!(ceiling, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap().and_hms_opt(23, 59, 59).unwrap());
+    }
+
+    #[test]
+    fn test_datetime_date_floor_ceiling() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = DateTime::Date(d);
+        let floor = dt.floor().unwrap();
+        let ceiling = dt.ceiling().unwrap();
+        assert_eq!(floor, d.and_hms_opt(0, 0, 0).unwrap());
+        assert_eq!(ceiling, d.and_hms_opt(23, 59, 59).unwrap());
+    }
+
+    #[test]
+    fn test_datetime_instant_floor_ceiling() {
+        use chrono::{Local, TimeZone};
+        let local_dt = Local.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
+        let ts = local_dt.timestamp();
+        let dt = DateTime::Instant(local_dt);
+        let floor = dt.floor().unwrap();
+        let ceiling = dt.ceiling().unwrap();
+        // floor/ceiling は NaiveDateTime(local) → Local → timestamp で元の ts に戻る
+        let floor_ts = Local.from_local_datetime(&floor).earliest().unwrap().timestamp();
+        let ceiling_ts = Local.from_local_datetime(&ceiling).earliest().unwrap().timestamp();
+        assert_eq!(floor_ts, ts);
+        assert_eq!(ceiling_ts, ts);
     }
 }
 
