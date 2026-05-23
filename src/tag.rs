@@ -84,15 +84,21 @@ pub trait Scan {
 
 /// タグ値の表示フォーマット定義。
 pub struct DisplayFormat {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: String,
+    pub label: String,
+}
+
+impl DisplayFormat {
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into() }
+    }
 }
 
 impl Default for DisplayFormat {
     fn default() -> Self {
         DisplayFormat {
-            id: "raw",
-            label: "Raw",
+            id: "raw".into(),
+            label: "Raw".into(),
         }
     }
 }
@@ -1063,10 +1069,10 @@ impl Query for SizeFn {
 impl Display for SizeFn {
     fn formats(&self) -> DisplayFormats {
         DisplayFormats {
-            default: DisplayFormat { id: "si",     label: "KB / MB" },
+            default: DisplayFormat::new("si", "KB / MB"),
             options: vec![
-                DisplayFormat { id: "si",     label: "KB / MB" },
-                DisplayFormat { id: "binary", label: "KiB / MiB" },
+                DisplayFormat::new("si",     "KB / MB"),
+                DisplayFormat::new("binary", "KiB / MiB"),
             ],
         }
     }
@@ -1075,7 +1081,7 @@ impl Display for SizeFn {
             LabelValue::Integer(i) => *i,
             _ => return value.as_display_name(),
         };
-        match format.id {
+        match format.id.as_str() {
             "binary" => format_size_binary(bytes),
             _ => format_size_si(bytes),
         }
@@ -1240,12 +1246,12 @@ fn mtime_range_op(first: &Operand, op: ComparisonOp, range: DatetimeRange) -> Ve
 impl Display for MtimeFn {
     fn formats(&self) -> DisplayFormats {
         DisplayFormats {
-            default: DisplayFormat { id: "human", label: "Human Readable" },
+            default: DisplayFormat::new("human", "Human Readable"),
             options: vec![
-                DisplayFormat { id: "human",    label: "Human Readable" },
-                DisplayFormat { id: "relative", label: "Relative" },
-                DisplayFormat { id: "iso",      label: "ISO 8601" },
-                DisplayFormat { id: "raw",      label: "Raw" },
+                DisplayFormat::new("human",    "Human Readable"),
+                DisplayFormat::new("relative", "Relative"),
+                DisplayFormat::new("iso",      "ISO 8601"),
+                DisplayFormat::new("raw",      "Raw"),
             ],
         }
     }
@@ -1254,7 +1260,7 @@ impl Display for MtimeFn {
             LabelValue::Integer(i) => *i,
             _ => return value.as_display_name(),
         };
-        match format.id {
+        match format.id.as_str() {
             "raw" => secs.to_string(),
             "iso" => chrono::DateTime::from_timestamp(secs, 0)
                 .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())

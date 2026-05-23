@@ -1,33 +1,16 @@
 package ttfm:plugin;
 
-// プラグインの基本情報を定義する共通インターフェース
+// 必須インターフェース
 interface core {
-    enum plugin-kind {
-        indexing-function,
-    }
-
-    // プラグインが返す値の型（ホストがDBスキーマを決定するために使用）
-    enum value-type {
-        text,
-        big-int,
-        boolean,
-        double,
-    }
-
-    record plugin-info {
-        name: string,
-        version: string,
-        kind: plugin-kind,
-        value-type: value-type,
-    }
-
-    // プラグインの種別やバージョンを返す
-    get-info: func() -> plugin-info;
+    name: func() -> string;
+    version: func() -> string;
 }
 
-// IndexingFunction (メタデータ抽出) 固有のインターフェース
-interface indexing-function {
-    // 値のバリアント
+// 省略可能インターフェース
+
+interface indexing {
+    enum value-type { text, big-int, boolean, double }
+
     variant tag-value {
         text(string),
         big-int(s64),
@@ -36,11 +19,31 @@ interface indexing-function {
         empty,
     }
 
-    // 指定されたファイルのパスを受け取り、タグ値を返す
+    get-value-type: func() -> value-type;
     tag-file: func(path: string) -> list<tag-value>;
 }
 
+interface query {
+    normalize-label: func(label: string) -> option<string>;
+    expand: func(tag-type: string, label: string) -> option<string>;
+    expand-projection: func(tag-type: string) -> option<string>;
+}
+
+interface display {
+    record display-format {
+        id: string,
+        label: string,
+    }
+
+    default-format: func() -> option<display-format>;
+    formats: func() -> list<display-format>;
+    show: func(value: string, format-id: string) -> string;
+}
+
+// プラグイン作者向け
 world plugin {
     export core;
-    export indexing-function;
+    export indexing;
+    export query;
+    export display;
 }

@@ -2,29 +2,38 @@ use crate::logic;
 
 wit_bindgen::generate!({
     path: "../../wit/plugin.wit",
-    world: "plugin",
+    inline: "
+        package mimetype:plugin;
+
+        world plugin {
+            export ttfm:plugin/core;
+            export ttfm:plugin/indexing;
+        }
+    ",
+    generate_all,
 });
 
 struct MimetypePlugin;
 
 impl exports::ttfm::plugin::core::Guest for MimetypePlugin {
-    fn get_info() -> exports::ttfm::plugin::core::PluginInfo {
-        exports::ttfm::plugin::core::PluginInfo {
-            name: "mimetype".to_string(),
-            version: "0.2.3".to_string(),
-            kind: exports::ttfm::plugin::core::PluginKind::IndexingFunction,
-            value_type: exports::ttfm::plugin::core::ValueType::Text,
-        }
+    fn name() -> String {
+        "mimetype".to_string()
+    }
+    fn version() -> String {
+        "0.2.3".to_string()
     }
 }
 
-impl exports::ttfm::plugin::indexing_function::Guest for MimetypePlugin {
-    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing_function::TagValue> {
+impl exports::ttfm::plugin::indexing::Guest for MimetypePlugin {
+    fn get_value_type() -> exports::ttfm::plugin::indexing::ValueType {
+        exports::ttfm::plugin::indexing::ValueType::Text
+    }
+    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing::TagValue> {
         let mime = logic::detect_mime(&path);
         if mime == "empty" {
-            vec![exports::ttfm::plugin::indexing_function::TagValue::Empty]
+            vec![exports::ttfm::plugin::indexing::TagValue::Empty]
         } else {
-            vec![exports::ttfm::plugin::indexing_function::TagValue::Text(mime)]
+            vec![exports::ttfm::plugin::indexing::TagValue::Text(mime)]
         }
     }
 }
