@@ -43,7 +43,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
     let user_plugins_dir = dir.path().join("plugins");
     std::fs::create_dir_all(&user_plugins_dir).unwrap();
     std::fs::copy(
-        "tests/fixtures/mimetype_override.component.wasm",
+        "tests/fixtures/mimetype_override_test_plugin.component.wasm",
         user_plugins_dir.join("my_custom_mimetype.component.wasm"),
     )
     .expect("Failed to copy override plugin");

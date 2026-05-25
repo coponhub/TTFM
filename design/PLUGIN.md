@@ -7,37 +7,24 @@
 Wasmモジュールはホスト（Rust）から見て1つの `TagFunction` として振る舞う。
 ホスト側で `WasmPluginAdapter` を作成し、これが `TagFunction + Index` トレイトを実装することで、`TagRegistry` にそのまま登録可能とする。
 
-## 2. インターフェース定義 (WIT: Wasm Interface Type)
+## 2. インターフェース定義
 
-Wasmコンポーネントモデルを採用し、`wit/plugin.wit` でインターフェースを定義する。
+Wasmコンポーネントモデルを採用する。インターフェース定義は `plugins_src/ttfm_plugin_macro/src/lib.rs` の定数が正典。
+
+### core（必須）
 
 ```wit
-package ttfm:plugin;
-
 interface core {
-    enum plugin-kind {
-        indexing-function,
-    }
-
-    // プラグインが返す値の型（ホストがDBスキーマを決定するために使用）
-    enum value-type {
-        text,
-        big-int,
-        boolean,
-        double,
-    }
-
-    record plugin-info {
-        name: string,
-        version: string,
-        kind: plugin-kind,
-        value-type: value-type,
-    }
-
-    get-info: func() -> plugin-info;
+    name: func() -> string;
+    version: func() -> string;
 }
+```
 
-interface indexing-function {
+### indexing（省略可能）
+
+```wit
+interface indexing {
+    enum value-type { text, big-int, boolean, double }
     variant tag-value {
         text(string),
         big-int(s64),
@@ -45,17 +32,34 @@ interface indexing-function {
         double(f64),
         empty,
     }
-
+    get-value-type: func() -> value-type;
     tag-file: func(path: string) -> list<tag-value>;
-}
-
-world plugin {
-    export core;
-    export indexing-function;
 }
 ```
 
-**注意:** `get-columns` は廃止。返す値の型は `plugin-info` の `value-type` で宣言する。
+### query（省略可能）
+
+```wit
+interface query {
+    normalize-label: func(label: string) -> option<string>;
+    expand: func(tag-type: string, label: string) -> option<string>;
+    expand-projection: func(tag-type: string) -> option<string>;
+}
+```
+
+### display（省略可能）
+
+```wit
+interface display {
+    record display-format {
+        id: string,
+        label: string,
+    }
+    default-format: func() -> option<display-format>;
+    formats: func() -> list<display-format>;
+    show: func(value: string, format-id: string) -> string;
+}
+```
 
 ## 3. ホスト側の責務 (Rust)
 
@@ -68,38 +72,51 @@ world plugin {
 
 ## 4. ゲスト側の責務 (Wasm/Rust, C, etc.)
 
-1. **ファイル解析**: 渡されたファイルパス（WASIパス）を開き、内容を解析する。
-2. **値の返却**: 解析結果を `tag-value` のリストとして返す。空の場合は `empty` を返す。
+`core` は必須。それ以外は必要なものだけ実装する。
+
+- **core**: `name()` でプラグイン識別名、`version()` でバージョンを返す。
+- **indexing**（省略可能）: 渡されたファイルパスを解析し `tag-value` のリストを返す。空の場合は `empty` を返す。
+- **query**（省略可能）: ラベル正規化・クエリ展開ロジックを実装する。省略時はホスト側のデフォルト動作が使われる。
+- **display**（省略可能）: 値の表示フォーマットを実装する。省略時は生値がそのまま表示される。
 
 ## 5. プラグインの実装例 (Rust)
 
+`Cargo.toml` に依存を追加：
+
+```toml
+[dependencies]
+ttfm_plugin = { path = "../ttfm_plugin_macro" }  # または crates.io バージョン
+wit-bindgen = "0.36.0"
+```
+
+`core` + `indexing` のみ実装する最小構成：
+
 ```rust
-wit_bindgen::generate!({
-    path: "../../wit/plugin.wit",
-    world: "plugin",
-});
+ttfm_plugin::target!(indexing);
 
 struct MyPlugin;
 
 impl exports::ttfm::plugin::core::Guest for MyPlugin {
-    fn get_info() -> exports::ttfm::plugin::core::PluginInfo {
-        exports::ttfm::plugin::core::PluginInfo {
-            name: "my_tag".to_string(),
-            version: "0.1.0".to_string(),
-            kind: exports::ttfm::plugin::core::PluginKind::IndexingFunction,
-            value_type: exports::ttfm::plugin::core::ValueType::Text,
-        }
-    }
+    fn name() -> String { "my_tag".to_string() }
+    fn version() -> String { "0.1.0".to_string() }
 }
 
-impl exports::ttfm::plugin::indexing_function::Guest for MyPlugin {
-    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing_function::TagValue> {
-        // ファイルを解析してタグ値を返す
-        vec![exports::ttfm::plugin::indexing_function::TagValue::Text("value".to_string())]
+impl exports::ttfm::plugin::indexing::Guest for MyPlugin {
+    fn get_value_type() -> exports::ttfm::plugin::indexing::ValueType {
+        exports::ttfm::plugin::indexing::ValueType::Text
+    }
+    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing::TagValue> {
+        vec![exports::ttfm::plugin::indexing::TagValue::Text("value".to_string())]
     }
 }
 
 export!(MyPlugin);
+```
+
+`query` や `display` も実装する場合は `target!` の引数に追加する：
+
+```rust
+ttfm_plugin::target!(indexing, query, display);
 ```
 
 ## 6. プラグインのビルド手順
@@ -124,6 +141,8 @@ wasm-tools component new target/wasm32-wasip1/release/my_plugin.wasm \
   -o ../../plugins/my_plugin.component.wasm
 ```
 
+`wit/plugin.wit` は不要。インターフェース定義は `ttfm_plugin::target!()` マクロに内包されている。
+
 ### インストール
 
 ビルドしたコンポーネントを `~/.ttfm/plugins/` に配置する。
@@ -134,7 +153,7 @@ cp ../../plugins/my_plugin.component.wasm ~/.ttfm/plugins/
 
 ### 有効化
 
-`ttfm.toml` の `[plugins.status]` にプラグイン名（`get_info()` の `name`）を追加する。
+`ttfm.toml` の `[plugins.status]` にプラグイン名（`name()` の戻り値）を追加する。
 
 ```toml
 [plugins]

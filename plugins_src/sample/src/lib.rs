@@ -1,7 +1,4 @@
-wit_bindgen::generate!({
-    path: "../../wit/plugin.wit",
-    world: "plugin",
-});
+ttfm_plugin::target!(indexing, query, display);
 
 struct SamplePlugin;
 

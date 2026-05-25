@@ -139,6 +139,7 @@ dependencies = [
 name = "sample-plugin"
 version = "0.1.0"
 dependencies = [
+ "ttfm_plugin",
  "wit-bindgen",
 ]
 
@@ -214,6 +215,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "ttfm_plugin"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

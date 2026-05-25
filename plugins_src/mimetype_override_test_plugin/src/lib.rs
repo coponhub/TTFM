@@ -1,15 +1,4 @@
-wit_bindgen::generate!({
-    path: "../../wit/plugin.wit",
-    inline: "
-        package mimetype-override:plugin;
-
-        world plugin {
-            export ttfm:plugin/core;
-            export ttfm:plugin/indexing;
-        }
-    ",
-    generate_all,
-});
+ttfm_plugin::target!(indexing);
 
 struct MimetypeOverridePlugin;
 

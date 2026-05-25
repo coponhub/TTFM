@@ -1,17 +1,6 @@
 use crate::logic;
 
-wit_bindgen::generate!({
-    path: "../../wit/plugin.wit",
-    inline: "
-        package mimetype:plugin;
-
-        world plugin {
-            export ttfm:plugin/core;
-            export ttfm:plugin/indexing;
-        }
-    ",
-    generate_all,
-});
+ttfm_plugin::target!(indexing);
 
 struct MimetypePlugin;
 

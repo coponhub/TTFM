@@ -1,5 +1,5 @@
 [package]
-name = "mimetype-override-plugin"
+name = "mimetype-override-test-plugin"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+ttfm_plugin = { path = "../ttfm_plugin_macro" }
 wit-bindgen = "0.36.0"
