@@ -42,7 +42,7 @@ pub fn search(
     let n = options.n.unwrap_or(100);
     let offset = options.offset.unwrap_or(0);
 
-    let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?;
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
 
     let warnings = if resolver.is_label_set_intersect() {
@@ -129,8 +129,11 @@ pub fn spawn_cache_worker(
         let res = (|| -> Result<()> {
             let conn = Connection::open_in_memory()?;
 
-            let resolver =
-                crate::query::lens_resolver::Resolver::new(&query_owned)?;
+            let std_registry = crate::tag::TagRegistry::with_standard();
+            let resolver = crate::query::lens_resolver::Resolver::new(
+                &query_owned,
+                &std_registry,
+            )?;
             let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &conn);
 
             let all_columns = crate::tag::TagRegistry::with_standard().get_all_columns();
@@ -230,7 +233,7 @@ fn try_resolve_cache(
 
 fn search_from_cache(
     store: &Store,
-    _registry: &TagRegistry,
+    registry: &TagRegistry,
     cache: &CacheManager,
     path: &Path,
     options: SearchOptions,
@@ -245,7 +248,7 @@ fn search_from_cache(
         .get(crate::cache::META_QUERY)
         .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
 
-    let resolver = crate::query::lens_resolver::Resolver::new(query)?;
+    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?;
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
     let src = crate::db::Src::Parquet(path_str);
 

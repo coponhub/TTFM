@@ -29,6 +29,7 @@ rustc-hash = "2.1.1"
 uuid = { version = "1.19.0", features = ["v4", "v5"] }
 pest = "2.7"
 pest_derive = "2.7"
+indexmap = "2"
 
 [dev-dependencies]
 filetime = "0.2.27"

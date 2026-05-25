@@ -21,13 +21,12 @@ use crate::query::ast::{
     ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::tag::TagRegistry;
 use crate::types::{Label, LabelValue, TagType};
 use anyhow::{bail, Result};
 
 // ========== Logical Representation ==========
 
-pub use crate::tag::{LogicalSchema, LogicalType};
+pub use super::logical_schema::{LogicalSchema, LogicalType};
 
 /// QueryNodeを論理的に展開します（Virtual tag展開、日付範囲化など）
 ///
@@ -157,9 +156,8 @@ fn expand_comparison_with_recursion(
     }
     cmp.rest = new_rest;
 
-    // 標準の比較ノード展開（日付範囲化など）を実行
-    let reg = TagRegistry::with_standard();
-    let expanded_node = reg.expand_comparison(cmp);
+    // 登録済みプラグインの比較ノード展開（日付範囲化・ラベル正規化など）を実行
+    let expanded_node = schema.expand_comparison(cmp);
 
     // 抽出したフィルタがあれば Comparison 全体を And で包む
     if lifted_filters.is_empty() {
@@ -381,9 +379,8 @@ fn expand_operand(
             } else if s == "false" {
                 Ok(Operand::Literal(crate::types::Label::from(false)))
             } else {
-                // サイズ・日付等の変換は TagFunction::normalize_label に委譲
-                let reg = TagRegistry::with_standard();
-                Ok(Operand::Literal(reg.normalize_label_any(&label)))
+                // サイズ・日付等の変換は登録済みプラグインの normalize_label に委譲
+                Ok(Operand::Literal(schema.normalize_label_any(&label)))
             }
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),

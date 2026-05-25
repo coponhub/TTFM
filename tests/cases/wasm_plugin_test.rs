@@ -8,6 +8,109 @@ use ttfm::types::{Label, LabelValue, TagType};
 use ttfm::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use ttfm::SearchOptions;
 
+/// プラグインが display を実装している場合、
+/// registry.format_display() で show() が呼ばれることを検証する。
+#[test]
+fn test_plugin_display_show_applied_in_format_display() {
+    use ttfm::tag::{Display, DisplayFormat, DisplayFormats};
+
+    struct IconTag;
+    impl TagFunction for IconTag {
+        fn name(&self) -> &str { "icon_tag" }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> { None }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> { None }
+        fn display(&self) -> Option<&dyn ttfm::tag::Display> { Some(self) }
+    }
+    impl Display for IconTag {
+        fn formats(&self) -> DisplayFormats {
+            DisplayFormats {
+                default: DisplayFormat { id: "icon".to_string(), label: "Icon".to_string() },
+                options: vec![],
+            }
+        }
+        fn show(&self, value: &LabelValue, _format: DisplayFormat) -> String {
+            let s = match value {
+                LabelValue::String(s) => s.clone(),
+                LabelValue::Integer(n) => n.to_string(),
+                _ => String::new(),
+            };
+            format!("● {s}")
+        }
+    }
+
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    registry.register(IconTag);
+
+    // format_display が show() を呼んで "● modified" を返すことを確認
+    let result = registry.format_display("icon_tag", "modified");
+    assert_eq!(result, "● modified",
+        "format_display が display::show() を呼んでいない");
+}
+
+/// プラグインが normalize_label を実装している場合、
+/// search 時にラベルの短縮形が正規化されて検索できることを検証する。
+///
+/// 現状バグ: expand_comparison_with_recursion が TagRegistry::with_standard() を
+/// ハードコードしているため、動的登録プラグインの normalize_label が呼ばれない。
+#[test]
+fn test_plugin_normalize_label_applied_in_search() {
+    use std::path::Path as StdPath;
+
+    struct ShortLabelTag;
+    impl TagFunction for ShortLabelTag {
+        fn name(&self) -> &str { "my_status" }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> { Some(self) }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> { Some(self) }
+    }
+    impl ttfm::tag::Index for ShortLabelTag {
+        fn extract(&self, _path: &StdPath) -> anyhow::Result<Option<LabelValue>> {
+            // 全ファイルに "modified" タグを付与
+            Ok(Some(LabelValue::String("modified".to_string())))
+        }
+    }
+    impl ttfm::tag::Query for ShortLabelTag {
+        fn normalize_label(&self, label: &Label) -> Label {
+            match label.as_str().as_str() {
+                "m" => Label::from("modified"),
+                "c" => Label::from("clean"),
+                _   => label.clone(),
+            }
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    let cache = ttfm::CacheManager::new(db_dir.join("cache"), 0);
+
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    registry.register(ShortLabelTag);
+
+    let test_file = dir.path().join("test.txt");
+    std::fs::write(&test_file, "hello").unwrap();
+
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
+        .unwrap();
+
+    // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
+    let results = search::search(
+        &store, &registry, &cache,
+        "my_status:m",
+        SearchOptions::default(),
+    )
+    .unwrap()
+    .results;
+
+    assert!(
+        !results.is_empty(),
+        "normalize_label が search に適用されていない: my_status:m → my_status:modified のヒットがゼロ"
+    );
+}
+
 #[test]
 fn test_wasm_plugin_mimetype() {
     let wasm_path = Path::new("plugins/sample_plugin.component.wasm");

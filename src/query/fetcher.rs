@@ -277,6 +277,7 @@ pub fn fetch_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::TagRegistry;
     use crate::query::ast::QueryNode;
     use crate::query::lens_resolver::ResolvedNode;
     use crate::query::lens_schema::StorageMapping;
@@ -286,7 +287,7 @@ mod tests {
     fn test_expand_query_recursive() {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
         let resolver =
-            crate::query::lens_resolver::Resolver::new("directory:docs")
+            crate::query::lens_resolver::Resolver::new("directory:docs", &TagRegistry::with_standard())
                 .unwrap();
         let expanded = &resolver.expanded_query;
 
@@ -302,7 +303,7 @@ mod tests {
     fn test_resolve_query_physical_mapping() {
         // Focused Lens 生成
         let resolver =
-            crate::query::lens_resolver::Resolver::new("size:100").unwrap();
+            crate::query::lens_resolver::Resolver::new("size:100", &TagRegistry::with_standard()).unwrap();
         let resolved = &resolver.resolved_query;
 
         if let ResolvedNode::Match {
@@ -358,7 +359,7 @@ mod tests {
         .unwrap();
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(10, 0).unwrap();
@@ -391,7 +392,7 @@ mod tests {
         .unwrap();
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch_flat_table(None, None).unwrap();
@@ -425,7 +426,7 @@ mod tests {
         .unwrap();
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -449,9 +450,7 @@ mod tests {
 
         // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
         // データがない -> fetch_boolean は FALSE (0) を返すはず
-        let resolver = crate::query::lens_resolver::Resolver::new(
-            "max(mtime:) < 2026-02-01",
-        )
+        let resolver = crate::query::lens_resolver::Resolver::new("max(mtime:) < 2026-02-01", &TagRegistry::with_standard())
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
@@ -546,9 +545,7 @@ mod tests {
         std::env::set_var("TTFM_DEBUG", "1");
 
         // parentdir: &: count(extension:jpg) → src=1, docs=1
-        let resolver = crate::query::lens_resolver::Resolver::new(
-            "parentdir: &: count(extension:jpg)",
-        )
+        let resolver = crate::query::lens_resolver::Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
@@ -626,7 +623,7 @@ mod tests {
         ).unwrap();
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(100, 0).unwrap();
@@ -697,7 +694,7 @@ mod tests {
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:rs").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(100, 0).unwrap();
@@ -720,7 +717,7 @@ mod tests {
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("extension:").unwrap();
+            crate::query::lens_resolver::Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(100, 0).unwrap();
@@ -754,7 +751,7 @@ mod tests {
         .unwrap();
 
         let resolver =
-            crate::query::lens_resolver::Resolver::new("sum(size:)").unwrap();
+            crate::query::lens_resolver::Resolver::new("sum(size:)", &TagRegistry::with_standard()).unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 
         let results = fetcher.fetch(100, 0).unwrap();
@@ -776,9 +773,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "md");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
-            "parentdir: &: (count(extension:rs) > 0)",
-        )
+        let resolver = crate::query::lens_resolver::Resolver::new("parentdir: &: (count(extension:rs) > 0)", &TagRegistry::with_standard())
         .unwrap();
         let fetcher = Fetcher::new(&resolver, &conn);
 

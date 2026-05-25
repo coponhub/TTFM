@@ -3478,6 +3478,7 @@ dependencies = [
  "file-id",
  "filetime",
  "ignore",
+ "indexmap",
  "indicatif",
  "path-slash",
  "pest",

@@ -5,6 +5,7 @@ pub mod lens_optimizer;
 pub mod lens_resolver;
 pub mod lens_schema;
 pub mod logical_resolver;
+pub mod logical_schema;
 pub mod parser;
 pub mod sql;
 
@@ -23,6 +24,7 @@ impl QueryNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::TagRegistry;
 
     #[test]
     fn test_query_types() {
@@ -147,7 +149,7 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let resolver = Resolver::new("extension:rs").unwrap();
+        let resolver = Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
         let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);
@@ -175,7 +177,7 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let resolver = Resolver::new("type:file & extension:rs").unwrap();
+        let resolver = Resolver::new("type:file & extension:rs", &TagRegistry::with_standard()).unwrap();
         let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);

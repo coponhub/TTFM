@@ -2519,14 +2519,18 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// 標準的な Lens を使用してクエリ文字列から Resolver を生成
+    /// クエリ文字列と TagRegistry から Resolver を生成
     ///
     /// 処理フロー:
     /// 1. パース: Query文字列 → QueryNode (AST)
     /// 2. 論理展開: logical_resolver::expand_query_node()
     /// 3. 物理解決: resolve_query_node() → ResolvedNode
-    pub fn new(query: &str) -> Result<Self> {
-        let lens = Lens::base_standard();
+    ///
+    /// 動的登録プラグインの normalize_label / expand_comparison を反映するには
+    /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
+    /// `&TagRegistry::with_standard()` を渡す。
+    pub fn new(query: &str, registry: &crate::tag::TagRegistry) -> Result<Self> {
+        let lens = Lens::from_registry(registry);
         let node = if query.trim().is_empty() {
             QueryNode::And(vec![])
         } else {
@@ -2613,6 +2617,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::TagRegistry;
     use crate::db::SqlType;
     use crate::query::ast::ArithmeticOp;
     use crate::query::lens_schema::StorageMapping;
@@ -3080,7 +3085,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_nvalue() {
         // parentdir: &: count(extension:jpg) → Nest { nvalue: Some(Count) }
-        let resolver = Resolver::new("parentdir: &: count(extension:jpg)")
+        let resolver = Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
             .expect("nest with agg should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, keys, .. } => {
@@ -3109,7 +3114,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_sum_nvalue() {
         // project: &: sum(size:) → Nest { nvalue: Some(Sum) }
-        let resolver = Resolver::new("project: &: sum(size:)")
+        let resolver = Resolver::new("project: &: sum(size:)", &TagRegistry::with_standard())
             .expect("nest with sum should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, keys, .. } => {
@@ -3138,7 +3143,7 @@ mod tests {
     fn test_projection_no_regression() {
         // size: → Nest { nvalue: None }
         let resolver =
-            Resolver::new("size:").expect("simple projection should resolve");
+            Resolver::new("size:", &TagRegistry::with_standard()).expect("simple projection should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, .. } => {
                 assert!(
@@ -3155,7 +3160,7 @@ mod tests {
     #[test]
     fn test_get_nvalue_through_and() {
         // extension: は And([is_dir:false, Nest(extension)]) に展開される
-        let resolver = Resolver::new("extension: &: count(name:test)").unwrap();
+        let resolver = Resolver::new("extension: &: count(name:test)", &TagRegistry::with_standard()).unwrap();
 
         // get_projection は And 内の Projection を見つける
         assert!(
@@ -3175,7 +3180,7 @@ mod tests {
     fn test_get_nvalue_direct_projection() {
         // parentdir は展開後も Nest のまま (And でラップされない)
         let resolver =
-            Resolver::new("parentdir: &: count(extension:jpg)").unwrap();
+            Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard()).unwrap();
 
         assert!(resolver.get_projection().is_some());
         assert!(
@@ -3190,7 +3195,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_comparison_distributed() {
         let resolver =
-            Resolver::new("parentdir: &: (count(extension:jpg) > 1)")
+            Resolver::new("parentdir: &: (count(extension:jpg) > 1)", &TagRegistry::with_standard())
                 .expect("nest comparison should resolve");
 
         // Nest として解決される（nvalue 付き比較は Projection を返す）
@@ -3220,7 +3225,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_comparison_flipped_distributed() {
         let resolver =
-            Resolver::new("parentdir: &: (1 < count(extension:jpg))")
+            Resolver::new("parentdir: &: (1 < count(extension:jpg))", &TagRegistry::with_standard())
                 .expect("flipped nest comparison should resolve");
 
         assert!(resolver.get_projection().is_some());
@@ -3238,9 +3243,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_comparison_agg_agg_distributed() {
         // 両辺が Query(Nest) の比較をサポート済み
-        let resolver = Resolver::new(
-            "parentdir: &: (avg(size:) == sum(size:))",
-        )
+        let resolver = Resolver::new("parentdir: &: (avg(size:) == sum(size:))", &TagRegistry::with_standard())
         .expect("Query-vs-Query comparison (nested) should now resolve");
 
         // 解析結果が NestNestMatch または MergedNestMatch であることを確認
@@ -3258,7 +3261,7 @@ mod tests {
     /// 右辺スカラー → nvalue: Some(Literal(100))
     #[test]
     fn test_resolve_nest_scalar_right() {
-        let resolver = Resolver::new("parentdir: &: 100")
+        let resolver = Resolver::new("parentdir: &: 100", &TagRegistry::with_standard())
             .expect("nest with scalar right should resolve");
 
         assert!(resolver.get_projection().is_some());
@@ -3277,7 +3280,7 @@ mod tests {
         // TypeRef を含む Calculation は純粋スカラーではないため、
         // nvalue ではなく複合キーの一つとして Nest を深化させる。
         // QUERY.md Level n 例: `project: &: (extension: + 1)`
-        let resolver = Resolver::new("parentdir: &: (size: * 2)")
+        let resolver = Resolver::new("parentdir: &: (size: * 2)", &TagRegistry::with_standard())
             .expect("nest with calculation right should resolve");
 
         assert!(resolver.get_projection().is_some());
@@ -3303,7 +3306,7 @@ mod tests {
         // クエリ: extension:html & parentdir: &: count(extension:jpg)
         // extension:html が parentdir: の context に注入されるべき
         let query = "extension:html & parentdir: &: count(extension:jpg)";
-        let result = Resolver::new(query).expect("Should resolve query");
+        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
         let node = &result.resolved_query;
 
         if let ResolvedNode::And(nodes) = node {
@@ -3332,7 +3335,7 @@ mod tests {
         // クエリ: (parentdir: &: count(ext:jpg)) == (parentdir: &: count(ext:png))
         let query = "(parentdir: &: count(extension:jpg)) == (parentdir: &: count(extension:png))";
         // 現在は解決ロジックを実装済みなので、Ok(NestNestMatch) が返るはず
-        let result = Resolver::new(query)
+        let result = Resolver::new(query, &TagRegistry::with_standard())
             .expect("Should resolve Query vs Query comparison");
         assert!(
             matches!(
@@ -3348,7 +3351,7 @@ mod tests {
     #[test]
     fn test_resolve_nest_depth1_produces_nest_variant() {
         let query = "parentdir: &: count()";
-        let result = Resolver::new(query).expect("Should resolve query");
+        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
         match result.resolved_query {
             ResolvedNode::Nest { keys, nvalue, .. } => {
                 assert_eq!(keys.len(), 1);
@@ -3363,7 +3366,7 @@ mod tests {
     #[test]
     fn test_resolve_projection_produces_nest_variant() {
         let query = "extension:";
-        let result = Resolver::new(query).expect("Should resolve query");
+        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
         match result.resolved_query {
             ResolvedNode::And(ref nodes) => {
                 let has_nest = nodes.iter().any(|n| {
@@ -3385,13 +3388,14 @@ mod tests {
 #[cfg(test)]
 mod tests_integration {
     use super::*;
+    use crate::tag::TagRegistry;
 
     #[test]
     fn test_resolver_new_applies_optimization() {
         // 同一キーのマージが最適化によって行われるクエリ
         let query =
             "parentdir: &: count(ext:rs) > 0 & parentdir: &: sum(size:) > 1000";
-        let resolver = Resolver::new(query).unwrap();
+        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
 
         // 最適化が適用されていれば、ルートは MergedNestMatch になっているはず
         assert!(
@@ -3407,7 +3411,7 @@ mod tests_integration {
     #[test]
     fn test_resolve_nest_depth2_produces_nest_with_two_keys() {
         let query = "parentdir: &: filename:";
-        let resolver = Resolver::new(query).unwrap();
+        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
                 resolver.resolved_query,
@@ -3422,7 +3426,7 @@ mod tests_integration {
     #[test]
     fn test_resolve_nest_left_is_nest() {
         let query = "(parentdir: &: filename:) &: extension:";
-        let resolver = Resolver::new(query).unwrap();
+        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
                 resolver.resolved_query,
@@ -3437,7 +3441,7 @@ mod tests_integration {
     #[test]
     fn test_mixed_key_arithmetic_returns_deeper_nest() {
         let query = "(parentdir: &: count()) + (extension: &: count())";
-        let resolver = Resolver::new(query).unwrap();
+        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
         // extension: expands to And([is_dir:false, Nest(extension)]), so the result
         // may be And([filter, Nest { keys: [parentdir, extension], ... }]).
         // Find the Nest node inside And if necessary.
@@ -3629,7 +3633,7 @@ mod tests_integration {
     #[test]
     fn test_and_two_projections_produces_label_set_op_intersect() {
         // And([Proj(cat), Proj(flavor)]) → LabelSetOp { Intersect, [Nest{cat}, Nest{flavor}] }
-        let resolver = Resolver::new("cat: & flavor:").unwrap();
+        let resolver = Resolver::new("cat: & flavor:", &TagRegistry::with_standard()).unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3655,7 +3659,7 @@ mod tests_integration {
     #[test]
     fn test_and_proj_nest_produces_label_set_op_intersect() {
         // And([Proj(tagA), Nest{tagA,tagB}]) → LabelSetOp { Intersect, 2 operands }
-        let resolver = Resolver::new("tagA: & (tagA: &: tagB:)").unwrap();
+        let resolver = Resolver::new("tagA: & (tagA: &: tagB:)", &TagRegistry::with_standard()).unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3676,7 +3680,7 @@ mod tests_integration {
     fn test_and_nest_nest_produces_label_set_op_intersect() {
         // And([Nest{tagA,tagB}, Nest{tagA,tagC}]) → LabelSetOp { Intersect, 2 operands }
         let resolver =
-            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC:)").unwrap();
+            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC:)", &TagRegistry::with_standard()).unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3698,7 +3702,7 @@ mod tests_integration {
     #[test]
     fn test_and_proj_proj_with_filter_context_injected() {
         // (cat: & flavor:) & path:foo/* — フィルタが各オペランドのコンテキストに注入される
-        let resolver = Resolver::new("cat: & flavor: & path:foo/*").unwrap();
+        let resolver = Resolver::new("cat: & flavor: & path:foo/*", &TagRegistry::with_standard()).unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3728,7 +3732,7 @@ mod tests_integration {
         // extension: は And([is_dir:false, Nest{ext}]) に展開される。
         // extension: & size: → And([And([is_dir:false, Nest{ext}]), Nest{size}])
         // as_label_set_op_operand() で And ラッパーを透過して LabelSetOp になるべき。
-        let resolver = Resolver::new("extension: & size:").unwrap();
+        let resolver = Resolver::new("extension: & size:", &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
                 &resolver.resolved_query,
@@ -3748,7 +3752,7 @@ mod tests_integration {
         // Nest{2keys} & Nest{3keys} → LabelSetOp { Intersect, 2 operands }
         // (tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)
         let resolver =
-            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)")
+            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)", &TagRegistry::with_standard())
                 .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
@@ -3775,7 +3779,7 @@ mod tests_integration {
     fn test_and_proj_typedtag_does_not_produce_label_set_op() {
         // Proj & TypedTag → LabelSetOp にはならず Nest にコンテキスト注入される
         // 単一 Projection の場合は And ラッパーが剥がれ Nest{ctx:TypedTag} として返る
-        let resolver = Resolver::new("cat: & animal:dog").unwrap();
+        let resolver = Resolver::new("cat: & animal:dog", &TagRegistry::with_standard()).unwrap();
         assert!(
             !resolver.is_label_set_op(),
             "cat: & animal:dog should NOT be LabelSetOp, got: {:?}",
@@ -3808,6 +3812,7 @@ mod tests_integration {
 #[cfg(test)]
 mod tests_walk_fold {
     use super::*;
+    use crate::tag::TagRegistry;
     use crate::query::ast::ArithmeticOp;
     use crate::types::{Label, LabelValue, SType, TagType};
 
@@ -3978,19 +3983,19 @@ mod tests_walk_fold {
     #[test]
     fn test_get_scalar_result_label_type_size() {
         use crate::types::{SType, TagType};
-        let r = Resolver::new("sum(size:)").unwrap();
+        let r = Resolver::new("sum(size:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "sum(size:) should yield Some(Size)"
         );
-        let r = Resolver::new("avg(size:)").unwrap();
+        let r = Resolver::new("avg(size:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "avg(size:) should yield Some(Size)"
         );
-        let r = Resolver::new("min(size:)").unwrap();
+        let r = Resolver::new("min(size:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
@@ -4001,7 +4006,7 @@ mod tests_walk_fold {
     #[test]
     fn test_get_scalar_result_label_type_mtime() {
         use crate::types::{SType, TagType};
-        let r = Resolver::new("max(mtime:)").unwrap();
+        let r = Resolver::new("max(mtime:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Mtime)),
@@ -4011,13 +4016,13 @@ mod tests_walk_fold {
 
     #[test]
     fn test_get_scalar_result_label_type_count_is_none() {
-        let r = Resolver::new("count(extension:rs)").unwrap();
+        let r = Resolver::new("count(extension:rs)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
             "count() should yield None (no type propagation)"
         );
-        let r = Resolver::new("count()").unwrap();
+        let r = Resolver::new("count()", &TagRegistry::with_standard()).unwrap();
         assert_eq!(r.get_scalar_result_label_type(), None);
     }
 
@@ -4025,7 +4030,7 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_mixed_is_none() {
         // sum(size: + mtime:) — two different tag types → None
         // Note: arithmetic inside sum() does not require extra parens
-        let r = Resolver::new("sum(size: + mtime:)").unwrap();
+        let r = Resolver::new("sum(size: + mtime:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
@@ -4037,7 +4042,7 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_calc_with_literal() {
         use crate::types::{SType, TagType};
         // sum(size: - 1000) — Calculation(TagRef{size}, Literal) → size only
-        let r = Resolver::new("sum(size: - 1000)").unwrap();
+        let r = Resolver::new("sum(size: - 1000)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
@@ -4049,14 +4054,14 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_outer_calc() {
         use crate::types::{SType, TagType};
         // sum(size:) + count() — Calculation of Agg{size} + Agg{Count} → size only
-        let r = Resolver::new("sum(size:) + count()").unwrap();
+        let r = Resolver::new("sum(size:) + count()", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "sum(size:) + count() should yield Some(Size)"
         );
         // sum(size:) + sum(mtime:) → None (2 types)
-        let r = Resolver::new("sum(size:) + sum(mtime:)").unwrap();
+        let r = Resolver::new("sum(size:) + sum(mtime:)", &TagRegistry::with_standard()).unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,

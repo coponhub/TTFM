@@ -8,7 +8,7 @@ use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
 use chrono::TimeZone as _;
 use path_slash::PathExt as _;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
@@ -167,28 +167,7 @@ pub trait Index: Send + Sync {
 // LogicalType / LogicalSchema
 // ============================================================
 
-/// クエリエンジンの論理レイヤーで扱う型。
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LogicalType {
-    Integer,
-    Float,
-    String,
-    Boolean,
-    Any,
-}
-
-impl LogicalType {
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::Boolean)
-    }
-}
-
-/// 論理的なスキーマ情報を提供するインターフェース。
-pub trait LogicalSchema {
-    fn get_logical_type(&self, tag: &TagType) -> LogicalType;
-    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode;
-    fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
-}
+pub use crate::query::logical_schema::{LogicalSchema, LogicalType};
 
 // ============================================================
 // LogicalRole
@@ -306,9 +285,8 @@ pub trait TagFunction: Send + Sync {
 
 /// TagFunction を一括管理するレジストリ。
 pub struct TagRegistry {
-    functions: HashMap<String, Arc<dyn TagFunction>>,
-    /// 登録順序を保持（カラムスキーマの安定のため）。
-    ordered: Vec<Arc<dyn TagFunction>>,
+    /// 登録順序を保持しつつ名前でのルックアップも O(1) で行える IndexMap
+    functions: IndexMap<String, Arc<dyn TagFunction>>,
 }
 
 impl Default for TagRegistry {
@@ -320,15 +298,13 @@ impl Default for TagRegistry {
 impl TagRegistry {
     pub fn new() -> Self {
         Self {
-            functions: HashMap::new(),
-            ordered: Vec::new(),
+            functions: IndexMap::new(),
         }
     }
 
     pub fn register(&mut self, func: impl TagFunction + 'static) {
         let arc = Arc::new(func);
-        self.functions.insert(arc.name().to_string(), arc.clone());
-        self.ordered.push(arc);
+        self.functions.insert(arc.name().to_string(), arc);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn TagFunction> {
@@ -342,13 +318,13 @@ impl TagRegistry {
     pub fn iter_arcs(
         &self,
     ) -> impl Iterator<Item = Arc<dyn TagFunction>> + '_ {
-        self.ordered.iter().cloned()
+        self.functions.values().cloned()
     }
 
     pub fn iter_all_for_rank(
         &self,
     ) -> impl Iterator<Item = (&str, Rank)> + '_ {
-        self.ordered.iter().map(|f| (f.name(), f.default_rank()))
+        self.functions.values().map(|f| (f.name(), f.default_rank()))
     }
 
     /// 標準タグを全登録したレジストリを返す。
@@ -400,7 +376,7 @@ impl TagRegistry {
         if matches!(label.value(), LabelValue::Literal(_)) {
             return label.clone();
         }
-        for f in self.ordered.iter().rev() {
+        for f in self.functions.values().rev() {
             if let Some(q) = f.query() {
                 let normalized = q.normalize_label(label);
                 if normalized != *label {
@@ -412,8 +388,8 @@ impl TagRegistry {
     }
 
     pub fn get_all_columns(&self) -> Vec<crate::taggers::ColumnDef> {
-        self.ordered
-            .iter()
+        self.functions
+            .values()
             .filter_map(|f| {
                 f.index().map(|idx| crate::taggers::ColumnDef {
                     name: f.name().to_string(),
@@ -428,8 +404,8 @@ impl TagRegistry {
         &self,
         path: &Path,
     ) -> Result<Vec<crate::taggers::TagValue>> {
-        self.ordered
-            .iter()
+        self.functions
+            .values()
             .filter_map(|f| f.index())
             .map(|idx| idx.extract_tag_value(path))
             .collect()

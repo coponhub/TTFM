@@ -1,3 +1,4 @@
+use ttfm::tag::TagRegistry;
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
     default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
@@ -2423,7 +2424,7 @@ fn test_nest_parse_with_aggregation() {
 #[test]
 fn test_nest_left_must_be_projection() {
     let result =
-        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:");
+        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:", &TagRegistry::with_standard());
     assert!(result.is_err(), "non-projection left should fail");
 }
 
@@ -2433,9 +2434,7 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
-        "parentdir: &: count(extension:jpg)",
-    )
+    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2444,7 +2443,7 @@ fn test_nest_resolves_to_projection_with_nvalue() {
 #[test]
 fn test_nest_resolves_sum_nvalue() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)")
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)", &TagRegistry::with_standard())
             .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2453,7 +2452,7 @@ fn test_nest_resolves_sum_nvalue() {
 #[test]
 fn test_plain_projection_no_nvalue() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("extension:").unwrap();
+        ttfm::query::lens_resolver::Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(
         resolver.get_nvalue().is_none(),
@@ -2467,33 +2466,25 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "extension:rs &: count(*:*)"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("extension:rs &: count(*:*)", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "count(*:*) &: extension:"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("count(*:*) &: extension:", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "(size: > 100) &: extension:"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("(size: > 100) &: extension:", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
-        "parentdir: &: (count(extension:jpg) > 1)",
-    )
+    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: (count(extension:jpg) > 1)", &TagRegistry::with_standard())
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2522,7 +2513,7 @@ fn test_nest_resolver_all_aggregations() {
         "filename: &: sum(size:)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}' should resolve: {}",
@@ -2542,7 +2533,7 @@ fn test_nest_resolver_all_aggregations() {
 #[test]
 fn test_nest_scalar_right_resolves() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100").unwrap();
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100", &TagRegistry::with_standard()).unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
@@ -2558,7 +2549,7 @@ fn test_nest_comparison_resolver_patterns() {
         "extension: &: (count(*:*) > 2)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}': {}",
@@ -2588,7 +2579,7 @@ fn test_nest_query_vs_calc_resolves() {
         "parentdir: &: (avg(size:) > (sum(size:) / count()))",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}': {}",

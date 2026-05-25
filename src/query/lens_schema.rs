@@ -1,12 +1,12 @@
 use crate::db::Col;
-use crate::query::ast::{ComparisonOp, QueryNode};
-use crate::query::logical_resolver::{LogicalSchema, LogicalType};
+use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
 use crate::types::{Label, LabelValue, SType, TagType};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, SimpleExpr};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 
 /// タグの物理的な格納場所
@@ -280,7 +280,8 @@ impl TagDescriptor {
 
 /// タグ知識の統合レジストリ
 pub struct Lens {
-    registry: HashMap<TagType, TagDescriptor>,
+    /// 登録順序を保持しつつタグ型でのルックアップも O(1) で行える IndexMap
+    registry: IndexMap<TagType, TagDescriptor>,
 }
 
 impl LogicalSchema for Lens {
@@ -292,11 +293,13 @@ impl LogicalSchema for Lens {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
                 if let Some(q) = func.query() {
+                    // normalize_label を適用してから expand する
+                    let normalized = q.normalize_label(label);
                     let tag = crate::types::TypedTag::new(
                         tag_type.clone(),
-                        label.clone(),
+                        normalized.clone(),
                     );
-                    return q.expand(tag_type, label, &tag);
+                    return q.expand(tag_type, &normalized, &tag);
                 }
             }
         }
@@ -314,17 +317,80 @@ impl LogicalSchema for Lens {
                 }
             }
         }
-        QueryNode::Projection(crate::query::ast::Operand::TypeRef(
-            tag_type.clone(),
-        ))
+        QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
     }
+
+    fn normalize_label_any(&self, label: &Label) -> Label {
+        if matches!(label.value(), LabelValue::Literal(_)) {
+            return label.clone();
+        }
+        // TagRegistry と同様に登録の逆順で走査する
+        for desc in self.registry.values().rev() {
+            if let Some(func) = &desc.logical_function {
+                if let Some(q) = func.query() {
+                    let normalized = q.normalize_label(label);
+                    if normalized != *label {
+                        return normalized;
+                    }
+                }
+            }
+        }
+        label.clone()
+    }
+
+    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+        let tag_type = find_tag_type_in_comparison(&node);
+        let Some(tag_type) = tag_type else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(desc) = self.look_up(&tag_type) else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(func) = &desc.logical_function else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(q) = func.query() else {
+            return QueryNode::Comparison(node);
+        };
+        q.expand_comparison(node)
+    }
+}
+
+/// 比較ノード内の TypeRef から TagType を探す。
+fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
+    fn from_operand(op: &Operand) -> Option<TagType> {
+        use crate::query::ast::AggregationNode;
+        match op {
+            Operand::TypeRef(tt) => Some(tt.clone()),
+            Operand::Aggregation(agg) => {
+                let inner = match agg.as_ref() {
+                    AggregationNode::Count(q) => q.as_ref(),
+                    AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
+                };
+                from_query_node(inner)
+            }
+            _ => None,
+        }
+    }
+    fn from_query_node(node: &QueryNode) -> Option<TagType> {
+        match node {
+            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt.clone()),
+            QueryNode::And(ns) | QueryNode::Or(ns) => {
+                ns.iter().find_map(from_query_node)
+            }
+            QueryNode::Difference(l, _) => from_query_node(l),
+            _ => None,
+        }
+    }
+    from_operand(&node.first)
+        .or_else(|| node.rest.iter().find_map(|(_, op)| from_operand(op)))
 }
 
 impl Lens {
     /// 内部初期化用の一時的な空 Lens。外部からは通常 with_standard を使用してください。
     fn new_empty() -> Self {
         Self {
-            registry: HashMap::new(),
+            registry: IndexMap::new(),
         }
     }
 

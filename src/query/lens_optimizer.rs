@@ -323,6 +323,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::TagRegistry;
     use crate::query::ResolvedOperand;
 
     use crate::query::lens_resolver::Resolver;
@@ -330,7 +331,7 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_logical() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
 
         // At this point `resolved` is an `And` node containing two NestMatches.
         let optimized = optimize(resolved);
@@ -364,7 +365,7 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_or() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) | parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
 
         let optimized = optimize(resolved);
 
@@ -405,7 +406,7 @@ mod tests {
     #[test]
     fn test_optimize_filter_pushdown() {
         let query_str = "parentdir: &: (count(*:*) > 0) & type:file";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         let ResolvedNode::And(nodes) = optimized else {
@@ -449,13 +450,13 @@ mod tests {
         // Query: sum(parentdir: &: sum(size:)) > 0
         // Outer sum should be flattened to essentially sum(size:) > 0.
         let query_str = "sum(parentdir: &: sum(size:)) > 0";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         // Compare with explicitly flat sum(size:) > 0
         let flat_query_str = "sum(size:) > 0";
         let flat_resolved =
-            Resolver::new(flat_query_str).unwrap().resolved_query;
+            Resolver::new(flat_query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
 
         match (optimized, flat_resolved) {
             (
@@ -478,7 +479,7 @@ mod tests {
         // (フラットリストを返すべき比較演算のため、MergedNestMatch には変換しない)
         let query_str =
             "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
@@ -522,7 +523,7 @@ mod tests {
         // 同一キーの算術演算 nvalue → Calculation を持つ MergedNestMatch に変換されること
         let query_str =
             "((parentdir: &: count(ext:rs)) / (parentdir: &: count())) :> 100";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
@@ -560,7 +561,7 @@ mod tests {
         // parentdir と extension は異なるキーなのでマージされないこと
         let query_str =
             "parentdir: &: (count(ext:rs) > 0) & extension: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         // MergedNestMatch にはなってはいけない
@@ -581,7 +582,7 @@ mod tests {
         // extension: の And ラッパーなしのシンプルな異なるキー同士はマージされないこと
         let query_str =
             "parentdir: &: (sum(size:) > 0) & stem: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         assert!(
@@ -599,12 +600,12 @@ mod tests {
     fn test_optimize_no_flatten_avg_avg() {
         // avg(parentdir: &: avg(size:)) は sum と違いフラット化されないこと
         let query_str = "avg(parentdir: &: avg(size:)) > 0";
-        let resolved = Resolver::new(query_str).unwrap().resolved_query;
+        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
         // 比較対象: avg(size:) > 0 (フラット版)
         let flat_resolved =
-            Resolver::new("avg(size:) > 0").unwrap().resolved_query;
+            Resolver::new("avg(size:) > 0", &TagRegistry::with_standard()).unwrap().resolved_query;
 
         match (optimized, flat_resolved) {
             (
