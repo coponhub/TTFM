@@ -247,10 +247,10 @@ impl ResolvedOperand {
 
     pub fn to_condition(&self) -> Condition {
         match self {
-            ResolvedOperand::Literal(_) => Condition::any(),
+            ResolvedOperand::Literal(_) => Condition::all(),
             ResolvedOperand::TagRef { storage, .. } => cond_projection(storage),
             ResolvedOperand::Calculation(calc) => calc.to_condition(),
-            ResolvedOperand::Aggregation(_) => Condition::any(),
+            ResolvedOperand::Aggregation(_) => Condition::all(),
         }
     }
 

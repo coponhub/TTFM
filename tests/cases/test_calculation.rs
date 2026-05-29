@@ -286,6 +286,53 @@ define_cases! {
             Ok(())
         },
     },
+    // Projection同士の & に Calculation キーが含まれる場合のテスト
+    calc_projection_intersect_no_crash: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), b"hello")?;
+            std::fs::write(dir.join("b.txt"), b"world!!")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(size: / 2) & parentdir:",
+        assert: |res, _dir| {
+            // 型が一致しないので空でも有効なプロジェクションでもよい（クラッシュしないことが重要）
+            let _ = res;
+            Ok(())
+        },
+    },
+    calc_projection_intersect_matching_values: {
+        setup: |dir| {
+            // size=8: size/2=4, size=2: size*2=4 → ラベル値4が両辺に現れる
+            std::fs::write(dir.join("size8.txt"), vec![0u8; 8])?;
+            std::fs::write(dir.join("size2.txt"), vec![0u8; 2])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(size: / 2) & (size: * 2)",
+        assert: |res, _dir| {
+            let reprs: Vec<String> = res.results.iter().map(|r| r.raw_repr()).collect();
+            // ラベル値4が積集合に現れるべき (size8: 8/2=4, size2: 2*2=4)
+            let item_with_4 = res.results.iter().find(|r| r.raw_repr() == "4")
+                .unwrap_or_else(|| panic!("ラベル値4が積集合に現れるべき: {:?}", reprs));
+            // size8.txt と size2.txt の両方がそのグループに含まれるべき
+            let item_strs: Vec<String> = item_with_4.tags.entries.iter()
+                .filter(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+                .map(|e| e.label.as_str())
+                .collect();
+            assert!(
+                item_strs.iter().any(|s| s.contains("size8")),
+                "size8.txt が結果グループに含まれるべき: {:?}", item_strs
+            );
+            assert!(
+                item_strs.iter().any(|s| s.contains("size2")),
+                "size2.txt が結果グループに含まれるべき: {:?}", item_strs
+            );
+            Ok(())
+        },
+    },
 }
 
 /// bare_calculation — ベースライン: 明示的括弧版 sum((size: - 100)) と同じ結果

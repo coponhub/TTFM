@@ -97,6 +97,43 @@ pub(super) fn extract_primary_storage_from_node(
     })
 }
 
+/// Calculation キーを持つ Nest オペランドのラベル SELECT を構築します。
+/// `(size: / 2)` のような算術式から代表値を SELECT します。
+/// `build_calculation_expr` を使用（GROUP BY なし＋WHERE フィルタ済みコンテキスト向け）。
+fn build_calculation_key_label_select(
+    src: &Src,
+    node: &ResolvedNode,
+    ids_sql: SelectStatement,
+) -> anyhow::Result<SelectStatement> {
+    use crate::query::lens_resolver::ResolvedCalculationNode;
+    let calc: &ResolvedCalculationNode = node
+        .walk()
+        .into_iter()
+        .find_map(|n| match n {
+            ResolvedNode::Nest { keys, .. } => match keys.first()? {
+                ResolvedOperand::Calculation(c) => Some(c.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "label_set_op_sql: cannot determine label type from operand (not a Calculation key)"
+            )
+        })?;
+
+    let calc_expr = build_calculation_expr(calc);
+    let cast_expr = CustomFunc::as_representative(calc_expr);
+    let cond = calc.to_condition();
+    let mut s = Query::select();
+    s.expr_as(cast_expr, Representative)
+        .column(Col::ItemId)
+        .from(src)
+        .cond_where(cond)
+        .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
+    Ok(s)
+}
+
 fn extract_primary_tag_type_from_node(node: &ResolvedNode) -> Option<String> {
     node.walk().into_iter().find_map(|n| match n {
         ResolvedNode::Nest { keys, .. } => match keys.first()? {
@@ -1304,31 +1341,23 @@ fn label_set_op_sql(
         let labels_sql = if matches!(op, LabelSetOpKind::Union) {
             if let Some(keys) = extract_multi_key_nest_operands(operand) {
                 build_multi_key_labels_sql(src, &keys, ids_sql)?
-            } else {
-                let storage =
-                    extract_primary_storage_from_node(operand).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "label_set_op_sql: cannot determine label type from operand {}", i
-                        )
-                    })?;
+            } else if let Some(storage) = extract_primary_storage_from_node(operand) {
                 storage.to_label_select(src, ids_sql).ok_or_else(|| {
                     anyhow::anyhow!(
                         "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
                     )
                 })?
+            } else {
+                build_calculation_key_label_select(src, operand, ids_sql)?
             }
-        } else {
-            let storage =
-                extract_primary_storage_from_node(operand).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "label_set_op_sql: cannot determine label type from operand {}", i
-                    )
-                })?;
+        } else if let Some(storage) = extract_primary_storage_from_node(operand) {
             storage.to_label_select(src, ids_sql).ok_or_else(|| {
                 anyhow::anyhow!(
                     "label_set_op_sql: Virtual storage cannot generate label select for operand {}", i
                 )
             })?
+        } else {
+            build_calculation_key_label_select(src, operand, ids_sql)?
         };
 
         with_clause.cte(
