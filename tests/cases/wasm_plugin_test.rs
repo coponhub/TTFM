@@ -1,40 +1,256 @@
+use std::collections::HashMap;
 use std::path::Path;
+use tempfile::tempdir;
+use ttfm::search;
 use ttfm::plugins::WasmPlugin;
-use ttfm::Tagger;
+use ttfm::tag::{Index, Query, TagFunction};
+use ttfm::types::{Label, LabelValue, TagType};
+use ttfm::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use ttfm::SearchOptions;
+
+/// プラグインが display を実装している場合、
+/// registry.format_display() で show() が呼ばれることを検証する。
+#[test]
+fn test_plugin_display_show_applied_in_format_display() {
+    use ttfm::tag::{Display, DisplayFormat, DisplayFormats};
+
+    struct IconTag;
+    impl TagFunction for IconTag {
+        fn name(&self) -> &str { "icon_tag" }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> { None }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> { None }
+        fn display(&self) -> Option<&dyn ttfm::tag::Display> { Some(self) }
+    }
+    impl Display for IconTag {
+        fn formats(&self) -> DisplayFormats {
+            DisplayFormats {
+                default: DisplayFormat { id: "icon".to_string(), label: "Icon".to_string() },
+                options: vec![],
+            }
+        }
+        fn show(&self, value: &LabelValue, _format: DisplayFormat) -> String {
+            let s = match value {
+                LabelValue::String(s) => s.clone(),
+                LabelValue::Integer(n) => n.to_string(),
+                _ => String::new(),
+            };
+            format!("● {s}")
+        }
+    }
+
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    registry.register(IconTag);
+
+    // format_display が show() を呼んで "● modified" を返すことを確認
+    let result = registry.format_display("icon_tag", "modified");
+    assert_eq!(result, "● modified",
+        "format_display が display::show() を呼んでいない");
+}
+
+/// プラグインが normalize_label を実装している場合、
+/// search 時にラベルの短縮形が正規化されて検索できることを検証する。
+///
+/// 現状バグ: expand_comparison_with_recursion が TagRegistry::with_standard() を
+/// ハードコードしているため、動的登録プラグインの normalize_label が呼ばれない。
+#[test]
+fn test_plugin_normalize_label_applied_in_search() {
+    use std::path::Path as StdPath;
+
+    struct ShortLabelTag;
+    impl TagFunction for ShortLabelTag {
+        fn name(&self) -> &str { "my_status" }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> { Some(self) }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> { Some(self) }
+    }
+    impl ttfm::tag::Index for ShortLabelTag {
+        fn extract(&self, _path: &StdPath) -> anyhow::Result<Option<LabelValue>> {
+            // 全ファイルに "modified" タグを付与
+            Ok(Some(LabelValue::String("modified".to_string())))
+        }
+    }
+    impl ttfm::tag::Query for ShortLabelTag {
+        fn normalize_label(&self, label: &Label) -> Label {
+            match label.as_str().as_str() {
+                "m" => Label::from("modified"),
+                "c" => Label::from("clean"),
+                _   => label.clone(),
+            }
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    let cache = ttfm::CacheManager::new(db_dir.join("cache"), 0);
+
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    registry.register(ShortLabelTag);
+
+    let test_file = dir.path().join("test.txt");
+    std::fs::write(&test_file, "hello").unwrap();
+
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
+        .unwrap();
+
+    // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
+    let results = search::search(
+        &store, &registry, &cache,
+        "my_status:m",
+        SearchOptions::default(),
+    )
+    .unwrap()
+    .results;
+
+    assert!(
+        !results.is_empty(),
+        "normalize_label が search に適用されていない: my_status:m → my_status:modified のヒットがゼロ"
+    );
+}
 
 #[test]
 fn test_wasm_plugin_mimetype() {
-    // 正しいパスに修正
     let wasm_path = Path::new("plugins/sample_plugin.component.wasm");
 
-    // プラグインのロード
-    let plugin =
-        WasmPlugin::new(wasm_path).expect("Failed to load Wasm plugin");
-
-    // アダプターの作成
+    let plugin = WasmPlugin::new(wasm_path).expect("Failed to load Wasm plugin");
     let adapter = plugin.into_adapter().expect("Failed to create adapter");
 
-    // カラム定義の確認
-    let columns = adapter.get_columns();
-    assert_eq!(columns.len(), 1);
-    // sample_plugin は mimetype ではなく "sample" カラムを持っている可能性があるため柔軟にチェック
-    // (以前の出力ログでは "sample" という名前でした)
-    assert!(columns
-        .iter()
-        .any(|c| c.name == "sample" || c.name == "mimetype"));
+    let name = adapter.name();
+    assert!(name == "sample" || name == "mimetype");
 
-    // タグ付けの実行 (1回目: インスタンス化が走る)
-    let results = adapter
-        .tag_file(Path::new("Cargo.toml"))
-        .expect("Failed to execute tag_file (1st)");
+    // 1回目: インスタンス化が走る
+    let result1 = adapter
+        .extract(Path::new("Cargo.toml"))
+        .expect("Failed to execute extract (1st)");
 
-    assert_eq!(results.len(), 1);
+    // 2回目: キャッシュされたインスタンスが使われる
+    let result2 = adapter
+        .extract(Path::new("Cargo.toml"))
+        .expect("Failed to execute extract (2nd)");
 
-    // タグ付けの実行 (2回目: キャッシュされたインスタンスが使われる)
-    let results2 = adapter
-        .tag_file(Path::new("Cargo.toml"))
-        .expect("Failed to execute tag_file (2nd)");
+    assert_eq!(result1, result2);
+}
 
-    assert_eq!(results2.len(), 1);
-    assert_eq!(results, results2);
+/// ユーザープラグインがビルトインと同じパッケージ名を持つ場合、
+/// ファイル名に関係なくパッケージ名でオーバーライドが判定されることを検証する。
+#[test]
+fn test_user_plugin_overrides_builtin_by_package_name() {
+    let dir = tempdir().unwrap();
+    let status: HashMap<String, bool> = HashMap::new();
+
+    // ユーザープラグインディレクトリにオーバーライドプラグインを配置
+    // ファイル名はパッケージ名と無関係（パッケージ名 "mimetype" はWIT get_info()で決まる）
+    let user_plugins_dir = dir.path().join("plugins");
+    std::fs::create_dir_all(&user_plugins_dir).unwrap();
+    std::fs::copy(
+        "tests/fixtures/mimetype_override_test_plugin.component.wasm",
+        user_plugins_dir.join("my_custom_mimetype.component.wasm"),
+    )
+    .expect("Failed to copy override plugin");
+
+    let test_file = dir.path().join("test.txt");
+    std::fs::write(&test_file, "hello").unwrap();
+
+    // ユーザープラグインあり: オーバーライドプラグインが優先される
+    let with_override = {
+        let db_dir = dir.path().join("db_override");
+        let mut registry = ttfm::tag::TagRegistry::with_standard();
+        let store = ttfm::db::Store::open(&db_dir).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+        registry.load_from_dir(&user_plugins_dir, &status).unwrap();
+        registry.load_builtins(&status).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
+            .unwrap()
+            .results
+    };
+
+    // ユーザープラグインなし: ビルトインが使われる
+    let without_override = {
+        let db_dir = dir.path().join("db_builtin");
+        let mut registry = ttfm::tag::TagRegistry::with_standard();
+        let store = ttfm::db::Store::open(&db_dir).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+        registry.load_builtins(&status).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
+            .unwrap()
+            .results
+    };
+
+    assert!(
+        !with_override.is_empty(),
+        "オーバーライドプラグインによるmimetypeタグがヒットしていない"
+    );
+    assert!(
+        without_override.is_empty(),
+        "ビルトインプラグインがオーバーライドプラグインより優先されている"
+    );
+}
+
+fn load_sample_adapter() -> ttfm::plugins::WasmPluginAdapter {
+    let plugin = WasmPlugin::new(Path::new("plugins/sample_plugin.component.wasm"))
+        .expect("Failed to load sample plugin");
+    plugin.into_adapter().expect("Failed to create adapter")
+}
+
+/// プラグインが query インターフェースを実装していれば adapter.query() は Some を返す
+#[test]
+fn test_wasm_adapter_query_is_some() {
+    let adapter = load_sample_adapter();
+    assert!(adapter.query().is_some(), "adapter.query() should return Some");
+}
+
+/// プラグインが display インターフェースを実装していれば adapter.display() は Some を返す
+#[test]
+fn test_wasm_adapter_display_is_some() {
+    let adapter = load_sample_adapter();
+    assert!(adapter.display().is_some(), "adapter.display() should return Some");
+}
+
+/// プラグインが normalize-label で None を返す場合、ラベルは変更されない
+#[test]
+fn test_wasm_adapter_normalize_label_default() {
+    let adapter = load_sample_adapter();
+    let query = adapter.query().expect("adapter.query() should be Some");
+    let label = Label::from("hello");
+    assert_eq!(query.normalize_label(&label).as_str(), "hello");
+}
+
+/// プラグインが expand で None を返す場合、TypedTag のデフォルト動作を使う
+#[test]
+fn test_wasm_adapter_expand_default_returns_typed_tag() {
+    let adapter = load_sample_adapter();
+    let query = adapter.query().expect("adapter.query() should be Some");
+    let tag_type = TagType::from("sample");
+    let label = Label::from("foo");
+    let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
+    let node = query.expand(&tag_type, &label, &typed_tag);
+    assert_eq!(node, QueryNode::TypedTag(typed_tag));
+}
+
+/// プラグインが expand-projection で None を返す場合、Projection のデフォルト動作を使う
+#[test]
+fn test_wasm_adapter_expand_projection_default() {
+    let adapter = load_sample_adapter();
+    let query = adapter.query().expect("adapter.query() should be Some");
+    let tag_type = TagType::from("sample");
+    let node = query.expand_projection(&tag_type);
+    let expected = QueryNode::Projection(Operand::from(tag_type));
+    assert_eq!(node, expected);
+}
+
+/// プラグインが display::default-format で None を返す場合、デフォルトフォーマット id は "raw"
+#[test]
+fn test_wasm_adapter_display_formats_default() {
+    let adapter = load_sample_adapter();
+    let display = adapter.display().expect("adapter.display() should be Some");
+    let formats = display.formats();
+    assert_eq!(formats.default.id, "raw");
+    assert!(formats.options.is_empty());
 }

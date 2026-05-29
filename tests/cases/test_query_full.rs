@@ -1,3 +1,4 @@
+use ttfm::tag::TagRegistry;
 use super::has_item_tags;
 use std::fs::File;
 use ttfm::query::lens_resolver::Resolver;
@@ -32,7 +33,7 @@ define_cases! {
             assert!(!has_item_tags(&res.results), "Should return items, not projection");
             assert!(!res.results.is_empty(), "Should have items from src/");
             for item in &res.results {
-                assert!(!item.name.contains("doc"), "doc/ items should be excluded, but got: {}", item.name);
+                assert!(!item.raw_repr().contains("doc"), "doc/ items should be excluded, but got: {}", item.raw_repr());
             }
             Ok(())
         },
@@ -50,10 +51,10 @@ define_cases! {
         query: r#"((extension: &: count(extension:rs)) * 10) :> 0"#,
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should return items without error");
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.contains(&"a.rs") && names.contains(&"b.rs") && names.contains(&"c.rs"),
+            let names: Vec<String> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"a.rs".to_string()) && names.contains(&"b.rs".to_string()) && names.contains(&"c.rs".to_string()),
                 "rs files should be included. Got: {:?}", names);
-            assert!(!names.contains(&"d.txt"), "txt files should be excluded. Got: {:?}", names);
+            assert!(!names.contains(&"d.txt".to_string()), "txt files should be excluded. Got: {:?}", names);
             Ok(())
         },
     },
@@ -96,7 +97,7 @@ define_cases! {
 #[test]
 fn test_full_resolution() {
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 1"#;
-    match Resolver::new(q) {
+    match Resolver::new(q, &TagRegistry::with_standard()) {
         Ok(resolver) => {
             eprintln!("SUCCESS: {:?}", resolver.get_projection())
         }
@@ -153,7 +154,7 @@ fn test_calculation_nvalue_label_groups() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"(((parentdir: &: count(extension:rs)) / (parentdir: &: count())) * 10) :> 5"#;
-    let resolver = Resolver::new(q).unwrap();
+    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results
@@ -224,7 +225,7 @@ fn test_calculation_nvalue_gt_zero() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 0"#;
-    let resolver = Resolver::new(q).unwrap();
+    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results

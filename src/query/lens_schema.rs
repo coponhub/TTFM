@@ -1,44 +1,44 @@
 use crate::db::Col;
-use crate::query::ast::{ComparisonOp, QueryNode};
-use crate::query::functions::*;
-use crate::query::logical_resolver::{LogicalSchema, LogicalType};
+use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
-use crate::query::QueryFunction;
+use crate::tag::{LogicalRole, TagFunction};
 use crate::types::{Label, LabelValue, SType, TagType};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, SimpleExpr};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 
 /// タグの物理的な格納場所
 #[derive(Debug, PartialEq, Clone)]
 pub enum StorageMapping {
-    /// oneview の直接のカラム
-    Column(Col),
-    /// oneview の行ベースのタグ (特定のラベルカラム + タグ名)
-    RowTag { column: Col, tag_type: String },
-    /// 他のタグに展開される論理タグ
-    Virtual,
+    /// oneview の専用カラム（Fixed タグ）
+    Fixed(Col),
+    /// oneview の汎用ラベルカラム＋タグ名（Basic タグ）
+    Basic { column: Col, tag_type: String },
+    /// 他のタグに展開される論理タグ（Composite タグ）
+    Composite,
 }
 
 impl StorageMapping {
     /// このストレージマッピングに基づき、ラベル値を SELECT する SQL を生成します。
-    /// Virtual の場合は None を返します。
+    /// Composite の場合は None を返します。
     pub fn to_label_select(
         &self,
+        src: &crate::db::Src,
         ids_sql: sea_query::SelectStatement,
     ) -> Option<sea_query::SelectStatement> {
         use crate::query::sql::schema_pieces::{
-            build_lens_select_column, build_lens_select_row_tag,
+            build_lens_select_column, build_lens_select_tag,
         };
         match self {
-            StorageMapping::Column(col) => {
-                Some(build_lens_select_column(*col, ids_sql))
+            StorageMapping::Fixed(col) => {
+                Some(build_lens_select_column(src, *col, ids_sql))
             }
-            StorageMapping::RowTag { column, tag_type } => {
-                Some(build_lens_select_row_tag(*column, tag_type, ids_sql))
+            StorageMapping::Basic { column, tag_type } => {
+                Some(build_lens_select_tag(src, *column, tag_type, ids_sql))
             }
-            StorageMapping::Virtual => None,
+            StorageMapping::Composite => None,
         }
     }
 
@@ -50,15 +50,15 @@ impl StorageMapping {
         sql_type: crate::db::SqlType,
     ) -> Condition {
         match self {
-            StorageMapping::Column(col) => {
+            StorageMapping::Fixed(col) => {
                 build_column_condition(*col, op, label, sql_type, false)
             }
-            StorageMapping::RowTag { column, tag_type } => {
+            StorageMapping::Basic { column, tag_type } => {
                 Condition::all().add(check_tag_match(tag_type)).add(
                     build_column_condition(*column, op, label, sql_type, true),
                 )
             }
-            StorageMapping::Virtual => Condition::any(),
+            StorageMapping::Composite => Condition::any(),
         }
     }
 }
@@ -84,32 +84,35 @@ fn build_column_condition(
 ) -> Condition {
     let bin_op = to_bin_op(op);
 
-    // 汎用カラムか？ (oneviewのRowTag用カラム)
-    let is_generic_row_col = col == Col::LabelStr
+    // 汎用ラベルカラムか？ (Basic タグの EAV カラム)
+    let is_eav_col = col == Col::LabelStr
         || col == Col::LabelInt
         || col == Col::LabelDouble
         || col == Col::LabelBool;
 
     match label.value() {
         LabelValue::Integer(i) => {
-            build_int_condition(col, bin_op, i, is_generic_row_col)
+            build_int_condition(col, bin_op, i, is_eav_col)
         }
         LabelValue::Boolean(b) => build_str_condition(
             col,
             bin_op,
             &b.to_string(),
             sql_type,
-            is_generic_row_col,
+            is_eav_col,
         ),
         LabelValue::Double(bits) => {
             schema_pieces::build_double_condition(bin_op, bits)
         }
         LabelValue::Null => schema_pieces::build_null_condition(),
         LabelValue::String(s) => {
-            build_str_condition(col, bin_op, &s, sql_type, is_generic_row_col)
+            build_str_condition(col, bin_op, &s, sql_type, is_eav_col)
         }
         LabelValue::Literal(s) => {
-            build_literal_condition(col, bin_op, &s, is_generic_row_col)
+            build_literal_condition(col, bin_op, &s, is_eav_col)
+        }
+        LabelValue::Date(dt) => {
+            build_int_condition(col, bin_op, dt.to_timestamp(), is_eav_col)
         }
     }
 }
@@ -253,7 +256,7 @@ pub struct TagDescriptor {
     pub tag_type: TagType,
     pub storage: StorageMapping,
     pub logical_type: LogicalType,
-    pub logical_function: Option<Arc<dyn QueryFunction>>,
+    pub logical_function: Option<Arc<dyn TagFunction>>,
 }
 
 impl TagDescriptor {
@@ -277,7 +280,8 @@ impl TagDescriptor {
 
 /// タグ知識の統合レジストリ
 pub struct Lens {
-    registry: HashMap<TagType, TagDescriptor>,
+    /// 登録順序を保持しつつタグ型でのルックアップも O(1) で行える IndexMap
+    registry: IndexMap<TagType, TagDescriptor>,
 }
 
 impl LogicalSchema for Lens {
@@ -288,7 +292,15 @@ impl LogicalSchema for Lens {
     fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
-                return func.expand(label);
+                if let Some(q) = func.query() {
+                    // normalize_label を適用してから expand する
+                    let normalized = q.normalize_label(label);
+                    let tag = crate::types::TypedTag::new(
+                        tag_type.clone(),
+                        normalized.clone(),
+                    );
+                    return q.expand(tag_type, &normalized, &tag);
+                }
             }
         }
         QueryNode::TypedTag(crate::types::TypedTag::new(
@@ -300,34 +312,136 @@ impl LogicalSchema for Lens {
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
-                return func.expand_projection(tag_type.clone());
+                if let Some(q) = func.query() {
+                    return q.expand_projection(tag_type);
+                }
             }
         }
-        QueryNode::Projection(crate::query::ast::Operand::TypeRef(
-            tag_type.clone(),
-        ))
+        QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
     }
+
+    fn normalize_label_any(&self, label: &Label) -> Label {
+        if matches!(label.value(), LabelValue::Literal(_)) {
+            return label.clone();
+        }
+        // TagRegistry と同様に登録の逆順で走査する
+        for desc in self.registry.values().rev() {
+            if let Some(func) = &desc.logical_function {
+                if let Some(q) = func.query() {
+                    let normalized = q.normalize_label(label);
+                    if normalized != *label {
+                        return normalized;
+                    }
+                }
+            }
+        }
+        label.clone()
+    }
+
+    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+        let tag_type = find_tag_type_in_comparison(&node);
+        let Some(tag_type) = tag_type else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(desc) = self.look_up(&tag_type) else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(func) = &desc.logical_function else {
+            return QueryNode::Comparison(node);
+        };
+        let Some(q) = func.query() else {
+            return QueryNode::Comparison(node);
+        };
+        q.expand_comparison(node)
+    }
+}
+
+/// 比較ノード内の TypeRef から TagType を探す。
+fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
+    fn from_operand(op: &Operand) -> Option<TagType> {
+        use crate::query::ast::AggregationNode;
+        match op {
+            Operand::TypeRef(tt) => Some(tt.clone()),
+            Operand::Aggregation(agg) => {
+                let inner = match agg.as_ref() {
+                    AggregationNode::Count(q) => q.as_ref(),
+                    AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
+                };
+                from_query_node(inner)
+            }
+            _ => None,
+        }
+    }
+    fn from_query_node(node: &QueryNode) -> Option<TagType> {
+        match node {
+            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt.clone()),
+            QueryNode::And(ns) | QueryNode::Or(ns) => {
+                ns.iter().find_map(from_query_node)
+            }
+            QueryNode::Difference(l, _) => from_query_node(l),
+            _ => None,
+        }
+    }
+    from_operand(&node.first)
+        .or_else(|| node.rest.iter().find_map(|(_, op)| from_operand(op)))
 }
 
 impl Lens {
     /// 内部初期化用の一時的な空 Lens。外部からは通常 with_standard を使用してください。
     fn new_empty() -> Self {
         Self {
-            registry: HashMap::new(),
+            registry: IndexMap::new(),
         }
     }
 
     /// 標準的なタグ定義を登録済みの Lens を返します。
     /// クエリ解釈を行わない、辞書単体としての Lens が必要な場合に使用します。
     pub fn base_standard() -> Self {
+        let registry = crate::tag::TagRegistry::with_standard();
+        Self::from_registry(&registry)
+    }
+
+    /// 既存の TagRegistry から Lens を構築します。
+    /// FileManager など、すでに TagRegistry を保持している場合に使用します。
+    pub fn from_registry(registry: &crate::tag::TagRegistry) -> Self {
         let mut lens = Self::new_empty();
+        // Fixed タグ: 専用 DB カラム定義（手動管理のまま）
         for desc in base_column_descriptors() {
             lens.register(desc);
         }
-        for desc in row_tag_descriptors() {
-            lens.register(desc);
-        }
-        for desc in virtual_tag_descriptors() {
+        // Composite / Basic / Fixed タグ: TagRegistry から自動生成
+        for func in registry.iter_arcs() {
+            let Some(q) = func.query() else { continue };
+            let tag_type = TagType::from(func.name());
+            let key = q.storage_key().unwrap_or(func.name()).to_string();
+            let desc = match q.logical_role() {
+                LogicalRole::Composite => TagDescriptor {
+                    tag_type,
+                    storage: StorageMapping::Composite,
+                    logical_type: q.logical_type(),
+                    logical_function: Some(func.clone()),
+                },
+                LogicalRole::Basic => {
+                    let col = logical_type_to_col(q.logical_type());
+                    TagDescriptor {
+                        tag_type,
+                        storage: StorageMapping::Basic {
+                            column: col,
+                            tag_type: key,
+                        },
+                        logical_type: q.logical_type(),
+                        logical_function: Some(func.clone()),
+                    }
+                }
+                LogicalRole::Fixed => TagDescriptor {
+                    // 物理ストレージは base_column_descriptors で登録済み
+                    // Composite として登録することで Fixed 定義を上書きしない
+                    tag_type,
+                    storage: StorageMapping::Composite,
+                    logical_type: q.logical_type(),
+                    logical_function: Some(func.clone()),
+                },
+            };
             lens.register(desc);
         }
         lens
@@ -340,7 +454,7 @@ impl Lens {
     pub fn register(&mut self, descriptor: TagDescriptor) {
         if let Some(existing) = self.registry.get_mut(&descriptor.tag_type) {
             // 物理ストレージ定義があれば上書き（Virtual は物理を上書きしない）
-            if descriptor.storage != StorageMapping::Virtual {
+            if descriptor.storage != StorageMapping::Composite {
                 existing.storage = descriptor.storage;
                 existing.logical_type = descriptor.logical_type;
             }
@@ -359,7 +473,7 @@ impl Lens {
         self.registry.get(tag)
     }
 
-    /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの RowTag 定義を返します。
+    /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの Basic 定義を返します。
     /// 未知のタグは Any 型として扱い、算術演算を許容します（実行時に DB がチェック）。
     pub fn look_up_or_default(&self, tag: &TagType) -> TagDescriptor {
         if let Some(desc) = self.registry.get(tag) {
@@ -367,7 +481,7 @@ impl Lens {
         }
         TagDescriptor {
             tag_type: tag.clone(),
-            storage: StorageMapping::RowTag {
+            storage: StorageMapping::Basic {
                 column: crate::db::Col::LabelStr,
                 tag_type: tag.as_str().to_string(),
             },
@@ -385,7 +499,7 @@ impl Lens {
         let desc = self.look_up(&tag).ok_or_else(|| {
             anyhow::anyhow!("Tag definition not found: {:?}", tag)
         })?;
-        if let StorageMapping::Column(col) = desc.storage {
+        if let StorageMapping::Fixed(col) = desc.storage {
             Ok(col)
         } else {
             Err(anyhow::anyhow!(
@@ -403,10 +517,10 @@ impl Lens {
         map: &duckdb::types::OrderedMap<String, Value>,
     ) -> Option<Label> {
         let from_storage = |desc: &TagDescriptor| match &desc.storage {
-            StorageMapping::Column(col) => {
+            StorageMapping::Fixed(col) => {
                 map.get(&col.name()).and_then(val_to_label_value)
             }
-            StorageMapping::RowTag { column, tag_type } => {
+            StorageMapping::Basic { column, tag_type } => {
                 let type_val = map.get(&SType::Type.name())?;
                 if type_val.as_str() == Some(tag_type) {
                     map.get(&column.name()).and_then(val_to_label_value)
@@ -414,7 +528,7 @@ impl Lens {
                     None
                 }
             }
-            StorageMapping::Virtual => None,
+            StorageMapping::Composite => None,
         };
 
         let from_fallback = || {
@@ -487,6 +601,16 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
     }
 }
 
+fn logical_type_to_col(lt: LogicalType) -> Col {
+    use crate::db::SqlType;
+    match TagDescriptor::logical_to_sql(lt) {
+        SqlType::BIGINT => Col::LabelInt,
+        SqlType::DOUBLE => Col::LabelDouble,
+        SqlType::BOOLEAN => Col::LabelBool,
+        _ => Col::LabelStr,
+    }
+}
+
 // --- 純粋関数 (初期化用データ定義) ---
 
 fn base_column_descriptors() -> Vec<TagDescriptor> {
@@ -504,53 +628,10 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
     cols.into_iter()
         .map(|(stype, col)| TagDescriptor {
             tag_type: TagType::Base(stype),
-            storage: StorageMapping::Column(col),
+            storage: StorageMapping::Fixed(col),
             logical_type: sql_to_logical(col.sql_type()),
             logical_function: None,
         })
-        .collect()
-}
-
-fn row_tag_descriptors() -> Vec<TagDescriptor> {
-    let tags = vec![
-        (SType::Path, Col::LabelStr),
-        (SType::Parentdir, Col::LabelStr),
-        (SType::Stem, Col::LabelStr),
-        (SType::Extension, Col::LabelStr),
-        (SType::IsDir, Col::LabelBool),
-        (SType::Size, Col::LabelInt),
-        (SType::Mtime, Col::LabelInt),
-        (SType::Hash, Col::LabelStr),
-        (SType::Content, Col::LabelStr),
-        (SType::Name, Col::LabelStr),
-        (SType::TypeFromExt, Col::LabelStr),
-        (SType::SizeStr, Col::LabelStr),
-        (SType::ModifiedStr, Col::LabelStr),
-        (SType::FileId, Col::LabelStr),
-    ];
-
-    tags.into_iter()
-        .map(|(stype, col)| {
-            let key: &'static str = stype.into();
-            TagDescriptor {
-                tag_type: TagType::Base(stype),
-                storage: StorageMapping::RowTag {
-                    column: col,
-                    tag_type: key.to_string(),
-                },
-                logical_type: sql_to_logical(col.sql_type()),
-                logical_function: None,
-            }
-        })
-        .chain(std::iter::once(TagDescriptor {
-            tag_type: TagType::Base(SType::Filename),
-            storage: StorageMapping::RowTag {
-                column: Col::LabelStr,
-                tag_type: "name".to_string(),
-            },
-            logical_type: LogicalType::String,
-            logical_function: Some(Arc::new(FilenameQuery)),
-        }))
         .collect()
 }
 
@@ -564,33 +645,6 @@ fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
     }
 }
 
-fn virtual_tag_descriptors() -> Vec<TagDescriptor> {
-    let v_tags: Vec<(SType, Arc<dyn QueryFunction>)> = vec![
-        (SType::Directory, Arc::new(DirectoryQuery)),
-        (SType::Extension, Arc::new(ExtensionQuery)),
-        (SType::Path, Arc::new(PathQuery)),
-        (SType::Parentdir, Arc::new(ParentDirQuery)),
-        (SType::Size, Arc::new(SizeQuery)),
-        (SType::Mtime, Arc::new(MtimeQuery)),
-        (SType::ItemKind, Arc::new(ItemKindQuery)),
-        (SType::Rank, Arc::new(RankQuery)),
-        (SType::Origin, Arc::new(OriginQuery)),
-        (SType::Type, Arc::new(TypeQuery)),
-        (SType::Label, Arc::new(LabelQuery)),
-        (SType::TypedTag, Arc::new(TypedTagQuery)),
-    ];
-
-    v_tags
-        .into_iter()
-        .map(|(stype, func)| TagDescriptor {
-            tag_type: TagType::Base(stype),
-            storage: StorageMapping::Virtual,
-            // Virtual タグのデフォルトは文字列
-            logical_type: LogicalType::String,
-            logical_function: Some(func),
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -602,7 +656,7 @@ mod tests {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Rank)).unwrap();
         // マージ論理により、Column 定義が Virtual を上書きしているはず
-        assert_eq!(found.storage, StorageMapping::Column(Col::Rank));
+        assert_eq!(found.storage, StorageMapping::Fixed(Col::Rank));
         assert!(found.logical_function.is_some());
     }
 
@@ -610,7 +664,7 @@ mod tests {
     fn test_lens_with_standard_includes_origin() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Origin)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Column(Col::Origin));
+        assert_eq!(found.storage, StorageMapping::Fixed(Col::Origin));
         assert!(found.logical_function.is_some());
     }
 
@@ -618,11 +672,11 @@ mod tests {
     fn test_lens_with_standard_includes_size() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Size)).unwrap();
-        if let StorageMapping::RowTag { column, tag_type } = &found.storage {
+        if let StorageMapping::Basic { column, tag_type } = &found.storage {
             assert_eq!(*column, Col::LabelInt);
             assert_eq!(tag_type, "size");
         } else {
-            panic!("Expected RowTag mapping for size, got {:?}", found.storage);
+            panic!("Expected Basic mapping for size, got {:?}", found.storage);
         }
         assert!(found.logical_function.is_some());
     }
@@ -631,7 +685,7 @@ mod tests {
     fn test_lens_with_standard_includes_directory_as_virtual() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Directory)).unwrap();
-        assert_eq!(found.storage, StorageMapping::Virtual);
+        assert_eq!(found.storage, StorageMapping::Composite);
         assert!(found.logical_function.is_some());
     }
 
@@ -646,16 +700,10 @@ mod tests {
     fn test_lens_filename_is_virtual() {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Filename)).unwrap();
-        // Virtual が最後に登録され、かつマージにより以前の RowTag を上書きしない（関数だけ上書き）
-        // ...はずだが、今回の実装では descriptor.storage != Virtual の時だけ物理をを優先。
-        // Filename は RowTag -> Virtual の順に登録される。
-        // RowTag 登録時: storage=RowTag
-        // Virtual 登録時: storage=Virtual なので existing.storage は更新されない。
-        // 結果、物理情報（RowTag）を保持しつつ論理関数を持つ。
-        if let StorageMapping::RowTag { tag_type, .. } = &found.storage {
+        if let StorageMapping::Basic { tag_type, .. } = &found.storage {
             assert_eq!(tag_type, "name");
         } else {
-            panic!("Expected RowTag for filename, got {:?}", found.storage);
+            panic!("Expected Basic for filename, got {:?}", found.storage);
         }
         assert!(found.logical_function.is_some());
     }
@@ -682,9 +730,6 @@ mod tests {
             SType::IsDir,
             SType::Hash,
             SType::Content,
-            SType::TypeFromExt,
-            SType::SizeStr,
-            SType::ModifiedStr,
             SType::Directory,
             SType::Name,
             SType::ScanHash,

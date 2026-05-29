@@ -1,6 +1,6 @@
+use ttfm::{search, tagging};
 use std::fs::File;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 #[test]
 fn verify_complex_search_patterns() -> anyhow::Result<()> {
@@ -32,8 +32,12 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     println!("Indexing...");
     // Use a custom index path inside the temp dir
     let index_path = root.join("test_index.parquet");
-    let fm = FileManager::new_with_index_path(&index_path)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let index_path_registry = ttfm::tag::TagRegistry::with_standard();
+    let index_path_store = ttfm::db::Store::open(&index_path)?;
+    ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry).initialize_tables()?;
+    let index_path_cache = ttfm::CacheManager::new(index_path_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (index_path_store, index_path_registry, index_path_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
     // 3. Verify Queries
     let test_cases = vec![
@@ -71,7 +75,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     for (query, expected_count) in test_cases {
         print!("Query: '{:<25}' -> ", query);
 
-        let response = fm.search(query, Default::default()).unwrap_or_default();
+        let response = search::search(&store, &registry, &cache, query, Default::default()).unwrap_or_default();
 
         if response.results.len() == expected_count {
             println!("OK ({} hits)", response.results.len());
@@ -114,38 +118,41 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // Use a specific DB directory inside the temp dir to ensure isolation
     let db_dir = root.join(".ttfm/db");
-    let fm = ttfm::FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&data_dir, None::<&fn(usize)>, false)?;
 
     // 1. 基本的なサイズ比較
     println!("Testing 'size: :> 300'...");
-    let res = fm.search("size: :> 300", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :> 300", Default::default())?;
     assert_eq!(res.results.len(), 2); // medium, large
 
     // 2. 連鎖比較 (Between)
     println!("Testing '200 :< size: :< 800'...");
-    let res = fm.search("200 :< size: :< 800", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "200 :< size: :< 800", Default::default())?;
     assert_eq!(res.results.len(), 1);
-    assert!(res.results[0].name.contains("medium.txt"));
+    assert!(res.results[0].raw_repr().contains("medium.txt"));
 
     // 3. カスタムタグ (TRY_CAST 経由)
     println!("Testing custom tag with TRY_CAST...");
     let item_id = res.results[0].id.to_string();
-    fm.tag_item(&item_id, "width:640")?;
+    tagging::tag_item(&store, &registry, &item_id, "width:640")?;
 
-    let res = fm.search("width: :> 500", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "width: :> 500", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].id.to_string(), item_id);
 
     // 4. 複数条件の組み合わせ
     println!("Testing multiple conditions...");
-    let res = fm.search("size: :> 300 & width: :> 500", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :> 300 & width: :> 500", Default::default())?;
     assert_eq!(res.results.len(), 1);
-    assert_eq!(res.results[0].name, "medium.txt");
+    assert_eq!(res.results[0].raw_repr(), "medium.txt");
 
     // 5. スペースなしフォーマット
     println!("Testing 'width:>500' (no spaces)...");
-    let res = fm.search("width:>500", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "width:>500", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].id.to_string(), item_id);
 
@@ -154,31 +161,31 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // >= (Inclusive)
     println!("Testing 'size: :>= 500'...");
-    let res = fm.search("size: :>= 500", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :>= 500", Default::default())?;
     assert_eq!(res.results.len(), 2, "size: :>= 500 failed"); // medium(500), large(1000)
 
     // <= (Inclusive)
     println!("Testing 'size: :<= 500'...");
     // 0-byte directory might match <= 500, so exclude directory explicitly
-    let res = fm.search("size: :<= 500 & is_dir:false", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :<= 500 & is_dir:false", Default::default())?;
     assert_eq!(res.results.len(), 2, "size: :<= 500 failed"); // small(100), medium(500)
 
     // == (Equal)
     println!("Testing 'size: := 500'...");
-    let res = fm.search("size: := 500", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: := 500", Default::default())?;
     assert_eq!(res.results.len(), 1, "size: := 500 failed"); // medium(500)
 
     // ^= (Not Equal)
     println!("Testing 'size: :^= 500'...");
-    let res = fm.search("size: :^= 500 & is_dir:false", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :^= 500 & is_dir:false", Default::default())?;
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // ^ (Not Equal shorthand)
-    let res = fm.search("size: :^ 500 & is_dir:false", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "size: :^ 500 & is_dir:false", Default::default())?;
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // Custom tag exact match (Cast check)
-    let res = fm.search("width: := 640", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "width: := 640", Default::default())?;
     assert_eq!(res.results.len(), 1);
 
     // width:640 is set on one item. Others don't have width.
@@ -195,12 +202,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let yesterday_str = yesterday.format("%Y-%m-%d %H:%M:%S").to_string();
 
     println!("Testing 'mtime:today'...");
-    let res = fm.search("mtime:today", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "mtime:today", Default::default())?;
     assert!(res.results.len() >= 3, "Should match files created today");
 
     println!("Testing 'mtime:\"{}\"'...", today_str);
     let query = format!("mtime:\"{}\"", today_str);
-    let res = fm.search(&query, Default::default())?;
+    let res = search::search(&store, &registry, &cache, &query, Default::default())?;
     assert!(res.results.len() >= 3, "Should match specific date (today)");
 
     // 過去のファイルを準備 (Linux の touch コマンドを使用)
@@ -212,23 +219,23 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert!(status.success());
 
     // 再インデックスして mtime を反映させる
-    fm.index_directory(&data_dir, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(&data_dir, None::<&fn(usize)>, false)?;
 
     println!("Testing 'mtime:yesterday'...");
-    let res = fm.search("mtime:yesterday", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "mtime:yesterday", Default::default())?;
     assert!(
-        res.results.iter().any(|r| r.name == "past.txt"),
+        res.results.iter().any(|r| r.raw_repr() == "past.txt"),
         "Should match past.txt by 'yesterday'"
     );
 
     println!("Testing 'mtime:<today'...");
-    let res = fm.search("mtime:<today", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "mtime:<today", Default::default())?;
     assert!(
-        res.results.iter().any(|r| r.name == "past.txt"),
+        res.results.iter().any(|r| r.raw_repr() == "past.txt"),
         "Should match past.txt by '<today'"
     );
     assert!(
-        res.results.iter().all(|r| r.name != "small.txt"),
+        res.results.iter().all(|r| r.raw_repr() != "small.txt"),
         "Should NOT match files created today"
     );
 
@@ -250,15 +257,19 @@ fn test_or_negation_complex_behavior() {
 
     std::fs::write(root.join("readme.txt"), "hello").unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
 
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 2. クエリ実行: item_kind:file - extension:rs (差集合: 全ファイル - rsファイル)
 
     let query = "item_kind:file - extension:rs";
 
-    let results = fm.search(query, Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, query, Default::default()).unwrap();
 
     let mut found_txt_file = false;
 
@@ -302,13 +313,17 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     std::fs::write(root.join("project_beta.txt"), "").unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
 
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. ワイルドカードによる部分一致
 
-    let results = fm.search("filename:*alpha*", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "filename:*alpha*", Default::default()).unwrap();
 
     assert_eq!(results.results.len(), 1);
 
@@ -319,88 +334,77 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
 
     // 2. 複数のワイルドカード
 
-    let results = fm.search("filename:project*", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "filename:project*", Default::default()).unwrap();
 
     assert_eq!(results.results.len(), 2);
 
     // 3. ワイルドカードなし (完全一致として動作)
 
-    let results = fm.search("filename:project", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "filename:project", Default::default()).unwrap();
 
     assert_eq!(results.results.len(), 0);
 
-    let results = fm
-        .search("filename:project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 4. ? (任意の一文字)
-    let results = fm
-        .search("filename:project_alph?.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:project_alph?.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].name, "project_alpha.pdf");
+    assert_eq!(results.results[0].raw_repr(), "project_alpha.pdf");
 
     // 5. [...] (文字セット) - alpha と beta 両方を拾いたいなら [ab]*
-    let results = fm
-        .search("filename:project_[ab]*", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:project_[ab]*", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 2); // alpha and beta
 
     // 6. [!...] (否定文字セット) - beta のみを拾う
-    let results = fm
-        .search("filename:project_[!a]eta*", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:project_[!a]eta*", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1); // beta only
 
     // 7. クォート内でのGlob (無効化されるはず)
-    let results = fm
-        .search("filename:\"project_[ab]*\"", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:\"project_[ab]*\"", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 0); // リテラル一致を試みるため0件
 
     // 8. クォートでの完全一致
-    let results = fm
-        .search("filename:\"project_alpha.pdf\"", Default::default())
+    let results = search::search(&store, &registry, &cache, "filename:\"project_alpha.pdf\"", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 9. Type側の引用符
-    let results = fm
-        .search("\"filename\":project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "\"filename\":project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 10. Type側のGlob (実装済みか確認)
     // filename が対象になるはず
-    let results = fm
-        .search("*name:project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "*name:project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
     // 11. Type Wildcard + Value Prefix (Regression Test)
     // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
     // This confirms that 'exte*' parses as a typed tag (not comparison) and '^pd' becomes 'pd*' glob.
-    let results = fm.search("exte*:^pd", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "exte*:^pd", Default::default()).unwrap();
     assert!(
         results.results.len() > 0,
         "Should match .pdf files via 'exte*' type glob and '^pd' value prefix"
     );
 
     // 12. Type側のGlob ([...] / [!...])
-    let results = fm
-        .search("[f]ilename:project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "[f]ilename:project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
-    let results = fm
-        .search("[!f]ilename:project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "[!f]ilename:project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 0); // filename にはマッチしないはず
 
     // 13. Type側のGlob (?)
-    let results = fm
-        .search("file?ame:project_alpha.pdf", Default::default())
+    let results = search::search(&store, &registry, &cache, "file?ame:project_alpha.pdf", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
 
@@ -408,15 +412,14 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // テスト用の特殊ファイルを作成
     let special_file = root.join("[WIP]_test.txt");
     std::fs::File::create(&special_file)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
     // バックスラッシュなしだとGlobとして解釈され、マッチしない可能性がある（または意図しないマッチ）
     // ここでは \[WIP\] とすることでリテラルとして扱う
-    let results = fm
-        .search(r"filename:\[WIP\]_*", Default::default())
+    let results = search::search(&store, &registry, &cache, r"filename:\[WIP\]_*", Default::default())
         .unwrap();
     assert_eq!(results.results.len(), 1);
-    assert_eq!(results.results[0].name, "[WIP]_test.txt");
+    assert_eq!(results.results[0].raw_repr(), "[WIP]_test.txt");
 
     Ok(())
 }
@@ -443,12 +446,16 @@ fn test_complex_search_combinations() {
     std::fs::write(root.join("LICENSE"), "").unwrap();
     std::fs::write(root.join("readme.txt"), "").unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. Type Glob + Value Glob (exte*:r*)
     // Should match 15 test_src + main + lib + mod = 18 files. (Extension is "rs")
-    let results = fm.search("exte*:r*", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "exte*:r*", Default::default()).unwrap();
     assert!(
         results.results.len() >= 18,
         "exte*:r* should match all rs files"
@@ -459,9 +466,9 @@ fn test_complex_search_combinations() {
     // Wait, let's make main.rs non-empty
     std::fs::write(root.join("main.rs"), "content").unwrap();
     // Re-index to update metadata
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
-    let results = fm.search("exte*:rs & size:>0", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "exte*:rs & size:>0", Default::default()).unwrap();
     assert_eq!(
         results.results.len(),
         1,
@@ -469,67 +476,61 @@ fn test_complex_search_combinations() {
     );
 
     // 3. Value Glob + OR + Prefix (name:*.toml | name:^LIC)
-    let results = fm
-        .search("name:*.toml | name:^LIC", Default::default())
+    let results = search::search(&store, &registry, &cache, "name:*.toml | name:^LIC", Default::default())
         .unwrap();
     // Verify correct items are present (ignoring extra matches)
     assert!(
-        results.results.iter().any(|r| r.name == "Cargo.toml"),
+        results.results.iter().any(|r| r.raw_repr() == "Cargo.toml"),
         "Should find Cargo.toml"
     );
     assert!(
-        results.results.iter().any(|r| r.name == "LICENSE"),
+        results.results.iter().any(|r| r.raw_repr() == "LICENSE"),
         "Should find LICENSE"
     );
 
     // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
-    let all_rs = fm
-        .search("exte*:rs", Default::default())
+    let all_rs = search::search(&store, &registry, &cache, "exte*:rs", Default::default())
         .unwrap()
         .results
         .len();
-    let results_diff = fm
-        .search("exte*:rs - name:mod*", Default::default())
+    let results_diff = search::search(&store, &registry, &cache, "exte*:rs - name:mod*", Default::default())
         .unwrap();
     assert_eq!(
         results_diff.results.len(),
         all_rs - 1,
         "Difference should remove mod.rs"
     );
-    assert!(results_diff.results.iter().all(|r| r.name != "mod.rs"));
+    assert!(results_diff.results.iter().all(|r| r.raw_repr() != "mod.rs"));
 
     // 5. Grouping + Glob Types + Comparison
     // (exte*:rs | exte*:toml) & size:>0 -> main.rs only
-    let results = fm
-        .search("(exte*:rs | exte*:toml) & size:>0", Default::default())
+    let results = search::search(&store, &registry, &cache, "(exte*:rs | exte*:toml) & size:>0", Default::default())
         .unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.iter().all(|r| r.raw_repr() == "main.rs"));
 
     // 6. Value Glob + Value Prefix AND (name:*.rs & name:mai*)
-    let results = fm
-        .search("name:*.rs & name:mai*", Default::default())
+    let results = search::search(&store, &registry, &cache, "name:*.rs & name:mai*", Default::default())
         .unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().all(|r| r.name == "main.rs"));
+    assert!(results.results.iter().all(|r| r.raw_repr() == "main.rs"));
 
     // 7. Bracket Glob (name:[m]ain.rs)
-    let results = fm.search("name:[m]ain.rs", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "name:[m]ain.rs", Default::default()).unwrap();
     assert!(results.results.len() >= 1);
-    assert!(results.results.iter().any(|r| r.name == "main.rs"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "main.rs"));
 
     // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
-    let results = fm.search("exte*:r?", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "exte*:r?", Default::default()).unwrap();
     assert!(results.results.len() >= 18);
 
     // 9. Double Glob (nam*:*.rs)
-    let results = fm.search("nam*:*.rs", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "nam*:*.rs", Default::default()).unwrap();
     assert!(results.results.len() >= 18);
 
     // 10. Type Prefix + Value Glob (item_kind:^fi & name:*.rs)
     // Matches 'file' type items which are .rs
-    let results = fm
-        .search("item_kind:^fi & name:*.rs", Default::default())
+    let results = search::search(&store, &registry, &cache, "item_kind:^fi & name:*.rs", Default::default())
         .unwrap();
     assert!(results.results.len() >= 18);
 }
@@ -548,43 +549,42 @@ fn test_escaping_behavior() {
     File::create(root.join("normal.txt")).unwrap();
 
     let db_dir = root.join(".ttfm/db");
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. Escaped Colon (Using raw string)
-    let res = fm
-        .search(r"name:colon\:file.txt", Default::default())
+    let res = search::search(&store, &registry, &cache, r"name:colon\:file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped colon");
-    assert!(res.results.iter().any(|r| r.name == "colon:file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "colon:file.txt"));
 
     // 2. Escaped Space
-    let res = fm
-        .search(r"name:space\ file.txt", Default::default())
+    let res = search::search(&store, &registry, &cache, r"name:space\ file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped space");
-    assert!(res.results.iter().any(|r| r.name == "space file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "space file.txt"));
 
     // 3. Escaped Caret
-    let res = fm
-        .search(r"name:caret\^file.txt", Default::default())
+    let res = search::search(&store, &registry, &cache, r"name:caret\^file.txt", Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match escaped caret");
-    assert!(res.results.iter().any(|r| r.name == "caret^file.txt"));
+    assert!(res.results.iter().any(|r| r.raw_repr() == "caret^file.txt"));
 
     // 4. Quoted Colon
-    let res = fm
-        .search(r#"name:"colon:file.txt""#, Default::default())
+    let res = search::search(&store, &registry, &cache, r#"name:"colon:file.txt""#, Default::default())
         .unwrap();
     assert!(res.results.len() >= 1, "Should match quoted colon");
 
     // 5. Double Escape (colon + glob)
-    let res = fm.search(r"name:colon\:*.txt", Default::default()).unwrap();
+    let res = search::search(&store, &registry, &cache, r"name:colon\:*.txt", Default::default()).unwrap();
     assert!(res.results.len() >= 1, "Should match colon + glob");
 
     // 6. Mixed Logic
-    let res = fm
-        .search(r"name:colon\:* | name:space\ *", Default::default())
+    let res = search::search(&store, &registry, &cache, r"name:colon\:* | name:space\ *", Default::default())
         .unwrap();
     assert!(res.results.len() >= 2, "Should match combined");
 }
@@ -619,12 +619,16 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
 
     // 2. インデックス作成
     let index_path = root.join("debug_index.parquet");
-    let fm = FileManager::new_with_index_path(&index_path)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let index_path_registry = ttfm::tag::TagRegistry::with_standard();
+    let index_path_store = ttfm::db::Store::open(&index_path)?;
+    ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry).initialize_tables()?;
+    let index_path_cache = ttfm::CacheManager::new(index_path_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (index_path_store, index_path_registry, index_path_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
     // 3. 検索実行: parentdir:src & extension:rs
     let results =
-        fm.search("parentdir:src & extension:rs", Default::default())?;
+        search::search(&store, &registry, &cache, "parentdir:src & extension:rs", Default::default())?;
 
     for path in &results.results {
         println!("Hit: {:?}", path);
@@ -639,14 +643,14 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
 
     // もし "sub_folder" がヒットしているなら、extension判定がバグっている
     let sub_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or_default();
+        let val = p.raw_repr();
         val.contains("sub_folder") && !val.ends_with(".rs")
     });
     assert!(!sub_hits, "'sub_folder' directory found in results!");
 
     // もし "strange.rs" (フォルダ) がヒットしているなら、ディレクトリ除外が必要
     let strange_hits = results.results.iter().any(|p| {
-        let val = p.primary_value().unwrap_or_default();
+        let val = p.raw_repr();
         val.contains("strange.rs") && !val.ends_with("ignored.txt")
     });
     assert!(!strange_hits, "'strange.rs' directory found in results!");

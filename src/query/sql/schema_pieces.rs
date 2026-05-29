@@ -1,40 +1,34 @@
-use crate::db::{Col, Pronoun::*, Tbl};
+use crate::db::{Col, Pronoun::Representative, Src};
 use sea_query::{BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
 
 // ── to_label_select 用 ────────────────────────────────────────────────────
 
 /// Column ストレージ用ラベル SELECT。`WHERE type = ?` フィルタなし。
-pub(crate) fn build_lens_select_column(
+pub(crate) fn build_lens_select_column(src: &Src,
     col: Col,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
-    let cast_expr = Expr::cust_with_exprs(
-        "CAST($1 AS VARCHAR)",
-        vec![Expr::col(col).into()],
-    );
+    let cast_expr = crate::db::CustomFunc::as_representative(Expr::col(col));
     let mut s = Query::select();
-    s.expr_as(cast_expr, Cast)
+    s.expr_as(cast_expr, Representative)
         .column(Col::ItemId)
-        .from(Tbl::OneView)
+        .from(src)
         .and_where(Expr::col(col).is_not_null())
         .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
     s
 }
 
-/// RowTag ストレージ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
-pub(crate) fn build_lens_select_row_tag(
+/// タグ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
+pub(crate) fn build_lens_select_tag(src: &Src,
     col: Col,
     tag_type: &str,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
-    let cast_expr = Expr::cust_with_exprs(
-        "CAST($1 AS VARCHAR)",
-        vec![Expr::col(col).into()],
-    );
+    let cast_expr = crate::db::CustomFunc::as_representative(Expr::col(col));
     let mut s = Query::select();
-    s.expr_as(cast_expr, Cast)
+    s.expr_as(cast_expr, Representative)
         .column(Col::ItemId)
-        .from(Tbl::OneView)
+        .from(src)
         .and_where(Expr::col(Col::Type).eq(tag_type))
         .and_where(Expr::col(col).is_not_null())
         .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql));
@@ -94,14 +88,14 @@ mod tests {
 
     fn dummy_ids() -> SelectStatement {
         let mut q = Query::select();
-        q.column(Col::ItemId).from(Tbl::OneView);
+        q.column(Col::ItemId).from(&Src::OneView);
         q
     }
 
     #[test]
     fn test_build_lens_select_column_no_type_filter() {
         use sea_query::SqliteQueryBuilder;
-        let sql = build_lens_select_column(Col::Type, dummy_ids())
+        let sql = build_lens_select_column(&Src::OneView, Col::Type, dummy_ids())
             .to_string(SqliteQueryBuilder);
         assert!(
             !sql.contains("\"type\" = "),
@@ -111,14 +105,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_lens_select_row_tag_has_type_filter() {
+    fn test_build_lens_select_tag_has_type_filter() {
         use sea_query::SqliteQueryBuilder;
         let sql =
-            build_lens_select_row_tag(Col::LabelStr, "parentdir", dummy_ids())
+            build_lens_select_tag(&Src::OneView, Col::LabelStr, "parentdir", dummy_ids())
                 .to_string(SqliteQueryBuilder);
         assert!(
             sql.contains("parentdir"),
-            "RowTag select must filter by tag_type"
+            "tag select must filter by tag_type"
         );
         assert!(sql.contains("CAST("), "must CAST to VARCHAR");
     }

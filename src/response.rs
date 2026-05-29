@@ -1,5 +1,5 @@
 use crate::types::{
-    Intrinsic, ItemId, ItemKind, ItemName, LabelValue, Origin, Rank, SType,
+    Intrinsic, ItemId, ItemKind, Label, LabelValue, Origin, Rank, SType,
     TagType, Tags,
 };
 
@@ -10,8 +10,8 @@ pub struct SearchResult {
     pub id: ItemId,
     /// アイテムの種類
     pub item_kind: ItemKind,
-    /// 解決済みの名称
-    pub name: ItemName,
+    /// この結果を代表するラベル（Projectionではラベル値、通常はpath/nameなど）
+    pub representative: Vec<Label>,
     /// アイテムの優先度
     pub rank: Rank,
     /// 固定の固有情報
@@ -19,7 +19,7 @@ pub struct SearchResult {
     /// アイテムに紐づく動的なタグの集合
     pub tags: Tags,
     /// プロジェクション時に、この結果が代表しているラベル
-    pub projected_label: Option<crate::types::Label>,
+    pub item_count: Option<crate::types::Label>,
 }
 
 /// データベースから取得した生のタグ情報の断片。
@@ -170,8 +170,8 @@ impl SearchResponse {
                 keys.insert(TagType::from(SType::Hash));
             }
             keys.insert(TagType::from(SType::ItemKind));
-            if !res.name.is_empty() {
-                keys.insert(TagType::from(SType::Name));
+            for label in &res.representative {
+                keys.insert(label.tag_type());
             }
 
             // 動的タグ
@@ -248,16 +248,25 @@ impl SearchResponse {
 
 impl SearchResult {
     /// 指定された ID で空の検索結果を作成します。
-    pub fn new_empty(id: ItemId, kind: ItemKind, name: String) -> Self {
+    pub fn new_empty(id: ItemId, kind: ItemKind) -> Self {
         Self {
             id,
             item_kind: kind,
-            name,
+            representative: vec![],
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
-            projected_label: None,
+            item_count: None,
         }
+    }
+
+    /// representative の全ラベルを " &: " で結合した文字列を返します。
+    pub fn raw_repr(&self) -> String {
+        self.representative
+            .iter()
+            .map(|l| l.as_str())
+            .collect::<Vec<_>>()
+            .join(" &: ")
     }
 
     /// 解決済みのタグ情報をアイテムに適用します。
@@ -266,7 +275,6 @@ impl SearchResult {
 
         // 検索結果に必要な基本属性を補完 (パターンマッチングによる直感的な代入)
         match &label {
-            Label::Name(s) => self.name = s.clone(),
             Label::Rank(i) => self.rank = *i,
             Label::Size(i) => {
                 self.intrinsic.size = Some(crate::types::FileSize(*i))
@@ -304,11 +312,9 @@ impl SearchResult {
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
     pub fn primary_value(&self) -> Option<String> {
-        // 抽象化された名前があればそれを最優先
-        if !self.name.is_empty() {
-            return Some(self.name.clone());
+        if !self.representative.is_empty() {
+            return Some(self.raw_repr());
         }
-        // フォールバックとしてタグの中を探す
         use crate::types::SType;
         self.get_all_labels(&SType::Path.into())
             .first()
@@ -384,7 +390,7 @@ impl SearchResult {
                 return vec![Label::from(self.item_kind.clone())];
             }
             TagType::Base(SType::Name) => {
-                return vec![Label::from(self.name.clone())];
+                return self.representative.clone();
             }
             TagType::Base(SType::Origin) => {
                 return vec![Label::from(self.origin().to_string())];
@@ -509,7 +515,7 @@ mod tests {
         SearchResult {
             id: 1.into(),
             item_kind: ItemKind::File,
-            name: "test.rs".to_string(),
+            representative: vec![Label::Name("test.rs".to_string())],
             rank: 1,
             intrinsic: Intrinsic {
                 size: Some(FileSize(100)),
@@ -517,7 +523,7 @@ mod tests {
                 hash: None,
             },
             tags,
-            projected_label: None,
+            item_count: None,
         }
     }
 
@@ -552,7 +558,7 @@ mod tests {
     fn test_iter_type_groups() {
         let res1 = create_test_result();
         let mut res2 = create_test_result();
-        res2.name = "other.rs".to_string();
+        res2.representative = vec![Label::Name("other.rs".to_string())];
 
         let response = SearchResponse {
             results: vec![res1, res2],
@@ -577,26 +583,18 @@ mod tests {
     #[test]
     fn test_search_result_new_empty_scalar() {
         let id = ItemId::new_volatile();
-        let res = SearchResult::new_empty(
-            id,
-            ItemKind::Volatile,
-            "123.45".to_string(),
-        );
+        let res = SearchResult::new_empty(id, ItemKind::Volatile);
 
-        assert_eq!(res.name, "123.45");
+        assert!(res.representative.is_empty());
         assert_eq!(res.item_kind, ItemKind::Volatile);
     }
 
     #[test]
     fn test_search_result_new_empty_label() {
         let label_id = ItemId::new_volatile();
-        let result = SearchResult::new_empty(
-            label_id,
-            ItemKind::Volatile,
-            "rs".to_string(),
-        );
+        let result = SearchResult::new_empty(label_id, ItemKind::Volatile);
 
-        assert_eq!(result.name, "rs");
+        assert!(result.representative.is_empty());
         assert_eq!(result.item_kind, ItemKind::Volatile);
         assert!(result.tags.is_empty());
     }

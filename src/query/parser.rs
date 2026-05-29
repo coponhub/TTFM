@@ -413,7 +413,9 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         Rule::calculation
         | Rule::calculation_inner
         | Rule::scalar_calculation
-        | Rule::scalar_calculation_inner => {
+        | Rule::scalar_calculation_inner
+        | Rule::label_calc
+        | Rule::label_calc_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
         Rule::type_ref => {
@@ -439,11 +441,26 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
             let node = build_nest_expr(inner)?;
             Ok(Operand::Query(Box::new(node)))
         }
+        Rule::nest_parenthesized_expr => {
+            build_nested_parenthesized_operand(inner)
+        }
         _ => Err(anyhow!(
             "{}: {:?}",
             error::UNKNOWN_OPERAND_RULE,
             inner.as_rule()
         )),
+    }
+}
+
+fn build_nested_parenthesized_operand(pair: Pair<Rule>) -> Result<Operand> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::nest_expr => {
+            let node = build_nest_expr(inner)?;
+            Ok(Operand::Query(Box::new(node)))
+        }
+        Rule::nest_parenthesized_expr => build_nested_parenthesized_operand(inner),
+        _ => unreachable!("nest_parenthesized_expr inner must be nest_expr or nest_parenthesized_expr"),
     }
 }
 
@@ -493,12 +510,14 @@ fn build_nest_operand(pair: Pair<Rule>) -> Result<QueryNode> {
 
 fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
     let rule = pair.as_rule();
-    let inner_pair =
-        if rule == Rule::calculation || rule == Rule::scalar_calculation {
-            pair.into_inner().next().unwrap()
-        } else {
-            pair
-        };
+    let inner_pair = if rule == Rule::calculation
+        || rule == Rule::scalar_calculation
+        || rule == Rule::label_calc
+    {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
 
     let mut pairs = inner_pair.into_inner();
 
@@ -538,6 +557,7 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
     let inner = if rule == Rule::operand_calc
         || rule == Rule::scalar_operand
         || rule == Rule::scalar_operand_calc
+        || rule == Rule::label_operand_calc
     {
         pair.into_inner().next().unwrap()
     } else {
@@ -562,7 +582,9 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         Rule::calculation
         | Rule::calculation_inner
         | Rule::scalar_calculation
-        | Rule::scalar_calculation_inner => {
+        | Rule::scalar_calculation_inner
+        | Rule::label_calc
+        | Rule::label_calc_inner => {
             Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
         }
         Rule::parenthesized_expr => {

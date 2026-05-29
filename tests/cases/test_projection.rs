@@ -1,7 +1,8 @@
+use ttfm::{search, tagging};
+use ttfm::types::ItemId;
 use crate::cases::has_item_tags;
 use std::fs::File;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 // ──────────────────────────────────────────────
 // スタンドアロン: bare クエリの挙動確認
@@ -17,20 +18,23 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     File::create(root.join("file_with_ext.txt"))?;
     File::create(root.join("file_no_ext"))?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("extension:", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "extension:", Default::default())?;
 
     assert!(
-        res.results.iter().any(|r| r.name == "txt"),
+        res.results.iter().any(|r| r.raw_repr() == "txt"),
         "Output should contain 'txt' label for file_with_ext.txt"
     );
-    let has_empty = res.results.iter().any(|r| r.name.is_empty());
+    let has_empty = res.results.iter().any(|r| r.raw_repr().is_empty());
     assert!(
         !has_empty,
         "Output should NOT contain empty label name. Found labels: {:?}",
-        res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
     );
     Ok(())
 }
@@ -53,12 +57,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "size: + mtime: should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             for &v in &vals {
                 assert!(v > 0.0, "calc value should be > 0, got: {}", v);
@@ -87,12 +91,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "mtime: - size: should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             for &v in &vals {
                 assert!(v > 0.0, "mtime - size should be > 0 (timestamp >> file size), got: {}", v);
@@ -121,12 +125,12 @@ define_cases! {
             assert!(
                 res.results.len() >= 2,
                 "size: / 1024 should return at least 2 groups. Got: {:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             let vals: Vec<f64> = res
                 .results
                 .iter()
-                .map(|r| r.name.parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.name)))
+                .map(|r| r.raw_repr().parse::<f64>().unwrap_or_else(|_| panic!("name should be numeric, got: {}", r.raw_repr())))
                 .collect();
             let has_pair_with_diff = vals
                 .iter()
@@ -157,7 +161,7 @@ define_cases! {
             assert!(
                 res.has_projection_results(),
                 "extension: &: count() (Lv.2 projection) should be routed as projection. names={:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -176,7 +180,7 @@ define_cases! {
             assert!(
                 !res.has_projection_results(),
                 "parentdir: &: count() :> 1 (Lv.1 flat list) should NOT be projection. names={:?}",
-                res.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -198,54 +202,57 @@ fn test_projection_queries() {
     File::create(root.join("test.txt")).unwrap();
     std::fs::create_dir(root.join("test_dir")).unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // 1. extension: (投影 - 転置: Label → Items)
     // 投影結果はラベル値（rs, txt）のリストとして返される
-    let results = fm.search("extension:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
     println!(
         "Matches for 'extension:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     assert_eq!(
         results.results.len(),
         2,
         "extension: should return 2 label values (rs, txt). Found: {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: results には label items が格納される（name="rs", name="txt"）
-    assert!(results.results.iter().any(|r| r.name == "rs"));
-    assert!(results.results.iter().any(|r| r.name == "txt"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "rs"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "txt"));
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
-    let results = fm.search("directory:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "directory:", Default::default()).unwrap();
     println!(
         "Matches for 'directory:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（test_dir など）
     assert!(
         results.results.len() >= 1,
         "directory: should return at least 1 label (test_dir filename)"
     );
-    assert!(results.results.iter().any(|r| r.name == "test_dir"));
+    assert!(results.results.iter().any(|r| r.raw_repr() == "test_dir"));
     // 仮想ラベル directory: は内部で filename を投影する
     assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
-    let results = fm.search("filename:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "filename:", Default::default()).unwrap();
     println!(
         "Matches for 'filename:': {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（:test.rs, :test.txt）
     assert_eq!(
         results.results.len(),
         2,
         "filename: should return 2 label values (test.rs, test.txt). Found: {:?}",
-        results.results.iter().map(|r| &r.name).collect::<Vec<_>>()
+        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
     );
     // 転置後は全て label items
     assert!(results
@@ -257,12 +264,11 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results = fm.search("origin:system", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "origin:system", Default::default()).unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
-    let results = fm
-        .search("extension: & directory:", Default::default())
+    let results = search::search(&store, &registry, &cache, "extension: & directory:", Default::default())
         .unwrap();
     assert_eq!(
         results.results.len(),
@@ -271,7 +277,7 @@ fn test_projection_queries() {
     );
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
-    let results = fm.search("type:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "type:", Default::default()).unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
 
@@ -279,7 +285,7 @@ fn test_projection_queries() {
     // 結果に含まれる全てのタグタイプ（label の name）を収集
     let mut found_types = std::collections::HashSet::new();
     for r in &results.results {
-        found_types.insert(r.name.clone());
+        found_types.insert(r.raw_repr().clone());
     }
 
     // 主要なSTypeが含まれているか確認
@@ -295,7 +301,7 @@ fn test_projection_queries() {
     }
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
-    let results = fm.search("tag:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "tag:", Default::default()).unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
     assert!(has_item_tags(&results.results));
@@ -311,10 +317,10 @@ fn test_projection_queries() {
     );
 
     // 追加検証: extension: 結果の中身
-    let ext_results = fm.search("extension:", Default::default()).unwrap();
+    let ext_results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
-        if r.name == "test.rs" {
+        if r.raw_repr() == "test.rs" {
             let ext = r
                 .get_tag_value("extension")
                 .expect("test.rs should have extension tag");
@@ -324,7 +330,7 @@ fn test_projection_queries() {
     // 8. rank: (投影 -> rank column)
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
-    let results = fm.search("rank:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "rank:", Default::default()).unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
     println!("Matches for 'rank:': {} items", results.results.len());
@@ -342,11 +348,11 @@ fn test_projection_queries() {
     // 9. category: (投影 -> type='category')
     // label は SType::Label (仮想タグ) として予約されているため、
     // 任意のタグ名のテストには category を使用する。
-    let note_id = fm.add_item("note", "Category Test Note").unwrap();
-    fm.tag_item(&note_id.to_string(), "category:important")
+    let note_id = tagging::add_item(&store, &registry, "note", "Category Test Note").unwrap();
+    tagging::tag_item(&store, &registry, &note_id.to_string(), "category:important")
         .unwrap();
 
-    let results = fm.search("category:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "category:", Default::default()).unwrap();
     assert!(
         results.results.len() >= 1,
         "category: should match items with category tag"
@@ -354,13 +360,13 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
     // 転置: results には label items が格納され、name が "important" であることを確認
     let has_val = results.results.iter().any(|r| {
-        r.item_kind == ttfm::ItemKind::Volatile && r.name == "important"
+        r.item_kind == ttfm::ItemKind::Volatile && r.raw_repr() == "important"
     });
     assert!(has_val, "Should find 'important' category label");
 
     // 10. label: (Volatile Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
-    let results = fm.search("label:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "label:", Default::default()).unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
     assert!(
         results.results.len() >= 3,
@@ -371,8 +377,6 @@ fn test_projection_queries() {
 
 #[test]
 fn test_projection_returns_label_volatile_items() {
-    use ttfm::types::ItemId;
-
     let dir = tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
@@ -382,11 +386,14 @@ fn test_projection_returns_label_volatile_items() {
     File::create(root.join("test.txt")).unwrap();
     File::create(root.join("another.rs")).unwrap();
 
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     // extension: で投影
-    let results = fm.search("extension:", Default::default()).unwrap();
+    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
 
     // 検証1: type_for_projection が設定されている
     assert!(has_item_tags(&results.results));
@@ -410,7 +417,7 @@ fn test_projection_returns_label_volatile_items() {
 
             // 検証5: name が空ではない（ラベル値）
             assert!(
-                !item.name.is_empty(),
+                !item.raw_repr().is_empty(),
                 "Label volatile item name should not be empty"
             );
 
@@ -426,17 +433,17 @@ fn test_projection_returns_label_volatile_items() {
                 item.tags.entries.iter().map(|e| format!("{}:{}", e.label.tag_type().as_str(), e.label.as_str())).collect::<Vec<_>>()
             );
 
-            // 検証7: projected_label に total_count が保存されている
+            // 検証7: item_count に total_count が保存されている
             assert!(
-                item.projected_label.is_some(),
-                "Label volatile item should have projected_label (total_count)"
+                item.item_count.is_some(),
+                "Label volatile item should have item_count (total_count)"
             );
 
             let total_count_str =
-                item.projected_label.as_ref().unwrap().as_str();
+                item.item_count.as_ref().unwrap().as_str();
             let total_count: usize = total_count_str
                 .parse()
-                .expect("projected_label should be parseable as usize");
+                .expect("item_count should be parseable as usize");
             assert!(total_count > 0, "total_count should be greater than 0");
 
             // 検証8: tagsの数が100件以下である（100件制限）かつtotal_count以下である
@@ -460,7 +467,7 @@ fn test_projection_returns_label_volatile_items() {
     }
 
     // 検証9: "rs" ラベルが存在する（test.rs, another.rs）
-    let rs_label = results.results.iter().find(|item| item.name == "rs");
+    let rs_label = results.results.iter().find(|item| item.raw_repr() == "rs");
     assert!(
         rs_label.is_some(),
         "Should find 'rs' label in projection results"

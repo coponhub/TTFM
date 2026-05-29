@@ -1,10 +1,11 @@
+use ttfm::tag::TagRegistry;
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
     default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
     inject_path_scope, scope_path_from_dir,
 };
 use tempfile::tempdir;
-use ttfm::FileManager;
+use ttfm::{search, tagging};
 
 // ──────────────────────────────────────────────
 // 全E2Eテストケースの定義
@@ -29,8 +30,8 @@ define_cases! {
         query: "parentdir: &: count(extension:jpg)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results), "Should be projection");
-            let src = res.results.iter().find(|r| r.name.contains("src")).expect("src");
-            let docs = res.results.iter().find(|r| r.name.contains("docs")).expect("docs");
+            let src = res.results.iter().find(|r| r.raw_repr().contains("src")).expect("src");
+            let docs = res.results.iter().find(|r| r.raw_repr().contains("docs")).expect("docs");
             assert_eq!(get_nvalue(src).as_deref(), Some("2"), "src: 2 jpg");
             assert_eq!(get_nvalue(docs).as_deref(), Some("1"), "docs: 1 jpg");
             Ok(())
@@ -49,7 +50,7 @@ define_cases! {
         query: "parentdir: &: sum(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("300"), "sub sum=300");
             Ok(())
         },
@@ -65,12 +66,12 @@ define_cases! {
         query: "extension:",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            assert!(res.results.iter().any(|r| r.name == "rs"));
-            assert!(res.results.iter().any(|r| r.name == "txt"));
+            assert!(res.results.iter().any(|r| r.raw_repr() == "rs"));
+            assert!(res.results.iter().any(|r| r.raw_repr() == "txt"));
             for item in &res.results {
                 let has_nvalue = item.tags.entries.iter()
                     .any(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"));
-                assert!(!has_nvalue, "Plain projection should NOT have nvalue for '{}'", item.name);
+                assert!(!has_nvalue, "Plain projection should NOT have nvalue for '{}'", item.raw_repr());
             }
             Ok(())
         },
@@ -87,8 +88,8 @@ define_cases! {
         query: "extension: &: count(*:*)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
-            let txt = res.results.iter().find(|r| r.name == "txt").expect("txt");
+            let rs = res.results.iter().find(|r| r.raw_repr() == "rs").expect("rs");
+            let txt = res.results.iter().find(|r| r.raw_repr() == "txt").expect("txt");
             assert_eq!(get_nvalue(rs).as_deref(), Some("2"), "rs count=2");
             assert_eq!(get_nvalue(txt).as_deref(), Some("1"), "txt count=1");
             Ok(())
@@ -106,8 +107,8 @@ define_cases! {
         query: "extension: &: sum(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let rs = res.results.iter().find(|r| r.name == "rs").expect("rs");
-            let txt = res.results.iter().find(|r| r.name == "txt").expect("txt");
+            let rs = res.results.iter().find(|r| r.raw_repr() == "rs").expect("rs");
+            let txt = res.results.iter().find(|r| r.raw_repr() == "txt").expect("txt");
             assert_eq!(get_nvalue(rs).as_deref(), Some("300"), "rs sum=300");
             assert_eq!(get_nvalue(txt).as_deref(), Some("50"), "txt sum=50");
             Ok(())
@@ -126,7 +127,7 @@ define_cases! {
         query: "parentdir: &: max(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("500"), "max=500");
             Ok(())
         },
@@ -144,7 +145,7 @@ define_cases! {
         query: "parentdir: &: min(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("10"), "min=10");
             Ok(())
         },
@@ -162,7 +163,7 @@ define_cases! {
         query: "parentdir: &: avg(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let sub = res.results.iter().find(|r| r.name.contains("sub")).expect("sub");
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
             let nv: f64 = get_nvalue(sub).expect("nvalue").parse().expect("numeric");
             assert!((nv - 150.0).abs() < 1.0, "avg~150, got {}", nv);
             Ok(())
@@ -185,8 +186,8 @@ define_cases! {
         query: "parentdir: &: count(*:*)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let alpha = res.results.iter().find(|r| r.name.contains("alpha")).expect("alpha");
-            let beta = res.results.iter().find(|r| r.name.contains("beta")).expect("beta");
+            let alpha = res.results.iter().find(|r| r.raw_repr().contains("alpha")).expect("alpha");
+            let beta = res.results.iter().find(|r| r.raw_repr().contains("beta")).expect("beta");
             assert_eq!(get_nvalue(alpha).as_deref(), Some("3"), "alpha=3");
             assert_eq!(get_nvalue(beta).as_deref(), Some("1"), "beta=1");
             Ok(())
@@ -202,7 +203,7 @@ define_cases! {
         query: "filename: &: sum(size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results));
-            let hello = res.results.iter().find(|r| r.name == "hello.txt").expect("hello.txt");
+            let hello = res.results.iter().find(|r| r.raw_repr() == "hello.txt").expect("hello.txt");
             assert_eq!(get_nvalue(hello).as_deref(), Some("100"), "sum=100");
             Ok(())
         },
@@ -225,10 +226,10 @@ define_cases! {
         query: "parentdir: &: (count(extension:jpg) > 1)",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "a.jpg" || n == "b.jpg" || n == "c.jpg"),
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.iter().any(|n| n == "a.jpg" || n == "b.jpg" || n == "c.jpg"),
                 "src items should appear: {:?}", names);
-            assert!(!names.iter().any(|&n| n == "d.jpg"),
+            assert!(!names.contains(&"d.jpg".to_string()),
                 "docs should be excluded: {:?}", names);
             Ok(())
         },
@@ -245,10 +246,10 @@ define_cases! {
         query: "extension: &: (sum(size:) > 100)",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "a.rs" || n == "b.rs"),
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.iter().any(|n| n == "a.rs" || n == "b.rs"),
                 "rs (sum=110) should appear: {:?}", names);
-            assert!(!names.iter().any(|&n| n == "c.txt"),
+            assert!(!names.contains(&"c.txt".to_string()),
                 "txt (sum=30) excluded: {:?}", names);
             Ok(())
         },
@@ -264,9 +265,9 @@ define_cases! {
         format_query: default_scope,
         query: "stem:a & extension: &: sum(size:)",
         assert: |res, _dir| {
-            let html = res.results.iter().find(|r| r.name == "html").expect("html");
+            let html = res.results.iter().find(|r| r.raw_repr() == "html").expect("html");
             assert_eq!(get_nvalue(html).as_deref(), Some("100"), "html=100");
-            assert!(res.results.iter().find(|r| r.name == "txt").is_none(), "txt filtered");
+            assert!(res.results.iter().find(|r| r.raw_repr() == "txt").is_none(), "txt filtered");
             Ok(())
         },
     },
@@ -287,8 +288,8 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (count(extension:jpg) > 10)",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(!names.iter().any(|&n| n == "f1.jpg" || n == "f2.jpg"),
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(!names.iter().any(|n| n == "f1.jpg" || n == "f2.jpg"),
                 "dirA excluded: {:?}", names);
             assert!(names.iter().any(|n| n.starts_with('g')),
                 "dirB included: {:?}", names);
@@ -310,8 +311,8 @@ define_cases! {
         format_query: default_scope,
         query: "extension:html & parentdir: &: count(extension:html) > 0",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "f1.html" || n == "f3.html"),
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.iter().any(|n| n == "f1.html" || n == "f3.html"),
                 "html files should appear: {:?}", names);
             Ok(())
         },
@@ -362,8 +363,8 @@ define_cases! {
         format_query: default_scope,
         query: "extension:html & parentdir: &: count(stem:*a*) == 2",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "apple.html" || n == "banana.html"),
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.iter().any(|n| n == "apple.html" || n == "banana.html"),
                 "dirA html expected: {:?}", names);
             assert_eq!(names.len(), 2, "Only 2 items: {:?}", names);
             Ok(())
@@ -390,10 +391,10 @@ define_cases! {
         query: "parentdir: &: (200 > sum(size:) > 50)",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "a.txt" || n == "b.txt"), "dirA included: {:?}", names);
-            assert!(!names.iter().any(|&n| n == "c.txt" || n == "d.txt"), "dirB excluded: {:?}", names);
-            assert!(!names.iter().any(|&n| n == "e.txt" || n == "f.txt"), "dirC excluded: {:?}", names);
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.iter().any(|n| n == "a.txt" || n == "b.txt"), "dirA included: {:?}", names);
+            assert!(!names.iter().any(|n| n == "c.txt" || n == "d.txt"), "dirB excluded: {:?}", names);
+            assert!(!names.iter().any(|n| n == "e.txt" || n == "f.txt"), "dirC excluded: {:?}", names);
             Ok(())
         },
     },
@@ -412,9 +413,9 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (sum(size:) * count(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("60"), "dir1: 30*2=60");
-            let d2 = res.results.iter().find(|r| r.name.contains("dir2")).expect("dir2");
+            let d2 = res.results.iter().find(|r| r.raw_repr().contains("dir2")).expect("dir2");
             assert_eq!(get_nvalue(d2).as_deref(), Some("100"), "dir2: 100*1=100");
             Ok(())
         },
@@ -434,7 +435,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (sum(size:) + count(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("32"), "dir1: 30+2=32");
             Ok(())
         },
@@ -454,7 +455,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (sum(size:) - count(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("28"), "dir1: 30-2=28");
             Ok(())
         },
@@ -474,7 +475,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (sum(size:) / count(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("15"), "dir1: 30/2=15");
             Ok(())
         },
@@ -494,7 +495,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (avg(size:) + sum(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("45"), "dir1: avg(15)+sum(30)=45");
             Ok(())
         },
@@ -514,7 +515,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (max(size:) * 2)",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("40"), "dir1: max(20)*2=40");
             Ok(())
         },
@@ -534,7 +535,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (1000 / min(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("100"), "dir1: 1000/min(10)=100");
             Ok(())
         },
@@ -554,7 +555,7 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: ((sum(size:) + 10) * count(size:))",
         assert: |res, _dir| {
-            let d1 = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
+            let d1 = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
             assert_eq!(get_nvalue(d1).as_deref(), Some("80"), "dir1: (30+10)*2=80");
             Ok(())
         },
@@ -577,10 +578,10 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (count(extension:rs) > 0) | parentdir: &: (count(*:*) > 1)",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n == "main.rs"), "dirA included: {:?}", names);
-            assert!(names.iter().any(|&n| n == "a.txt" || n == "b.txt"), "dirB included: {:?}", names);
-            assert!(!names.iter().any(|&n| n == "c.txt"), "dirC excluded: {:?}", names);
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"main.rs".to_string()), "dirA included: {:?}", names);
+            assert!(names.contains(&"a.txt".to_string()) || names.contains(&"b.txt".to_string()), "dirB included: {:?}", names);
+            assert!(!names.contains(&"c.txt".to_string()), "dirC excluded: {:?}", names);
             Ok(())
         },
     },
@@ -598,9 +599,9 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: (sum(size:) + count(extension:rs))",
         assert: |res, _dir| {
-            let dir_rs = res.results.iter().find(|r| r.name.contains("dir_rs")).expect("dir_rs");
+            let dir_rs = res.results.iter().find(|r| r.raw_repr().contains("dir_rs")).expect("dir_rs");
             assert_eq!(get_nvalue(dir_rs).as_deref(), Some("11"), "10+1=11");
-            let dir_txt = res.results.iter().find(|r| r.name.contains("dir_txt")).expect("dir_txt");
+            let dir_txt = res.results.iter().find(|r| r.raw_repr().contains("dir_txt")).expect("dir_txt");
             assert_eq!(get_nvalue(dir_txt).as_deref(), Some("50"), "50+0=50");
             Ok(())
         },
@@ -619,10 +620,10 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: count(extension:rs)",
         assert: |res, _dir| {
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
             assert!(has_item_tags(&res.results));
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n.contains("dir1")), "dir1 included");
-            assert!(!names.iter().any(|&n| n.contains("dir2")), "dir2 excluded");
+            assert!(names.iter().any(|n| n.contains("dir1")), "dir1 included");
+            assert!(!names.iter().any(|n| n.contains("dir2")), "dir2 excluded");
             Ok(())
         },
     },
@@ -647,8 +648,8 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: filename:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|r| r.name.contains("work") && r.name.contains("a.rs")),
-                "work/a.rs expected: {:?}", res.results.iter().map(|r| &r.name).collect::<Vec<_>>());
+            assert!(res.results.iter().any(|r| r.raw_repr().contains("work") && r.raw_repr().contains("a.rs")),
+                "work/a.rs expected: {:?}", res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>());
             Ok(())
         },
     },
@@ -672,7 +673,7 @@ define_cases! {
             assert_eq!(res.results.len(), 4, "4 groups: {:?}", res.results);
             let find_nv = |pdir: &str, ext: &str| -> f64 {
                 let g = res.results.iter()
-                    .find(|r| r.name.contains(pdir) && r.name.contains(ext))
+                    .find(|r| r.raw_repr().contains(pdir) && r.raw_repr().contains(ext))
                     .unwrap_or_else(|| panic!("Should find {}/{}", pdir, ext));
                 get_nvalue_f64(g).expect("nvalue")
             };
@@ -707,11 +708,11 @@ define_cases! {
                 })
             }).collect();
             assert_eq!(files.len(), 4, "4 files: {:?}", files);
-            let names: Vec<_> = files.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|&n| n.contains("a.rs")));
-            assert!(names.iter().any(|&n| n.contains("c.txt")));
-            assert!(names.iter().any(|&n| n.contains("d.txt")));
-            assert!(!names.iter().any(|&n| n.contains("b.txt")), "b.txt filtered");
+            let names: Vec<_> = files.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"a.rs".to_string()));
+            assert!(names.contains(&"c.txt".to_string()));
+            assert!(names.contains(&"d.txt".to_string()));
+            assert!(!names.contains(&"b.txt".to_string()), "b.txt filtered");
             Ok(())
         },
     },
@@ -730,8 +731,8 @@ define_cases! {
         format_query: default_scope,
         query: "parentdir: &: extension: &: size:",
         assert: |res, _dir| {
-            let dir1_rs = res.results.iter().filter(|r| r.name.contains("dir1") && r.name.contains("rs")).count();
-            let dir2_txt = res.results.iter().filter(|r| r.name.contains("dir2") && r.name.contains("txt")).count();
+            let dir1_rs = res.results.iter().filter(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("rs")).count();
+            let dir2_txt = res.results.iter().filter(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("txt")).count();
             assert_eq!(dir1_rs, 1);
             assert_eq!(dir2_txt, 1);
             Ok(())
@@ -750,7 +751,7 @@ define_cases! {
         query: "parentdir: &: extension: &: sum(size: :> 10 & size:)",
         assert: |res, _dir| {
             let dir1_rs = res.results.iter()
-                .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
+                .find(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("rs"))
                 .expect("dir1/rs");
             let val = get_nvalue_f64(dir1_rs).expect("nvalue");
             assert_eq!(val, 15.0, "only >10 bytes included: {}", val);
@@ -792,7 +793,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 3.0, "scalar 3.0, got {}", val);
             Ok(())
         },
@@ -814,7 +815,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 2.0, "scalar 2.0, got {}", val);
             Ok(())
         },
@@ -838,7 +839,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 1.0, "scalar 1.0, got {}", val);
             Ok(())
         },
@@ -862,7 +863,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 3.0, "scalar 3.0, got {}", val);
             Ok(())
         },
@@ -886,7 +887,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 99.0, "99.0, got {}", val);
             Ok(())
         },
@@ -909,7 +910,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results));
             assert_eq!(res.results.len(), 1);
-            let val: f64 = res.results[0].name.parse().unwrap_or(-1.0);
+            let val: f64 = res.results[0].raw_repr().parse().unwrap_or(-1.0);
             assert_eq!(val, 6.0, "6.0, got {}", val);
             Ok(())
         },
@@ -931,11 +932,11 @@ define_cases! {
         query: "(parentdir: &: count()) + (extension: &: count())",
         assert: |res, _dir| {
             let dir1_group = res.results.iter()
-                .find(|r| r.name.contains("dir1") && r.name.contains("rs"))
+                .find(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("rs"))
                 .expect("(dir1, rs)");
             assert_eq!(get_nvalue_f64(dir1_group), Some(5.0), "dir1 nvalue=5");
             let dir2_group = res.results.iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("rs"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("rs"))
                 .expect("(dir2, rs)");
             assert_eq!(get_nvalue_f64(dir2_group), Some(4.0), "dir2 nvalue=4");
             Ok(())
@@ -954,7 +955,7 @@ define_cases! {
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1, "1 merged group");
             let group = &res.results[0];
-            assert!(group.name.contains("rs"), "key has rs: {}", group.name);
+            assert!(group.raw_repr().contains("rs"), "key has rs: {}", group.raw_repr());
             assert_eq!(get_nvalue_f64(group), Some(2.0), "1+1=2");
             Ok(())
         },
@@ -976,8 +977,8 @@ define_cases! {
         query: "sum(parentdir: &: size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results), "projection");
-            let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
-            let dir2_r = res.results.iter().find(|r| r.name.contains("dir2")).expect("dir2");
+            let dir1_r = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
+            let dir2_r = res.results.iter().find(|r| r.raw_repr().contains("dir2")).expect("dir2");
             assert_eq!(get_nvalue_f64(dir1_r), Some(17.0), "dir1 sum=17");
             assert_eq!(get_nvalue_f64(dir2_r), Some(5.0), "dir2 sum=5");
             Ok(())
@@ -999,8 +1000,8 @@ define_cases! {
         query: "count(parentdir: &: extension:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results), "projection");
-            let dir1_r = res.results.iter().find(|r| r.name.contains("dir1")).expect("dir1");
-            let dir2_r = res.results.iter().find(|r| r.name.contains("dir2")).expect("dir2");
+            let dir1_r = res.results.iter().find(|r| r.raw_repr().contains("dir1")).expect("dir1");
+            let dir2_r = res.results.iter().find(|r| r.raw_repr().contains("dir2")).expect("dir2");
             assert_eq!(get_nvalue_f64(dir1_r), Some(2.0), "dir1 count=2");
             assert_eq!(get_nvalue_f64(dir2_r), Some(1.0), "dir2 count=1");
             Ok(())
@@ -1026,7 +1027,7 @@ define_cases! {
             assert_eq!(res.results.len(), 4, "4 groups");
             let find_nv = |pdir: &str, ext: &str| -> f64 {
                 let g = res.results.iter()
-                    .find(|r| r.name.contains(pdir) && r.name.contains(ext))
+                    .find(|r| r.raw_repr().contains(pdir) && r.raw_repr().contains(ext))
                     .unwrap_or_else(|| panic!("{}/{}", pdir, ext));
                 get_nvalue_f64(g).expect("nvalue")
             };
@@ -1048,7 +1049,7 @@ define_cases! {
         query: "sum(extension:rs & size:)",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            assert_eq!(res.results[0].name, "17", "sum=17");
+            assert_eq!(res.results[0].raw_repr(), "17B", "sum=17B");
             Ok(())
         },
     },
@@ -1068,7 +1069,7 @@ define_cases! {
         query: "sum(parentdir: &: count())",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            let val: f64 = res.results[0].name.parse().expect("numeric");
+            let val: f64 = res.results[0].raw_repr().parse().expect("numeric");
             assert_eq!(val, 5.0, "sum of counts=5");
             Ok(())
         },
@@ -1092,7 +1093,7 @@ define_cases! {
             assert_eq!(res.results.len(), 3, "3 groups");
             let find_nv = |pdir: &str, ext: &str, fname: &str| -> f64 {
                 let g = res.results.iter()
-                    .find(|r| r.name.contains(pdir) && r.name.contains(ext) && r.name.contains(fname))
+                    .find(|r| r.raw_repr().contains(pdir) && r.raw_repr().contains(ext) && r.raw_repr().contains(fname))
                     .unwrap_or_else(|| panic!("{}/{}/{}", pdir, ext, fname));
                 get_nvalue_f64(g).expect("nvalue")
             };
@@ -1118,7 +1119,9 @@ define_cases! {
         query: "sum(sum(parentdir: &: extension: &: size:))",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            let val: f64 = res.results[0].name.parse().expect("numeric");
+            // raw_repr() is size-formatted; use value tag for numeric check
+            let value_strs = res.results[0].get_all_values("value");
+            let val: f64 = value_strs[0].parse().expect("numeric value tag");
             assert_eq!(val, 22.0, "22.0, got {}", val);
             Ok(())
         },
@@ -1139,7 +1142,7 @@ define_cases! {
         query: "sum(count(parentdir: &: extension:))",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            let val: f64 = res.results[0].name.parse().expect("numeric");
+            let val: f64 = res.results[0].raw_repr().parse().expect("numeric");
             assert_eq!(val, 3.0, "3.0, got {}", val);
             Ok(())
         },
@@ -1155,7 +1158,7 @@ define_cases! {
         query: "count(extension: &: parentdir: &: (sum(size:) > 10))",
         assert: |res, _dir| {
             assert!(!has_item_tags(&res.results), "scalar");
-            let val: f64 = res.results[0].name.parse().expect("numeric");
+            let val: f64 = res.results[0].raw_repr().parse().expect("numeric");
             assert_eq!(val, 1.0, "1 valid group, got {}", val);
             Ok(())
         },
@@ -1178,16 +1181,16 @@ define_cases! {
         assert: |res, _dir| {
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir1") && r.name.contains("8"))
+                .find(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("8"))
                 .expect("Should find dir1 8.0 result");
 
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("11"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("11"))
                 .expect("Should find dir2 11.0 result (b.rs)");
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("6"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("6"))
                 .expect("Should find dir2 6.0 result (c.rs)");
             Ok(())
         },
@@ -1210,15 +1213,15 @@ define_cases! {
         assert: |res, _dir| {
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir1") && r.name.contains("14"))
+                .find(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("14"))
                 .expect("Should find dir1 14.0 result");
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("20"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("20"))
                 .expect("Should find dir2 20.0 result");
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("10"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("10"))
                 .expect("Should find dir2 10.0 result");
             Ok(())
         },
@@ -1235,18 +1238,18 @@ define_cases! {
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        modify: Some(|fm, dir| {
+        modify: Some(|store, registry, dir| {
             let file_path = dir.join("dir1").join("a.rs");
-            fm.tag_item(&file_path.to_string_lossy(), "width:10")?;
-            fm.tag_item(&file_path.to_string_lossy(), "height:20")?;
+            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "width:10")?;
+            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "height:20")?;
 
             let file_path2 = dir.join("dir2").join("b.rs");
-            fm.tag_item(&file_path2.to_string_lossy(), "width:15")?;
-            fm.tag_item(&file_path2.to_string_lossy(), "height:30")?;
+            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "width:15")?;
+            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "height:30")?;
 
             let file_path3 = dir.join("dir2").join("c.rs");
-            fm.tag_item(&file_path3.to_string_lossy(), "width:5")?;
-            fm.tag_item(&file_path3.to_string_lossy(), "height:6")?;
+            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "width:5")?;
+            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "height:6")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1254,15 +1257,15 @@ define_cases! {
         assert: |res, _dir| {
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir1") && r.name.contains("200"))
+                .find(|r| r.raw_repr().contains("dir1") && r.raw_repr().contains("200"))
                 .expect("Should find dir1 200.0 result");
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("450"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("450"))
                 .expect("Should find dir2 450.0 result");
             res.results
                 .iter()
-                .find(|r| r.name.contains("dir2") && r.name.contains("30"))
+                .find(|r| r.raw_repr().contains("dir2") && r.raw_repr().contains("30"))
                 .expect("Should find dir2 30.0 result");
             Ok(())
         },
@@ -1280,11 +1283,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:three")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:three")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1299,9 +1302,9 @@ define_cases! {
                 res.results.len(),
                 1,
                 "Intersection should yield exactly 1 group ('one'), got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            assert_eq!(res.results[0].name.as_str(), "one");
+            assert_eq!(res.results[0].raw_repr(), "one");
             assert!(res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")));
             let all_names: Vec<String> = res
                 .results
@@ -1325,11 +1328,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagX:alpha")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagX:alpha")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1343,11 +1346,11 @@ define_cases! {
                 res.results.len(),
                 2,
                 "Union should yield 2 groups ('alpha' and 'beta'), got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            let alpha = res.results.iter().find(|r| r.name.as_str() == "alpha")
+            let alpha = res.results.iter().find(|r| r.raw_repr() == "alpha")
                 .expect("Should have 'alpha' group");
-            let beta  = res.results.iter().find(|r| r.name.as_str() == "beta")
+            let beta  = res.results.iter().find(|r| r.raw_repr() == "beta")
                 .expect("Should have 'beta' group");
             assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("a.txt")));
             assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("c.txt")));
@@ -1366,11 +1369,11 @@ define_cases! {
             std::fs::write(dir.join("also_apple.txt"), "d")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
-            fm.tag_item(&dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
-            fm.tag_item(&dir.join("cherry.txt").to_string_lossy(), "fruit:cherry")?;
-            fm.tag_item(&dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
+            tagging::tag_item(store, registry, &dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
+            tagging::tag_item(store, registry, &dir.join("cherry.txt").to_string_lossy(), "fruit:cherry")?;
+            tagging::tag_item(store, registry, &dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1384,12 +1387,12 @@ define_cases! {
                 res.results.len(),
                 2,
                 "Except should yield 2 groups ('banana' and 'cherry'), got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            assert!(!res.results.iter().any(|g| g.name.as_str() == "apple"),
+            assert!(!res.results.iter().any(|g| g.raw_repr() == "apple"),
                 "'apple' must be excluded");
-            assert!(res.results.iter().any(|g| g.name.as_str() == "banana"));
-            assert!(res.results.iter().any(|g| g.name.as_str() == "cherry"));
+            assert!(res.results.iter().any(|g| g.raw_repr() == "banana"));
+            assert!(res.results.iter().any(|g| g.raw_repr() == "cherry"));
             Ok(())
         },
     },
@@ -1405,28 +1408,38 @@ define_cases! {
             std::fs::write(dir_b.join("file2.txt"), "content")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
-            fm.tag_item(&dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
+            tagging::tag_item(store, registry, &dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
             Ok(())
         }),
         format_query: default_scope,
         query: "parentdir: &: (tagA: | tagB:)",
         assert: |res, dir| {
             assert!(has_item_tags(&res.results), "Should return Projection result");
-            // 複合ラベル形式: "parentdir_path &: tag_value"
+            println!("nest_right_side_label_set_op_union results: {:#?}", res.results);
             let dir_a = dir.join("dir_a").to_string_lossy().into_owned();
             let dir_b = dir.join("dir_b").to_string_lossy().into_owned();
-            let mut names: Vec<String> = res.results.iter().map(|r| r.name.clone()).collect();
-            names.sort_unstable();
-            let mut expected = vec![
-                format!("{dir_a} &: x"),
-                format!("{dir_a} &: y"),
-                format!("{dir_b} &: p"),
-            ];
-            expected.sort_unstable();
-            assert_eq!(names, expected);
+            let mut a_tags = vec![];
+            let mut b_tags = vec![];
+            for r in &res.results {
+                let group = r.raw_repr();
+                for e in &r.tags.entries {
+                    let label_str = e.label.as_str();
+                    let file_name = label_str.split('#').next().unwrap().to_string();
+                    if group == dir_a {
+                        a_tags.push(file_name);
+                    } else if group == dir_b {
+                        b_tags.push(file_name);
+                    }
+                }
+            }
+            a_tags.sort_unstable();
+            b_tags.sort_unstable();
+
+            assert_eq!(a_tags, vec!["file1.txt", "file1.txt"]);
+            assert_eq!(b_tags, vec!["file2.txt"]);
             Ok(())
         },
     },
@@ -1453,10 +1466,10 @@ define_cases! {
                 "sum(Nest & path_filter) must Unnest and return Projection, not scalar"
             );
             let dir1_group = res.results.iter()
-                .find(|r| r.name.contains("dir1"))
+                .find(|r| r.raw_repr().contains("dir1"))
                 .expect("Should have dir1 group");
             let dir2_group = res.results.iter()
-                .find(|r| r.name.contains("dir2"))
+                .find(|r| r.raw_repr().contains("dir2"))
                 .expect("Should have dir2 group");
             assert_eq!(get_nvalue(dir1_group).as_deref(), Some("30"), "dir1 sum=30");
             assert_eq!(get_nvalue(dir2_group).as_deref(), Some("5"),  "dir2 sum=5");
@@ -1464,17 +1477,16 @@ define_cases! {
         },
     },
     // ケース⑧ Proj & Proj → SearchResponse.warnings に警告を生成する
-    // NOTE: warnings フィールドは Phase 1 で追加。Phase 0 ではコンパイルエラー（意図的 Red）。
     label_set_intersect_warns: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1514,7 +1526,10 @@ define_cases! {
             );
             // extension: が全3ファイルをカバーするため Union 結果は過不足なく3ファイル
             let mut filenames: Vec<_> = res.results.iter()
-                .map(|r| std::path::Path::new(&r.name).file_name().unwrap_or_default().to_str().unwrap_or(""))
+                .map(|r| {
+                    let s = r.raw_repr();
+                    std::path::Path::new(&s).file_name().unwrap_or_default().to_str().unwrap_or("").to_string()
+                })
                 .collect();
             filenames.sort_unstable();
             assert_eq!(
@@ -1548,7 +1563,7 @@ define_cases! {
                 "Proj - TypedTag should still return Projection (Lv.2)"
             );
             // rs グループ: include/a.rs のみ（exclude/c.rs は除外済み）
-            let rs_group = res.results.iter().find(|r| r.name == "rs").expect("'rs' group");
+            let rs_group = res.results.iter().find(|r| r.raw_repr() == "rs").expect("'rs' group");
             assert!(
                 rs_group.tags.entries.len() == 1
                     && rs_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("a.rs")),
@@ -1556,7 +1571,7 @@ define_cases! {
                 rs_group.tags.entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
             );
             // txt グループ: include/b.txt のみ（exclude/d.txt は除外済み）
-            let txt_group = res.results.iter().find(|r| r.name == "txt").expect("'txt' group");
+            let txt_group = res.results.iter().find(|r| r.raw_repr() == "txt").expect("'txt' group");
             assert!(
                 txt_group.tags.entries.len() == 1
                     && txt_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("b.txt")),
@@ -1578,14 +1593,14 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "grade:A")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:one")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "grade:A")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:one")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "grade:A")?;
             Ok(())
         }),
         format_query: default_scope,
@@ -1596,9 +1611,9 @@ define_cases! {
                 res.results.len(),
                 1,
                 "LabelSetOp & TypedTag should return 1 group ('one'), got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            assert_eq!(res.results[0].name.as_str(), "one");
+            assert_eq!(res.results[0].raw_repr(), "one");
             // a.txt が含まれる（grade:A あり）
             assert!(
                 res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")),
@@ -1637,7 +1652,7 @@ define_cases! {
                 "sum((parentdir: & filter) &: (size: & filter)) must return Projection"
             );
             let dir1_group = res.results.iter()
-                .find(|r| r.name.contains("dir1"))
+                .find(|r| r.raw_repr().contains("dir1"))
                 .expect("Should have dir1 group");
             assert_eq!(
                 get_nvalue(dir1_group).as_deref(),
@@ -1655,13 +1670,13 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "grade:A")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
             // a.txt: grade:A あり → Nest 結果に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
             // b.txt: grade:A なし → 除外される
             Ok(())
         }),
@@ -1674,13 +1689,13 @@ define_cases! {
             );
             // a.txt の cat:one/flavor:sweet グループが存在する
             assert!(
-                res.results.iter().any(|r| r.name.contains("one") || r.name.contains("sweet")),
+                res.results.iter().any(|r| r.raw_repr().contains("one") || r.raw_repr().contains("sweet")),
                 "cat:one/flavor:sweet group should exist, got: {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             // b.txt (grade:A なし) の cat:two/flavor:bitter グループは除外される
             assert!(
-                !res.results.iter().any(|r| r.name.contains("two") || r.name.contains("bitter")),
+                !res.results.iter().any(|r| r.raw_repr().contains("two") || r.raw_repr().contains("bitter")),
                 "cat:two/flavor:bitter group must be absent (no grade:A)"
             );
             Ok(())
@@ -1694,11 +1709,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: cat/flavor のみ
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade:A のみ
             // c.txt: タグなし → どちらにも属さない
             Ok(())
@@ -1711,15 +1726,15 @@ define_cases! {
                 "Nest | TypedTag should flatten to Lv.1"
             );
             assert!(
-                res.results.iter().any(|r| r.name.contains("a.txt")),
+                res.results.iter().any(|r| r.raw_repr().contains("a.txt")),
                 "a.txt (cat/flavor) should appear in flat results"
             );
             assert!(
-                res.results.iter().any(|r| r.name.contains("b.txt")),
+                res.results.iter().any(|r| r.raw_repr().contains("b.txt")),
                 "b.txt (grade:A) should appear in flat results"
             );
             assert!(
-                !res.results.iter().any(|r| r.name.contains("c.txt")),
+                !res.results.iter().any(|r| r.raw_repr().contains("c.txt")),
                 "c.txt (no tags) must NOT appear"
             );
             Ok(())
@@ -1733,16 +1748,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: grade:A なし → 除外されない
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:sour")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:sour")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade:A あり → 除外される
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
             // c.txt: grade:A なし → 除外されない
             Ok(())
         }),
@@ -1755,17 +1770,17 @@ define_cases! {
             );
             // b.txt (grade:A) の "one &: sour" グループが消える
             assert!(
-                !res.results.iter().any(|r| r.name.contains("sour")),
+                !res.results.iter().any(|r| r.raw_repr().contains("sour")),
                 "flavor:sour group (b.txt, grade:A) must be excluded"
             );
             // a.txt の "one &: sweet" グループが残る
             assert!(
-                res.results.iter().any(|r| r.name.contains("sweet")),
+                res.results.iter().any(|r| r.raw_repr().contains("sweet")),
                 "flavor:sweet group (a.txt, no grade:A) should remain"
             );
             // c.txt の "two &: bitter" グループが残る
             assert!(
-                res.results.iter().any(|r| r.name.contains("bitter")),
+                res.results.iter().any(|r| r.raw_repr().contains("bitter")),
                 "flavor:bitter group (c.txt, no grade:A) should remain"
             );
             Ok(())
@@ -1780,11 +1795,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
             // a.txt: tagA: & Nest 両方に属す
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
             // b.txt: tagA: のみ（tagB: なし）→ Nest に非存在 → 除外
             Ok(())
         }),
@@ -1814,16 +1829,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: 両 Nest に存在 → 積集合に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC なし → 第2 Nest に非存在 → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
@@ -1863,18 +1878,18 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
             // a.txt: 両 Nest に存在 → 積集合に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC/tagD なし → 第2 Nest に非存在 → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 除外
             Ok(())
         }),
@@ -1923,7 +1938,7 @@ define_cases! {
             assert!(
                 res.results.is_empty(),
                 "extension: & size: label value sets are disjoint (string vs int) → empty result, got: {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -1966,11 +1981,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
             // a.txt: tagA のみ（tagB なし）→ tagA: に存在するが Nest には非存在
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:1")?;
             // b.txt: tagA + tagB → 両方に存在
             Ok(())
         }),
@@ -2004,17 +2019,17 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: 第1 Nest のみ
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "shape:round")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "color:red")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "shape:round")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "color:red")?;
             // b.txt: 第2 Nest のみ
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "shape:square")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "color:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "shape:square")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "color:blue")?;
             // c.txt: 両 Nest に存在
             Ok(())
         }),
@@ -2025,7 +2040,7 @@ define_cases! {
                 !has_item_tags(&res.results),
                 "Nest | Nest (Lv.3 異なるキー、共通プレフィックスなし) → Lv.1 フラット"
             );
-            // LabelSetOp SQL はラベル値グループを返すため r.name はラベル値
+            // LabelSetOp SQL はラベル値グループを返すため r.raw_repr() はラベル値
             // ファイルパスは各グループの entries に格納される
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
@@ -2053,11 +2068,11 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
             // a.txt: Nest に存在 → tagA: 結果から除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
             // b.txt: tagB なし → Nest に非存在 → tagA: 結果に残る
             Ok(())
         }),
@@ -2072,14 +2087,14 @@ define_cases! {
             assert_eq!(
                 res.results.len(), 1,
                 "should have exactly 1 label group, got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             assert!(
-                res.results.iter().any(|r| r.name == "y"),
+                res.results.iter().any(|r| r.raw_repr() == "y"),
                 "'y' label group must remain (b.txt has tagA:y, not in Nest)"
             );
             assert!(
-                !res.results.iter().any(|r| r.name == "x"),
+                !res.results.iter().any(|r| r.raw_repr() == "x"),
                 "'x' label group must be excluded (a.txt has tagA:x and is in Nest)"
             );
             // アイテムの確認（サブ）
@@ -2099,13 +2114,13 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
             // a.txt: grade: なし → Nest に残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade: あり → grade: Proj に存在 → Nest から除外
             Ok(())
         }),
@@ -2120,14 +2135,14 @@ define_cases! {
             assert_eq!(
                 res.results.len(), 1,
                 "should have exactly 1 label group, got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             assert!(
-                res.results.iter().any(|r| r.name == "one"),
+                res.results.iter().any(|r| r.raw_repr() == "one"),
                 "'one' label group must remain (a.txt has no grade:)"
             );
             assert!(
-                !res.results.iter().any(|r| r.name == "two"),
+                !res.results.iter().any(|r| r.raw_repr() == "two"),
                 "'two' label group must be excluded (b.txt has grade:A)"
             );
             // アイテムの確認（サブ）
@@ -2148,16 +2163,16 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: 両 Nest に存在 → 第1 Nest から除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
             // b.txt: tagC なし → 第2 Nest に非存在 → 第1 Nest に残る
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
             // c.txt: tagB なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
@@ -2172,10 +2187,10 @@ define_cases! {
             assert_eq!(
                 res.results.len(), 1,
                 "should have exactly 1 label group, got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             assert!(
-                res.results.iter().any(|r| r.name == "x"),
+                res.results.iter().any(|r| r.raw_repr() == "x"),
                 "'x' label group must remain (b.txt has tagA:x and is only in Nest1)"
             );
             // アイテムの確認（サブ）
@@ -2196,19 +2211,19 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
             // a.txt: grade: なし → 残る
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "grade:A")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
             // b.txt: grade: あり → 除外
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagC:green")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:green")?;
             // c.txt: grade: なし → 残る
             Ok(())
         }),
@@ -2223,12 +2238,12 @@ define_cases! {
             assert_eq!(
                 res.results.len(), 2,
                 "should have 2 label groups ('x' and 'y'), got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            assert!(res.results.iter().any(|r| r.name == "x"), "'x' group must remain");
-            assert!(res.results.iter().any(|r| r.name == "y"), "'y' group must remain");
+            assert!(res.results.iter().any(|r| r.raw_repr() == "x"), "'x' group must remain");
+            assert!(res.results.iter().any(|r| r.raw_repr() == "y"), "'y' group must remain");
             // "x" グループに a.txt のみ（b.txt は grade: で除外）
-            let x_group = res.results.iter().find(|r| r.name == "x").unwrap();
+            let x_group = res.results.iter().find(|r| r.raw_repr() == "x").unwrap();
             let x_items: Vec<_> = x_group.tags.entries.iter()
                 .map(|e| e.label.as_str())
                 .collect();
@@ -2246,19 +2261,19 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|fm, dir| {
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            fm.tag_item(&dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
+        modify: Some(|store, registry, dir| {
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
+            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
             // a.txt: 両 Nest に存在 → 除外
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            fm.tag_item(&dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
+            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
             // b.txt: tagD なし → 第2 Nest に非存在 → 残る
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            fm.tag_item(&dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
+            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
             // c.txt: tagC なし → 第1 Nest に非存在 → 結果に影響なし
             Ok(())
         }),
@@ -2273,9 +2288,9 @@ define_cases! {
             assert_eq!(
                 res.results.len(), 1,
                 "should have exactly 1 label group, got {:?}",
-                res.results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
-            assert!(res.results.iter().any(|r| r.name == "x"), "'x' group must remain");
+            assert!(res.results.iter().any(|r| r.raw_repr() == "x"), "'x' group must remain");
             // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
@@ -2299,10 +2314,41 @@ define_cases! {
         query: "sum(extension: &: size:)",
         assert: |res, _dir| {
             assert!(has_item_tags(&res.results), "Should return projection result");
-            let rs_group = res.results.iter().find(|r| r.name.contains("rs")).expect("rs group");
-            let txt_group = res.results.iter().find(|r| r.name.contains("txt")).expect("txt group");
+            let rs_group = res.results.iter().find(|r| r.raw_repr().contains("rs")).expect("rs group");
+            let txt_group = res.results.iter().find(|r| r.raw_repr().contains("txt")).expect("txt group");
             assert_eq!(get_nvalue_f64(rs_group), Some(17.0));
             assert_eq!(get_nvalue_f64(txt_group), Some(5.0));
+            Ok(())
+        },
+    },
+    // Issue 1: nvalue なし Nest への比較は最後のキーが比較値として機能する
+    // nvalue は「最後のキー」を明示的に上書きするもの。nvalue がなければ最後のキーを直接使う。
+    // 修正前は "Comparison on Nest without nvalue is not supported" エラーになる
+    nest_no_nvalue_comparison_last_key: {
+        setup: |dir| {
+            let big = dir.join("big");
+            let small = dir.join("small");
+            std::fs::create_dir_all(&big)?;
+            std::fs::create_dir_all(&small)?;
+            std::fs::write(big.join("large.txt"), vec![0u8; 200])?;
+            std::fs::write(small.join("tiny.txt"), vec![0u8; 10])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(parentdir: &: size:) :> 100",
+        assert: |res, _dir| {
+            // NestMatch はファイルアイテムを返す（nvalue タグなし）
+            assert!(!has_item_tags(&res.results));
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(
+                names.iter().any(|n| n.contains("large.txt")),
+                "large.txt (200B) should be included: {:?}", names
+            );
+            assert!(
+                !names.iter().any(|n| n.contains("tiny.txt")),
+                "tiny.txt (10B) should be excluded: {:?}", names
+            );
             Ok(())
         },
     },
@@ -2378,7 +2424,7 @@ fn test_nest_parse_with_aggregation() {
 #[test]
 fn test_nest_left_must_be_projection() {
     let result =
-        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:");
+        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:", &TagRegistry::with_standard());
     assert!(result.is_err(), "non-projection left should fail");
 }
 
@@ -2388,9 +2434,7 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
-        "parentdir: &: count(extension:jpg)",
-    )
+    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2399,7 +2443,7 @@ fn test_nest_resolves_to_projection_with_nvalue() {
 #[test]
 fn test_nest_resolves_sum_nvalue() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)")
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)", &TagRegistry::with_standard())
             .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2408,7 +2452,7 @@ fn test_nest_resolves_sum_nvalue() {
 #[test]
 fn test_plain_projection_no_nvalue() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("extension:").unwrap();
+        ttfm::query::lens_resolver::Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(
         resolver.get_nvalue().is_none(),
@@ -2422,33 +2466,25 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "extension:rs &: count(*:*)"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("extension:rs &: count(*:*)", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "count(*:*) &: extension:"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("count(*:*) &: extension:", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
-        "(size: > 100) &: extension:"
-    )
+    assert!(ttfm::query::lens_resolver::Resolver::new("(size: > 100) &: extension:", &TagRegistry::with_standard())
     .is_err());
 }
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
-        "parentdir: &: (count(extension:jpg) > 1)",
-    )
+    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: (count(extension:jpg) > 1)", &TagRegistry::with_standard())
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2477,7 +2513,7 @@ fn test_nest_resolver_all_aggregations() {
         "filename: &: sum(size:)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}' should resolve: {}",
@@ -2497,7 +2533,7 @@ fn test_nest_resolver_all_aggregations() {
 #[test]
 fn test_nest_scalar_right_resolves() {
     let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100").unwrap();
+        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100", &TagRegistry::with_standard()).unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
@@ -2513,7 +2549,7 @@ fn test_nest_comparison_resolver_patterns() {
         "extension: &: (count(*:*) > 2)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}': {}",
@@ -2543,7 +2579,7 @@ fn test_nest_query_vs_calc_resolves() {
         "parentdir: &: (avg(size:) > (sum(size:) / count()))",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query);
+        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
         assert!(
             result.is_ok(),
             "'{}': {}",
@@ -2567,11 +2603,13 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
     std::fs::write(dir1.join("b.txt"), "world")?;
     std::fs::write(dir2.join("c.rs"), "foo")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res =
-        fm.search("parentdir: &: extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "parentdir: &: extension:", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2586,11 +2624,13 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir1)?;
     std::fs::write(dir1.join("a.rs"), "hello")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res =
-        fm.search("parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2609,17 +2649,18 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     std::fs::write(dir1.join("b.txt"), "world")?;
     std::fs::write(dir2.join("c.rs"), "foo")?;
 
-    let fm = FileManager::new_with_db_dir(&root.join(".ttfm/db"))?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res =
-        fm.search("type: & parentdir:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "type: & parentdir:", ttfm::SearchOptions::default())?;
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res =
-        fm.search("type: | extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(&store, &registry, &cache, "type: | extension:", ttfm::SearchOptions::default())?;
     assert!(
         !res.results.is_empty(),
         "type: | extension: should return labels from both"

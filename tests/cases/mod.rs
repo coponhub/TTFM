@@ -1,6 +1,5 @@
 use std::path::Path;
 use ttfm::response::SearchResponse;
-use ttfm::FileManager;
 
 // ──────────────────────────────────────────────
 // 共通テストケース構造体
@@ -10,7 +9,13 @@ pub(super) struct QueryTestCase {
     pub name: &'static str,
     pub setup: fn(&Path) -> anyhow::Result<()>,
     /// DBのインデックス完了後に、ファイルに対してタグ付け等の操作を行うためのオプションのフック
-    pub modify: Option<fn(&FileManager, &Path) -> anyhow::Result<()>>,
+    pub modify: Option<
+        fn(
+            &ttfm::db::Store,
+            &ttfm::tag::TagRegistry,
+            &Path,
+        ) -> anyhow::Result<()>,
+    >,
     /// クエリを実行前に加工する関数。デフォルトは `default_scope`。
     /// outer-agg クエリ等、特殊なスコープ付与が必要なケースで上書きする。
     pub format_query: fn(&str, &Path) -> String,
@@ -20,7 +25,9 @@ pub(super) struct QueryTestCase {
 
 pub(super) struct SharedFixture {
     pub root: tempfile::TempDir,
-    pub fm: std::sync::Mutex<ttfm::FileManager>,
+    pub store: std::sync::Mutex<ttfm::db::Store>,
+    pub registry: ttfm::tag::TagRegistry,
+    pub cache: ttfm::CacheManager,
 }
 
 // ──────────────────────────────────────────────
@@ -49,31 +56,48 @@ macro_rules! define_cases {
                         panic!("Setup failed for '{}': {}", case.name, e)
                     });
                 }
-                let fm = ttfm::FileManager::new_with_db_dir(&db_dir).expect("FM create");
-                fm.index_directory(root.path(), None::<&fn(usize)>, false)
+                let store = ttfm::db::Store::open(&db_dir).expect("Store::open");
+                let registry = ttfm::tag::TagRegistry::with_standard();
+                ttfm::indexing::Indexer::new(&store, &registry)
+                    .initialize_tables()
+                    .expect("initialize_tables");
+                ttfm::indexing::Indexer::new(&store, &registry)
+                    .run(root.path(), None::<&fn(usize)>, false)
                     .expect("index_directory");
                 for case in CASES {
                     if let Some(modify) = case.modify {
                         let case_dir = root.path().join(case.name);
-                        modify(&fm, &case_dir).unwrap_or_else(|e| {
+                        modify(&store, &registry, &case_dir).unwrap_or_else(|e| {
                             panic!("Modify failed for '{}': {}", case.name, e)
                         });
                     }
                 }
+                let cache = ttfm::CacheManager::new(
+                    store.db_dir.join("cache"),
+                    0,
+                );
                 crate::cases::SharedFixture {
                     root,
-                    fm: std::sync::Mutex::new(fm),
+                    store: std::sync::Mutex::new(store),
+                    registry,
+                    cache,
                 }
             })
         }
 
         fn run_case(name: &'static str) -> anyhow::Result<()> {
             let fix = get_fixture();
-            let fm = fix.fm.lock().unwrap().try_clone()?;
+            let store = fix.store.lock().unwrap().try_clone()?;
             let case = CASES.iter().find(|c| c.name == name).unwrap();
             let case_dir = fix.root.path().join(case.name);
             let query = (case.format_query)(case.query, &case_dir);
-            let res = fm.search(&query, ttfm::SearchOptions::default())?;
+            let res = ttfm::search::search(
+                &store,
+                &fix.registry,
+                &fix.cache,
+                &query,
+                ttfm::SearchOptions::default(),
+            )?;
             (case.assert)(&res, &case_dir)
         }
 
@@ -193,11 +217,6 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
     }
 
     // 汎用: クエリ内の全アグリゲーション呼び出しにスコープを注入する。
-    // sum/count/avg/max/min を含む任意の式に対応:
-    //   agg(X) > N  →  agg((X) & path:dir/*) > N
-    //   agg(X) == agg(X)  →  agg((X) & path:dir/*) == agg((X) & path:dir/*)
-    //   (agg(X) + N) > M  →  (agg((X) & path:dir/*) + N) > M
-    //   count()  →  count(*:* & path:dir/*)
     const AGGS: &[&str] = &["sum(", "count(", "avg(", "max(", "min("];
     if AGGS.iter().any(|&a| query.contains(a)) {
         let bytes = query.as_bytes();
@@ -225,7 +244,6 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
                     }
                     let inner = &query[inner_start..i];
                     if inner.is_empty() {
-                        // count() → count(*:* & path:dir/*)
                         out.push_str("*:*");
                     } else {
                         out.push('(');
@@ -235,7 +253,7 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
                     out.push(' ');
                     out.push_str(&filter);
                     out.push(')');
-                    i += 1; // skip ')'
+                    i += 1;
                     matched = true;
                     break;
                 }
@@ -279,6 +297,7 @@ pub mod test_optimize_sql;
 pub mod test_projection;
 pub mod test_query_full;
 pub mod test_reverse_patterns;
+pub mod test_scalar_format;
 pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;

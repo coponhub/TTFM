@@ -1,7 +1,7 @@
+use ttfm::search;
 use super::{default_scope, inject_path_scope};
 use anyhow::Result;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 define_cases! {
     label_calc_arith_projection: {
@@ -29,7 +29,7 @@ define_cases! {
         query: "(extension:rs & size:) * 2",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "should return results");
-            assert_eq!(res.results[0].name, "200", "size(100) * 2 = 200");
+            assert_eq!(res.results[0].raw_repr(), "200", "size(100) * 2 = 200");
             Ok(())
         },
     },
@@ -53,6 +53,44 @@ define_cases! {
         query: "100MB :< (size: / 2)",
         assert: |_res, _dir| Ok(()),
     },
+    label_calc_tag_arith_label_cmp: {
+        setup: |dir| {
+            std::fs::write(dir.join("small.txt"), vec![0u8; 100])?;
+            std::fs::write(dir.join("large.txt"), vec![0u8; 200000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "(size: / 1024) :> 100",
+        assert: |res, _dir| {
+            assert_eq!(
+                res.results.len(), 1,
+                "should return exactly 1 item (large.txt), got: {:?}", res.results
+            );
+            assert!(
+                res.results[0].raw_repr().contains("large.txt"),
+                "should return large.txt, got: {:?}", res.results
+            );
+            Ok(())
+        },
+    },
+    label_calc_tag_arith_and: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.rs"), vec![0u8; 200000])?;
+            std::fs::write(dir.join("b.txt"), vec![0u8; 200000])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: inject_path_scope,
+        query: "(size: / 1024) :> 100 & extension:rs",
+        assert: |res, _dir| {
+            assert_eq!(
+                res.results.len(), 1,
+                "should return only a.rs, got: {:?}", res.results
+            );
+            Ok(())
+        },
+    },
 }
 
 /// 複合比較クエリ (成功/エラー混在のため移行不可)
@@ -61,37 +99,41 @@ fn test_complex_comparisons() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
 
-    fm.index_directory(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
 
     let query_agg_agg = "sum(size:) > count(extension:rs)";
     assert!(
-        fm.search(query_agg_agg, Default::default()).is_ok(),
+        search::search(&store, &registry, &cache, query_agg_agg, Default::default()).is_ok(),
         "Agg vs Agg should be valid"
     );
 
     let query_agg_calc = "(sum(size:) / 1024) > 100";
     assert!(
-        fm.search(query_agg_calc, Default::default()).is_ok(),
+        search::search(&store, &registry, &cache, query_agg_calc, Default::default()).is_ok(),
         "Agg calculation vs Literal should be valid"
     );
 
     let query_proj_calc = "size: :> (1024 * 1024)";
     assert!(
-        fm.search(query_proj_calc, Default::default()).is_ok(),
+        search::search(&store, &registry, &cache, query_proj_calc, Default::default()).is_ok(),
         "Proj vs Calculation with label op should be valid"
     );
 
     let query_forbidden = "size: > 100";
-    let res_forbidden = fm.search(query_forbidden, Default::default());
+    let res_forbidden = search::search(&store, &registry, &cache, query_forbidden, Default::default());
     assert!(
         res_forbidden.is_err(),
         "size: > 100 should be a syntax error according to design"
     );
 
     let query_agg_proj = "max(size:) == size:";
-    let res_agg_proj = fm.search(query_agg_proj, Default::default());
+    let res_agg_proj = search::search(&store, &registry, &cache, query_agg_proj, Default::default());
     assert!(res_agg_proj.is_err(), "max(size:) == size: should be a syntax error if both sides must be scalar");
 }
 
@@ -101,16 +143,20 @@ fn test_arithmetic_projection_syntax() -> Result<()> {
     let dir = tempdir()?;
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
 
-    let result = fm.search("(size: / 1024)", Default::default());
+    let result = search::search(&store, &registry, &cache, "(size: / 1024)", Default::default());
     assert!(
         result.is_ok(),
         "Failed to parse arithmetic projection: {:?}",
         result.err()
     );
 
-    let result2 = fm.search("extension:rs & (size: * 2)", Default::default());
+    let result2 = search::search(&store, &registry, &cache, "extension:rs & (size: * 2)", Default::default());
     assert!(
         result2.is_ok(),
         "Failed to parse complex query: {:?}",

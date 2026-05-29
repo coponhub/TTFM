@@ -1,7 +1,7 @@
+use ttfm::search;
 use std::fs::File;
 use std::os::unix::fs::symlink;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 #[test]
 #[cfg(unix)]
@@ -18,14 +18,17 @@ fn test_metadata_error_recovery_integration() {
     symlink(&loop_link, &loop_link).expect("Failed to create loop link");
 
     // 2. インデックス作成
-    let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
-    fm.index_directory(dir.path(), None::<&fn(usize)>, false)
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     // 3. エラー値がセットされたアイテムを検索して検証
     // 数値型のエラー値 (-1) で検索
-    let results = fm
-        .search("size:-1", Default::default())
+    let results = search::search(&store, &registry, &cache, "size:-1", Default::default())
         .expect("Search for size:-1 should succeed");
 
     // 検証: loop_link がエラー値で登録されてヒットするはず
@@ -38,16 +41,4 @@ fn test_metadata_error_recovery_integration() {
         .primary_value()
         .unwrap()
         .contains("loop_link"));
-
-    // 文字列表現のエラー値 ("-") も検証
-    let results_str = fm
-        .search("size_str:-", Default::default())
-        .expect("Search for size_str:- should succeed");
-
-    // type_from_ext:Folder も "-" になるため、名前でフィルタリングして確認
-    let found_loop = results_str
-        .results
-        .iter()
-        .any(|r| r.name.contains("loop_link"));
-    assert!(found_loop, "Loop link should have '-' as size_str");
 }

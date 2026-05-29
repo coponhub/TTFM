@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use terminal_size::{terminal_size, Width};
 use ttfm::config::Config;
-use ttfm::{FileManager, SearchOptions};
+use ttfm::db::Store;
+use ttfm::tag::TagRegistry;
+use ttfm::{CacheManager, SearchOptions};
 
 macro_rules! safe_print {
     ($($arg:tt)*) => {
@@ -123,21 +125,34 @@ fn main() -> Result<()> {
 
     // Clear コマンドの場合は完全な初期化をスキップし、破損したDBでも削除できるようにする
     if matches!(cli.command, Commands::Clear) {
-        FileManager::delete_database()?;
+        let home = ttfm::get_ttfm_home()?;
+        Store::delete_database(home.join("db").as_path())?;
         safe_println!("Database cleared successfully.");
         return Ok(());
     }
 
-    let mut fm = FileManager::new()?;
+    let home = ttfm::get_ttfm_home()?;
+
+    // ユーザープラグイン用ディレクトリの準備
+    let plugins_dir = home.join("plugins");
+    if !plugins_dir.exists() {
+        std::fs::create_dir_all(&plugins_dir)?;
+    }
+
+    let mut registry = TagRegistry::with_standard();
 
     // 設定ファイルの読み込み
     let config = Config::load();
 
-    // プラグインが有効な場合のみロード
+    // プラグインが有効な場合のみロード（ユーザー → ビルトインの順、同名はユーザーが優先）
     if config.plugins.enabled {
-        let plugins_dir = ttfm::get_ttfm_plugins_dir()?;
-        fm.load_plugins(plugins_dir, &config.plugins.status)?;
+        registry.load_from_dir(ttfm::get_ttfm_plugins_dir()?, &config.plugins.status)?;
+        registry.load_builtins(&config.plugins.status)?;
     }
+
+    let store = Store::open(home.join("db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = CacheManager::new(store.db_dir.join("cache"), 3 * 1024 * 1024 * 1024);
 
     match &cli.command {
         Commands::Index { path, dry_run } => {
@@ -156,7 +171,7 @@ fn main() -> Result<()> {
             pb.set_message("Scanning...");
             pb.enable_steady_tick(Duration::from_millis(100));
 
-            let count = fm.index_directory(
+            let count = ttfm::indexing::Indexer::new(&store, &registry).run(
                 path,
                 Some(&|count| {
                     pb.set_message(format!("Indexed {} files...", count));
@@ -184,11 +199,11 @@ fn main() -> Result<()> {
                 offset: *offset,
                 cid: cid.clone(),
             };
-            let response = fm.search(query, opts)?;
+            let response = ttfm::search::search(&store, &registry, &cache, query, opts)?;
             if *short {
-                print_simple_results(&response);
+                print_simple_results(&registry, &response);
             } else {
-                print_results(&fm, &response, query, n.unwrap_or(100));
+                print_results(&store, &registry, &response, query, n.unwrap_or(100), &mut std::io::stdout());
             }
         }
         Commands::List {
@@ -205,24 +220,24 @@ fn main() -> Result<()> {
                 offset: *offset,
                 cid: cid.clone(),
             };
-            let response = fm.search("", opts)?;
+            let response = ttfm::search::search(&store, &registry, &cache, "", opts)?;
             if *short {
-                print_simple_results(&response);
+                print_simple_results(&registry, &response);
             } else {
-                print_results(&fm, &response, "list", n.unwrap_or(100));
+                print_results(&store, &registry, &response, "list", n.unwrap_or(100), &mut std::io::stdout());
             }
         }
         Commands::Tag { item, tag } => {
-            fm.tag_item(item, tag)?;
+            ttfm::tagging::tag_item(&store, &registry, item, tag)?;
             safe_println!("Tagged '{}' with '{}'", item, tag);
         }
         Commands::Clear => unreachable!("Handled early"),
         Commands::Note { content } => {
-            let id = fm.add_item("note", content)?;
+            let id = ttfm::tagging::add_item(&store, &registry, "note", content)?;
             safe_println!("Created note (ID: {})", id);
         }
         Commands::Rank { item, value } => {
-            let response = fm.search(item, SearchOptions::default())?;
+            let response = ttfm::search::search(&store, &registry, &cache, item, SearchOptions::default())?;
             if response.results.is_empty() {
                 safe_println!("No items matched query: '{}'", item);
                 return Ok(());
@@ -241,7 +256,7 @@ fn main() -> Result<()> {
             };
 
             if do_update {
-                fm.update_ranks(&response.results, *value)?;
+                ttfm::rank::update_ranks(&store, &registry, &response.results, *value)?;
                 safe_println!("Updated {} items.", response.results.len());
             } else {
                 safe_println!("Aborted.");
@@ -300,37 +315,48 @@ fn print_warnings(warnings: &[String], writer: &mut dyn std::io::Write) {
 
 /// 検索結果の一覧を標準出力に表示します。
 fn print_results(
-    fm: &FileManager,
+    store: &Store,
+    registry: &TagRegistry,
     response: &ttfm::SearchResponse,
     query: &str,
     current_n: usize,
+    writer: &mut dyn std::io::Write,
 ) {
-    print_warnings(&response.warnings, &mut std::io::stdout());
+    print_warnings(&response.warnings, writer);
 
     // 続きがある場合のみ、進捗状況（キャッシュ生成待ち）をチェックして表示
     if response.has_more && !response.progress.is_finished() {
-        safe_println!(
+        writeln!(
+            writer,
             "\x1b[1;33mSearching... (Background cache generating: {})\x1b[0m",
             response.progress.current
-        );
+        ).unwrap_or(());
     }
 
     if response.results.is_empty() {
         if response.progress.is_finished() {
-            safe_println!("No items found.");
+            writeln!(writer, "No items found.").unwrap_or(());
         }
         return;
     }
 
     // item: タグが注入されている場合は Projection グループ表示
     if response.has_projection_results() {
-        print_compact_projections(response, query, current_n);
+        print_compact_projections(registry, response, query, current_n, writer);
         return;
     }
 
     // データベースからタグ型のランクを取得
-    let type_ranks = fm.get_type_ranks().unwrap_or_default();
+    let type_ranks = ttfm::rank::get_type_ranks(store).unwrap_or_default();
     let term_width = get_terminal_width();
+
+    // volatile スカラー結果のフォーマット済み representative をテーブル上部に表示
+    if let Some(res) = response.results.iter()
+        .find(|r| r.id.is_volatile() && !r.representative.is_empty())
+    {
+        let repr = format_representative(registry, res);
+        writeln!(writer, "\x1b[1m{}\x1b[0m", repr).unwrap_or(());
+    }
 
     // TypeGroup ごとに表示を行う
     for group in response.iter_type_groups() {
@@ -339,17 +365,16 @@ fn print_results(
         sorted_keys.sort_by(|a, b| {
             let r_a = type_ranks
                 .get(a.as_str())
+                .filter(|&&r| r != 0)
                 .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(a.as_str()));
+                .unwrap_or_else(|| ttfm::rank::get_rank_by_name(registry, a.as_str()));
             let r_b = type_ranks
                 .get(b.as_str())
+                .filter(|&&r| r != 0)
                 .cloned()
-                .unwrap_or_else(|| fm.get_default_rank(b.as_str()));
+                .unwrap_or_else(|| ttfm::rank::get_rank_by_name(registry, b.as_str()));
             r_b.cmp(&r_a).then_with(|| a.cmp(b))
         });
-
-        // 「name」カラムがあれば先頭に持ってきたいが、BTreeSetソートにより元々順序はある。
-        // ここでは純粋にランク順を優先する。
 
         // テーブル幅の計算
         let mut item_id_width = 7; // "item_id"
@@ -366,108 +391,122 @@ fn print_results(
             col_widths[i] = col_widths[i].max(key.as_str().len());
         }
 
-        // 行の出力ヘルパー
-        let print_line = |res_opt: Option<&ttfm::SearchResult>| {
-            let mut current_width = 0;
-            let sep = "  ";
-            let sep_len = sep.len();
-            let is_header = res_opt.is_none();
+        // 行の出力ヘルパー（writer を借用するためブロックで囲む）
+        {
+            let mut print_line = |res_opt: Option<&ttfm::SearchResult>| {
+                let mut current_width = 0;
+                let sep = "  ";
+                let sep_len = sep.len();
+                let is_header = res_opt.is_none();
 
-            // item_id
-            let id_str = res_opt
-                .map(|r| r.id.to_string())
-                .unwrap_or_else(|| "item_id".to_string());
-            let available = term_width.saturating_sub(current_width);
-            if available == 0 {
-                return;
-            }
-
-            let id_disp = if item_id_width <= available {
-                format!("{:<width$}", id_str, width = item_id_width)
-            } else {
-                truncate_text(&id_str, available)
-            };
-
-            if is_header {
-                safe_print!("\x1b[1m{}\x1b[0m", id_disp);
-            } else {
-                safe_print!("{}", id_disp);
-            }
-            current_width += id_disp.chars().count();
-
-            // 各属性カラム
-            for (i, key) in sorted_keys.iter().enumerate() {
-                if current_width + sep_len >= term_width {
-                    safe_print!("...");
-                    break;
-                }
-                safe_print!("{}", sep);
-                current_width += sep_len;
-
-                let val_str = res_opt
-                    .and_then(|r| r.get_tag_value(key.as_str()))
-                    .unwrap_or_else(|| {
-                        if is_header {
-                            key.as_str().to_string()
-                        } else {
-                            "".to_string()
-                        }
-                    });
-
-                let avail = term_width.saturating_sub(current_width);
-                if avail == 0 {
-                    break;
+                // item_id
+                let id_str = res_opt
+                    .map(|r| r.id.to_string())
+                    .unwrap_or_else(|| "item_id".to_string());
+                let available = term_width.saturating_sub(current_width);
+                if available == 0 {
+                    return;
                 }
 
-                let target_width = col_widths[i];
-                let out = if target_width <= avail {
-                    format!("{:<width$}", val_str, width = target_width)
+                let id_disp = if item_id_width <= available {
+                    format!("{:<width$}", id_str, width = item_id_width)
                 } else {
-                    truncate_text(&val_str, avail)
+                    truncate_text(&id_str, available)
                 };
 
                 if is_header {
-                    safe_print!("\x1b[1m{}\x1b[0m", out);
+                    write!(writer, "\x1b[1m{}\x1b[0m", id_disp).unwrap_or(());
                 } else {
-                    safe_print!("{}", out);
+                    write!(writer, "{}", id_disp).unwrap_or(());
                 }
-                current_width += out.chars().count();
-            }
-            safe_println!();
-        };
+                current_width += id_disp.chars().count();
 
-        print_line(None); // Header
-        for res in group.results {
-            print_line(Some(res));
+                // 各属性カラム
+                for (i, key) in sorted_keys.iter().enumerate() {
+                    if current_width + sep_len >= term_width {
+                        write!(writer, "...").unwrap_or(());
+                        break;
+                    }
+                    write!(writer, "{}", sep).unwrap_or(());
+                    current_width += sep_len;
+
+                    let val_str = if is_header {
+                        res_opt.map(|_| "".to_string())
+                            .unwrap_or_else(|| key.as_str().to_string())
+                    } else {
+                        res_opt
+                            .and_then(|r| r.get_tag_value(key.as_str()))
+                            .map(|raw| registry.format_display(key.as_str(), &raw))
+                            .unwrap_or_default()
+                    };
+
+                    let avail = term_width.saturating_sub(current_width);
+                    if avail == 0 {
+                        break;
+                    }
+
+                    let target_width = col_widths[i];
+                    let out = if target_width <= avail {
+                        format!("{:<width$}", val_str, width = target_width)
+                    } else {
+                        truncate_text(&val_str, avail)
+                    };
+
+                    if is_header {
+                        write!(writer, "\x1b[1m{}\x1b[0m", out).unwrap_or(());
+                    } else {
+                        write!(writer, "{}", out).unwrap_or(());
+                    }
+                    current_width += out.chars().count();
+                }
+                writeln!(writer).unwrap_or(());
+            };
+
+            print_line(None); // Header
+            for res in group.results {
+                print_line(Some(res));
+            }
         }
-        safe_println!();
+        writeln!(writer).unwrap_or(());
     }
 
-    safe_println!("Total: {} results displayed.", response.results.len());
+    writeln!(writer, "Total: {} results displayed.", response.results.len()).unwrap_or(());
 
     if response.has_more {
         if let Some(cid) = &response.cid {
-            safe_println!(
+            writeln!(
+                writer,
                 "\x1b[1;32mMore results available.\x1b[0m To see next page, run:"
-            );
-            safe_println!("  ttfm search \"{}\" --cid {}", query, cid);
+            ).unwrap_or(());
+            writeln!(writer, "  ttfm search \"{}\" --cid {}", query, cid).unwrap_or(());
         }
     }
 }
 
+/// representative の各 Label を型に応じたフォーマットで表示用文字列にします。
+fn format_representative(registry: &TagRegistry, res: &ttfm::SearchResult) -> String {
+    res.representative
+        .iter()
+        .map(|l| registry.format_display(l.tag_type().as_str(), &l.as_str()))
+        .collect::<Vec<_>>()
+        .join(" &: ")
+}
+
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
 fn print_compact_projections(
+    registry: &TagRegistry,
     response: &ttfm::SearchResponse,
     query: &str,
     _current_n: usize,
+    writer: &mut dyn std::io::Write,
 ) {
     let term_width = get_terminal_width();
 
     // Phase 2: results には label items（転置）が格納されている
     for label_item in &response.results {
-        // total_count を projected_label から取得
+        // total_count を item_count から取得
         let total_count = label_item
-            .projected_label
+            .item_count
             .as_ref()
             .and_then(|l| l.as_str().parse::<usize>().ok())
             .unwrap_or(label_item.tags.entries.len());
@@ -478,22 +517,26 @@ fn print_compact_projections(
             .entries
             .iter()
             .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
-            .map(|e| e.label.as_str().to_string());
+            .map(|e| e.label.as_str());
+
+        let repr_display = format_representative(registry, label_item);
 
         // 1行目: ヘッダー (ラベル値 - nvalue (X items))
         if let Some(nv) = &nvalue_str {
-            safe_println!(
+            writeln!(
+                writer,
                 "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
-                label_item.name,
+                repr_display,
                 nv,
                 total_count
-            );
+            ).unwrap_or(());
         } else {
-            safe_println!(
+            writeln!(
+                writer,
                 "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-                label_item.name,
+                repr_display,
                 total_count
-            );
+            ).unwrap_or(());
         }
 
         // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
@@ -511,43 +554,46 @@ fn print_compact_projections(
             }
         }
 
-        safe_println!(
+        writeln!(
+            writer,
             "  {}",
             truncate_text(&all_items_str, term_width.saturating_sub(2))
-        );
+        ).unwrap_or(());
     }
 
-    safe_println!(
+    writeln!(
+        writer,
         "Total: {} unique labels matched the projection.",
         response.results.len()
-    );
+    ).unwrap_or(());
 
     if response.has_more {
         if let Some(cid) = &response.cid {
-            safe_println!(
+            writeln!(
+                writer,
                 "\n\x1b[1;32mMore items available.\x1b[0m To see next page, run:"
-            );
-            safe_println!("  ttfm search \"{}\" --cid {}", query, cid);
+            ).unwrap_or(());
+            writeln!(writer, "  ttfm search \"{}\" --cid {}", query, cid).unwrap_or(());
         }
     }
 }
 
 /// シンプルな形式（1行1アイテム、ヘッダーなし、色なし）で結果を出力します。
-fn print_simple_results(response: &ttfm::SearchResponse) {
+fn print_simple_results(registry: &TagRegistry, response: &ttfm::SearchResponse) {
     if response.has_projection_results() {
         for label_item in &response.results {
-            safe_println!("{}", format_short_result(label_item));
+            safe_println!("{}", format_short_result(registry, label_item));
         }
     } else {
         for res in &response.results {
-            let line = res.primary_value().unwrap_or_else(|| res.name.clone());
+            let line = res.primary_value().unwrap_or_else(|| res.raw_repr());
             safe_println!("{}", line);
         }
     }
 }
 
 /// --short 時のアイテム表示に必要な文字列を生成します。
-fn format_short_result(res: &ttfm::SearchResult) -> String {
+fn format_short_result(registry: &TagRegistry, res: &ttfm::SearchResult) -> String {
     let nvalue_str = res
         .tags
         .entries
@@ -555,47 +601,117 @@ fn format_short_result(res: &ttfm::SearchResult) -> String {
         .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.label.as_str().to_string());
 
+    let repr = format_representative(registry, res);
     if let Some(nv) = nvalue_str {
-        format!("{} {}", res.name, nv)
+        format!("{} {}", repr, nv)
     } else {
-        res.name.clone()
+        repr
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use ttfm::types::{ItemId, ItemKind, Label, LabelValue, Origin, TagType};
     use ttfm::SearchResult;
 
+    // COLUMNS 環境変数を操作するテストを直列化するための Mutex
+    static COLUMNS_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn make_store_and_registry(db_dir: &std::path::Path) -> (ttfm::db::Store, TagRegistry) {
+        let store = ttfm::db::Store::open(db_dir).unwrap();
+        let registry = TagRegistry::with_standard();
+        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        (store, registry)
+    }
+
     #[test]
     fn test_short_format_with_nvalue() {
-        // projection パスでの生成プロセスに近い形でダミーデータを作成
         let mut res_with_nvalue = SearchResult::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
-            "test_label".to_string(),
         );
+        res_with_nvalue.representative = vec![Label::Name("test_label".to_string())];
         res_with_nvalue.apply_tag(
             Label::resolve(TagType::from("nvalue"), LabelValue::Integer(9986)),
             Origin::System,
         );
 
-        let output = format_short_result(&res_with_nvalue);
+        let registry = TagRegistry::with_standard();
+        let output = format_short_result(&registry, &res_with_nvalue);
         assert_eq!(output, "test_label 9986");
     }
 
     #[test]
     fn test_short_format_without_nvalue() {
-        // nvalueを持たないダミーダミーデータを作成
-        let res_without_nvalue = SearchResult::new_empty(
+        let mut res_without_nvalue = SearchResult::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
-            "test_label_no_nv".to_string(),
         );
+        res_without_nvalue.representative = vec![Label::Name("test_label_no_nv".to_string())];
 
-        let output = format_short_result(&res_without_nvalue);
+        let registry = TagRegistry::with_standard();
+        let output = format_short_result(&registry, &res_without_nvalue);
         assert_eq!(output, "test_label_no_nv");
+    }
+
+    // --- print_results の display フォーマット確認 ---
+    // get_terminal_width() は COLUMNS 環境変数を優先するため、
+    // 列が切れないよう十分な幅を指定してから print_results を呼ぶ。
+
+    #[test]
+    fn test_print_results_formats_size_as_human_readable() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "500");
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+        let cache = CacheManager::new(db_dir.join("cache"), 0);
+
+        let test_file = dir.path().join("sized.bin");
+        std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+
+        let response = ttfm::search::search(&store, &registry, &cache, "name:sized.bin", ttfm::SearchOptions::default()).unwrap();
+        assert!(!response.results.is_empty(), "ファイルがインデックスされていない");
+
+        let mut out = Vec::<u8>::new();
+        print_results(&store, &registry, &response, "name:sized.bin", 100, &mut out);
+        std::env::remove_var("COLUMNS");
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("1.0KB"), "size should show '1.0KB', got:\n{}", output);
+    }
+
+    #[test]
+    fn test_print_results_formats_mtime_as_human_readable() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "500");
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+        let cache = CacheManager::new(db_dir.join("cache"), 0);
+
+        let test_file = dir.path().join("dated.txt");
+        std::fs::write(&test_file, b"hi").unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
+
+        let response = ttfm::search::search(&store, &registry, &cache, "name:dated.txt", ttfm::SearchOptions::default()).unwrap();
+        assert!(!response.results.is_empty());
+
+        let mut out = Vec::<u8>::new();
+        print_results(&store, &registry, &response, "name:dated.txt", 100, &mut out);
+        std::env::remove_var("COLUMNS");
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("2026") || output.contains("2025"),
+            "mtime should show year, got:\n{}",
+            output
+        );
     }
 
     #[test]

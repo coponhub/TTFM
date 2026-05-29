@@ -1,6 +1,61 @@
+use ttfm::search;
 use anyhow::Result;
 use tempfile::tempdir;
-use ttfm::FileManager;
+
+// =========================================================================
+// Over-aggregation error tests (集約過剰エラー)
+// =========================================================================
+
+fn make_store_registry_cache(
+) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)>
+{
+    let dir = tempdir()?;
+    let db_dir = dir.path().join(".ttfm/db");
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache =
+        ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    // dir を drop させないためリーク（テスト内の短命な用途）
+    std::mem::forget(dir);
+    Ok((store, registry, cache))
+}
+
+fn assert_over_agg_error(query: &str) {
+    let (store, registry, cache) = make_store_registry_cache().unwrap();
+    let result =
+        search::search(&store, &registry, &cache, query, Default::default());
+    assert!(
+        result.is_err(),
+        "Expected error for over-aggregation query '{query}', but got Ok"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("scalar"),
+        "Error for '{query}' should mention 'scalar', got: {msg}"
+    );
+}
+
+#[test]
+fn test_over_aggregation_count_count() {
+    assert_over_agg_error("count(count())");
+}
+
+#[test]
+fn test_over_aggregation_sum_count() {
+    assert_over_agg_error("sum(count())");
+}
+
+#[test]
+fn test_over_aggregation_count_sum() {
+    assert_over_agg_error("count(sum(size:))");
+}
+
+#[test]
+fn test_over_aggregation_nested_with_nvalue() {
+    // ユーザーが実際に panic を確認したケース
+    assert_over_agg_error("sum(count(extension: &: count()))");
+}
 
 #[test]
 fn test_mismatched_comparison_error_message() -> Result<()> {
@@ -12,11 +67,15 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
 
     std::fs::write(files_dir.join("test.txt"), "content")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&files_dir, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
 
     // size: > 100 という形式（本来は :> であるべき）を実行
-    let result = fm.search("size: > 100", Default::default());
+    let result = search::search(&store, &registry, &cache, "size: > 100", Default::default());
 
     assert!(
         result.is_err(),
@@ -25,8 +84,6 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
 
     let err_msg = format!("{}", result.unwrap_err());
 
-    // 期待される詳細なエラーメッセージが含まれているか確認
-    // 注: 現時点では文法エラーなどで失敗するため、このアサーションは失敗する想定 (Red)
     assert!(
         err_msg.contains("Invalid operator '>'"),
         "Error message should point out the invalid operator"
@@ -53,13 +110,17 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
 
     std::fs::write(files_dir.join("test.txt"), "content")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&files_dir, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
 
     // --- Investigation ---
     // 1.1 正常系: プレーンなプロジェクション同士の演算（size: + mtime:）
     let ok_query1 = "(size: + mtime:) :> 10";
-    let ok_result1 = fm.search(ok_query1, Default::default());
+    let ok_result1 = search::search(&store, &registry, &cache, ok_query1, Default::default());
     if let Err(e) = &ok_result1 {
         println!("QUERY 1 ERROR: {:?}", e);
     }
@@ -68,25 +129,21 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
         "Simple projection arithmetic should succeed (Top level)"
     );
 
-    // 1.2 異常系: Nest 内での非集約タグ算術（Level 2 Nest は未実装）
-    let err_query2 = "(parentdir: &: (size: + mtime:)) :> 10";
-    let err_result2 = fm.search(err_query2, Default::default());
+    // 1.2 Nest 内での非集約タグ算術: 仕様上は最後の値（Calculation）を使って比較する
+    // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
+    let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
+    let result2 = search::search(&store, &registry, &cache, query2, Default::default());
     assert!(
-        err_result2.is_err(),
-        "Arithmetic over non-aggregated tags within Nest should fail (not yet implemented)"
-    );
-    let err_msg2 = format!("{}", err_result2.unwrap_err());
-    assert!(
-        err_msg2.contains("not yet implemented"),
-        "Error should mention 'not yet implemented', got: {}",
-        err_msg2
+        result2.is_ok(),
+        "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
+        result2.err()
     );
 
     // 2. Phase 3 以降: 異なるキーを持つ Nest 同士の算術は Level 3+ Nest として解決される
     // (parentdir: &: count()) / (extension: &: count()) はエラーではなく、
     // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
-    let result = fm.search(query, Default::default());
+    let result = search::search(&store, &registry, &cache, query, Default::default());
 
     assert!(
         result.is_ok(),

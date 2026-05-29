@@ -49,7 +49,7 @@ use scalar::{
 use util::*;
 pub use util::{to_tag_condition, AggregationContext, NestContext};
 
-use crate::db::{Col, CustomFunc, Pronoun::*, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, Src};
 use crate::query::ast::QueryNode;
 use crate::query::lens_resolver::{NestMatchOp, ResolvedNode, ResolvedOperand};
 #[cfg(test)]
@@ -57,6 +57,7 @@ use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use sea_query::{Expr, Query, SelectStatement};
 
 fn build_fetch_items_sql(
+    src: &Src,
     pick: &PickNode<'_>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -114,7 +115,7 @@ fn build_fetch_items_sql(
             Col::ItemKind,
         )
         .expr_as(tags_expr, crate::db::QueryResultCol::Tags)
-        .from(Tbl::OneView)
+        .from(src)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .group_by_col(Col::ItemId)
         .order_by(Col::Rank, sea_query::Order::Desc)
@@ -124,6 +125,7 @@ fn build_fetch_items_sql(
 }
 
 pub fn build_flat_table_sql(
+    src: &Src,
     pick: &PickNode<'_>,
     query_node: &QueryNode,
     limit: Option<usize>,
@@ -150,13 +152,27 @@ pub fn build_flat_table_sql(
     let mut q = Query::select();
     q.columns(Col::raw_tag_row_columns())
         .column(Col::Rank)
-        .from(Tbl::OneView)
+        .from(src)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
         .and_where(tagcond.into())
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
     q
+}
+
+/// ノードがスカラー boolean として扱われるべきかを判定する。
+/// CalculationMatch はタグ参照を含む場合はアイテムフィルタとして扱う。
+fn is_boolean_only_node(n: &ResolvedNode) -> bool {
+    match n {
+        ResolvedNode::AggregationMatch { .. }
+        | ResolvedNode::AggregationAggregationMatch { .. }
+        | ResolvedNode::AggregationCalculationMatch { .. }
+        | ResolvedNode::AggregationTagMatch { .. }
+        | ResolvedNode::ScalarMatch { .. } => true,
+        ResolvedNode::CalculationMatch { calc, .. } => !calc.contains_tag(),
+        _ => false,
+    }
 }
 
 /// すべてのクエリ種別に対する統一 SQL エントリポイント。
@@ -166,6 +182,7 @@ pub fn build_flat_table_sql(
 ///   - Scalar (aggregation / boolean)              → build_resolved_scalar_sql / build_boolean_sql
 ///   - Regular items                               → build_fetch_items_sql
 pub fn build_fetch_sql(
+    src: &Src,
     resolver: &crate::query::lens_resolver::Resolver,
     n: usize,
     offset: usize,
@@ -174,18 +191,19 @@ pub fn build_fetch_sql(
         if resolver.get_label_set_op_node().is_some()
             || resolver.get_nvalue_condition().is_none()
         {
-            return nest::build_fetch_nest_sql(resolver, n, offset);
+            return nest::build_fetch_nest_sql(src, resolver, n, offset);
         }
         // nvalue比較あり → Lv.1 フラットリスト（items path）
-        let pick = PickNode::new(&resolver.resolved_query);
+        let pick = PickNode::new(src, &resolver.resolved_query);
         let limit = if n > 0 { Some(n + 1) } else { None };
-        return Ok(build_fetch_items_sql(&pick, limit, Some(offset)));
+        return Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)));
     }
     let limit = if n > 0 { Some(n + 1) } else { None };
     match &resolver.resolved_query {
         // スカラー集約：単一値を返す
         ResolvedNode::Aggregation(agg) => {
             return Ok(build_resolved_scalar_sql(
+                src,
                 &ResolvedOperand::Aggregation(agg.clone()),
             ));
         }
@@ -193,7 +211,7 @@ pub fn build_fetch_sql(
         ResolvedNode::Nest { keys, .. } => {
             let op = keys.first().unwrap();
             if op.contains_aggregation() || op.is_pure_scalar() {
-                return Ok(build_resolved_scalar_sql(op));
+                return Ok(build_resolved_scalar_sql(src, op));
             }
         }
         // ブーリアン比較：集約同士／集約とリテラル／リテラル同士 の比較結果を volatile row で返す
@@ -201,11 +219,15 @@ pub fn build_fetch_sql(
         | ResolvedNode::AggregationAggregationMatch { .. }
         | ResolvedNode::AggregationCalculationMatch { .. }
         | ResolvedNode::AggregationTagMatch { .. }
-        | ResolvedNode::CalculationMatch { .. }
         | ResolvedNode::ScalarMatch { .. }
         | ResolvedNode::NestMatch { .. }
         | ResolvedNode::MergedNestMatch { .. }) => {
-            return Ok(build_boolean_sql(node));
+            return Ok(build_boolean_sql(src, node));
+        }
+        // CalculationMatch: タグ参照なし（純スカラー・集約のみ）→ boolean
+        // タグ参照を含む場合（例: (size: / 1024) :> 100）はアイテムフィルタへ fall-through
+        ResolvedNode::CalculationMatch { calc, .. } if !calc.contains_tag() => {
+            return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
         // NestNestMatch のうち Comparison + Literal 右辺は存在確認ブーリアン
         ResolvedNode::NestNestMatch {
@@ -213,30 +235,19 @@ pub fn build_fetch_sql(
             right_nvalue: ResolvedOperand::Literal(_),
             ..
         } => {
-            return Ok(build_boolean_sql(&resolver.resolved_query));
+            return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
         // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
         // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
         ResolvedNode::And(nodes) | ResolvedNode::Or(nodes)
-            if !nodes.is_empty()
-                && nodes.iter().all(|n| {
-                    matches!(
-                        n,
-                        ResolvedNode::AggregationMatch { .. }
-                            | ResolvedNode::AggregationAggregationMatch { .. }
-                            | ResolvedNode::AggregationCalculationMatch { .. }
-                            | ResolvedNode::AggregationTagMatch { .. }
-                            | ResolvedNode::CalculationMatch { .. }
-                            | ResolvedNode::ScalarMatch { .. }
-                    )
-                }) =>
+            if !nodes.is_empty() && nodes.iter().all(|n| is_boolean_only_node(n)) =>
         {
-            return Ok(build_boolean_sql(&resolver.resolved_query));
+            return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
         _ => {}
     }
-    let pick = PickNode::new(&resolver.resolved_query);
-    Ok(build_fetch_items_sql(&pick, limit, Some(offset)))
+    let pick = PickNode::new(src, &resolver.resolved_query);
+    Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)))
 }
 
 #[cfg(test)]
@@ -289,14 +300,15 @@ mod tests {
 
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
-            storage: StorageMapping::Column(Col::Name),
+            storage: StorageMapping::Fixed(Col::Name),
             sql_type: crate::db::SqlType::VARCHAR,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
         let query_node = QueryNode::And(vec![]);
         let sql = build_flat_table_sql(
-            &PickNode::new(&node),
+            &Src::OneView,
+            &PickNode::new(&Src::OneView, &node),
             &query_node,
             Some(10),
             None,
@@ -341,13 +353,13 @@ mod tests {
 
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
-            storage: StorageMapping::Column(Col::Name),
+            storage: StorageMapping::Fixed(Col::Name),
             sql_type: crate::db::SqlType::VARCHAR,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
-        let pick = PickNode::new(&node);
-        let sql = build_fetch_items_sql(&pick, Some(10), Some(0));
+        let pick = PickNode::new(&Src::OneView, &node);
+        let sql = build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0));
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 新スキーマ: "tag_type" フィールドが含まれる
@@ -397,7 +409,7 @@ mod tests {
             ResolvedAggregationNode::Count(Box::new(ResolvedNode::And(vec![
                 ResolvedNode::Match {
                     tag_type: TagType::Base(SType::Extension),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: "extension".to_string(),
                     },
@@ -407,8 +419,8 @@ mod tests {
                 },
             ])));
 
-        let agg_ctx = build_aggregation_context_for_agg(&agg);
-        let sql = build_agg(&agg, &agg_ctx);
+        let agg_ctx = build_aggregation_context_for_agg(&Src::OneView, &agg);
+        let sql = build_agg(&Src::OneView, &agg, &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // アイテム数を数えるので COUNT(DISTINCT "item_id")
@@ -429,7 +441,7 @@ mod tests {
             inner: Box::new(ResolvedNode::Nest {
                 keys: vec![ResolvedOperand::TagRef {
                     tag_type: TagType::Base(SType::Size),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelInt,
                         tag_type: "size".to_string(),
                     },
@@ -440,7 +452,7 @@ mod tests {
             }),
         };
 
-        let sql = build_agg(&agg, &AggregationContext::new());
+        let sql = build_agg(&Src::OneView, &agg, &AggregationContext::new());
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -466,7 +478,7 @@ mod tests {
                 ResolvedNode::Nest {
                     keys: vec![ResolvedOperand::TagRef {
                         tag_type: TagType::Base(SType::Size),
-                        storage: StorageMapping::Column(Col::Size),
+                        storage: StorageMapping::Fixed(Col::Size),
                         sql_type: crate::db::SqlType::BIGINT,
                     }],
                     nvalue: None,
@@ -474,7 +486,7 @@ mod tests {
                 },
                 ResolvedNode::Match {
                     tag_type: TagType::Custom("project".to_string()),
-                    storage: StorageMapping::RowTag {
+                    storage: StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: "project".to_string(),
                     },
@@ -487,8 +499,8 @@ mod tests {
             ])),
         };
 
-        let agg_ctx = build_aggregation_context_for_agg(&agg);
-        let sql = build_agg(&agg, &agg_ctx);
+        let agg_ctx = build_aggregation_context_for_agg(&Src::OneView, &agg);
+        let sql = build_agg(&Src::OneView, &agg, &agg_ctx);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // サブクエリ形式: SUM("val")
@@ -570,7 +582,7 @@ mod tests {
         // 2. Boolean TagRef -> CAST(... AS BIGINT)
         let tag_bool = ResolvedOperand::TagRef {
             tag_type: TagType::from("is_dir"),
-            storage: crate::query::lens_schema::StorageMapping::Column(
+            storage: crate::query::lens_schema::StorageMapping::Fixed(
                 crate::db::Col::LabelBool,
             ),
             sql_type: SqlType::BOOLEAN,

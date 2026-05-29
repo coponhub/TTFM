@@ -1,8 +1,11 @@
 use crate::taggers::ColumnDef;
+use anyhow::{Context, Result};
+use duckdb::Connection;
 use sea_query::{
-    ColumnDef as SeaColumnDef, Iden, IntoIden, Table, TableCreateStatement,
+    Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
+    IntoTableRef, Table, TableCreateStatement, TableRef,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use strum::{Display, EnumIter};
 
 /// カラムが所属すべきテーブル。
@@ -18,14 +21,52 @@ pub enum TargetTable {
     DataTypes,
 }
 
-/// データベースの物理ストレージ（Parquetファイル）へのパスを管理する構造体。
+/// DB接続とParquetファイルのパスを管理する構造体（設計書4.4 IndexStore）。
 pub struct Store {
+    pub conn: Connection,
     pub db_dir: PathBuf,
 }
 
 impl Store {
-    pub fn new(db_dir: PathBuf) -> Self {
-        Self { db_dir }
+    /// db_dir を準備しインメモリDB接続を開く。
+    /// テーブル初期化は呼び出し元が `Indexer::new(store, registry).initialize_tables()` で行う。
+    pub fn open(db_dir: impl AsRef<Path>) -> Result<Self> {
+        let db_dir = db_dir.as_ref().to_path_buf();
+        if !db_dir.exists() {
+            std::fs::create_dir_all(&db_dir)
+                .with_context(|| format!("Failed to create db dir: {:?}", db_dir))?;
+        }
+        let conn = Connection::open_in_memory()
+            .context("Failed to open in-memory DuckDB connection")?;
+        Ok(Self { conn, db_dir })
+    }
+
+    /// 同一インメモリDBを共有するクローンを返す（テスト用）。
+    /// テーブルはすでに共有されるため initialize_tables は不要。
+    pub fn try_clone(&self) -> Result<Self> {
+        let conn = self.conn.try_clone()
+            .context("Failed to clone DuckDB connection")?;
+        Ok(Self { conn, db_dir: self.db_dir.clone() })
+    }
+
+    /// 指定されたディレクトリを物理削除する（Clear コマンド用）。
+    pub fn delete_database(db_dir: &Path) -> Result<()> {
+        if db_dir.exists() {
+            std::fs::remove_dir_all(db_dir)
+                .with_context(|| format!("Failed to remove db dir: {:?}", db_dir))?;
+        }
+        Ok(())
+    }
+
+    /// インデックスをクリアしてディレクトリを空に再作成する。
+    pub fn clear(&self) -> Result<()> {
+        if self.db_dir.exists() {
+            std::fs::remove_dir_all(&self.db_dir)
+                .context("Failed to clear database directory")?;
+        }
+        std::fs::create_dir_all(&self.db_dir)
+            .context("Failed to recreate database directory")?;
+        Ok(())
     }
 
     /// ターゲットテーブルに対応するパスを生成します。
@@ -75,6 +116,38 @@ pub enum Tbl {
     Master,
 }
 
+/// SQL クエリのデータソース（OneView テーブルまたは Parquet ファイル）。
+#[derive(Clone, Debug)]
+pub enum Src {
+    OneView,
+    Parquet(String),
+}
+
+impl Src {
+    /// format! 内でテーブル式として使う文字列を返す。
+    pub fn table_str(&self) -> String {
+        match self {
+            Src::OneView => Iden::to_string(&Tbl::OneView),
+            Src::Parquet(path) => {
+                format!("read_parquet('{}')", path.replace('\'', "''"))
+            }
+        }
+    }
+}
+
+impl IntoTableRef for &Src {
+    fn into_table_ref(self) -> TableRef {
+        match self {
+            Src::OneView => TableRef::Table(Tbl::OneView.into_iden()),
+            Src::Parquet(path) => TableRef::FunctionCall(
+                Func::cust(DuckDbFunc::ReadParquet)
+                    .arg(Expr::val(path.as_str())),
+                Alias::new("src").into_iden(),
+            ),
+        }
+    }
+}
+
 /// SQL 内部で使われる中間的な識別子（サブクエリエイリアス・中間カラム名）。
 /// `use crate::db::Pronoun::*;` でインポートして使用する。
 #[derive(Iden, Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +174,7 @@ pub enum Pronoun {
     // --- 中間カラム ---
     Nvalue,
     Group,
-    Cast,
+    Representative,
     Label,
     Scalar,
     // --- 追加分 ---
@@ -522,6 +595,17 @@ impl CustomFunc {
         sea_query::Func::cust(DuckDbFunc::ListValue)
             .args(exprs)
             .into()
+    }
+
+    /// スカラー値を代表値リスト型 LIST(UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)) に変換します。
+    pub fn as_representative<E: Into<sea_query::SimpleExpr>>(
+        expr: E,
+    ) -> sea_query::SimpleExpr {
+        let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+        sea_query::Expr::cust_with_exprs(
+            &format!("list_value(CAST($1 AS {}))", union_type),
+            [expr.into()],
+        )
     }
 
     /// typeof(expr) を生成します。

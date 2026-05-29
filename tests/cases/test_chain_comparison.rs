@@ -13,10 +13,10 @@ define_cases! {
         format_query: default_scope,
         query: "100 :< size: :<= 500",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.contains(&"medium.txt"), "medium.txt should match");
-            assert!(!names.contains(&"small.txt"), "small.txt should NOT match");
-            assert!(!names.contains(&"large.txt"), "large.txt should NOT match");
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"medium.txt".to_string()), "medium.txt should match");
+            assert!(!names.contains(&"small.txt".to_string()), "small.txt should NOT match");
+            assert!(!names.contains(&"large.txt".to_string()), "large.txt should NOT match");
             Ok(())
         },
     },
@@ -31,10 +31,10 @@ define_cases! {
         format_query: default_scope,
         query: "10 :<= size: :< 1001",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.contains(&"small.txt"));
-            assert!(names.contains(&"medium.txt"));
-            assert!(names.contains(&"large.txt"));
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"small.txt".to_string()));
+            assert!(names.contains(&"medium.txt".to_string()));
+            assert!(names.contains(&"large.txt".to_string()));
             Ok(())
         },
     },
@@ -49,10 +49,10 @@ define_cases! {
         format_query: default_scope,
         query: "500 :>= size: :> 100",
         assert: |res, _dir| {
-            let names: Vec<_> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.contains(&"medium.txt"));
-            assert!(!names.contains(&"small.txt"));
-            assert!(!names.contains(&"large.txt"));
+            let names: Vec<_> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"medium.txt".to_string()));
+            assert!(!names.contains(&"small.txt".to_string()));
+            assert!(!names.contains(&"large.txt".to_string()));
             Ok(())
         },
     },
@@ -68,7 +68,7 @@ define_cases! {
         query: "sum((100 :< size: :<= 500) & size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "200", "Sum of medium file size should be 200");
+            assert_eq!(res.results[0].raw_repr(), "200B", "Sum of medium file size should be 200B");
             Ok(())
         },
     },

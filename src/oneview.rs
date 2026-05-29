@@ -502,30 +502,34 @@ fn create_view_union_by_name(
 
 #[cfg(test)]
 mod tests {
-    use crate::FileManager;
+    use crate::tag::TagRegistry;
+    use crate::{tagging, indexing};
+    use crate::db::Store;
     use tempfile::tempdir;
 
     #[test]
     fn test_oneview_consistency() {
         let dir = tempdir().unwrap();
         let db_dir = dir.path().join(".ttfm/db");
-        let fm = FileManager::new_with_db_dir(&db_dir).unwrap();
+        let store = Store::open(&db_dir).unwrap();
+        let registry = TagRegistry::with_standard();
+        indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
 
         // Noteを作成してタグを付ける
-        let note_id = fm.add_item("note", "Consistency Test Memo").unwrap();
-        fm.tag_item(&note_id.to_string(), "testtag:true").unwrap();
+        let note_id = tagging::add_item(&store, &registry, "note", "Consistency Test Memo").unwrap();
+        tagging::tag_item(&store, &registry, &note_id.to_string(), "testtag:true").unwrap();
 
         // oneview ビューを直接クエリして不整合をチェック
         // 同じIDなのに異なるNameまたは異なるRankを持つグループがあるか探す
         let sql = "
-            SELECT item_id 
-            FROM oneview 
+            SELECT item_id
+            FROM oneview
             WHERE type = 'name' OR type = 'rank'
-            GROUP BY item_id 
+            GROUP BY item_id
             HAVING COUNT(DISTINCT label_str) > 1 OR COUNT(DISTINCT label_int) > 1
         ";
 
-        let mut stmt = fm.conn.prepare(sql).unwrap();
+        let mut stmt = store.conn.prepare(sql).unwrap();
         let inconsistent_ids: Vec<i64> = stmt
             .query_map([], |row| row.get(0))
             .unwrap()

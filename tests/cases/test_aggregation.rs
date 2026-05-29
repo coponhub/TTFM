@@ -1,8 +1,8 @@
+use ttfm::search;
 /// 集約機能 (Aggregation) の統合テスト
 use super::inject_path_scope;
 use path_slash::PathExt;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 define_cases! {
     count_items_txt: {
@@ -17,7 +17,7 @@ define_cases! {
         query: "count(extension:txt)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "2");
+            assert_eq!(res.results[0].raw_repr(), "2");
             Ok(())
         },
     },
@@ -32,7 +32,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(extension:)",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].name, "2");
+            assert_eq!(res.results[0].raw_repr(), "2");
             Ok(())
         },
     },
@@ -46,7 +46,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].name, "1100");
+            assert_eq!(res.results[0].raw_repr(), "1.1KB");
             Ok(())
         },
     },
@@ -61,7 +61,7 @@ define_cases! {
         query: "sum(size:) > 500",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             assert!(res.results[0].id.is_volatile());
             assert_eq!(res.results[0].item_kind, ttfm::ItemKind::Volatile);
             Ok(())
@@ -77,7 +77,7 @@ define_cases! {
         query: "sum(size:) > 1000",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].name, "FALSE");
+            assert_eq!(res.results[0].raw_repr(), "FALSE");
             assert!(res.results[0].id.is_volatile());
             assert_eq!(res.results[0].item_kind, ttfm::ItemKind::Volatile);
             Ok(())
@@ -92,7 +92,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(type:)",
         assert: |res, _dir| {
-            let val: f64 = res.results[0].name.parse()?;
+            let val: f64 = res.results[0].raw_repr().parse()?;
             assert!(val > 1.0, "Expected multiple types, got {}", val);
             Ok(())
         },
@@ -107,7 +107,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(directory:)",
         assert: |res, _dir| {
-            let val: f64 = res.results[0].name.parse()?;
+            let val: f64 = res.results[0].raw_repr().parse()?;
             assert!(val >= 1.0, "Expected at least 1 directory, got {}", val);
             Ok(())
         },
@@ -134,7 +134,7 @@ define_cases! {
         query: "sum(size:0) == sum(size:0)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Result should not be empty");
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             assert!(res.results[0].id.is_volatile());
             Ok(())
         },
@@ -150,7 +150,7 @@ define_cases! {
         query: "sum(extension:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            let val = &res.results[0].name;
+            let val = &res.results[0].raw_repr();
             assert!(val.contains("txt") && val.contains("rs") && val.contains(", "), "Unexpected sum(extension:): {}", val);
             Ok(())
         },
@@ -167,7 +167,7 @@ define_cases! {
         query: "sum(extension:rs & extension:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Result should not be empty");
-            let name = &res.results[0].name;
+            let name = &res.results[0].raw_repr();
             assert!(name.contains("rs"), "Result should contain 'rs', but got: {}", name);
             assert!(name.contains(","), "Result should be a joined string, but got: {}", name);
             Ok(())
@@ -199,7 +199,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count() > 2",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },
@@ -214,7 +214,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count(*:*) > 2",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },
@@ -228,7 +228,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count() + 1",
         assert: |res, _dir| {
-            assert!(res.results[0].name.parse::<i64>().is_ok(), "Result should be a valid integer");
+            assert!(res.results[0].raw_repr().parse::<i64>().is_ok(), "Result should be a valid integer");
             Ok(())
         },
     },
@@ -241,7 +241,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "count() == count(type:)",
         assert: |res, _dir| {
-            assert!(res.results[0].name == "TRUE" || res.results[0].name == "FALSE");
+            assert!(res.results[0].raw_repr() == "TRUE" || res.results[0].raw_repr() == "FALSE");
             Ok(())
         },
     },
@@ -257,18 +257,21 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     std::fs::write(root.join("a.txt"), "a")?;
     std::fs::write(root.join("b.txt"), "b")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res1 = fm.search("count(extension:txt) ^ 0", Default::default())?;
+    let res1 = search::search(&store, &registry, &cache, "count(extension:txt) ^ 0", Default::default())?;
     assert_eq!(
         res1.total_count,
         Some(1),
         "Should match root directory (calc is true)"
     );
 
-    let res2 = fm.search("count(extension:txt) ^ 2", Default::default())?;
-    assert_eq!(res2.results[0].name, "FALSE");
+    let res2 = search::search(&store, &registry, &cache, "count(extension:txt) ^ 2", Default::default())?;
+    assert_eq!(res2.results[0].raw_repr(), "FALSE");
 
     Ok(())
 }
@@ -284,35 +287,38 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     std::fs::create_dir(root.join("sub"))?;
     std::fs::write(root.join("sub/test2.txt"), "content2")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("count(item_id:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(item_id:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(item_id) failed: {}", val);
 
-    let res = fm.search("count(item_kind:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(item_kind:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(item_kind) failed: {}", val);
 
-    let res = fm.search("count(rank:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(rank:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(rank) failed: {}", val);
 
-    let res = fm.search("count(origin:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(origin:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(origin) failed: {}", val);
 
-    let res = fm.search("count(path:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(path:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(path) failed: {}", val);
 
-    let res = fm.search("count(parentdir:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(parentdir:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(parentdir) failed: {}", val);
 
-    let res = fm.search("count(filename:)", Default::default())?;
-    let val: f64 = res.results[0].name.parse().unwrap();
+    let res = search::search(&store, &registry, &cache, "count(filename:)", Default::default())?;
+    let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(filename) failed: {}", val);
 
     Ok(())
@@ -329,12 +335,15 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(1));
     std::fs::write(root.join("new.txt"), "new")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res2 = fm.search("max(mtime:) < 2027-01-01", Default::default())?;
+    let res2 = search::search(&store, &registry, &cache, "max(mtime:) < 2027-01-01", Default::default())?;
     assert_eq!(res2.results.len(), 1);
-    assert_eq!(res2.results[0].name, "TRUE");
+    assert_eq!(res2.results[0].raw_repr(), "TRUE");
 
     Ok(())
 }
@@ -350,15 +359,18 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(1));
     std::fs::write(root.join("test.rs"), "code")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search(
+    let res = search::search(&store, &registry, &cache, 
         "max(extension:txt & mtime:) < 2027-02-01",
         Default::default(),
     )?;
     assert_eq!(res.results.len(), 1);
-    assert_eq!(res.results[0].name, "TRUE");
+    assert_eq!(res.results[0].raw_repr(), "TRUE");
 
     Ok(())
 }
@@ -372,17 +384,20 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
 
     std::fs::write(root.join("test.txt"), "content")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search("max(mtime:) == 2026", Default::default())?;
+    let res = search::search(&store, &registry, &cache, "max(mtime:) == 2026", Default::default())?;
     assert_eq!(res.results.len(), 1);
-    assert_eq!(res.results[0].name, "TRUE");
+    assert_eq!(res.results[0].raw_repr(), "TRUE");
     assert!(res.results[0].id.is_volatile());
 
-    let res_false = fm.search("max(mtime:) == 2025", Default::default())?;
+    let res_false = search::search(&store, &registry, &cache, "max(mtime:) == 2025", Default::default())?;
     assert_eq!(res_false.results.len(), 1);
-    assert_eq!(res_false.results[0].name, "FALSE");
+    assert_eq!(res_false.results[0].raw_repr(), "FALSE");
     assert!(res_false.results[0].id.is_volatile());
 
     Ok(())
@@ -412,10 +427,13 @@ impl TestContext {
     }
 
     fn search(&self, query: &str) -> ttfm::response::SearchResponse {
-        let fm = FileManager::new_with_db_dir(&self.db_dir).unwrap();
-        fm.index_directory(&self.root, None::<&fn(usize)>, false)
+        let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&self.db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+        ttfm::indexing::Indexer::new(&store, &registry).run(&self.root, None::<&fn(usize)>, false)
             .unwrap();
-        fm.search(query, ttfm::SearchOptions::default()).unwrap()
+        search::search(&store, &registry, &cache, query, ttfm::SearchOptions::default()).unwrap()
     }
 }
 
@@ -428,7 +446,8 @@ fn test_max_mtime_with_year_filter() {
 
     let res = context.search("max(extension:rs & mtime:2025 & mtime:)");
     assert!(!res.results.is_empty());
-    let scalar: f64 = res.results[0].name.parse().unwrap();
+    let value_strs = res.results[0].get_all_values("value");
+    let scalar: f64 = value_strs[0].parse().unwrap();
     assert!(scalar > 1700000000.0);
 }
 
@@ -442,16 +461,19 @@ fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
     std::fs::write(root.join("a.rs"), "")?;
     std::fs::write(root.join("b.txt"), "")?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res = fm.search(
+    let res = search::search(&store, &registry, &cache, 
         "sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)",
         Default::default(),
     )?;
 
     assert!(!res.results.is_empty(), "Result should not be empty");
-    let name = &res.results[0].name;
+    let name = &res.results[0].raw_repr();
     assert!(
         name.contains("rs"),
         "Result should contain 'rs', but got: {}",
@@ -486,18 +508,21 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     std::fs::create_dir(root.join("subdir1"))?;
     std::fs::create_dir(root.join("subdir2"))?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(&root, None::<&fn(usize)>, false)?;
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
+    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
 
-    let res_any_top = fm.search("count()", Default::default())?;
-    let res_wild_top = fm.search("count(*:*)", Default::default())?;
-    assert_eq!(res_any_top.results[0].name, res_wild_top.results[0].name);
+    let res_any_top = search::search(&store, &registry, &cache, "count()", Default::default())?;
+    let res_wild_top = search::search(&store, &registry, &cache, "count(*:*)", Default::default())?;
+    assert_eq!(res_any_top.results[0].raw_repr(), res_wild_top.results[0].raw_repr());
 
     let root_str = root.to_slash_lossy();
     let query_indirect =
         format!("count() - count(*:* - parentdir:\"{}\")", root_str);
-    let res_indirect = fm.search(&query_indirect, Default::default())?;
-    assert_eq!(res_indirect.results[0].name, "5");
+    let res_indirect = search::search(&store, &registry, &cache, &query_indirect, Default::default())?;
+    assert_eq!(res_indirect.results[0].raw_repr(), "5");
 
     Ok(())
 }

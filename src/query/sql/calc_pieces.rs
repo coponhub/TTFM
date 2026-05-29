@@ -92,6 +92,11 @@ pub(super) fn fold_simple_operand(
                         crate::types::LabelValue::Null => {
                             sea_query::Expr::val(None::<i32>).into()
                         }
+                        crate::types::LabelValue::Date(dt) => {
+                            sea_query::Expr::val(dt.to_timestamp())
+                                .cast_as(crate::db::SqlType::DOUBLE)
+                                .into()
+                        }
                     }
                 };
             Some(expr)

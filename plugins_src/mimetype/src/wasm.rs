@@ -1,36 +1,28 @@
 use crate::logic;
 
-wit_bindgen::generate!({
-    path: "../../wit/plugin.wit",
-    world: "plugin",
-});
+ttfm_plugin::target!(indexing);
 
 struct MimetypePlugin;
 
 impl exports::ttfm::plugin::core::Guest for MimetypePlugin {
-    fn get_info() -> exports::ttfm::plugin::core::PluginInfo {
-        exports::ttfm::plugin::core::PluginInfo {
-            name: "mimetype".to_string(),
-            version: "0.2.3".to_string(),
-            kind: exports::ttfm::plugin::core::PluginKind::IndexingFunction,
-        }
+    fn name() -> String {
+        "mimetype".to_string()
+    }
+    fn version() -> String {
+        "0.2.3".to_string()
     }
 }
 
-impl exports::ttfm::plugin::indexing_function::Guest for MimetypePlugin {
-    fn get_columns() -> Vec<exports::ttfm::plugin::indexing_function::ColumnDef> {
-        vec![exports::ttfm::plugin::indexing_function::ColumnDef {
-            name: "mimetype".to_string(),
-            sql_type: "TEXT".to_string(),
-        }]
+impl exports::ttfm::plugin::indexing::Guest for MimetypePlugin {
+    fn get_value_type() -> exports::ttfm::plugin::indexing::ValueType {
+        exports::ttfm::plugin::indexing::ValueType::Text
     }
-
-    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing_function::TagValue> {
+    fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing::TagValue> {
         let mime = logic::detect_mime(&path);
         if mime == "empty" {
-            vec![exports::ttfm::plugin::indexing_function::TagValue::Empty]
+            vec![exports::ttfm::plugin::indexing::TagValue::Empty]
         } else {
-            vec![exports::ttfm::plugin::indexing_function::TagValue::Text(mime)]
+            vec![exports::ttfm::plugin::indexing::TagValue::Text(mime)]
         }
     }
 }

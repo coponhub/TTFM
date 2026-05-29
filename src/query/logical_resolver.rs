@@ -21,40 +21,12 @@ use crate::query::ast::{
     ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::query::functions::{expand_comparison_node, QueryFunctionRegistry};
 use crate::types::{Label, LabelValue, TagType};
 use anyhow::{bail, Result};
 
 // ========== Logical Representation ==========
 
-/// クエリエンジンの論理レイヤーで扱う型。
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LogicalType {
-    Integer,
-    Float,
-    String,
-    Boolean,
-    Any,
-}
-
-impl LogicalType {
-    /// 数値計算が可能な型かどうかを返します。
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, Self::Integer | Self::Float | Self::Boolean)
-    }
-}
-
-/// 論理的なスキーマ情報を提供するインターフェース。
-pub trait LogicalSchema {
-    /// 指定されたタグの論理型を返します。
-    fn get_logical_type(&self, tag: &TagType) -> LogicalType;
-
-    /// タグの論理展開（Virtualタグの具体化など）を行います。
-    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode;
-
-    /// プロジェクションの論理展開を行います。
-    fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
-}
+pub use super::logical_schema::{LogicalSchema, LogicalType};
 
 /// QueryNodeを論理的に展開します（Virtual tag展開、日付範囲化など）
 ///
@@ -184,9 +156,8 @@ fn expand_comparison_with_recursion(
     }
     cmp.rest = new_rest;
 
-    // 標準の比較ノード展開（日付範囲化など）を実行
-    let reg = QueryFunctionRegistry::with_standard();
-    let expanded_node = expand_comparison_node(cmp, &reg);
+    // 登録済みプラグインの比較ノード展開（日付範囲化・ラベル正規化など）を実行
+    let expanded_node = schema.expand_comparison(cmp);
 
     // 抽出したフィルタがあれば Comparison 全体を And で包む
     if lifted_filters.is_empty() {
@@ -407,11 +378,9 @@ fn expand_operand(
                 Ok(Operand::Literal(crate::types::Label::from(true)))
             } else if s == "false" {
                 Ok(Operand::Literal(crate::types::Label::from(false)))
-            } else if let Some(bytes) = crate::util::parse_size(&s) {
-                // サイズ単位付きリテラル ("1M", "10TB" 等) を数値に正規化
-                Ok(Operand::Literal(crate::types::Label::from(bytes)))
             } else {
-                Ok(Operand::Literal(label))
+                // サイズ・日付等の変換は登録済みプラグインの normalize_label に委譲
+                Ok(Operand::Literal(schema.normalize_label_any(&label)))
             }
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
@@ -455,7 +424,9 @@ fn strip_filters_from_operand(
             filters.extend(filter_nodes);
             let core = match core_nodes.len() {
                 1 => core_nodes.into_iter().next().unwrap(),
-                _ => return Operand::Query(Box::new(QueryNode::And(core_nodes))),
+                _ => {
+                    return Operand::Query(Box::new(QueryNode::And(core_nodes)))
+                }
             };
             match core {
                 QueryNode::Projection(op) => op,
@@ -1066,10 +1037,20 @@ fn expand_aggregation(
     match agg {
         AggregationNode::Count(node) => {
             let expanded = expand_query_node(schema, *node)?;
+            if let QueryNode::Aggregation(ref inner) = expanded {
+                return Err(error::invalid_aggregation_over_scalar(
+                    "count", inner,
+                ));
+            }
             Ok(AggregationNode::Count(Box::new(expanded)))
         }
         AggregationNode::Arithmetic { op, inner } => {
             let expanded = expand_query_node(schema, *inner)?;
+            if let QueryNode::Aggregation(ref inner) = expanded {
+                return Err(error::invalid_aggregation_over_scalar(
+                    error::agg_op_name(op), inner,
+                ));
+            }
             if matches!(expanded, QueryNode::Comparison(_)) {
                 return Err(error::invalid_aggregation_inner_item_set());
             }
@@ -1161,6 +1142,7 @@ fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
                 LogicalType::String
             }
         }
+        LabelValue::Date(_) => LogicalType::Integer,
     }
 }
 
@@ -2221,5 +2203,60 @@ mod tests {
             })),
         };
         assert!(is_unnestable_aggregation(&agg));
+    }
+
+    // --- Phase 4: expand_operand delegates size normalization via normalize_label_any ---
+
+    #[test]
+    fn test_expand_operand_size_literal_via_normalize() {
+        // "1MB" as unquoted string literal should be normalized to Label::Size(1_048_576)
+        // This tests that the delegation works (not hardcoded parse_size)
+        let lens = Lens::base_standard();
+        let op = Operand::Literal(crate::types::Label::from("1MB"));
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(label) => {
+                assert_eq!(label.as_i64(), 1_048_576, "1MB should be 1048576 bytes");
+            }
+            other => panic!("Expected Literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_operand_date_string_becomes_date_label() {
+        // "2026-02-01" as unquoted string literal should be normalized to Label::Date
+        let lens = Lens::base_standard();
+        let op = Operand::Literal(crate::types::Label::from("2026-02-01"));
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(label) => {
+                match label {
+                    crate::types::Label::Date(dt) => {
+                        assert!(
+                            matches!(dt, crate::types::DateTime::Date(_)),
+                            "Expected DateTime::Date, got {:?}", dt
+                        );
+                    }
+                    other => panic!("Expected Label::Date, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_operand_quoted_literal_unchanged() {
+        // Quoted ("literal") should NOT be normalized — stays as LabelValue::Literal
+        let lens = Lens::base_standard();
+        let label = crate::types::Label::Other(
+            crate::types::TagType::Custom(String::new()),
+            crate::types::LabelValue::Literal("1MB".to_string()),
+        );
+        let op = Operand::Literal(label.clone());
+        let expanded = expand_operand(&lens, op).unwrap();
+        match expanded {
+            Operand::Literal(l) => assert_eq!(l, label),
+            other => panic!("Expected Literal unchanged, got {:?}", other),
+        }
     }
 }

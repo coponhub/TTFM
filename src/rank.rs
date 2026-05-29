@@ -1,5 +1,5 @@
 use crate::types::Rank;
-use crate::FunctionRegistry;
+use crate::tag::TagRegistry;
 use sea_query::{CaseStatement, Condition, SimpleExpr};
 
 /// システムにおける標準的なランク（優先度）の定義。
@@ -8,26 +8,25 @@ pub struct SystemRank;
 
 impl SystemRank {
     pub const NAME: Rank = 10;
-    pub const TYPE_FROM_EXT: Rank = 9;
-    pub const SIZE_STR: Rank = 8;
-    pub const MODIFIED_STR: Rank = 7;
+    pub const SIZE: Rank = 8;
+    pub const MTIME: Rank = 7;
     pub const PARENT_DIR: Rank = 6;
     pub const ITEM_KIND: Rank = 5;
     pub const CONTENT: Rank = 4;
-    pub const FILENAME: Rank = 1;
+    pub const FILENAME: Rank = 9;
     pub const DEFAULT: Rank = 0;
     pub const PATH: Rank = -1;
 }
 
-/// FunctionRegistry の情報に基づき、ランク決定用の SQL 式を構築します。
+/// TagRegistry の情報に基づき、ランク決定用の SQL 式を構築します。
 ///
 /// # Arguments
-/// * `registry` - IndexingFunction の定義（名前とデフォルトランク）を持つレジストリ
+/// * `registry` - タグ定義（名前とデフォルトランク）を持つレジストリ
 /// * `guard_condition` - ランク付けルールを適用するための条件（例: `ItemKind == "type"`）
 /// * `key_expr` - ランク決定のキーとなる値を持つ式（例: `Content`）
 /// * `default_rank` - 条件に合致しない、またはキーに対応するランクがない場合のデフォルト値
 pub fn build_rank_expr(
-    registry: &FunctionRegistry,
+    registry: &TagRegistry,
     guard_condition: Condition,
     key_expr: impl Into<SimpleExpr>,
     default_rank: Rank,
@@ -35,32 +34,143 @@ pub fn build_rank_expr(
     let key: SimpleExpr = key_expr.into();
     let mut key_case = CaseStatement::new();
 
-    // 1. Registryからランク情報を収集してCASE文を構築
-    for func in registry.all_functions() {
-        let rank = func.default_rank();
-        // 0 (デフォルト) 以外の場合のみ明示的にルール化
+    for (name, rank) in registry.iter_all_for_rank() {
         if rank != 0 {
-            key_case = key_case.case(key.clone().eq(func.name()), rank);
+            key_case = key_case.case(key.clone().eq(name), rank);
         }
     }
 
-    // 2. キーに対するCASE文を完成させる
     let key_rank_expr = key_case.finally(default_rank);
 
-    // 3. ガード条件で包む
     CaseStatement::new()
         .case(guard_condition, key_rank_expr)
         .finally(default_rank)
         .into()
 }
 
+/// 検索結果リストに対して優先度を一括設定し、OneView を再構築します。
+pub fn update_ranks(
+    store: &crate::db::Store,
+    registry: &TagRegistry,
+    results: &[crate::response::SearchResult],
+    rank: i64,
+) -> anyhow::Result<()> {
+    let file_ids: Vec<i64> = results
+        .iter()
+        .filter(|r| r.item_kind == crate::types::ItemKind::File)
+        .map(|r| r.id.as_i64())
+        .collect();
+    let item_ids: Vec<i64> = results
+        .iter()
+        .filter(|r| r.item_kind != crate::types::ItemKind::File)
+        .map(|r| r.id.as_i64())
+        .collect();
+
+    if !file_ids.is_empty() {
+        batch_update_rank(store, &file_ids, true, rank)?;
+    }
+    if !item_ids.is_empty() {
+        batch_update_rank(store, &item_ids, false, rank)?;
+    }
+    let all_columns = registry.get_all_columns();
+    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    Ok(())
+}
+
+/// IDを指定して優先度を設定します。
+pub fn set_rank_by_id(
+    store: &crate::db::Store,
+    registry: &TagRegistry,
+    id: i64,
+    is_file: bool,
+    rank: i64,
+) -> anyhow::Result<()> {
+    batch_update_rank(store, &[id], is_file, rank)?;
+    let all_columns = registry.get_all_columns();
+    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    Ok(())
+}
+
+/// 全てのタグ型の優先度（RANK）を取得します。
+pub fn get_type_ranks(
+    store: &crate::db::Store,
+) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    use crate::db::{Col, Tbl};
+    use crate::util;
+    use sea_query::{Expr, PostgresQueryBuilder, Query};
+
+    let path = store.path_for_target(crate::db::TargetTable::ItemReferences);
+    if !path.exists() {
+        return Ok(Default::default());
+    }
+
+    let query = Query::select()
+        .column(Col::Content)
+        .column(Col::Rank)
+        .from_subquery(
+            util::parquet_query(&path.to_string_lossy()),
+            Tbl::ItemReferences,
+        )
+        .and_where(Expr::col(Col::ItemKind).eq("type"))
+        .to_string(PostgresQueryBuilder);
+
+    let mut stmt = store.conn.prepare(&query)?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (name, r) = row?;
+        map.insert(name, r);
+    }
+    Ok(map)
+}
+
+fn batch_update_rank(
+    store: &crate::db::Store,
+    ids: &[i64],
+    is_file: bool,
+    rank: i64,
+) -> anyhow::Result<()> {
+    use crate::db::{Col, Tbl, TargetTable};
+    use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+    use sea_query::{Expr, Query};
+
+    let path = if is_file {
+        store.path_for_target(TargetTable::FileReferences)
+    } else {
+        store.path_for_target(TargetTable::ItemReferences)
+    };
+
+    let path_str = path.to_string_lossy();
+    let temp_table = Tbl::Target;
+
+    util::parquet_query(&path_str).create_table_as(&store.conn, temp_table)?;
+
+    Query::update()
+        .table(temp_table)
+        .values([(Col::Rank, rank.into())])
+        .and_where(
+            Expr::col(Col::ItemId).is_in(
+                ids.iter()
+                    .cloned()
+                    .map(sea_query::Value::from)
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .execute(&store.conn)?;
+
+    temp_table.write_parquet(&store.conn, &path)?;
+    temp_table.drop_table(&store.conn)?;
+    Ok(())
+}
+
 /// 指定されたタグ名に対応するデフォルトランクを取得します。
-/// CLI (main.rs) 等で、単一のランク値を知りたい場合に使用します。
-pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
-    // Registry内を検索
-    for func in registry.all_functions() {
-        if func.name() == name {
-            return func.default_rank();
+pub fn get_rank_by_name(registry: &TagRegistry, name: &str) -> Rank {
+    for (n, rank) in registry.iter_all_for_rank() {
+        if n == name {
+            return rank;
         }
     }
     0
@@ -70,63 +180,29 @@ pub fn get_rank_by_name(registry: &FunctionRegistry, name: &str) -> Rank {
 mod tests {
     use super::*;
     use crate::db::{Col, Pronoun::*};
-    use crate::indexing::functions::IndexingFunction;
-    use crate::taggers::{ColumnDef, TagValue, Tagger};
+    use crate::tag::TagFunction;
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 
-    // Mock IndexingFunction implementation
-    struct MockTagger;
-    impl Tagger for MockTagger {
-        fn get_columns(&self) -> Vec<ColumnDef> {
-            vec![]
-        }
-        fn tag_file(
-            &self,
-            _path: &std::path::Path,
-        ) -> anyhow::Result<Vec<TagValue>> {
-            Ok(vec![])
-        }
-    }
-
     struct MockFunc {
-        name: String,
+        name: &'static str,
         rank: Rank,
     }
-    impl IndexingFunction for MockFunc {
+    impl TagFunction for MockFunc {
         fn name(&self) -> &str {
-            &self.name
-        }
-        fn tagger(&self) -> Option<&dyn Tagger> {
-            Some(&MockTagger)
+            self.name
         }
         fn default_rank(&self) -> Rank {
             self.rank
         }
     }
 
-    fn create_registry() -> FunctionRegistry {
-        let mut reg = FunctionRegistry::new();
-        reg.register(Box::new(MockFunc {
-            name: "high".to_string(),
-            rank: 100,
-        }));
-        reg.register(Box::new(MockFunc {
-            name: "low".to_string(),
-            rank: 1,
-        }));
-        reg.register(Box::new(MockFunc {
-            name: "zero".to_string(),
-            rank: 0,
-        }));
-        // Add system defaults for testing
-        reg.register(Box::new(MockFunc {
-            name: "name".to_string(),
-            rank: 10,
-        }));
-        reg.register(Box::new(MockFunc {
-            name: "kind".to_string(),
-            rank: 5,
-        }));
+    fn create_registry() -> TagRegistry {
+        let mut reg = TagRegistry::new();
+        reg.register_plugin(MockFunc { name: "high", rank: 100 });
+        reg.register_plugin(MockFunc { name: "low", rank: 1 });
+        reg.register_plugin(MockFunc { name: "zero", rank: 0 });
+        reg.register_plugin(MockFunc { name: "name", rank: 10 });
+        reg.register_plugin(MockFunc { name: "kind", rank: 5 });
         reg
     }
 

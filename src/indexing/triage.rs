@@ -5,7 +5,7 @@ use crate::indexing::indexer::{
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::ItemId;
 use crate::util::DotOk;
-use crate::FunctionRegistry;
+use crate::tag::TagRegistry;
 use anyhow::Result;
 use rayon::prelude::*;
 use std::path::Path;
@@ -21,7 +21,7 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 // ========================================================
 
 pub(crate) fn run_triage(
-    registry: &FunctionRegistry,
+    registry: &TagRegistry,
     to_process: Vec<(Option<ItemId>, TempScanEntry)>,
     max_id_fn: impl Fn() -> Result<i64>, // 正の最大IDを取得する関数
 ) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
@@ -43,11 +43,11 @@ pub(crate) fn run_triage(
 // ========================================================
 
 pub(crate) struct ItemTriager<'a> {
-    pub(crate) registry: &'a FunctionRegistry,
+    pub(crate) registry: &'a TagRegistry,
 }
 
 impl<'a> ItemTriager<'a> {
-    pub(crate) fn new(reg: &'a FunctionRegistry) -> Self {
+    pub(crate) fn new(reg: &'a TagRegistry) -> Self {
         Self { registry: reg }
     }
 
@@ -246,7 +246,7 @@ impl TriageAccumulator {
 mod tests {
     use super::*;
     use crate::db::SqlType;
-    use crate::indexing::functions::ScanEntry;
+    use crate::indexing::ScanEntry;
     use crate::indexing::indexer::calc_scanhash;
     use crate::util::SafeMetadata;
 
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_triager_classify_logic() {
-        let registry = FunctionRegistry::new();
+        let registry = TagRegistry::new();
         let triager = ItemTriager::new(&registry);
 
         let col_ent = ColumnDef {
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_triager_triage_item_full() {
-        let registry = FunctionRegistry::new();
+        let registry = TagRegistry::new();
         let triager = ItemTriager::new(&registry);
 
         let cols = vec![
@@ -331,7 +331,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().unwrap();
-        let registry = FunctionRegistry::with_standard();
+        let registry = TagRegistry::with_standard();
         let triager = ItemTriager::new(&registry);
 
         let paths = vec![
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_assemble_records_id_reuse() {
-        let registry = FunctionRegistry::new();
+        let registry = TagRegistry::new();
         let triager = ItemTriager::new(&registry);
         let input = vec![
             (Some(ItemId::from(100)), vec![], ScanHash(1)),

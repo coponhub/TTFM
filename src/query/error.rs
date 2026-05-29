@@ -1,8 +1,8 @@
 // Error messages for the query module
 
 use crate::query::ast::{
-    AggregationNode, ArithmeticAggOp, ComparisonNode, ComparisonOp, Operand,
-    QueryNode,
+    AggregationNode, ArithmeticAggOp, BasicOp, CalculationNode, ComparisonNode,
+    ComparisonOp, Operand, QueryNode,
 };
 
 // =========================================================================
@@ -523,6 +523,73 @@ fn check_scalar_op_target_proj_start(
 // Logical Resolver Errors
 // =========================================================================
 
+/// label_comparison の LHS に TypeRef を含まない純スカラー計算が来た場合の検出。
+/// (sum(a) + sum(b)) :> 100 のようなケースで true を返す。
+/// (size: - sum(rs)) :> 100 は TypeRef(size:) を含むので false。
+pub fn calc_is_scalar_only(calc: &CalculationNode) -> bool {
+    operand_is_scalar_only(&calc.left) && operand_is_scalar_only(&calc.right)
+}
+
+fn operand_is_scalar_only(op: &Operand) -> bool {
+    match op {
+        Operand::Literal(_) | Operand::Aggregation(_) => true,
+        Operand::Calculation(c) => calc_is_scalar_only(c),
+        Operand::TypeRef(_) | Operand::Query(_) => false,
+    }
+}
+
+fn basic_op_label_str(op: &BasicOp) -> &'static str {
+    match op {
+        BasicOp::Eq => ":=",
+        BasicOp::Ne => ":^=",
+        BasicOp::Gt => ":>",
+        BasicOp::Ge => ":>=",
+        BasicOp::Lt => ":<",
+        BasicOp::Le => ":<=",
+    }
+}
+
+fn basic_op_scalar_str(op: &BasicOp) -> &'static str {
+    match op {
+        BasicOp::Eq => "==",
+        BasicOp::Ne => "^=",
+        BasicOp::Gt => ">",
+        BasicOp::Ge => ">=",
+        BasicOp::Lt => "<",
+        BasicOp::Le => "<=",
+    }
+}
+
+/// LHS calc が純スカラー かつ Label op の場合に Err を返す。
+/// resolver の (Calculation, Literal) ブランチで呼ぶ。
+/// Scalar op (>) で来た場合はスカラー同士の計算比較として正当なのでスルー。
+pub fn check_label_calc_not_scalar(
+    calc: &CalculationNode,
+    op: &ComparisonOp,
+) -> anyhow::Result<()> {
+    if matches!(op, ComparisonOp::Label(_)) && calc_is_scalar_only(calc) {
+        Err(label_comparison_scalar_lhs_error(op))
+    } else {
+        Ok(())
+    }
+}
+
+/// (sum(a) + sum(b)) :> 100 のような「純スカラー計算 label_comparison」のエラー。
+fn label_comparison_scalar_lhs_error(op: &ComparisonOp) -> anyhow::Error {
+    let (label_op, scalar_op) = match op {
+        ComparisonOp::Label(basic) | ComparisonOp::Scalar(basic) => {
+            (basic_op_label_str(basic), basic_op_scalar_str(basic))
+        }
+    };
+    anyhow::anyhow!(
+        "Invalid operator '{}': Label comparison cannot be applied to a pure scalar expression \
+         (no Projection on either side).\nDid you mean: use scalar comparison '{}' instead of '{}'?",
+        label_op,
+        scalar_op,
+        label_op,
+    )
+}
+
 pub const ARITHMETIC_ONLY_NUMERIC: &str =
     "Arithmetic operations are only possible for numeric types.";
 
@@ -560,10 +627,7 @@ pub fn comparison_is_valid_nest_rhs(cmp: &ComparisonNode) -> bool {
         return true;
     }
     operand_is_agg_or_literal(&cmp.first)
-        && cmp
-            .rest
-            .iter()
-            .all(|(_, op)| operand_is_agg_or_literal(op))
+        && cmp.rest.iter().all(|(_, op)| operand_is_agg_or_literal(op))
 }
 
 fn operand_is_agg_or_literal(operand: &Operand) -> bool {
@@ -587,6 +651,33 @@ pub fn invalid_nest_rhs_label_comparison() -> anyhow::Error {
         "Invalid right side of '&:': label comparison (':>', ':<', etc.) involving projections \
          returns an item set, not a nvalue. \
          Use a scalar comparison (e.g., count(rs) > 5) or an aggregation."
+    )
+}
+
+pub fn agg_op_name(op: ArithmeticAggOp) -> &'static str {
+    match op {
+        ArithmeticAggOp::Sum => "sum",
+        ArithmeticAggOp::Avg => "avg",
+        ArithmeticAggOp::Max => "max",
+        ArithmeticAggOp::Min => "min",
+    }
+}
+
+pub fn agg_node_name(agg: &AggregationNode) -> &'static str {
+    match agg {
+        AggregationNode::Count(_) => "count",
+        AggregationNode::Arithmetic { op, .. } => agg_op_name(*op),
+    }
+}
+
+pub fn invalid_aggregation_over_scalar(
+    outer: &str,
+    inner: &AggregationNode,
+) -> anyhow::Error {
+    let inner_name = agg_node_name(inner);
+    anyhow::anyhow!(
+        "Cannot aggregate a scalar: '{inner_name}(...)' returns a scalar value (Lv.0).\n\
+         '{outer}(...)' requires a Projection (e.g., size:) or Nest as input, not another aggregation."
     )
 }
 

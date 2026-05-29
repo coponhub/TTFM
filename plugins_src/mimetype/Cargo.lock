@@ -195,6 +195,7 @@ version = "0.1.0"
 dependencies = [
  "infer",
  "tempfile",
+ "ttfm_plugin",
  "wit-bindgen 0.36.0",
 ]
 
@@ -342,6 +343,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "ttfm_plugin"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

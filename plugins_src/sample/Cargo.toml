@@ -7,4 +7,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+ttfm_plugin = { path = "../ttfm_plugin_macro" }
 wit-bindgen = "0.36.0"

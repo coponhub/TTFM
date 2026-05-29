@@ -37,6 +37,7 @@ pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
         LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
         LabelValue::Null => Expr::val(Option::<i32>::None).into(),
         LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s).into(),
+        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
     }
 }
 
@@ -55,6 +56,7 @@ pub(super) fn label_to_unit_aware_expr(label: &Label) -> SimpleExpr {
         LabelValue::Boolean(b) => Expr::val(b).into(),
         LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
         LabelValue::Null => Expr::val(None::<i32>).into(),
+        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
     }
 }
 
@@ -76,6 +78,9 @@ pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
             LabelValue::Boolean(b) => Expr::val(b).into(),
             LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
             LabelValue::Null => Expr::val(None::<i32>).into(),
+            LabelValue::Date(dt) => {
+                Expr::val(dt.to_timestamp()).cast_as(SqlType::DOUBLE).into()
+            }
         }
     }
 }
@@ -103,14 +108,14 @@ pub(super) fn apply_arithmetic_agg(
 }
 
 /// `StorageMapping` からカラム式を生成します。
-/// 数値演算が必要な `RowTag.LabelStr` には `TRY_CAST` を適用します。
+/// 数値演算が必要な `LabelStr` には `TRY_CAST` を適用します。
 pub(super) fn build_storage_column_expr(
     storage: &StorageMapping,
     sql_type: SqlType,
 ) -> SimpleExpr {
     match storage {
-        StorageMapping::Column(col) => Expr::col(*col).into(),
-        StorageMapping::RowTag { column, .. } => {
+        StorageMapping::Fixed(col) => Expr::col(*col).into(),
+        StorageMapping::Basic { column, .. } => {
             let col_expr = Expr::col(*column);
             if *column == Col::LabelStr
                 && matches!(sql_type, SqlType::BIGINT | SqlType::DOUBLE)
@@ -120,7 +125,7 @@ pub(super) fn build_storage_column_expr(
                 col_expr.into()
             }
         }
-        StorageMapping::Virtual => {
+        StorageMapping::Composite => {
             CustomFunc::any_value(Expr::col(Col::LabelStr)).into()
         }
     }
@@ -180,10 +185,10 @@ pub(super) fn build_tag_value_agg_expr(
     _sql_type: SqlType,
 ) -> SimpleExpr {
     match storage {
-        StorageMapping::Column(col) => {
+        StorageMapping::Fixed(col) => {
             CustomFunc::any_value(Expr::col(*col)).into()
         }
-        StorageMapping::RowTag { column, tag_type } => {
+        StorageMapping::Basic { column, tag_type } => {
             let cast_expr = CustomFunc::try_cast_double(Expr::col(*column));
             let case_expr = Expr::case(
                 Expr::col(Col::Type).eq(tag_type.as_str()),
@@ -191,7 +196,7 @@ pub(super) fn build_tag_value_agg_expr(
             );
             Func::max(case_expr).into()
         }
-        StorageMapping::Virtual => CustomFunc::any_value(Expr::val(0)).into(),
+        StorageMapping::Composite => CustomFunc::any_value(Expr::val(0)).into(),
     }
 }
 

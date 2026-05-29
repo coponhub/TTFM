@@ -1,8 +1,8 @@
+use ttfm::search;
 /// 算術演算 (Calculation) 機能の統合テスト
 use super::default_scope;
 use super::inject_path_scope;
 use tempfile::tempdir;
-use ttfm::FileManager;
 
 define_cases! {
     calc_literal_simple: {
@@ -16,7 +16,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should have at least one result");
             assert!(
-                res.results.iter().any(|item| item.name.contains("file1.txt")),
+                res.results.iter().any(|item| item.raw_repr().contains("file1.txt")),
                 "Results should contain file1.txt"
             );
             Ok(())
@@ -34,7 +34,7 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
             assert!(
-                res.results.iter().any(|item| item.name.contains("large.txt")),
+                res.results.iter().any(|item| item.raw_repr().contains("large.txt")),
                 "Results should contain large.txt"
             );
             Ok(())
@@ -52,11 +52,11 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
             assert!(
-                res.results.iter().any(|item| item.name.contains("huge.txt")),
+                res.results.iter().any(|item| item.raw_repr().contains("huge.txt")),
                 "Results should contain huge.txt"
             );
             assert!(
-                !res.results.iter().any(|item| item.name.contains("medium.txt")),
+                !res.results.iter().any(|item| item.raw_repr().contains("medium.txt")),
                 "Results should not contain medium.txt (1000 < 1500)"
             );
             Ok(())
@@ -74,11 +74,11 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
             assert!(
-                res.results.iter().any(|item| item.name.contains("big.txt")),
+                res.results.iter().any(|item| item.raw_repr().contains("big.txt")),
                 "Results should contain big.txt"
             );
             assert!(
-                !res.results.iter().any(|item| item.name.contains("small.txt")),
+                !res.results.iter().any(|item| item.raw_repr().contains("small.txt")),
                 "Results should not contain small.txt (5 < 9)"
             );
             Ok(())
@@ -97,15 +97,15 @@ define_cases! {
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
             assert!(
-                res.results.iter().any(|item| item.name.contains("large.dat")),
+                res.results.iter().any(|item| item.raw_repr().contains("large.dat")),
                 "Results should contain large.dat"
             );
             assert!(
-                !res.results.iter().any(|item| item.name.contains("medium.dat")),
+                !res.results.iter().any(|item| item.raw_repr().contains("medium.dat")),
                 "Should not contain medium.dat"
             );
             assert!(
-                !res.results.iter().any(|item| item.name.contains("small.dat")),
+                !res.results.iter().any(|item| item.raw_repr().contains("small.dat")),
                 "Should not contain small.dat"
             );
             Ok(())
@@ -122,8 +122,8 @@ define_cases! {
         format_query: default_scope,
         query: "(5 + 10) :< size:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|i| i.name.contains("f20.txt")), "f20.txt (20 > 15) should match");
-            assert!(!res.results.iter().any(|i| i.name.contains("f10.txt")), "f10.txt (10 < 15) should not match");
+            assert!(res.results.iter().any(|i| i.raw_repr().contains("f20.txt")), "f20.txt (20 > 15) should match");
+            assert!(!res.results.iter().any(|i| i.raw_repr().contains("f10.txt")), "f10.txt (10 < 15) should not match");
             Ok(())
         },
     },
@@ -138,8 +138,8 @@ define_cases! {
         format_query: default_scope,
         query: "(30 - 10) :< size:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|i| i.name.contains("f50.txt")), "f50.txt (50 > 20) should match");
-            assert!(!res.results.iter().any(|i| i.name.contains("f20.txt")), "f20.txt (20 = 20) should not match");
+            assert!(res.results.iter().any(|i| i.raw_repr().contains("f50.txt")), "f50.txt (50 > 20) should match");
+            assert!(!res.results.iter().any(|i| i.raw_repr().contains("f20.txt")), "f20.txt (20 = 20) should not match");
             Ok(())
         },
     },
@@ -154,7 +154,7 @@ define_cases! {
         format_query: default_scope,
         query: "(5 * 3) :< size:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|i| i.name.contains("f20.txt")), "Multiplication: f20.txt (20 > 15) should match");
+            assert!(res.results.iter().any(|i| i.raw_repr().contains("f20.txt")), "Multiplication: f20.txt (20 > 15) should match");
             Ok(())
         },
     },
@@ -169,7 +169,7 @@ define_cases! {
         format_query: default_scope,
         query: "(100 / 5) :< size:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|i| i.name.contains("f50.txt")), "Division: f50.txt (50 > 20) should match");
+            assert!(res.results.iter().any(|i| i.raw_repr().contains("f50.txt")), "Division: f50.txt (50 > 20) should match");
             Ok(())
         },
     },
@@ -184,7 +184,7 @@ define_cases! {
         format_query: default_scope,
         query: "(25 % 20) :< size:",
         assert: |res, _dir| {
-            assert!(res.results.iter().any(|i| i.name.contains("f10.txt")), "Modulo: f10.txt (10 > 5) should match");
+            assert!(res.results.iter().any(|i| i.raw_repr().contains("f10.txt")), "Modulo: f10.txt (10 > 5) should match");
             Ok(())
         },
     },
@@ -228,8 +228,10 @@ define_cases! {
         query: "sum(size: - 100)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should return a scalar result");
-            let val: f64 = res.results[0].name.parse().unwrap_or(f64::NAN);
-            assert!(!val.is_nan(), "Result should be a number, got: {}", res.results[0].name);
+            // raw_repr() is now size-formatted; use value tag to check numeric result
+            let value_strs = res.results[0].get_all_values("value");
+            let val: i64 = value_strs[0].parse().unwrap_or(-1);
+            assert!(val > 0, "Result should be a positive number, got value: {:?}", value_strs);
             Ok(())
         },
     },
@@ -244,7 +246,7 @@ define_cases! {
         query: "sum(size: * 2) > 1000",
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1);
-            assert_eq!(res.results[0].name, "TRUE");
+            assert_eq!(res.results[0].raw_repr(), "TRUE");
             Ok(())
         },
     },
@@ -259,8 +261,10 @@ define_cases! {
         query: "sum(size: + 100 - 50)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty(), "Should return a scalar result");
-            let val: f64 = res.results[0].name.parse().unwrap_or(f64::NAN);
-            assert!(!val.is_nan(), "Result should be a number, got: {}", res.results[0].name);
+            // raw_repr() is now size-formatted; use value tag to check numeric result
+            let value_strs = res.results[0].get_all_values("value");
+            let val: i64 = value_strs[0].parse().unwrap_or(-1);
+            assert!(val > 0, "Result should be a positive number, got value: {:?}", value_strs);
             Ok(())
         },
     },
@@ -275,10 +279,57 @@ define_cases! {
         format_query: default_scope,
         query: "(size: - 100) :> (size: * 0.1)",
         assert: |res, _dir| {
-            let names: Vec<&str> = res.results.iter().map(|r| r.name.as_str()).collect();
-            assert!(names.iter().any(|n| n.contains("large.txt")), "large.txt (200B) should match: got {:?}", names);
-            assert!(!names.iter().any(|n| n.contains("small.txt")), "small.txt (100B) should not match: got {:?}", names);
-            assert!(!names.iter().any(|n| n.contains("tiny.txt")), "tiny.txt (50B) should not match: got {:?}", names);
+            let names: Vec<String> = res.results.iter().map(|r| r.raw_repr()).collect();
+            assert!(names.contains(&"large.txt".to_string()), "large.txt (200B) should match: got {:?}", names);
+            assert!(!names.contains(&"small.txt".to_string()), "small.txt (100B) should not match: got {:?}", names);
+            assert!(!names.contains(&"tiny.txt".to_string()), "tiny.txt (50B) should not match: got {:?}", names);
+            Ok(())
+        },
+    },
+    // Projection同士の & に Calculation キーが含まれる場合のテスト
+    calc_projection_intersect_no_crash: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), b"hello")?;
+            std::fs::write(dir.join("b.txt"), b"world!!")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(size: / 2) & parentdir:",
+        assert: |res, _dir| {
+            // 型が一致しないので空でも有効なプロジェクションでもよい（クラッシュしないことが重要）
+            let _ = res;
+            Ok(())
+        },
+    },
+    calc_projection_intersect_matching_values: {
+        setup: |dir| {
+            // size=8: size/2=4, size=2: size*2=4 → ラベル値4が両辺に現れる
+            std::fs::write(dir.join("size8.txt"), vec![0u8; 8])?;
+            std::fs::write(dir.join("size2.txt"), vec![0u8; 2])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "(size: / 2) & (size: * 2)",
+        assert: |res, _dir| {
+            let reprs: Vec<String> = res.results.iter().map(|r| r.raw_repr()).collect();
+            // ラベル値4が積集合に現れるべき (size8: 8/2=4, size2: 2*2=4)
+            let item_with_4 = res.results.iter().find(|r| r.raw_repr() == "4")
+                .unwrap_or_else(|| panic!("ラベル値4が積集合に現れるべき: {:?}", reprs));
+            // size8.txt と size2.txt の両方がそのグループに含まれるべき
+            let item_strs: Vec<String> = item_with_4.tags.entries.iter()
+                .filter(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+                .map(|e| e.label.as_str())
+                .collect();
+            assert!(
+                item_strs.iter().any(|s| s.contains("size8")),
+                "size8.txt が結果グループに含まれるべき: {:?}", item_strs
+            );
+            assert!(
+                item_strs.iter().any(|s| s.contains("size2")),
+                "size2.txt が結果グループに含まれるべき: {:?}", item_strs
+            );
             Ok(())
         },
     },
@@ -294,20 +345,24 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     std::fs::write(root.join("a.txt"), vec![0u8; 200])?;
     std::fs::write(root.join("b.txt"), vec![0u8; 300])?;
 
-    let fm = FileManager::new_with_db_dir(&db_dir)?;
-    fm.index_directory(root, None::<&fn(usize)>, false)?;
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
+    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-    let res_explicit = fm.search("sum((size: - 100))", Default::default())?;
+    let res_explicit = search::search(&store, &registry, &cache, "sum((size: - 100))", Default::default())?;
     assert!(
         !res_explicit.results.is_empty(),
         "Explicit paren should work"
     );
 
-    let res_bare = fm.search("sum(size: - 100)", Default::default())?;
+    let res_bare = search::search(&store, &registry, &cache, "sum(size: - 100)", Default::default())?;
     assert!(!res_bare.results.is_empty(), "Bare calc should work");
 
     assert_eq!(
-        res_explicit.results[0].name, res_bare.results[0].name,
+        res_explicit.results[0].raw_repr(), res_bare.results[0].raw_repr(),
         "bare_calculation and explicit paren should produce the same result"
     );
 
