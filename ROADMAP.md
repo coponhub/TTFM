@@ -72,12 +72,12 @@ Advanced TTQL (Typed Tag Query Language) and performance optimizations.
 
 ---
 
-## Milestone 3: Tag & Plugin Refinement (Status: [/])
+## Milestone 3: Tag & Plugin Refinement (Status: [x])
 Modularizing the core for tag-centricity and extensibility.
 
-- [ ] **Tag-Centric Management**: Centralize `IndexingFunction`, `QueryFunction`, display/extraction rules within `TagType` modules.
-- [ ] **Modular Plugins**: Enable adding/overriding functionality on a per-`TagType` basis via plugins.
-- [ ] **Component Decoupling**:
+- [x] **Tag-Centric Management**: Centralize `IndexingFunction`, `QueryFunction`, display/extraction rules within `TagType` modules.
+- [x] **Modular Plugins**: Enable adding/overriding functionality on a per-`TagType` basis via plugins.
+- [x] **Component Decoupling**:
     - Decompose `FileManager` in `lib.rs` (extract indexing and plugin management).
 
 ---
