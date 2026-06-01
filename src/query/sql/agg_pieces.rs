@@ -26,7 +26,7 @@ use crate::query::lens_resolver::{
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use sea_query::{
-    Alias, Condition, Expr, ExprTrait, Func, Iden, Query, SelectStatement, SimpleExpr,
+    Alias, Condition, Expr, ExprTrait, Func, Query, SelectStatement, SimpleExpr,
 };
 
 // ── 低レベルユーティリティ ──────────────────────────────────────────────────

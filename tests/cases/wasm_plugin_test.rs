@@ -18,9 +18,9 @@ use std::path::Path;
 use tempfile::tempdir;
 use ttfm::search;
 use ttfm::plugins::WasmPlugin;
-use ttfm::tag::{Index, Query, TagFunction};
+use ttfm::tag::{Index, TagFunction};
 use ttfm::types::{Label, LabelValue, TagType};
-use ttfm::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use ttfm::query::ast::{Operand, QueryNode};
 use ttfm::SearchOptions;
 
 /// プラグインが display を実装している場合、

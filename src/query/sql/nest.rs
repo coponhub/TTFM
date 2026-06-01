@@ -149,17 +149,6 @@ fn build_calculation_key_label_select(
     Ok(s)
 }
 
-fn extract_primary_tag_type_from_node(node: &ResolvedNode) -> Option<String> {
-    node.walk().into_iter().find_map(|n| match n {
-        ResolvedNode::Nest { keys, .. } => match keys.first()? {
-            ResolvedOperand::TagRef { tag_type, .. } => {
-                Some(tag_type.as_str().to_string())
-            }
-            _ => None,
-        },
-        _ => None,
-    })
-}
 
 pub(super) fn extract_multi_key_nest_operands(
     node: &ResolvedNode,

@@ -409,7 +409,7 @@ impl std::str::FromStr for DateTime {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, ()> {
-        use chrono::{Local, NaiveDate, TimeZone};
+        use chrono::{Local, NaiveDate};
 
         let s = s.trim();
         let parts: Vec<&str> = s
