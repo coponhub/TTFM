@@ -224,12 +224,12 @@ pub trait Query: Send + Sync {
         label.clone()
     }
 
-    /// タグのストレージ上の役割。Lens が Descriptor を自動生成するために使用。
+    /// タグのストレージ上の役割。
     fn logical_role(&self) -> LogicalRole {
         LogicalRole::Basic
     }
 
-    /// タグ値の論理型。算術演算の型チェックとカラム選択に使用。デフォルトは Any。
+    /// Label の論理型。
     fn logical_type(&self) -> LogicalType {
         LogicalType::Any
     }

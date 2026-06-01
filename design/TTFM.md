@@ -39,7 +39,7 @@ TTFMは、**Typed Tag（型付きタグ）** を用いてファイルを管理�
 デフォルトでは `name` は `filename` と同一だが、ユーザーは任意の `name` をタグとして付与できる。
 これにより、ファイルシステム上のファイル名を変更することなく、コンテキストに応じたわかりやすい名前で管理可能となる。
 
-なお、タグの種類としての `type:name` は `origin:system` であるが、ユーザーが付与した個別のタグ値（例: `name:foo`）は `origin:user` として扱われる。一方で、ファイル名から自動解決された `name` は `origin:system` となる。
+なお、タグの種類としての `type:name` は `origin:system` であるが、ユーザーが付与した個別のタグ（例: `name:foo`）は `origin:user` として扱われる。一方で、ファイル名から自動解決された `name` は `origin:system` となる。
 
 ### 2.4 優先度システム (RANK)
 全てのアイテムは `rank` と呼ばれる整数値の優先度を保持する。
@@ -67,22 +67,21 @@ TTFMは、**Typed Tag（型付きタグ）** を用いてファイルを管理�
 
 テーブル定義・スキーマについては `STORE.md` を参照
 
-### 4.3 プラグイン・コンポーネント設計 (Function パターン)
-新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
+### 4.3 プラグイン・コンポーネント設計 (TagFunction パターン)
+新しいタグ機能を追加していくための拡張基盤として、`TagFunction` を中心とした構成を採用する。
+これにより、インデックス・検索・表示の各機能を TypedTag の型 (Type) 単位で一元管理し、プラグインによる追加・上書きを可能にする。
 
-#### A. `IndexingFunction` trait (`src/functions.rs`)
-特定の TypedTag に関する**定義・抽出の統合単位**。
-- **タグ名の管理**: 担当する識別子（例: `"path"`, `"extension"`) を `NAME` 定数として保持する。
-- **Taggerの提供**: 内部に `Tagger` を必ず持ち、インデックス作成時の抽出ロジックをシステムへ提供する。 
+#### A. `TagFunction`
+特定の TypedTag に関する**定義の統合単位**。タグ名と優先度を保持し、以下の3つの機能コンポーネントを任意に束ねる（いずれも省略可能で、必要なものだけ実装する）。
+- **Index**: インデックス時にファイルから Label を抽出する。抽出方法・Label の型・格納先テーブルを定義する。
+- **Query**: 検索時のクエリ展開（Volatile Tag の具体化等）と Label の正規化ロジック、および各タグの論理型・論理的な格納役割を提供する。これらは論理スキーマ (LogicalSchema) を構成し、Logical Resolver による論理解決に用いられる。
+- **Display**: Label の表示フォーマット変換を担う。省略時は生の値がそのまま表示される。
 
-#### B. `Tagger` trait (`src/taggers.rs`)
-**「実際のタグ付け」を行う実行部**。`IndexingFunction` に内包される。
-- **DB定義**: そのタグをインデックス登録する際に必要なデータベースカラム（名前、型）を定義する (`get_columns`)。
-- **タグ付けロジック**: ファイルパスを受け取り、具体的な抽出・生成ロジックを実行して値を生成する (`tag_file`)。
-
-#### C. `FunctionRegistry` (`src/lib.rs`)
-個別の `IndexingFunction` を一括管理するハブ。
-- インデックス作成時は `IndexingFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `IndexingFunction` にSQL変換を委譲する。
+#### B. `TagRegistry`
+個別の `TagFunction` を一括管理するハブ。
+- 標準タグ群（インデックス機能を持つもの・クエリ専用のもの）をまとめて登録する。
+- インデックス作成時は Index を持つ関数に抽出を委譲し、検索時はクエリに対応する関数の Query に展開・SQL変換を委譲する。
+- Wasm プラグインも `TagFunction` を実装するアダプタとして本レジストリに登録され、組み込みのタグ機能と同一に扱われる（詳細は `PLUGIN.md`）。
 
 ### 4.4 永続化とアトミック性 (IndexStore)
 インデックス（Parquetファイル）の更新において、データの整合性と堅牢性を確保するため、`IndexStore` は以下の設計指針に基づくアトミックな書き込みを提供する。
@@ -121,7 +120,7 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 
 3.  **Triage Phase (Selection & Assembly)**:
     - **ItemTriager** を実行し、抽出されたメタデータを各テーブルへ振り分ける。
-    - **Extraction**: **To Process** のリストに対して並列で `Tagger` を実行し、メタデータを抽出する。
+    - **Extraction**: **To Process** のリストに対して並列で各 `TagFunction` の Index を実行し、メタデータを抽出する。
     - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/Tags）へ選別（トリアージ）する。
     - **Reconstruction**: **Moved** のリストに対し、ファイルを開かずにパス情報から場所情報を再構築する。
 
@@ -143,7 +142,7 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 2.  **Logical Resolution Phase (論理解決)**:
     -   **Logical Resolver** が AST を走査し、意味的な展開を行う。
     -   **機能**:
-        -   **Virtual Tag の具体化**: エイリアスを物理的なタグ条件へ変換 (例: `directory:` → `is_dir:true`)。
+        -   **Volatile Tag の具体化**: 物理ストレージを持たないタグをクエリ時に物理的なタグ条件へ変換 (例: `directory:` → `is_dir:true`)。
         -   **日付範囲の展開**: 相対日付等を範囲条件へ展開 (例: `mtime:today` → `mtime >= Start AND mtime <= End`)。
         -   **型チェック**: 演算の論理的な妥当性検証。
 
