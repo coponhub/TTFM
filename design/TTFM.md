@@ -31,6 +31,14 @@ TTFMは、**Typed Tag（型付きタグ）** を用いてファイルを管理�
 
 アイテムはすべてタグ付けの対象となる。これにより、ファイルだけでなくタグ定義自体にメタデータを付与したり、メモ情報を記録・管理したりすることが可能となる。
 
+#### Stored / Volatile
+Item は永続化の有無で区別される。
+
+- **Stored Item**: DB に永続化済みの Item。`item_references`（File Reference 経由なら `file_references`）に行を持ち、**正式な item_id** が採番されている。index 済みファイルや、明示的に登録された type/label/tag/note 定義がこれにあたる。
+- **Volatile Item**: まだ DB に永続化されていない Item。正式な item_id を持たない。検索結果には現れるが永続化されていないもの——Projection が返すラベル、集計値/計算値のスカラー（`value:`）、未登録の type/label/tag 定義など。
+
+TTFM が持つのは「Item を登録する」機能だけで（登録時に item_id を採番する）、登録対象が Volatile かどうかを判定しない。Volatile な検索結果を取得して登録すれば、結果的に Stored になる。
+
 ### 2.3 Item Name Abstraction (アイテム名の抽象化)
 「アイテムの名前」(name)を、ファイルシステム上の「ファイル名」(filename)から分離し、ユーザーが認識・操作する対象をnameとする
 - **name**: GUIやCLIでユーザーに提示されるアイテムの名称。
