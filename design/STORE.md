@@ -37,7 +37,7 @@ TTFMのデータベースは以下の様式で定義される。
 - **ファイルパス**: `.ttfm/db/item_references.parquet`
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
-- `item_kind`: アイテムの種類 (`type`, `tag`, `label`, `note` のいずれか)
+- `item_kind`: アイテムの種類 (`type`, `tag`, `note` のいずれか。`label` は登録対象外＝Volatile)
 - `content`: 識別名（Type名等）または Note の本文
 
 ## 3. Tag Store (Relations)
@@ -56,18 +56,22 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `item_id`: 対象のID (`file_references` または `item_references` のいずれか)
 - `type`: タグの種類
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
+- `tagged_at`: その行 (item×tag の関連) が付与された日時 (epoch)。oneview に現れ、行粒度で
+  クエリ・削除できる (`untag '*:*' 'project:X & tagged_at:>T'` 等)。`user_tags` 専用
+  (`base_tags` / `system_tags` には無く、oneview では NULL)。
 - ※ ユーザーが手動で付与した全てのタグ。`ttfm index` によるスキャン更新の影響を受けず、永続化される。
 
 ## 4. Unified View (`oneview`)
 全てのタグ情報を一元的に扱うための論理ビュー。検索クエリはこのビューに対して実行される。
 - `item_id`: 対象のID
-- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `label`, `tag` 等)
+- `item_kind`: アイテムの種類 (`file`, `note`, `type`, `tag` 等。`label` は Volatile のみ)
 - `rank`: 対象の優先度（ソート用）
 - `origin`: タグの出典 (`system` または `user`)
 - `type`: タグの種類
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（それぞれの物理カラムから合流）
 - `tag`: タグ全体（`type:label`）を表す文字列
 - `name`: アイテムの名称
+- `tagged_at`: 付与日時 (epoch)。`user_tags` 由来の行のみ値を持ち、`base_tags` / `system_tags` 由来は NULL。
 
 ### 4.1 Origin & Name Resolution
 - **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。

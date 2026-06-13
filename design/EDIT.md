@@ -7,9 +7,12 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 ## 1. コマンド体系
 
 - **`ttfm tag <SearchQuery> <EditQuery>`**: マッチしたアイテムに編集を適用する (付与 / mv / rank)。
-- **`ttfm tag <SearchQuery>`** (EditQuery 省略): 結果を加工せずそのまま登録する (定義の Stored 化 / 結果のスナップショット。§4.7)。
+- **`ttfm tag <SearchQuery>`** (EditQuery 省略): 結果を加工せずそのまま登録する (定義の Stored 化 / 結果を note として残す。§4.7)。
 - **`ttfm untag <SearchQuery> <TagQuery>`**: マッチしたアイテムからタグを削除する。`-` (差集合) との混同を避けるため独立コマンドとする。
+  `TagQuery` には projection も指定できる (`project:` = その type のタグ全てを除去する **type 指定の Delete**。
+  ラベル値の解決は不要)。これにより `untag <Q> item_id:` は各 item の `item_id` ラベル除去 = **item 削除**を表す (§4.1)。
 - **`ttfm replace <OLD> <NEW>`**: `OLD` を持つ全アイテムの TypedTag を `OLD` → `NEW` へ付け替える。`tag` + 条件付き `untag` の糖衣 (第5章)。
+- **`ttfm decal <From> <To>`**: `From` のアイテムが持つタグ群を `To` のアイテムへ転写する (第9章)。
 
 `SearchQuery` / `EditQuery` はいずれも TTQL クエリであり、両者は対称をなす。
 **`SearchQuery` が編集対象アイテムを解決**し、**`EditQuery` が適用するラベル (新しい値) を解決**する。
@@ -18,21 +21,16 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 - `<SearchQuery>` の解決は検索系の `search()` を再利用する (`ttfm rank` と同一パイプライン)。
   クエリ → 結果アイテムの `item_id` リスト → 編集の一括適用、という流れ。
 - **確認プロンプト必須**: マッチ件数に加え、**編集操作の総数 (対象アイテム数 × EditQuery 解決ラベル数)** を
-  表示し、ユーザーに確認を求める (`project:` のようなラベル無し Projection は全ラベルへ展開され付与数が
-  爆発し得るため)。`-y` / `--yes` グローバルフラグでバイパス可能 (スクリプト・パイプ用途)。
+  表示し、ユーザーに確認を求める。`-y` / `--yes` グローバルフラグでバイパス可能 (スクリプト・パイプ用途)。
 
 ### 1.2 EditQuery (編集内容の解決)
 `EditQuery` も TTQL クエリであり、評価結果のラベル群が各対象アイテムへ適用される。
 - **リテラル `key:value`**: 単一ラベルの付与 (縮退形)。
 - **複数ラベル**: Basic タグの複数 add (例: `project:A status:done`)。
-- **Projection / クエリ式**: 動的なラベル集合。評価結果の各ラベルを Add する。
-  定義間コピー等に使う (例: `ttfm tag tag:"status:A" 'tag:"project:A" & *:'` で `project:A` 定義の全メタを
-  `status:A` 定義へ複写)。`project:` のようなラベル無し Projection は全 project ラベルへ展開され、各々が
-  Add される (付与数が増えるため §1.1 の確認プロンプトで担保)。
-- **`type:` / `label:` / `tag:` の完結性**: EditQuery 終端が**完結した TypedTag** (`tag:"project:A"` のように
-  type も label も揃う) なら Append する。Projection が `tag:` を返す場合はタグコピーの基盤となる
-  (例: `ttfm tag fileB 'item_id:123 & tag:'` で file#123 の全タグを複写)。一方 `type:project` / `label:foo`
-  のように**片側だけの不完全な指定はエラー** (付与すべき TypedTag が確定しないため)。
+- **Projection は不可**: 検索を要する動的なラベル展開 (`tag:"project:A" & *:` 等) は EditQuery では行わない。
+  別アイテムからのタグ複写は `ttfm decal` (第9章) が担う。これにより EditQuery の解決は DB アクセス不要となる。
+- **`tag:"t:l"` リテラル**: 完結した TypedTag として Append する。`type:project` / `label:foo` のような
+  付与すべき TypedTag が確定しない指定はエラー。
 - **キャプチャ参照 `{n}`**: SearchQuery でキャプチャした部分文字列を参照する per-item テンプレート (第8章)。
 - **ディスパッチ**: EditQuery が返す各ラベルの type が宣言する `EditStrategy` で操作クラスが決まる (第2章)。
   キャプチャ参照が無ければ EditQuery はグローバルに1回評価され、有れば per-item で評価される。
@@ -47,7 +45,7 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 - `Some(tf)` かつ `tf.edit() = None` → **Forbidden** (即エラー)。
 - `None` (registry 未登録のユーザー定義型) → **Append** (重複可で追記)。
 
-`type` / `label` / `tag` の定義アイテムも item なので、**それ自身のメタは通常のタグ付与で編集**する
+`type` / `tag` の定義アイテムも item なので、**それ自身のメタは通常のタグ付与で編集**する
 (例: `ttfm tag tag:"project:A" rank:100` は EditQuery の `rank` 型 → `Replace` でディスパッチ)。
 なお EditQuery 終端が `type:` / `label:` / `tag:` のときの扱い (完結 TypedTag なら Append、不完全ならエラー) は §1.2 を参照。
 
@@ -94,7 +92,7 @@ pub enum EditStrategy {
 - **デフォルトは編集不可**: `edit()` を実装しない (`None` を返す) タグは編集できない。
   これにより組み込み・プラグインが意図せず編集される事故を防ぐ。
 - `Forbidden` は `edit() == None` で表現する (列挙子としては持たない)。
-  よって `type` / `label` / `tag` のための専用戦略は存在しない。
+  よって `type` / `tag` のための専用戦略は存在しない。
 
 ### 3.2 プラグイン向け簡便化
 - プラグインが選択できる戦略は **`Append` / `Replace` / Forbidden (未実装)** の3つ。
@@ -115,7 +113,7 @@ pub enum EditStrategy {
 | `name` | `Replace` (単一値) |
 | `size` / `hash` / `file_id` / `item_kind` / `origin` | Forbidden |
 | `directory:` 等の Composite (複合タグ) | Forbidden |
-| `type` / `label` / `tag` (定義アイテムのメタ編集) | EditQuery の型に従う (リネーム/再分類は §5 の合成) |
+| `type` / `tag` (定義アイテムのメタ編集) | EditQuery の型に従う (リネーム/再分類は §5 の合成) |
 
 ## 4. 永続化エンジン `write`
 
@@ -125,29 +123,58 @@ pub enum EditStrategy {
 Lens は論理タグと物理スキーマを相互に対応づける写像であり、両者が物理配置
 (`user_tags` / `item_references` / `rank` カラム等の区別) を隠蔽する。
 
-`search` が抽象レイヤーから `SearchResult` を読み出すのに対し、`write` は編集を表す
+`search` が抽象レイヤーから `Item`(旧 `SearchResult`) を読み出すのに対し、`write` は編集を表す
 **`WriteAction` の列**を受け取り、Lens を通じて抽象レイヤーへ適用する。
 
 ```rust
 pub enum WriteAction {
-    Add(SearchResult),                      // この item のラベル群を追記 (格納先は Lens が解決)
-    Delete { item: ItemId, label: Label },  // この item の該当ラベルを除去
+    Add    { item: ItemId, tags: Tags },  // この item に tags を追記 (格納先は Lens が解決)
+    Delete { item: ItemId, tags: Tags },  // この item から tags を除去
 }
 
 // 読み出し (既存)
 pub fn search(store, registry, cache, query, options) -> Result<SearchResponse>;
-// 書き戻し (本章)
+// 検索 + キャプチャ束縛: search を実行し、{n} を各アイテムのタグ値で展開した具体的 EditQuery を返す (§8)
+pub fn search_and_apply_captures(store, registry, search_query: SearchQuery, edit_query: EditQuery) -> Result<Vec<(Item, EditQuery)>>;
+// planning: item_edits を strategy で分割し fs 操作列と WriteAction 列を構築する純関数
+pub fn plan(item_edits: Vec<(Item, EditQuery)>, registry) -> Result<(Vec<(Item, EditQuery)>, Vec<WriteAction>)>;
+// 編集エントリポイント: search_and_apply_captures → plan → confirm → fs_operate_all + write を束ねる
+pub fn edit(store, registry, search_query: SearchQuery, edit_query: EditQuery, options: WriteOptions) -> Result<EditResponse>;
+// fs 操作担当: Relocate + SetFileAttr を実行しインデクサーへ通知する
+pub fn fs_operate_all(fs_ops: Vec<(Item, EditQuery)>, registry) -> Result<()>;
+// WriteAction の構築 (EditStrategy のコンパイラ, §4.3)。{n} 解決済みの具体的タグのみ受け取る純関数
+pub fn modify(item: &Item, query: EditQuery, registry) -> Result<Vec<WriteAction>>;
+// DB への書き込み。WriteAction を Lens 経由で永続化する実行器
 pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) -> Result<WriteResponse>;
 ```
 
+編集は **`edit` → `search_and_apply_captures` → `plan` → confirm → (`fs_operate_all` + `write`)** の流れで処理される。
+`search_and_apply_captures` が検索とキャプチャ束縛を一括で行い、`{n}` を解決済みの per-item な `(Item, EditQuery)` を返す。
+`plan` がそれを strategy で fs/db に分割し、fs 操作列と全 WriteAction を構築する。confirm はここで全件を把握してから表示できる。
+`modify` は `{n}` を含まない具体的なタグのみ受け取り、strategy をディスパッチして Add/Delete を組み立てる純関数。
+`write` は全 WriteAction を一括で受け取り DB に書き込む。
+`modify` は loaded Item を主に対象 item の特定に使い、**現値の参照には依存しない** (Replace も旧値不要、後述)。
+但し**条件付き Delete** (例: `untag '*:*' 'project:X & tagged_at:>T'`) では、loaded Item のタグ値
+(`tagged_at` 等) を述語で in-memory フィルタして消す行を選ぶため、現値を参照する。この場合も Item は
+検索で全タグをロード済みなので **DB 再検索は不要**で、純関数性は保たれる (WriteAction は具体タグのまま)。
+
 ### 4.1 WriteAction を入力とする
-- `WriteAction::Add` は **`search` の戻り値 `SearchResult` をそのまま**運べる。これにより
-  「検索 → 加工 → 書き戻し」の往復が成立する: `search` で得た `SearchResult` を編集し、
-  `Add` に包んで `write` へ渡せばよい。新規 item の追加でも、既存 item へのラベル追記でも、
-  対象 item の `id` と追記したいラベル群を持つ `SearchResult` を渡す形に統一される。
-- `Delete` は除去なので `(item, label)` 粒度で対象を指す。Add (item 中心) と Delete
-  (ラベル粒度) で形が非対称なのは、追加と削除の実態に沿っている。
-- `write` は渡された action 列を**そのまま**適用する。`SearchResult` 全体の「あるべき状態」を
+- `WriteAction` は **`{item: ItemId, tags: Tags}`** という最小の指示単位である。`search` の戻り値
+  `Item` が持つ表示用情報 (`representative` / `intrinsic` / `rank` 等) は `write` に渡らない——
+  `Item` から WriteAction への翻訳 (どのタグを足し/消すか) は `modify` の責務であり、
+  `write` が受け取るのは確定済みの (item, tags) だけである。
+- Add と Delete は対称で、Add は `tags` を追記し、Delete は `tags` を除去する。
+- **item の作成も `Add` で表す**: 対象 `item` が Volatile (未採番) の Add は item 作成を兼ねる。
+  note の作成も `Add { item: Volatile, tags: [item_kind:note, content:"...", ...] }` という
+  純粋なタグ列で表現する (`item_kind` / `content` は oneview 上もタグとして見えており、
+  Lens が item_references のカラムへ振り分ける)。専用の作成アクションは無い。
+- **item の削除も `Delete` で表す**: `item_id` は item の identity タグなので、それを除去する
+  `Delete { tags: [item_id:] }` は、タグ1本の除去ではなく **item 行ごと削除** (全タグ cascade) を意味する。
+  `untag <Q> item_id:` がこれを生む (untag の projection も tag 同様ラベルへ展開して Delete するため、
+  マッチ各 item の `item_id` ラベルが対象になる)。専用の `DeleteItem` アクションや削除コマンドは設けず、
+  **すべてタグ編集で貫く**。ファイルは対象外 (作成/削除とも index 専管)。
+  `write` は `Delete` のタグ型で分岐する (`item_id` なら行削除、それ以外はタグ削除)。
+- `write` は渡された action 列を**そのまま**適用する。item の「あるべき状態」を
   暗黙に再構築するような差分は取らない (明示された `Add` / `Delete` だけを実行するので、
   渡し忘れたタグが消える危険がない)。
 
@@ -167,23 +194,23 @@ pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) 
 
 | 戦略 | WriteAction への展開 |
 |---|---|
-| `Append` | `[Add(SearchResult)]` |
-| `Replace` | `[Delete{item, 該当 type}, Add(SearchResult)]` (単一値化) |
+| `Append` | `[Add{item, tags}]` |
+| `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[type:new]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない) |
 
 - 物理書き込みは Lens 経由で各 action の格納先 (`user_tags` 行 / `rank` カラム等) を解決し、
   最後に `OneView::recreate` で oneview を再構築して完了する。
 - 既存の `add_item` / `tag_item` / `untag` 等の個別関数は、対応する `WriteAction` を
   組み立てて `write` を呼ぶ薄いラッパに再構成される (`untag` = `Delete` のみ、tag = `Add`)。
 
-- **`write` の範囲外**(fs 操作・再 index が必要なため高次の関数が担う):
-  - `Relocate` / `SetFileAttr` (第6章)
+- **`write` の範囲外**: `Relocate` / `SetFileAttr` は fs 操作・再 index が必要なため `fs_operate` が担う (第6章)。
+  `edit` が `split_by_strategy` で振り分けるため `modify` / `write` はこれらを知らない。
 
 ### 4.4 守備範囲 (境界)
 - `write` は**渡された `WriteAction` の対象 item だけ**を操作する純粋な永続化単位であり、
   内部で `search` / `index` やファイルシステム操作 (`fs::rename` 等) を呼び出さない。
 - 対象の解決 (どの item をどう編集するか = action 列の構築) は呼び出し側の責務である。
 - 実ファイル変更を伴う `Relocate` / `SetFileAttr` の fs 操作・再 index・対話プロンプトは、
-  すべてより高次の関数 (UI / コマンド層) が組み合わせて実現する (第6章)。
+  `edit` が `split_by_strategy` で分割し `fs_operate` が担う (第6章)。
 - この境界により、`write` は副作用が DB に限定されたテスト容易な単位となる。
 
 ### 4.5 抽象と SQL 最適化の分離
@@ -200,24 +227,26 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
 
 - `write` が新しいアイテム行を追加するか否かは Stored / Volatile で分岐する (Stored は既存 `item_id` を再利用、
   Volatile は新規追加)。アイテムを追加する局面では item_id の採番が行われ、採番は `write` が所有する。
-- **定義アイテムは lazy に登録する**: 通常のタグ付与 (`status:done` を付ける等) では type / label / tag の
+- **定義アイテムは lazy に登録する**: 通常のタグ付与 (`status:done` を付ける等) では type / tag の
   定義アイテムを eager に登録しない。これらは tag 行から導出可能な Volatile として projection に現れ、
-  **その定義自身が独自状態を持つとき (例: `ttfm tag label:ttfm rank:100` で rank を設定) に限り登録**される。
+  **その定義自身が独自状態を持つとき (例: `ttfm tag tag:"project:ttfm" rank:100` で rank を設定) に限り登録**される。
+  (`label` 単独は登録対象としない。TTFM.md §2.2 参照。)
 
 ### 4.7 SearchQuery 結果の登録
 `ttfm tag <SearchQuery>` を **EditQuery 無し**で実行すると、結果を加工せずそのまま登録する
-(`search(Q)` の各結果を `Add(SearchResult)` として `write` へ流す identity 往復, §4.1)。
+(`search(Q)` の各結果を `Add{item, tags}` として `write` へ流す, §4.1)。
 確認プロンプトには「N 件を登録」と明示する。既に Stored の結果は no-op。
 
 結果の種類で登録のされ方が分かれる:
-- **定義 (tag / type / label) の登録 (A)**: 対応する定義アイテムを登録する (kind + content で冪等。既存なら重複しない)。
-  `@()` (Eval) で参照したい定義の Stored 化などに使う。
-- **Projection / Nest / 計算値のスナップショット (B)**: その時点の結果を **`note` アイテム**として固める。
-  - 各結果セルは representative のラベル群 + 評価値 (`value:<n>`) を持つ note となる。
-  - **由来の保持**: スナップショット note には元クエリを `query:"<SearchQuery>"` タグとして注入する
+- **定義 (tag / type) の登録 (A)**: 対応する定義アイテムを登録する (kind + content で冪等。既存なら重複しない)。
+  `q()` (Eval) で参照したい定義の Stored 化などに使う。
+- **Projection / Nest / 計算値を note として残す (B)** (`label:` も含む):
+  その時点の**結果全体を1つの `note` アイテム**として保存する。
+  - note の `content` には結果の文字列表現を入れる。
+  - **由来の保持**: この note には元クエリを `query:"<SearchQuery>"` タグとして注入する
     (例: `query:"project: &: sum(size:)"`)。これにより「何の計算だったか」の文脈が失われない。
     `query` 型は `value` 型と同様、システムが注入する仮想型 (文字列を保持・ファイル由来でない・ユーザー編集不可) として実装する。
-  - スナップショットは固有 identity を持たないため、再実行のたび**毎回新規**に作られる (重複可)。
+  - これらの note は固有 identity を持たないため、再実行のたび**毎回新規**に作られる (重複可)。
 
 ## 5. タグの付け替え (`ttfm replace`)
 
@@ -267,10 +296,13 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
 1. **計画フェーズ**: マッチした全アイテムの新ターゲットパスを算出し、以下を**厳格に事前検証**する。
    - 書き込み権限 / 同一ファイルシステム (cross-device rename 不可)
    - ターゲット同士の重複・既存ファイルとの衝突
-   - ターゲットの親ディレクトリの存在
+   - ターゲットの親ディレクトリの存在 (不在時は「ディレクトリを作成しますか？」と確認し、
+     yes で `mkdir -p` してから rename。単純な yes/no のため -y では自動作成する。§6.4)
    - 複数 location (ハードリンク) の有無
 2. **実行フェーズ**: 検証済みのターゲットに対して `fs::rename` を実行する。
    事前検証を通過している前提のため、実行中の失敗は例外的事象として扱う。
+   **失敗時はその時点で中断しエラーを表示する。既に完了したリネームはロールバックしない**
+   (原理的に困難なため、計画フェーズの厳格な事前検証で失敗確率を抑えることで担保する)。
 
 ### 6.2 衝突解決 (対話)
 複数アイテムが同一ターゲットパスに衝突する場合 (例: 多数のファイルを同名へ)、
@@ -282,7 +314,18 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
 - スキップ / 移動する / キャンセル (および「以降全て」)
 
 ### 6.4 非対話モード (`-y` / パイプ)
-- プロンプトを出せないため、**衝突を検出した時点で error 中断**し、何も適用しない。
+- プロンプトを出せないため、既定では**衝突または複数 location (ハードリンク) を検出した時点で
+  error 中断**し、何も適用しない (どちらも人の選択を要するため)。ハードリンクで中断する場合、
+  エラーメッセージに**当該アイテムの全実パスを列挙**する。
+- 対話で決めるはずの解決は、**関心ごとのポリシーフラグ**で事前宣言すれば -y でも一括適用できる
+  (対話の「以降全て」を CLI で先出しするのと同義):
+  - `--on-conflict <abort|skip|serial>` — ターゲット衝突時 (§6.2)。`abort`=中断 (既定) /
+    `skip`=衝突アイテムを飛ばし残りを処理 / `serial`=連番サフィックス付与。
+  - `--on-hardlink <abort|skip|all>` — 複数 location 時 (§6.3)。`abort`=中断 (既定) /
+    `skip`=ハードリンクのアイテムを飛ばす / `all`=全リンクを移動。
+- フラグを与えない -y は従来どおり安全側 (abort) のまま。
+- 例外: **親ディレクトリ不在は -y でも中断せず自動作成する** (`skip/serial` や
+  `which link?` のような多択でなく単純な yes/no で、作成が明らかな既定のため。§6.1)。
 
 ### 6.5 DB への反映
 DB への反映方法は、編集が**実ファイルを変更するか / DB のみを書き換えるか**で分かれる。
@@ -301,7 +344,7 @@ DB への反映方法は、編集が**実ファイルを変更するか / DB の
 ## 7. 値セマンティクス
 
 - **name**: 単一値。書き込みは既存 name の置換となる (1アイテム1名前)。
-- **一般ユーザー定義タグ**: `Append` (重複可)。同一 `type:label` の再付与も許容する。
+- **一般ユーザー定義タグ**: `Append` (重複可)。
   値を変えたい場合は第5章の `ttfm replace` で付け替える。
 - **TagFunction が提供するタグ**: デフォルトで編集不可。宣言した `EditStrategy` に従う。
 - **将来拡張**: ユーザー定義型を Unique にしたい場合、Type アイテムに `unique:true` のような
@@ -327,10 +370,11 @@ SearchQuery 側のパターンでキャプチャした部分文字列を、EditQ
   厳格モードへ切り替え可能としてもよい。
 
 ### 8.2 実行モデル
-- EditQuery 値が定数ではなくアイテムごとの関数になるため、
-  各アイテムのタグ値からキャプチャを抽出し、テンプレートを展開してから書き込む。
+- キャプチャの展開は `search_and_apply_captures` が担う (§4)。各アイテムのタグ値を SearchQuery の
+  glob パターンに当て、`{n}` を具体値で置換した EditQuery を per-item で返す。`modify` は
+  `{n}` を含まない具体的な EditQuery のみ受け取り、キャプチャを知らない。
 - **1アイテムが同 type の該当ラベルを複数持つ場合** (Append 型タグで `project:ttfm` と `project:ttgui` の両方を
-  持つ等): マッチしたラベルごとにテンプレートを展開し、**複数の edit を生成**する
+  持つ等): マッチしたラベルごとにテンプレートを展開し、**複数の `(Item, EditQuery)` ペアを生成**する
   (例: `note:belongs_to_fm` と `note:belongs_to_gui` の両方を付与)。
 - ただし展開先が**ユニークタグ** (重複不可) で複数候補が競合する場合は、単一値スロットに収まらないため
   **確認プロンプト**で解決する。
@@ -338,3 +382,28 @@ SearchQuery 側のパターンでキャプチャした部分文字列を、EditQ
 ### 8.3 例
 - `ttfm tag filename:*_draft.txt filename:{1}.txt` (各ファイルの `_draft` を剥がしてリネーム)
 - `ttfm tag filename:proj_* project:{1}` (ファイル名の一部を project タグとして付与)
+
+## 9. タグの転写 (`ttfm decal`)
+
+`ttfm decal <From> <To>`: `From` のアイテムが持つタグ群を `To` のアイテムへ転写する。
+EditQuery は Projection (動的ラベル展開) を含められないため (§1.2)、アイテム間のタグコピーは
+本コマンドが担う。内部的にはコマンド層が search(From) でタグ群を取得し、`modify` → `write` (第4章) の
+通常経路で `To` へ Add する (検索はコマンド層で行い、`modify` は純関数のまま)。
+
+### 9.1 対象の解決
+- `To` にキャプチャ参照 `{n}` が**無い**場合: `From` は単一アイテムに解決されなければならない (複数は error)。
+  `To` は複数可 (同じタグ群を一括転写)。
+- `To` に `{n}` が**有る**場合: `From` は複数可。各 From アイテムのマッチから `{n}` を束縛し、
+  **アイテムごとに To テンプレートを展開**して転写先を解決する (per-item ペアリング。第8章と同一モデル)。
+
+### 9.2 転写対象
+- 各タグは type の `EditStrategy` でディスパッチされる (第2章)。Append / Replace 型のみ転写し、
+  `Relocate` / `SetFileAttr` / Forbidden 型 (path / extension 等の構造系) は**スキップ**する
+  (スキップした型は確認プロンプトに表示する)。decal は DB 編集に限定され、ファイル操作を伴わない。
+- 確認プロンプトは tag と同様、対象アイテム数 × 転写タグ数を表示する (§1.1)。
+
+### 9.3 例
+- `ttfm decal item_id:123 fileB` (file#123 の全タグを fileB へ複写)
+- `ttfm decal tag:"project:A" tag:"status:A"` (`project:A` 定義の全メタを `status:A` 定義へ複写)
+- `ttfm decal 'tag:"project:*"' 'tag:"status:{1}"'` (project:A 定義のメタは status:A 定義へ、
+  project:B のは status:B へ、それぞれ対応相手に転写)
