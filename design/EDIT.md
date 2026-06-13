@@ -128,15 +128,22 @@ Lens は論理タグと物理スキーマを相互に対応づける写像であ
 
 ```rust
 pub enum WriteAction {
-    Add    { item: ItemId, tags: Tags },  // この item に tags を追記 (格納先は Lens が解決)
-    Delete { item: ItemId, tags: Tags },  // この item から tags を除去
+    Add    { item: ItemId, tags: Vec<TagOp> },  // この item に tags を追記 (格納先は Lens が解決)
+    Delete { item: ItemId, tags: Tags },        // この item から tags を除去
+}
+// Add 内の各タグは由来の strategy を保持する。confirm はこれを見て
+// 同一 item・同一 type に Replace が複数来た競合 (§8.2) を検出・解決する。
+pub enum TagOp {
+    Append(Label),   // 重複可で追記
+    Replace(Label),  // 単値。同一 type が複数あれば confirm が1つに畳む
 }
 
 // 読み出し (既存)
 pub fn search(store, registry, cache, query, options) -> Result<SearchResponse>;
 // 検索 + キャプチャ束縛: search を実行し、{n} を各アイテムのタグ値で展開した具体的 EditQuery を返す (§8)
 pub fn search_and_apply_captures(store, registry, search_query: SearchQuery, edit_query: EditQuery) -> Result<Vec<(Item, EditQuery)>>;
-// planning: item_edits を strategy で分割し fs 操作列と WriteAction 列を構築する純関数
+// planning: item_edits を strategy で分割し fs 操作列と WriteAction 列を構築する純関数。
+// 単値タグに複数候補が来た場合 (§8.2) もエラーにせず Replace を複数積み、解決は confirm に委ねる
 pub fn plan(item_edits: Vec<(Item, EditQuery)>, registry) -> Result<(Vec<(Item, EditQuery)>, Vec<WriteAction>)>;
 // 編集エントリポイント: search_and_apply_captures → plan → confirm → fs_operate_all + write を束ねる
 pub fn edit(store, registry, search_query: SearchQuery, edit_query: EditQuery, options: WriteOptions) -> Result<EditResponse>;
@@ -164,7 +171,7 @@ pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) 
   `Item` から WriteAction への翻訳 (どのタグを足し/消すか) は `modify` の責務であり、
   `write` が受け取るのは確定済みの (item, tags) だけである。
 - Add と Delete は対称で、Add は `tags` を追記し、Delete は `tags` を除去する。
-- **item の作成も `Add` で表す**: 対象 `item` が Volatile (未採番) の Add は item 作成を兼ねる。
+- **item の作成も `Add` で表す**: 対象 `item` が Volatile (DB に無い) の Add は item 作成を兼ねる。
   note の作成も `Add { item: Volatile, tags: [item_kind:note, content:"...", ...] }` という
   純粋なタグ列で表現する (`item_kind` / `content` は oneview 上もタグとして見えており、
   Lens が item_references のカラムへ振り分ける)。専用の作成アクションは無い。
@@ -194,8 +201,8 @@ pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) 
 
 | 戦略 | WriteAction への展開 |
 |---|---|
-| `Append` | `[Add{item, tags}]` |
-| `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[type:new]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない) |
+| `Append` | `[Add{item, tags:[Append(tag)]}]` |
+| `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[Replace(type:new)]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない。`Add` の `Replace` マーカーで confirm が多値競合を検出する) |
 
 - 物理書き込みは Lens 経由で各 action の格納先 (`user_tags` 行 / `rank` カラム等) を解決し、
   最後に `OneView::recreate` で oneview を再構築して完了する。
@@ -228,8 +235,9 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
 - `write` が新しいアイテム行を追加するか否かは Stored / Volatile で分岐する (Stored は既存 `item_id` を再利用、
   Volatile は新規追加)。アイテムを追加する局面では item_id の採番が行われ、採番は `write` が所有する。
 - **定義アイテムは lazy に登録する**: 通常のタグ付与 (`status:done` を付ける等) では type / tag の
-  定義アイテムを eager に登録しない。これらは tag 行から導出可能な Volatile として projection に現れ、
-  **その定義自身が独自状態を持つとき (例: `ttfm tag tag:"project:ttfm" rank:100` で rank を設定) に限り登録**される。
+  定義アイテムを eager に登録しない。これらは tag 行から導出可能な Volatile として projection に現れる。
+  **Volatile な定義が `Add` の対象になったとき** (例: `ttfm tag tag:"project:ttfm" rank:100` で
+  定義へ rank を付与) に限り、write が採番して登録する。付与されるタグ自身が登録の契機となる。
   (`label` 単独は登録対象としない。TTFM.md §2.2 参照。)
 
 ### 4.7 SearchQuery 結果の登録
@@ -373,11 +381,11 @@ SearchQuery 側のパターンでキャプチャした部分文字列を、EditQ
 - キャプチャの展開は `search_and_apply_captures` が担う (§4)。各アイテムのタグ値を SearchQuery の
   glob パターンに当て、`{n}` を具体値で置換した EditQuery を per-item で返す。`modify` は
   `{n}` を含まない具体的な EditQuery のみ受け取り、キャプチャを知らない。
-- **1アイテムが同 type の該当ラベルを複数持つ場合** (Append 型タグで `project:ttfm` と `project:ttgui` の両方を
-  持つ等): マッチしたラベルごとにテンプレートを展開し、**複数の `(Item, EditQuery)` ペアを生成**する
-  (例: `note:belongs_to_fm` と `note:belongs_to_gui` の両方を付与)。
-- ただし展開先が**ユニークタグ** (重複不可) で複数候補が競合する場合は、単一値スロットに収まらないため
-  **確認プロンプト**で解決する。
+- **1アイテムが同 type の該当ラベルを複数持つ場合** (SearchQuery の glob が item ごとに複数マッチ): マッチ
+  ごとにテンプレートを展開し**複数の `(Item, EditQuery)` ペアを生成**する。展開先 strategy で扱いが分かれる:
+  - `Append`: 異なる label は複数行として共存 (完全一致は §4.1 の冪等性で吸収)。
+  - `Replace`: 同一 item・同一 type に複数の `Replace(tag)` が積まれ、`confirm` が1候補に解決する。
+- 静的な多重リテラル (`name:a name:b`) は曖昧なので **`edit` 入口で事前エラー**とする。
 
 ### 8.3 例
 - `ttfm tag filename:*_draft.txt filename:{1}.txt` (各ファイルの `_draft` を剥がしてリネーム)
