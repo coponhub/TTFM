@@ -77,7 +77,25 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
 - **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
 
-## 5. Sorting strategy
+## 5. Storage Mapping (Lens) — 論理タグ ↔ 物理スキーマ
+`oneview`（§4）は read 専用の派生 VIEW（複数 parquet の UNION ALL）であり、**書き込めない**。
+そのため write は Lens が論理タグを基底テーブル/カラムへ解決して直接書き、完了後に
+`OneView::recreate`（§4）で oneview を作り直す。read（検索）と write（編集）は同じ
+StorageMapping を共有し、read 方向は oneview への射影、write 方向は基底テーブルへの解決として使う。
+
+StorageMapping は3種:
+
+| マッピング | read（`oneview` 上の表現） | write（書き込み先の基底テーブル） |
+|---|---|---|
+| **Fixed(col)** | 専用カラム（`rank` / `item_kind` / `content` 等） | 対象 item の物理テーブルの当該カラムを更新（`rank` なら `file_references` / `item_references` の `rank`、`item_kind` / `content` は `item_references`） |
+| **Basic{column, tag_type}** | 汎用ラベルカラム（`label_str` / `label_int` / `label_double` / `label_bool`）＋ `type` | `user_tags` に行を追加/削除（`type` = tag_type、値を型に応じた `label_*` カラムへ） |
+| **Composite** | 他タグへ展開される論理タグ（`directory:` 等） | 直接の格納先を持たず、展開先の各タグの write へ委ねる |
+
+- **書き込み先テーブルは origin で決まる**: ユーザー編集は常に `user_tags`（または Fixed の専用カラム）。
+  `base_tags` / `system_tags` は `ttfm index` 専管で、編集の write 対象外。
+- **値の型解決**（どの `label_*` カラムを使うか）は read と同じロジックを共有する。
+
+## 6. Sorting strategy
 - `base_tags`, `system_tags`, `user_tags`は保存時、以下の順序でソートしておき、DuckDBのZoneMapを活用する
     - type ASC
     - label_int ASC

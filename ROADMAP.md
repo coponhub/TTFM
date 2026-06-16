@@ -135,6 +135,7 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **Open Operations**: Support `ttfm open <QUERY>` with system-default apps.
 - [ ] **Item Operations**: `split` (separate multi-location items) and `merge` (combine entities).
 - [ ] **Remote Support**: Integrate `RemoteID` (ETag/VersionID) for online files.
+- [ ] **Unique Tag Types**: Allow a user-defined type to be marked unique (e.g. a `unique:true` meta tag on the Type item) so its tag is single-valued, rejecting or replacing duplicates on edit.
 
 ### Search & UI Enhancements
 - [ ] **Sorting**: Sort results by Size, Date Modified, or Name.
