@@ -139,15 +139,25 @@ enum OneViewSource<'a> {
 // ----------------------------------------------------------------------------
 
 fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
-    // UserTags の時だけ User、それ以外は System
-    if matches!(source, OneViewSource::Tag(s) if s.table == Tbl::UserTags) {
-        Expr::val(Into::<&'static str>::into(Val::User))
-            .cast_as(SqlType::VARCHAR)
-            .into()
-    } else {
-        Expr::val(Into::<&'static str>::into(Val::System))
-            .cast_as(SqlType::VARCHAR)
-            .into()
+    match source {
+        OneViewSource::Tag(s) if s.table == Tbl::UserTags => {
+            Expr::val(Into::<&'static str>::into(Val::User))
+                .cast_as(SqlType::VARCHAR)
+                .into()
+        }
+        OneViewSource::ItemRef(_) => {
+            // item_id の区画から origin を決定する（within と同じ判定）。
+            sea_query::Expr::cust(
+                &crate::db::CustomFunc::item_id_origin(&Col::ItemId.to_string())
+            ).into()
+        }
+        OneViewSource::Tag(_)
+        | OneViewSource::Physical { .. }
+        | OneViewSource::LocationAlias(_) => {
+            Expr::val(Into::<&'static str>::into(Val::System))
+                .cast_as(SqlType::VARCHAR)
+                .into()
+        }
     }
 }
 

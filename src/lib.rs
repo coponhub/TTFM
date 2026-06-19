@@ -40,7 +40,7 @@ pub use db::{Store, TargetTable};
 pub use query::{parse, QueryNode};
 pub use response::{SearchResponse, SearchResult};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use types::{FileRef, ItemKind, Label, Progress, TagType, TypedTag};
+pub use types::{FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag};
 
 mod cache;
 pub use cache::CacheManager;

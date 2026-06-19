@@ -361,6 +361,7 @@ impl TagRegistry {
         reg.register(HashFn);
         reg.register(ContentFn);
         reg.register(NameFn);
+        reg.register(ItemIdFn);
         reg.register(ItemKindFn);
         reg.register(RankFn);
         reg.register(OriginFn);
@@ -1426,6 +1427,51 @@ impl Query for MtimeFn {
             1 => conditions.remove(0),
             _ => QueryNode::And(conditions),
         }
+    }
+}
+
+// --- ItemIdFn ---
+pub(crate) struct ItemIdFn;
+impl TagFunction for ItemIdFn {
+    fn name(&self) -> &str {
+        SType::ItemId.into()
+    }
+    fn query(&self) -> Option<&dyn Query> {
+        Some(self)
+    }
+}
+impl Query for ItemIdFn {
+    fn logical_role(&self) -> LogicalRole {
+        LogicalRole::Fixed
+    }
+    fn logical_type(&self) -> LogicalType {
+        LogicalType::Integer
+    }
+    /// ローカル形式（"User(0)"/"Sys(10)"）を raw i64 へ正規化する。
+    /// 生整数文字列や Literal 以外はそのまま返す。
+    fn normalize_label(&self, label: &Label) -> Label {
+        let s = match label.value() {
+            LabelValue::String(s) | LabelValue::Literal(s) => s,
+            _ => return label.clone(),
+        };
+        match crate::db::identifier::parse(&s) {
+            Ok(id) => Label::ItemId(id),
+            Err(_) => label.clone(),
+        }
+    }
+    fn expand(
+        &self,
+        _tt: &TagType,
+        label: &Label,
+        _tag: &TypedTag,
+    ) -> QueryNode {
+        QueryNode::ColumnMatch {
+            tag: SType::ItemId,
+            label: label.clone(),
+        }
+    }
+    fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
+        QueryNode::Projection(Operand::from(tagtype.clone()))
     }
 }
 

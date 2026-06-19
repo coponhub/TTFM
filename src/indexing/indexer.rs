@@ -13,11 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl};
+use crate::db::{
+    identifier, Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl,
+};
 use crate::indexing::ScanEntry;
 use crate::tag::TagRegistry;
 use crate::taggers::{ColumnDef, TagValue};
-use crate::types::ItemId;
+use crate::types::{ItemId, Origin};
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
 use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -105,9 +107,7 @@ impl<'a> Indexer<'a> {
 
         // 3. Triage Phase
         let (results, moved_rows) =
-            triage::run_triage(self.registry, diff.to_process, || {
-                self.max_file_id()
-            })?;
+            triage::run_triage(&self.store, self.registry, diff.to_process)?;
 
         // 4. Merge Phase
         merge::run_merge(
@@ -295,7 +295,7 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
 
-        let start_id = self.next_item_id(&items_str)?;
+        let start_id = identifier::attach(&self.store, Origin::System, 1)?[0];
         let tmp_items = items_path.with_extension("parquet.tmp");
         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
 
@@ -319,6 +319,7 @@ impl<'a> Indexer<'a> {
                 .from(Tbl::IdItem)
                 .to_owned(),
         );
+        query_union.order_by(Col::ItemId, sea_query::Order::Asc);
         query_union.save_parquet(&self.store.conn, &tmp_items)?;
         // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
         let p1 = Query::select()
@@ -381,40 +382,6 @@ impl<'a> Indexer<'a> {
     }
 
     // --- Shared Helpers ---
-
-    /// ファイルエンティティの現在の最大ID（正の整数）を取得します。
-    pub(crate) fn max_file_id(&self) -> Result<i64> {
-        let ents_path = self.store.path_for_target(TargetTable::FileReferences);
-        if !ents_path.exists() {
-            return Ok(0);
-        }
-        let ents_str = ents_path.to_string_lossy();
-        let query = Query::select()
-            .expr(Func::cust(DuckDbFunc::Coalesce).args([
-                Expr::col(Col::ItemId).max().into(),
-                Expr::val(0).into(),
-            ]))
-            .from_subquery(util::parquet_query(&ents_str), Tbl::FileReferences)
-            .to_string(PostgresQueryBuilder);
-
-        self.store.conn
-            .query_row(&query, [], |r| r.get(0))
-            .map_err(Into::into)
-    }
-
-    /// 次の負のアイテムIDを取得します（システムアイテム用）。
-    pub(crate) fn next_item_id(&self, items_path: &str) -> Result<i64> {
-        let query_min = Query::select()
-            .expr(Func::cust(DuckDbFunc::Coalesce).args([
-                Expr::col(Col::ItemId).min().into(),
-                Expr::val(0).into(),
-            ]))
-            .from_subquery(util::parquet_query(items_path), Tbl::ItemReferences)
-            .to_string(PostgresQueryBuilder);
-
-        let min_id: i64 = self.store.conn.query_row(&query_min, [], |r| r.get(0))?;
-        Ok(if min_id > -1 { -1 } else { min_id - 1 })
-    }
 
     /// テーブルのレコード数を取得します（共有ロジック）。
     pub(crate) fn count_table(
@@ -644,19 +611,6 @@ mod tests {
         let store = Store::open(&db_dir).unwrap();
         Indexer::new(&store, &registry).initialize_tables().unwrap();
         assert!(db_dir.join("file_references.parquet").exists());
-    }
-
-    #[test]
-    fn test_indexer_next_item_id_logic() {
-        fn calc_next(min_id: i64) -> i64 {
-            if min_id > -1 {
-                -1
-            } else {
-                min_id - 1
-            }
-        }
-        assert_eq!(calc_next(0), -1);
-        assert_eq!(calc_next(-1), -2);
     }
 
     #[test]

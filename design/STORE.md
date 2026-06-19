@@ -101,3 +101,6 @@ StorageMapping は3種:
     - label_int ASC
     - label_str ASC
     - item_id ASC
+- `item_references` は保存時に `item_id ASC` でソートする
+    - System 区画（8B+）と User 区画（0+）が混在するため、zone map の枝刈りを有効にするには書き出し時点でのソートが必要
+    - 書き出し経路: `tagging::add_item` / `indexer::update_system_items` / `rank::batch_update_rank`

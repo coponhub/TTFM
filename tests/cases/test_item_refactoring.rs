@@ -17,6 +17,39 @@ use tempfile::tempdir;
 use ttfm::{search, tagging};
 use ttfm::{SearchOptions};
 
+fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager) {
+    let dir = Box::leak(Box::new(tempdir().unwrap()));
+    let db_dir = dir.path().join(".ttfm/db");
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    let cache = ttfm::CacheManager::new(db_dir.join("cache"), 0);
+    (store, registry, cache)
+}
+
+/// User 区画 [0, B) の幅 B = 2^58。
+const B: i64 = 1 << 58;
+
+#[test]
+fn add_item_allocates_in_user_space() {
+    let dir = tempdir().unwrap();
+    let db_dir = dir.path().join(".ttfm/db");
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+
+    // ユーザー作成アイテムは User 区画から採番される（負値ではない）。
+    let id0 = tagging::add_item(&store, &registry, "note", "memo A").unwrap();
+    let id1 = tagging::add_item(&store, &registry, "note", "memo B").unwrap();
+    assert!((0..B).contains(&id0), "id0={id0} should be in User space");
+    assert!((0..B).contains(&id1), "id1={id1} should be in User space");
+    assert!(id1 > id0, "ids should ascend: {id0} -> {id1}");
+}
+
 #[test]
 fn test_item_id_and_kind_refactoring() {
     let dir = tempdir().unwrap();
@@ -72,4 +105,59 @@ fn test_item_id_and_kind_refactoring() {
 
     // 5. Explicitly check for ID 0 if we can assume fresh process or just check behavior
     println!("First result ID: {}", res.results[0].id);
+}
+
+/// display(id) はローカル形式 "User(0)" / "Sys(N)" を返す。
+/// SearchResult.id.as_i64() を通すと identifier::display の形式になることを確認。
+#[test]
+fn item_id_display_uses_local_form() {
+    let (store, registry, cache) = setup_store();
+    let raw_id = tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+
+    let o = ttfm::Origin::within(raw_id);
+    let disp = format!("{}({})", o.short(), raw_id - o.space_lo());
+    // User 区画 [0, B) なので "User(N)" 形式
+    assert!(disp.starts_with("User("), "expected User(N), got {disp}");
+    assert!(disp.ends_with(')'), "expected User(N), got {disp}");
+
+    // SearchResult が同じ id を返す
+    let results = search::search(
+        &store, &registry, &cache,
+        &format!("item_id:{raw_id}"),
+        SearchOptions::default(),
+    ).unwrap();
+    assert_eq!(results.results.len(), 1);
+    let rid = results.results[0].id.as_i64();
+    let ro = ttfm::Origin::within(rid);
+    assert_eq!(format!("{}({})", ro.short(), rid - ro.space_lo()), disp);
+}
+
+/// item_id:"User(0)" クエリは item_id:0 と同一アイテムを返す（ローカル形式の往復）。
+#[test]
+fn item_id_quoted_local_form_resolves_same_as_raw_id() {
+    let (store, registry, cache) = setup_store();
+    let raw_id = tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+
+    let o = ttfm::Origin::within(raw_id);
+    let disp = format!("{}({})", o.short(), raw_id - o.space_lo()); // e.g. "User(0)"
+    let q_raw = format!("item_id:{raw_id}");
+    let q_local = format!("item_id:\"{disp}\"");
+
+    let r_raw = search::search(
+        &store, &registry, &cache, &q_raw, SearchOptions::default(),
+    ).unwrap();
+    let r_local = search::search(
+        &store, &registry, &cache, &q_local, SearchOptions::default(),
+    ).unwrap();
+
+    assert_eq!(r_raw.results.len(), 1, "raw id query should find item");
+    assert_eq!(
+        r_local.results.len(), 1,
+        "local form query '{q_local}' should find same item (got {})",
+        r_local.results.len()
+    );
+    assert_eq!(
+        r_raw.results[0].id, r_local.results[0].id,
+        "both queries must resolve to same item",
+    );
 }

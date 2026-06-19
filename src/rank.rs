@@ -149,7 +149,7 @@ fn batch_update_rank(
     rank: i64,
 ) -> anyhow::Result<()> {
     use crate::db::{Col, Tbl, TargetTable};
-    use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+    use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
     use sea_query::{Expr, Query};
 
     let path = if is_file {
@@ -176,7 +176,12 @@ fn batch_update_rank(
         )
         .execute(&store.conn)?;
 
-    temp_table.write_parquet(&store.conn, &path)?;
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from(temp_table)
+        .order_by(Col::ItemId, sea_query::Order::Asc)
+        .to_owned()
+        .save_parquet(&store.conn, &path)?;
     temp_table.drop_table(&store.conn)?;
     Ok(())
 }

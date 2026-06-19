@@ -1207,11 +1207,11 @@ pub(super) fn nest(
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&Col::Type)
     );
+    let item_id_col = format!("{}.{}", Iden::to_string(&TopItems), Iden::to_string(&Col::ItemId));
     let item_label_str = format!(
-        "CONCAT(COALESCE({}, 'unknown'), '#', CAST({}.{} AS VARCHAR))",
+        "CONCAT(COALESCE({}, 'unknown'), '#', {})",
         name_subquery,
-        Iden::to_string(&TopItems),
-        Iden::to_string(&Col::ItemId)
+        crate::db::CustomFunc::item_id_display(&item_id_col),
     );
     let item_sp = make_tag_struct_pack(
         "item",
@@ -1507,11 +1507,11 @@ fn label_set_op_sql(
         Iden::to_string(&Col::ItemId),
         Iden::to_string(&Col::Type),
     );
+    let item_id_col = format!("{}.{}", Iden::to_string(&TopItems), Iden::to_string(&Col::ItemId));
     let item_label_str = format!(
-        "CONCAT(COALESCE({}, 'unknown'), '#', CAST({}.{} AS VARCHAR))",
+        "CONCAT(COALESCE({}, 'unknown'), '#', {})",
         name_subquery,
-        Iden::to_string(&TopItems),
-        Iden::to_string(&Col::ItemId),
+        crate::db::CustomFunc::item_id_display(&item_id_col),
     );
     let item_sp = make_tag_struct_pack(
         "item",

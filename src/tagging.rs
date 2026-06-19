@@ -13,9 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, Store, TargetTable, Tbl};
+use crate::db::{identifier, Col, Store, TargetTable, Tbl};
 use crate::tag::TagRegistry;
-use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+use crate::types::Origin;
+use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
 use anyhow::{Context, Result};
 use sea_query::{Expr, PostgresQueryBuilder, Query};
 
@@ -34,16 +35,7 @@ pub fn add_item(
     }
 
     let path_str = path.to_string_lossy();
-    let query_min = Query::select()
-        .expr(Expr::col(Col::ItemId).min())
-        .from_subquery(util::parquet_query(&path_str), Tbl::ItemReferences)
-        .to_string(PostgresQueryBuilder);
-
-    let min_id: i64 = store
-        .conn
-        .query_row(&query_min, [], |r| r.get(0))
-        .unwrap_or(0);
-    let new_id = if min_id > -1 { -1 } else { min_id - 1 };
+    let new_id = identifier::attach(store, Origin::User, 1)?[0];
 
     let temp_table = Tbl::Item;
     util::parquet_query(&path_str).create_table_as(&store.conn, temp_table)?;
@@ -54,7 +46,12 @@ pub fn add_item(
         .values_panic([new_id.into(), kind.into(), content.into()])
         .execute(&store.conn)?;
 
-    temp_table.write_parquet(&store.conn, &path)?;
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from(temp_table)
+        .order_by(Col::ItemId, sea_query::Order::Asc)
+        .to_owned()
+        .save_parquet(&store.conn, &path)?;
     temp_table.drop_table(&store.conn)?;
 
     refresh_view(store, registry)?;

@@ -396,7 +396,11 @@ fn print_results(
         let mut col_widths = vec![0; sorted_keys.len()];
 
         for res in &group.results {
-            item_id_width = item_id_width.max(res.id.to_string().len());
+            item_id_width = item_id_width.max({
+                let id = res.id.as_i64();
+                let o = ttfm::Origin::within(id);
+                format!("{}({})", o.short(), id - o.space_lo()).len()
+            });
             for (i, key) in sorted_keys.iter().enumerate() {
                 let val = res.get_tag_value(key.as_str()).unwrap_or_default();
                 col_widths[i] = col_widths[i].max(val.chars().count());
@@ -416,7 +420,11 @@ fn print_results(
 
                 // item_id
                 let id_str = res_opt
-                    .map(|r| r.id.to_string())
+                    .map(|r| {
+                        let id = r.id.as_i64();
+                        let o = ttfm::Origin::within(id);
+                        format!("{}({})", o.short(), id - o.space_lo())
+                    })
                     .unwrap_or_else(|| "item_id".to_string());
                 let available = term_width.saturating_sub(current_width);
                 if available == 0 {

@@ -337,3 +337,144 @@ fn test_definition_only_items_registration() {
         .results
         .is_empty());
 }
+
+/// 区画幅 B = 2^58。System 区画は [8B, 9B)。
+const SPACE_B: i64 = 1 << 58;
+
+fn read_item_ids(
+    store: &ttfm::db::Store,
+    target: ttfm::db::TargetTable,
+) -> Vec<i64> {
+    let path = store.path_for_target(target);
+    let sql = format!(
+        "SELECT item_id FROM read_parquet('{}') ORDER BY item_id",
+        path.to_string_lossy()
+    );
+    store
+        .conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// インデックス後、システム定義（item_references の全行）は System 区画 [-B, 0) に入る。
+#[test]
+fn indexed_system_definitions_live_in_system_space() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let db_dir = base.join("db");
+    let root = base.join("work");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn main(){}").unwrap();
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let def_ids = read_item_ids(&store, ttfm::db::TargetTable::ItemReferences);
+    assert!(!def_ids.is_empty(), "system definitions should exist");
+    let (lo, hi) = (-SPACE_B, 0_i64);
+    for id in &def_ids {
+        assert!(
+            (lo..hi).contains(id),
+            "definition id {id} not in System space [{lo}, {hi})"
+        );
+    }
+}
+
+/// インデックス後、ファイル（file_references）は File 区画 [8B, ∞) に入る。
+/// ファイル id と System 定義 id は区画が異なるため衝突しない。
+#[test]
+fn indexed_files_live_in_file_space_without_collision() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let db_dir = base.join("db");
+    let root = base.join("work");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn main(){}").unwrap();
+    std::fs::write(root.join("b.txt"), "hello").unwrap();
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let file_ids = read_item_ids(&store, ttfm::db::TargetTable::FileReferences);
+    let def_ids = read_item_ids(&store, ttfm::db::TargetTable::ItemReferences);
+    assert!(!file_ids.is_empty(), "files should exist");
+
+    let lo = 8 * SPACE_B;
+    for id in &file_ids {
+        assert!(
+            *id >= lo,
+            "file id {id} not in File space [{lo}, ∞)"
+        );
+    }
+
+    // ファイル（File 区画 [8B, ∞)）と定義（System 区画 [-B, 0)）は区画が異なるため衝突しない。
+    let mut all = file_ids.clone();
+    all.extend(def_ids.iter().copied());
+    let unique: std::collections::HashSet<_> = all.iter().copied().collect();
+    assert_eq!(unique.len(), all.len(), "File and System ids must all be distinct");
+}
+
+/// item_references が書き出し時点で item_id 昇順に整列していること。
+/// indexer 後に add_item を呼ぶと System 区画(8B+) と User 区画(0+) が混在する。
+/// ORDER BY なしで書くと System 行の後ろに User 行(0)が付くため非昇順になる。
+#[test]
+fn item_references_sorted_by_item_id_after_add_item() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let db_dir = base.join("db");
+    let root = base.join("work");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn main(){}").unwrap();
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    // System 定義が item_references に書き込まれる（ids in [-B, 0)）。
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    // User item を追加（id は User 区画 [0, B) から採番 → 0）。
+    // ORDER BY なしで書くと既存の System 行（負値）の末尾に User 行(id=0)が付いても
+    // 昇順になるが、将来的に逆転しうるケースのための ORDER BY 保証テスト。
+    ttfm::tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+
+    let path = store.path_for_target(ttfm::db::TargetTable::ItemReferences);
+    let sql = format!(
+        "SELECT item_id FROM read_parquet('{}')",
+        path.to_string_lossy()
+    );
+    let ids: Vec<i64> = store
+        .conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert!(ids.len() >= 2, "should have both System and User items");
+    assert!(
+        ids.windows(2).all(|w| w[0] <= w[1]),
+        "item_references not sorted by item_id (ORDER BY missing): {:?}",
+        ids
+    );
+}

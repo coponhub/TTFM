@@ -13,12 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::TargetTable;
+use crate::db::{identifier, Store, TargetTable};
 use crate::indexing::indexer::{
     DynamicRow, ScanHash, TagRow, TaggingResult, TempScanEntry,
 };
 use crate::taggers::{ColumnDef, TagValue};
-use crate::types::ItemId;
+use crate::types::{ItemId, Origin};
 use crate::util::DotOk;
 use crate::tag::TagRegistry;
 use anyhow::Result;
@@ -36,18 +36,22 @@ fn is_not_found(err: &anyhow::Error) -> bool {
 // ========================================================
 
 pub(crate) fn run_triage(
+    store: &Store,
     registry: &TagRegistry,
     to_process: Vec<(Option<ItemId>, TempScanEntry)>,
-    max_id_fn: impl Fn() -> Result<i64>, // 正の最大IDを取得する関数
 ) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
     let triager = ItemTriager::new(registry);
 
     // 1. 各エントリからメタデータを抽出（ハッシュとIDも引き継ぐ）
     let raw_values = triager.extract_all(to_process)?;
-    let max_id = max_id_fn()?;
 
-    // 2. ID の割当（既存 ID があれば流用、なければ新規採番）
-    let results = triager.assemble_records(raw_values, max_id)?;
+    // 2. 新規（既存 ID 無し）の分だけ db に一括採番を依頼する。
+    //    採番（連番生成）は db（identifier::attach）の責務。
+    let new_count = raw_values.iter().filter(|(id, _, _)| id.is_none()).count();
+    let new_ids = identifier::attach(store, Origin::File, new_count)?;
+
+    // 3. ID の割当（既存 ID があれば流用、なければ採番済み id を配る）
+    let results = triager.assemble_records(raw_values, new_ids)?;
 
     // 移動用の再構築ロジックは merge.rs で吸収されるため、ここでは常に空
     (results, Vec::new()).to_ok()
@@ -117,18 +121,22 @@ impl<'a> ItemTriager<'a> {
     pub(crate) fn assemble_records(
         &self,
         all_values: Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>,
-        max_id: i64,
+        new_ids: Vec<i64>,
     ) -> Result<Vec<TaggingResult>> {
         let columns = self.registry.get_all_columns();
-        let mut current_max_id = max_id;
+        let mut new_ids = new_ids.into_iter();
 
         all_values
             .into_iter()
             .map(|(existing_id, values, hash)| {
-                let id = existing_id.unwrap_or_else(|| {
-                    current_max_id += 1;
-                    ItemId::from(current_max_id)
-                });
+                let id = match existing_id {
+                    Some(id) => id,
+                    None => ItemId::from(
+                        new_ids
+                            .next()
+                            .expect("attach must supply one id per new entry"),
+                    ),
+                };
                 self.triage_item(id, values, hash, &columns)
             })
             .collect::<Vec<_>>()
@@ -392,9 +400,10 @@ mod tests {
             (None, vec![], ScanHash(2)),
         ];
 
-        let results = triager.assemble_records(input, 500).unwrap();
+        // 採番済み id（db 役割）を渡すと、新規エントリへ順に配られる。
+        let results = triager.assemble_records(input, vec![501]).unwrap();
 
         assert_eq!(results[0].entity_row.id, 100, "Should reuse existing ID");
-        assert_eq!(results[1].entity_row.id, 501, "Should issue next new ID");
+        assert_eq!(results[1].entity_row.id, 501, "Should use allocated ID");
     }
 }

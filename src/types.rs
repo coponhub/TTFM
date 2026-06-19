@@ -182,10 +182,66 @@ pub type TagNumber = usize;
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum Origin {
-    /// システムによる自動抽出
+    /// システム定義アイテム（type/tag 定義）— item_references、負側区画
     System,
-    /// ユーザーによる手動付与
+    /// ユーザー作成アイテム（note 等）— item_references、正側区画 0
     User,
+    /// ファイル — file_references、正側区画 8
+    File,
+}
+
+impl Origin {
+    /// 区画幅 B = 2^58（i64 空間を 64 分割した 1 区画のサイズ）。
+    pub const SPACE_SIZE: i64 = 1 << 58;
+
+    /// origin の区画 index。負値は負側区画。Origin 追加時はここだけ変える。
+    pub fn space_index(self) -> i64 {
+        match self {
+            Origin::System => -1,
+            Origin::User => 0,
+            Origin::File => 8,
+        }
+    }
+
+    /// 区画下端 lo = index * SPACE_SIZE。
+    pub fn space_lo(self) -> i64 {
+        self.space_index() * Self::SPACE_SIZE
+    }
+
+    /// 区画上端 hi（排他）。直上 origin の lo、最上位は i64::MAX。
+    pub fn space_hi(self) -> i64 {
+        use strum::IntoEnumIterator;
+        let lo = self.space_lo();
+        Origin::iter()
+            .map(|o| o.space_lo())
+            .filter(|&l| l > lo)
+            .min()
+            .unwrap_or(i64::MAX)
+    }
+
+    /// origin の短縮ラベル。System→"Sys"、User→"User"、File→"File"。
+    pub fn short(self) -> &'static str {
+        match self {
+            Origin::System => "Sys",
+            Origin::User => "User",
+            Origin::File => "File",
+        }
+    }
+
+    /// id → Origin 逆引き（全域関数）。
+    /// `lo <= id` を満たす区画のうち lo が最大のものを返す。
+    /// 全区画より下（負値等）の場合は lo 最小の Origin に縮退。
+    pub fn within(id: i64) -> Self {
+        use strum::IntoEnumIterator;
+        Origin::iter()
+            .filter(|&o| o.space_lo() <= id)
+            .max_by_key(|&o| o.space_lo())
+            .unwrap_or_else(|| {
+                Origin::iter()
+                    .min_by_key(|&o| o.space_lo())
+                    .expect("Origin must have at least one variant")
+            })
+    }
 }
 
 /// データベース上の型名を取得するためのトレイト。
@@ -561,8 +617,11 @@ impl Label {
             | Label::Path(s) => s.clone(),
             Label::Rank(i)
             | Label::Size(i)
-            | Label::Mtime(i)
-            | Label::ItemId(i) => i.to_string(),
+            | Label::Mtime(i) => i.to_string(),
+            Label::ItemId(i) => {
+                let o = Origin::within(*i);
+                format!("{}({})", o.short(), i - o.space_lo())
+            }
             Label::FileId(u) => u.to_string(),
             Label::IsDir(b) => LabelValue::Boolean(*b).as_display_name(),
             Label::Date(dt) => dt.as_display_str(),
