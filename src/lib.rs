@@ -46,6 +46,7 @@ mod cache;
 pub use cache::CacheManager;
 pub mod search;
 pub use search::SearchOptions;
+pub mod edit;
 pub mod tagging;
 pub use tagging::{add_item, get_or_create_item, tag_item};
 pub use rank::{get_type_ranks, set_rank_by_id, update_ranks};

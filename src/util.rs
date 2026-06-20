@@ -181,7 +181,7 @@ impl SelectExt for SelectStatement {
         name: I,
     ) -> Result<I> {
         let sql = format!(
-            "CREATE TABLE {} AS {}",
+            "CREATE OR REPLACE TABLE {} AS {}",
             iden_to_sql(name.clone()),
             self.to_string(PostgresQueryBuilder)
         );

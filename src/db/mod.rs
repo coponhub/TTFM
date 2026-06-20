@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use duckdb::Connection;
 use sea_query::{
     Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
-    IntoTableRef, Table, TableCreateStatement, TableRef,
+    IntoTableRef, SimpleExpr, Table, TableCreateStatement, TableRef,
 };
 use std::path::{Path, PathBuf};
 use strum::{Display, EnumIter};
@@ -303,6 +303,27 @@ impl sea_query::Iden for QueryResultCol {
 /// 共通で使用されるカラム名を表す識別子。
 pub use crate::types::SType as Col;
 
+crate::define_item_schema! {
+    ItemRefRow {
+        item_id   => ItemId,
+        rank      => Rank,
+        name      => Name,
+        item_kind => ItemKind,
+        content   => Content,
+    }
+}
+
+crate::define_item_schema! {
+    UserTagsRow {
+        item_id    => ItemId,
+        tag_type   => Type,
+        label_str  => LabelStr,
+        label_int  => LabelInt,
+        label_dbl  => LabelDouble,
+        label_bool => LabelBool,
+    }
+}
+
 impl sea_query::Iden for Col {
     fn unquoted(&self, s: &mut dyn std::fmt::Write) {
         let val: &'static str = (*self).into();
@@ -315,14 +336,8 @@ impl Col {
         <Self as std::str::FromStr>::from_str(s).ok()
     }
 
-    pub fn item_references_columns() -> [Self; 5] {
-        [
-            Self::ItemId,
-            Self::Rank,
-            Self::Name,
-            Self::ItemKind,
-            Self::Content,
-        ]
+    pub fn item_references_columns() -> Vec<Self> {
+        ItemRefRow::all_columns()
     }
 
     pub fn typed_label_columns() -> [Self; 4] {
@@ -364,6 +379,19 @@ impl Col {
         }
     }
 
+    pub fn for_label_value(v: &crate::types::LabelValue) -> Option<(Self, SimpleExpr)> {
+        use crate::types::LabelValue;
+        let col = v.sql_type().map(Self::from_sql_type)?;
+        let expr: SimpleExpr = match v {
+            LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s.clone()).into(),
+            LabelValue::Integer(i)   => Expr::val(*i).into(),
+            LabelValue::Double(bits) => Expr::val(f64::from_bits(*bits)).into(),
+            LabelValue::Boolean(b)   => Expr::val(*b).into(),
+            _ => unreachable!(),
+        };
+        Some((col, expr))
+    }
+
     pub fn sql_type(&self) -> SqlType {
         match self {
             Self::LabelStr => SqlType::VARCHAR,
@@ -373,6 +401,18 @@ impl Col {
             Self::LabelDouble => SqlType::DOUBLE,
             Self::LabelBool => SqlType::BOOLEAN,
             _ => SqlType::VARCHAR,
+        }
+    }
+}
+
+impl crate::types::LabelValue {
+    pub fn sql_type(&self) -> Option<SqlType> {
+        match self {
+            Self::String(_) | Self::Literal(_) => Some(SqlType::VARCHAR),
+            Self::Integer(_)                   => Some(SqlType::BIGINT),
+            Self::Double(_)                    => Some(SqlType::DOUBLE),
+            Self::Boolean(_)                   => Some(SqlType::BOOLEAN),
+            Self::Null | Self::Date(_)         => None,
         }
     }
 }
@@ -461,12 +501,9 @@ impl Schema {
                 }
             }
             TargetTable::SystemTags | TargetTable::UserTags => {
-                create
-                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
-                    .col(SeaColumnDef::new(Col::Type).string());
-                for l_col in Col::typed_label_columns() {
-                    let mut def = SeaColumnDef::new(l_col);
-                    l_col.sql_type().prepare_column(&mut def);
+                for col in UserTagsRow::all_columns() {
+                    let mut def = SeaColumnDef::new(col);
+                    col.sql_type().prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }

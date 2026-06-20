@@ -375,6 +375,7 @@ pub enum Label {
     Mtime(i64),
     Hash(String),
     ItemKind(String),
+    Content(String), // write 専用。item_references.content 固定カラムへの書き込みを表現する。
     Extension(String),
     Path(String),
     ItemId(i64),
@@ -613,6 +614,7 @@ impl Label {
             Label::Name(s)
             | Label::Hash(s)
             | Label::ItemKind(s)
+            | Label::Content(s)
             | Label::Extension(s)
             | Label::Path(s) => s.clone(),
             Label::Rank(i)
@@ -655,6 +657,7 @@ impl Label {
             Label::Mtime(_) => TagType::Base(SType::Mtime),
             Label::Hash(_) => TagType::Base(SType::Hash),
             Label::ItemKind(_) => TagType::Base(SType::ItemKind),
+            Label::Content(_) => TagType::Base(SType::Content),
             Label::Extension(_) => TagType::Base(SType::Extension),
             Label::Path(_) => TagType::Base(SType::Path),
             Label::ItemId(_) => TagType::Base(SType::ItemId),
@@ -688,6 +691,7 @@ impl Label {
             Label::Name(s)
             | Label::Hash(s)
             | Label::ItemKind(s)
+            | Label::Content(s)
             | Label::Extension(s)
             | Label::Path(s) => LabelValue::String(s.clone()),
             Label::Rank(i)
@@ -1160,6 +1164,13 @@ mod tests_types {
         assert!(results.contains(&"project:A".to_string()));
         assert!(results.contains(&"project:B".to_string()));
         assert!(results.contains(&"extension:rs".to_string()));
+    }
+
+    #[test]
+    fn label_content_has_correct_tag_type_and_str() {
+        let label = Label::Content("hello".to_string());
+        assert_eq!(label.tag_type(), TagType::Base(SType::Content));
+        assert_eq!(label.as_str(), "hello");
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub fn add_item(
     }
 
     let path_str = path.to_string_lossy();
-    let new_id = identifier::attach(store, Origin::User, 1)?[0];
+    let new_id = identifier::next(store, Origin::User, 1)?[0];
 
     let temp_table = Tbl::Item;
     util::parquet_query(&path_str).create_table_as(&store.conn, temp_table)?;

@@ -4,3 +4,4 @@ target/
 *.parquet
 *~
 *MEMO.md
+plugins_src/git_status_plugin_project.tar.bz2

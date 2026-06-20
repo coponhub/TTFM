@@ -46,9 +46,9 @@ pub(crate) fn run_triage(
     let raw_values = triager.extract_all(to_process)?;
 
     // 2. 新規（既存 ID 無し）の分だけ db に一括採番を依頼する。
-    //    採番（連番生成）は db（identifier::attach）の責務。
+    //    採番（連番生成）は db（identifier::next）の責務。
     let new_count = raw_values.iter().filter(|(id, _, _)| id.is_none()).count();
-    let new_ids = identifier::attach(store, Origin::File, new_count)?;
+    let new_ids = identifier::next(store, Origin::File, new_count)?;
 
     // 3. ID の割当（既存 ID があれば流用、なければ採番済み id を配る）
     let results = triager.assemble_records(raw_values, new_ids)?;

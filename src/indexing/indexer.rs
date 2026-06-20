@@ -295,7 +295,7 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
 
-        let start_id = identifier::attach(&self.store, Origin::System, 1)?[0];
+        let start_id = identifier::next(&self.store, Origin::System, 1)?[0];
         let tmp_items = items_path.with_extension("parquet.tmp");
         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
 

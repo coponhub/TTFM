@@ -86,7 +86,7 @@ fn max_in_space(store: &Store, origin: Origin) -> Result<i64> {
 /// origin の区画から次の count 個の item_id を採番する。
 /// 区画内 MAX から **必ず +1 ずつ昇順**に連番（減算は無い）。区画が空なら
 /// 下端 lo から。公称幅を超えても直上 origin の手前まで採番でき、エラーにしない。
-pub fn attach(store: &Store, origin: Origin, count: usize) -> Result<Vec<i64>> {
+pub fn next(store: &Store, origin: Origin, count: usize) -> Result<Vec<i64>> {
     let start = max_in_space(store, origin)? + 1;
     Ok((0..count as i64).map(|i| start + i).collect())
 }

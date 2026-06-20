@@ -293,12 +293,14 @@ pub(crate) struct MergeQueryParts;
 
 // 唯一の定義箇所。ここが Single Source of Truth となります。
 crate::define_item_schema! {
-    kind    => ItemKind,
-    content => Content,
-    name    => Name,
-    rank    => Rank,
-    type_   => Type,
-    label   => Label,
+    ItemRow {
+        kind    => ItemKind,
+        content => Content,
+        name    => Name,
+        rank    => Rank,
+        type_   => Type,
+        label   => Label,
+    }
 }
 
 impl ItemRow {
@@ -315,7 +317,7 @@ impl ItemRow {
 }
 
 impl MergeQueryParts {
-    pub(crate) fn item_columns() -> [Col; 6] {
+    pub(crate) fn item_columns() -> Vec<Col> {
         ItemRow::all_columns()
     }
 
@@ -346,7 +348,7 @@ impl MergeQueryParts {
         items_path: &str,
     ) -> SelectStatement {
         Query::select()
-            .columns(Self::item_columns().map(|c| (Tbl::Item, c)))
+            .columns(Self::item_columns().into_iter().map(|c| (Tbl::Item, c)))
             .distinct()
             .from_subquery(candidates, Tbl::Item)
             .join_subquery(

@@ -13,11 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-//! `identifier::attach` の DB 越し採番挙動の統合テスト。
+//! `identifier::next` の DB 越し採番挙動の統合テスト。
 //! （純関数 space/within/display/parse は src/db/identifier.rs の単体テスト側）
 
 use tempfile::tempdir;
-use ttfm::db::identifier::attach;
+use ttfm::db::identifier::next;
 use ttfm::db::{Store, TargetTable};
 use ttfm::types::Origin;
 
@@ -59,44 +59,44 @@ fn store_with(rows: &[(TargetTable, &[i64])]) -> (Store, tempfile::TempDir) {
 }
 
 #[test]
-fn attach_empty_space_starts_at_lo() {
+fn next_empty_space_starts_at_lo() {
     let (store, _dir) = store_with(&[]);
     // parquet が無い → User 区画は lo=0 から連番。
-    assert_eq!(attach(&store, Origin::User, 3).unwrap(), vec![0, 1, 2]);
+    assert_eq!(next(&store, Origin::User, 3).unwrap(), vec![0, 1, 2]);
 }
 
 #[test]
-fn attach_user_continues_above_existing_max() {
+fn next_user_continues_above_existing_max() {
     // User 区画 [0,B) に max=10 → 次は 11,12,13。
     let (store, _dir) = store_with(&[(TargetTable::ItemReferences, &[5, 10])]);
-    assert_eq!(attach(&store, Origin::User, 3).unwrap(), vec![11, 12, 13]);
+    assert_eq!(next(&store, Origin::User, 3).unwrap(), vec![11, 12, 13]);
 }
 
 #[test]
-fn attach_file_reads_file_references() {
+fn next_file_reads_file_references() {
     // File 区画 [8B, ...) — file_references の max=8B+5 → 次は 8B+6, 8B+7。
     let (store, _dir) =
         store_with(&[(TargetTable::FileReferences, &[8 * B + 5])]);
     assert_eq!(
-        attach(&store, Origin::File, 2).unwrap(),
+        next(&store, Origin::File, 2).unwrap(),
         vec![8 * B + 6, 8 * B + 7]
     );
 }
 
 #[test]
-fn attach_system_reads_item_references() {
+fn next_system_reads_item_references() {
     // System 区画 [-B, 0) — item_references の System 行 max=-B+5 → 次は -B+6。
     let (store, _dir) =
         store_with(&[(TargetTable::ItemReferences, &[-B + 5])]);
-    assert_eq!(attach(&store, Origin::System, 1).unwrap(), vec![-B + 6]);
+    assert_eq!(next(&store, Origin::System, 1).unwrap(), vec![-B + 6]);
 }
 
 #[test]
-fn attach_user_ignores_system_rows_in_item_references() {
+fn next_user_ignores_system_rows_in_item_references() {
     // item_references に System(-B+5) / User(7) 混在。User 採番は User 区画のみ見る。
     let (store, _dir) = store_with(&[(
         TargetTable::ItemReferences,
         &[7, -B + 5],
     )]);
-    assert_eq!(attach(&store, Origin::User, 1).unwrap(), vec![8]);
+    assert_eq!(next(&store, Origin::User, 1).unwrap(), vec![8]);
 }

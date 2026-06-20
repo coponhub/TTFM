@@ -291,6 +291,7 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
 pub mod cache_paged_test;
 pub mod identifier_test;
 pub mod indexing_integration;
+pub mod write_engine;
 pub mod integration_tags;
 pub mod rank_test;
 pub mod robustness_test;
