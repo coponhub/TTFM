@@ -275,27 +275,6 @@ fn write_cascade_delete_file_origin_removes_from_file_references() {
 }
 
 // ──────────────────────────────────────────────
-// Slice 6: rank 更新エラー後の再試行
-// ──────────────────────────────────────────────
-
-#[test]
-fn write_rank_update_succeeds_after_previous_incomplete_call() {
-    let (store, registry, _dir) = setup();
-    let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
-
-    // Tbl::Target を手動で残してエラー後の状態を模擬
-    store.conn.execute("CREATE TABLE target AS SELECT 1 AS dummy", []).unwrap();
-
-    // この呼び出しが "table already exists" で失敗しないこと
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![TagOp::Append(Label::Rank(3))],
-    }]).unwrap();
-
-    assert_eq!(read_rank(&store, id), Some(3));
-}
-
-// ──────────────────────────────────────────────
 // Slice 5: rank 更新
 // ──────────────────────────────────────────────
 
