@@ -18,9 +18,9 @@ use crate::types::{
     TagType, Tags,
 };
 
-/// 検索結果を表す構造体。
+/// 検索・編集操作の共通アイテム表現。
 #[derive(Debug, PartialEq, Clone)]
-pub struct SearchResult {
+pub struct Item {
     /// アイテムの一意なID
     pub id: ItemId,
     /// アイテムの種類
@@ -116,7 +116,7 @@ impl RawTagRow {
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct SearchResponse {
     /// ヒットしたアイテムのリスト
-    pub results: Vec<SearchResult>,
+    pub results: Vec<Item>,
     /// キャッシュ ID（続きがある場合のみ有効）
     pub cid: Option<String>,
     /// 検索結果の総件数（確定している場合）
@@ -135,7 +135,7 @@ pub struct TypeGroup<'a> {
     /// このグループが持つ共通の属性（タグ型）のリスト。
     pub keys: Vec<TagType>,
     /// 所属するアイテムのリスト。
-    pub results: Vec<&'a SearchResult>,
+    pub results: Vec<&'a Item>,
 }
 
 /// ページングされた結果を保持する構造体。
@@ -168,7 +168,7 @@ impl SearchResponse {
 
         let mut groups: HashMap<
             (ItemKind, BTreeSet<TagType>),
-            Vec<&SearchResult>,
+            Vec<&Item>,
         > = HashMap::new();
 
         for res in &self.results {
@@ -261,7 +261,7 @@ impl SearchResponse {
     }
 }
 
-impl SearchResult {
+impl Item {
     /// 指定された ID で空の検索結果を作成します。
     pub fn new_empty(id: ItemId, kind: ItemKind) -> Self {
         Self {
@@ -512,7 +512,7 @@ mod tests {
     use crate::types::Progress;
     use crate::types::{FileSize, Intrinsic, Label, Origin, TagType};
 
-    fn create_test_result() -> SearchResult {
+    fn create_test_result() -> Item {
         let mut tags = Tags::new();
         tags.push(
             Label::resolve(TagType::from("extension"), "rs".into()),
@@ -527,7 +527,7 @@ mod tests {
             Origin::User,
         );
 
-        SearchResult {
+        Item {
             id: 1.into(),
             item_kind: ItemKind::File,
             representative: vec![Label::Name("test.rs".to_string())],
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn test_search_result_new_empty_scalar() {
         let id = ItemId::new_volatile();
-        let res = SearchResult::new_empty(id, ItemKind::Volatile);
+        let res = Item::new_empty(id, ItemKind::Volatile);
 
         assert!(res.representative.is_empty());
         assert_eq!(res.item_kind, ItemKind::Volatile);
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn test_search_result_new_empty_label() {
         let label_id = ItemId::new_volatile();
-        let result = SearchResult::new_empty(label_id, ItemKind::Volatile);
+        let result = Item::new_empty(label_id, ItemKind::Volatile);
 
         assert!(result.representative.is_empty());
         assert_eq!(result.item_kind, ItemKind::Volatile);

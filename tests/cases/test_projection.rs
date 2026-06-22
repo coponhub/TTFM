@@ -328,7 +328,7 @@ fn test_projection_queries() {
         .any(|r| r.get_tag_value("tag").is_some());
     assert!(
         has_tag,
-        "Items should have 'tag' tag values in SearchResult"
+        "Items should have 'tag' tag values in Item"
     );
 
     // 追加検証: extension: 結果の中身
@@ -419,7 +419,7 @@ fn test_projection_returns_label_volatile_items() {
         "projection should return label items"
     );
 
-    // 検証3: 各 SearchResult が Volatile ID を持っている
+    // 検証3: 各 Item が Volatile ID を持っている
     for item in &results.results {
         // ID が Volatile(u64) であることを確認
         if let ItemId::Volatile(_) = item.id {

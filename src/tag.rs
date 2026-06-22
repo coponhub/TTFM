@@ -289,6 +289,10 @@ pub trait TagFunction: Send + Sync {
         None
     }
 
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        None
+    }
+
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::DEFAULT
     }
@@ -650,6 +654,9 @@ impl TagFunction for FilenameFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::RelocateEdit)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::FILENAME
     }
@@ -705,6 +712,9 @@ impl TagFunction for ExtensionFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::RelocateEdit)
+    }
 }
 impl Index for ExtensionFn {
     fn role(&self) -> ScanRole { ScanRole::Location }
@@ -755,6 +765,9 @@ impl TagFunction for PathFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::RelocateEdit)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PATH
@@ -807,6 +820,9 @@ impl TagFunction for ParentDirFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::RelocateEdit)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PARENT_DIR
@@ -923,6 +939,9 @@ impl TagFunction for ContentFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::ModifyInjectionEdit)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::CONTENT
     }
@@ -983,6 +1002,9 @@ impl TagFunction for NameFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::ReplaceEdit)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::NAME
@@ -1167,6 +1189,9 @@ impl TagFunction for MtimeFn {
     }
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::SetFileAttrEdit)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::MTIME
@@ -1484,6 +1509,9 @@ impl TagFunction for ItemKindFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::ModifyInjectionEdit)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::ITEM_KIND
     }
@@ -1516,6 +1544,9 @@ impl TagFunction for RankFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+        Some(&crate::edit::ReplaceEdit)
     }
 }
 impl Query for RankFn {

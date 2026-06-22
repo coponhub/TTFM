@@ -38,7 +38,7 @@ pub mod util;
 
 pub use db::{Store, TargetTable};
 pub use query::{parse, QueryNode};
-pub use response::{SearchResponse, SearchResult};
+pub use response::{SearchResponse, Item};
 pub use taggers::{ColumnDef, TagValue, Tagger};
 pub use types::{FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag};
 

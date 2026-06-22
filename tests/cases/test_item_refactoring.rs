@@ -108,7 +108,7 @@ fn test_item_id_and_kind_refactoring() {
 }
 
 /// display(id) はローカル形式 "User(0)" / "Sys(N)" を返す。
-/// SearchResult.id.as_i64() を通すと identifier::display の形式になることを確認。
+/// Item.id.as_i64() を通すと identifier::display の形式になることを確認。
 #[test]
 fn item_id_display_uses_local_form() {
     let (store, registry, cache) = setup_store();
@@ -120,7 +120,7 @@ fn item_id_display_uses_local_form() {
     assert!(disp.starts_with("User("), "expected User(N), got {disp}");
     assert!(disp.ends_with(')'), "expected User(N), got {disp}");
 
-    // SearchResult が同じ id を返す
+    // Item が同じ id を返す
     let results = search::search(
         &store, &registry, &cache,
         &format!("item_id:{raw_id}"),

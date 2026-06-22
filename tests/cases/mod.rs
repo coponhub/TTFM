@@ -129,7 +129,7 @@ macro_rules! define_cases {
 // 共通ヘルパー関数
 // ──────────────────────────────────────────────
 
-pub(super) fn get_nvalue(item: &ttfm::SearchResult) -> Option<String> {
+pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
@@ -137,7 +137,7 @@ pub(super) fn get_nvalue(item: &ttfm::SearchResult) -> Option<String> {
         .map(|e| e.label.as_str().to_string())
 }
 
-pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
+pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
         .iter()
@@ -150,7 +150,7 @@ pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
 }
 
 /// 結果が item: タグを持つか（グループ表示 / projection パス）を判定します。
-pub(super) fn has_item_tags(results: &[ttfm::SearchResult]) -> bool {
+pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
     results.iter().any(|r| {
         r.tags
             .entries

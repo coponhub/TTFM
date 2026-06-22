@@ -5,16 +5,19 @@ use crate::util::{parquet_query, ExecuteSql, IdenExt, ParquetExt, SelectExt};
 use anyhow::Result;
 use sea_query::{Asterisk, Expr, Order, Query};
 
+#[derive(Debug)]
 pub enum WriteAction {
     Add    { item: ItemId, tags: Vec<TagOp> },
     Delete { item: ItemId, tags: Vec<DeleteTarget> },
 }
 
+#[derive(Debug, PartialEq)]
 pub enum TagOp {
     Append(Label),
     Replace(Label),
 }
 
+#[derive(Debug, PartialEq)]
 pub enum DeleteTarget {
     Type(TagType),
     Tag(Label),

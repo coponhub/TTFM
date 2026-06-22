@@ -67,7 +67,7 @@ pub fn build_rank_expr(
 pub fn update_ranks(
     store: &crate::db::Store,
     registry: &TagRegistry,
-    results: &[crate::response::SearchResult],
+    results: &[crate::response::Item],
     rank: i64,
 ) -> anyhow::Result<()> {
     let file_ids: Vec<i64> = results

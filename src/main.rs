@@ -412,7 +412,7 @@ fn print_results(
 
         // 行の出力ヘルパー（writer を借用するためブロックで囲む）
         {
-            let mut print_line = |res_opt: Option<&ttfm::SearchResult>| {
+            let mut print_line = |res_opt: Option<&ttfm::Item>| {
                 let mut current_width = 0;
                 let sep = "  ";
                 let sep_len = sep.len();
@@ -507,7 +507,7 @@ fn print_results(
 }
 
 /// representative の各 Label を型に応じたフォーマットで表示用文字列にします。
-fn format_representative(registry: &TagRegistry, res: &ttfm::SearchResult) -> String {
+fn format_representative(registry: &TagRegistry, res: &ttfm::Item) -> String {
     res.representative
         .iter()
         .map(|l| registry.format_display(l.tag_type().as_str(), &l.as_str()))
@@ -616,7 +616,7 @@ fn print_simple_results(registry: &TagRegistry, response: &ttfm::SearchResponse)
 }
 
 /// --short 時のアイテム表示に必要な文字列を生成します。
-fn format_short_result(registry: &TagRegistry, res: &ttfm::SearchResult) -> String {
+fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
     let nvalue_str = res
         .tags
         .entries
@@ -637,7 +637,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use ttfm::types::{ItemId, ItemKind, Label, LabelValue, Origin, TagType};
-    use ttfm::SearchResult;
+    use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
     static COLUMNS_MUTEX: Mutex<()> = Mutex::new(());
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_short_format_with_nvalue() {
-        let mut res_with_nvalue = SearchResult::new_empty(
+        let mut res_with_nvalue = Item::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
         );
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_short_format_without_nvalue() {
-        let mut res_without_nvalue = SearchResult::new_empty(
+        let mut res_without_nvalue = Item::new_empty(
             ItemId::new_volatile(),
             ItemKind::Volatile,
         );

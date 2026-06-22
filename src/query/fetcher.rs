@@ -16,7 +16,7 @@
 use crate::db::Src;
 use crate::query::lens_resolver::Resolver;
 use crate::query::sql::PickNode;
-use crate::response::{RawTagRow, SearchResult};
+use crate::response::{RawTagRow, Item};
 use crate::types::{ItemId, ItemKind, SType};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -36,7 +36,7 @@ impl<'a> Fetcher<'a> {
     /// クエリの種別を ResolvedNode の構造から判断し、適切な結果を返す単一エントリポイント。
     ///
     /// `n` は要求件数（0 = 全件）。内部で n+1 件取得して has_more 判定を呼び出し側に委ねる。
-    pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<SearchResult>> {
+    pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<Item>> {
         self.fetch_from(&Src::OneView, n, offset)
     }
 
@@ -45,7 +45,7 @@ impl<'a> Fetcher<'a> {
         src: &Src,
         n: usize,
         offset: usize,
-    ) -> Result<Vec<SearchResult>> {
+    ) -> Result<Vec<Item>> {
         use sea_query::PostgresQueryBuilder;
         let resolver = &self.resolver;
 
@@ -125,11 +125,11 @@ impl<'a> Fetcher<'a> {
         crate::util::save_parquet(self.conn, &select_sql, path, metadata)
     }
 
-    /// DuckDB の Row から SearchResult を構築します（通常アイテム用）。
+    /// DuckDB の Row から Item を構築します（通常アイテム用）。
     fn decode_item_from_row(
         &self,
         row: &duckdb::Row,
-    ) -> duckdb::Result<SearchResult> {
+    ) -> duckdb::Result<Item> {
         use crate::types::{Label, LabelValue};
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
@@ -149,13 +149,13 @@ impl<'a> Fetcher<'a> {
         Ok(res)
     }
 
-    /// DuckDB の Row から Projection (Nest) 結果の SearchResult を構築します。
+    /// DuckDB の Row から Projection (Nest) 結果の Item を構築します。
     /// Representative カラムから代表値リストを取得し、型付き Label に変換する。
     /// item_count タグは res.item_count に移動する。
     fn decode_nest_item_from_row(
         &self,
         row: &duckdb::Row,
-    ) -> duckdb::Result<SearchResult> {
+    ) -> duckdb::Result<Item> {
         use crate::types::{Label, LabelValue, TagType};
         use duckdb::types::Value;
 
@@ -227,7 +227,7 @@ impl<'a> Fetcher<'a> {
 /// DuckDB Row から item_id / item_kind / rank と raw tag rows を読み取る共通ヘルパー。
 fn read_base_from_row(
     row: &duckdb::Row,
-) -> duckdb::Result<(crate::response::SearchResult, Vec<RawTagRow>)> {
+) -> duckdb::Result<(crate::response::Item, Vec<RawTagRow>)> {
     use duckdb::types::Value;
 
     let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
@@ -243,7 +243,7 @@ fn read_base_from_row(
         ItemId::Stored(id_val)
     };
 
-    let mut res = crate::response::SearchResult::new_empty(id, kind);
+    let mut res = crate::response::Item::new_empty(id, kind);
     res.rank = row
         .get::<_, Option<i64>>(SType::Rank.name().as_str())?
         .unwrap_or(0);
