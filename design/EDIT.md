@@ -11,6 +11,9 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 - **`ttfm untag <SearchQuery> <TagQuery>`**: マッチしたアイテムからタグを削除する。
   `TagQuery` には projection も指定できる (`project:` = その type のタグ全てを除去する **type 指定の Delete**。
   ラベル値の解決は不要)。 `untag <Q> item_id:` は各 item の `item_id` ラベル除去 = **item 削除**を表す (§5.1)。
+- **`ttfm untag <SearchQuery> <TagQuery> <TagCondition>`**: `TagQuery` にマッチしたエントリのうち、
+  エントリ自身のメタ属性 (`tagged_at`、タグ自身の `rank` 等) が `TagCondition` を満たすものだけを削除する。
+  例: `untag '*:*' 'project:X' 'tagged_at:>T'` → `project:X` エントリのうち `tagged_at > T` のものだけ除去。
 - **`ttfm replace <OLD> <NEW>`**: `OLD` (SearchQuery) にマッチするアイテムの終端タグを `NEW` へ付け替える。`tag` + 条件付き `untag` の糖衣 (第6章)。
 - **`ttfm decal <From> <To>`**: `From` のアイテムが持つタグ群を `To` のアイテムへ転写する (第9章)。
 
@@ -132,31 +135,58 @@ pub fn edit(store, registry, search_query: SearchQuery, edit_query: EditQuery, o
   // 編集エントリポイント: search_and_apply_captures → plan → confirm → fs_operate_all + write を束ねる
 pub fn fs_operate(fs_ops: Vec<(Item, EditQuery)>, registry) -> Result<()>;
   // fs 操作担当: Relocate + SetFileAttr を実行しインデクサーへ通知する
-pub fn modify(item: &Item, query: EditQuery, registry) -> Result<Vec<WriteAction>>;
-  // WriteAction の構築 (EditStrategy のコンパイラ, §5.3)。{n} 解決済みの具体的タグのみ受け取る純関数
+pub enum QueryType { Tag, Untag }
+pub fn modify(item: &Item, query: &str, query_type: QueryType, registry) -> Result<Vec<WriteAction>>;
+  // WriteAction の構築 (EditStrategy のコンパイラ, §5.3)。{n} 解決済みの具体文字列を受け取る純関数。
+  // plan が per-item で呼び出す内部ヘルパー。内部で parse を呼んでから dispatch する。
+  // TagCondition の評価は plan の責務。modify は無条件の TagQuery のみ受け取る。
 pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) -> Result<WriteResponse>;
   // DB への書き込み。WriteAction を Lens 経由で永続化する実行器
 ```
 
-編集は **`edit` → `search_and_apply_captures` → `plan` → confirm → (`fs_operate_all` + `write`)** の流れで処理される。
+編集は **`edit` → `search_and_apply_captures` → `plan` → confirm → (`fs_operate` + `write`)** の流れで処理される。
 `search_and_apply_captures` が検索とキャプチャ束縛を一括で行い、`{n}` を解決済みの per-item な `(Item, EditQuery)` を返す。
-`plan` がそれを strategy で fs/db に分割し、fs 操作列と全 WriteAction を構築する。confirm はここで全件を把握してから表示できる。
-`modify` は `{n}` を含まない具体的なタグのみ受け取り、strategy をディスパッチして Add/Delete を組み立てる純関数。
+`plan` がそれを strategy で fs/db に分割し、fs 操作列と全 WriteAction を構築する。**`modify` は `plan` の内部から per-item で呼ばれる**。confirm はここで全件を把握してから表示できる。
+`modify` は `{n}` を含まない具体文字列を受け取り、内部でパースして strategy をディスパッチし Add/Delete を組み立てる純関数。
 `write` は全 WriteAction を一括で受け取り DB に書き込む。
 `modify` は loaded Item を主に対象 item の特定に使い、**現値の参照には依存しない** (Replace も旧値不要、後述)。
-但し**条件付き Delete** (例: `untag '*:*' 'project:X & tagged_at:>T'`) では、loaded Item のタグ値
-(`tagged_at` 等) を述語で in-memory フィルタして消す行を選ぶため、現値を参照する。この場合も Item は
-検索で全タグをロード済みなので **DB 再検索は不要**で、純関数性は保たれる (WriteAction は具体タグのまま)。
+`modify` は `TagCondition` を持たず常に純関数。`<TagCondition>` が指定された場合は
+`plan` が `Store` を使って対象エントリの `tagged_at` 等を取得・評価し、`modify` の呼び方を制御する。
+- `TypedTag` 指定 (`project:X`) の場合: 条件を満たすエントリがなければ `modify` を呼ばない（スキップ）。
+- `Projection` 指定 (`project:`) の場合: 条件を満たす具体ラベルを取得し、per-entry で `modify` を呼ぶ。
+`WriteAction` の生成はあくまで `modify` の責務。
 
 ### 4.1 modify — EditStrategy を WriteAction へ展開
 `EditStrategy` は実行ロジックではなく、ユーザーの編集意図を `Vec<WriteAction>` へ**展開する規則**である。
 `modify` がこの展開を担う純関数で、`write` は戦略を知らず出来上がった action 列を実行するだけ。
 削除も独立したエンジンではなく単に `WriteAction::Delete` である。
 
-| 戦略 | WriteAction への展開 |
-|---|---|
-| `Append` | `[Add{item, tags:[Append(tag)]}]` |
-| `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[Replace(type:new)]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない。`Add` の `Replace` マーカーで confirm が多値競合を検出する) |
+`modify` は `Relocate` / `SetFileAttr` を受け取った場合はエラーにする (`plan` がこれらを `fs_operate` 側に振り分けた後に呼ぶ前提のため、受け取ること自体が `plan` の実装バグを示す)。
+
+#### EditQuery / TagQuery の構文とパース
+`query: &str` の構文は EditQuery (`QueryType::Tag`) と TagQuery (`QueryType::Untag`) で共通の制限付き TTQL サブセットを使う。
+
+- `|` とスペース区切りは**同義**（「列挙された全要素を処理する」和集合）。`project:A status:done` と `project:A | status:done` は同じ意味。
+- EditQuery (Tag 方向) 許可: `TypedTag`、`|`・スペース
+- TagQuery (Untag 方向) 許可: `TypedTag`、`Projection`、`|`・スペース
+- TagCondition 許可: ラベル比較式 (`tagged_at:>T`、`rank:>5` 等。エントリのメタ属性のみ)
+- 禁止 (エラー): `&`、Nest、集約、算術演算、`type:/label:/tag:` (EditQuery §1.2)。ラベル比較は TagQuery/EditQuery に書けず TagCondition として分離する
+
+パースは `modify` から呼ばれる内部関数 `parse(query, query_type) -> Result<Vec<EditDirective>>` が担う。
+
+#### 条件付き Delete の in-memory 評価
+`tag_condition` が指定された場合、`modify` は `TagQuery` にマッチしたエントリを `tag_condition` で
+in-memory フィルタして Delete 対象を絞る。`TagCondition` はエントリ自身のメタ属性
+(`tagged_at`、タグ自身の `rank` 等) に対するラベル比較式のみ許可する。
+この評価器は `edit/` モジュール内に新規実装する（SQL 生成前提の `query::` 層のロジックは再利用しない）。
+
+| QueryType | 戦略 | WriteAction への展開 |
+|---|---|---|
+| `Tag` | `Append` | `[Add{item, tags:[Append(tag)]}]` |
+| `Tag` | `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[Replace(type:new)]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない。`Add` の `Replace` マーカーで confirm が多値競合を検出する) |
+| `*` | Forbidden (`edit() == None`) | エラー |
+| `*` | `Relocate` / `SetFileAttr` | エラー (`plan` の契約違反) |
+| `Untag` | `*` | `[Delete{item, tags:[Tag(label)]}]` (具体指定) または `[Delete{item, tags:[Type(tag_type)]}]` (Projection 指定)。条件付きは in-memory フィルタ後に具体 Delete を生成 |
 
 ## 5. 永続化エンジン (`write`)
 
