@@ -24,6 +24,7 @@ use ttfm::config::Config;
 use ttfm::db::Store;
 use ttfm::tag::TagRegistry;
 use ttfm::{CacheManager, SearchOptions};
+use ttfm::edit::{edit, QueryType, WriteOptions};
 
 macro_rules! safe_print {
     ($($arg:tt)*) => {
@@ -113,12 +114,36 @@ enum Commands {
     },
     /// 作成されたインデックスファイルを削除します。
     Clear,
-    /// アイテムにタグを付与します（例: ttfm tag "path/to/file" "project:ttfm"）。
+    /// マッチしたアイテムにタグを付与します。
     Tag {
-        /// 対象のパスまたはID
-        item: String,
-        /// 付与するタグ (key:value)
-        tag: String,
+        /// 対象を絞るクエリ（例: "filename:foo.txt"）
+        search_query: String,
+        /// 付与するタグ（例: "project:A status:done"）
+        edit_query: Option<String>,
+    },
+    /// マッチしたアイテムからタグを削除します。
+    Untag {
+        /// 対象を絞るクエリ
+        search_query: String,
+        /// 削除するタグ（TypedTag または Projection）
+        tag_query: String,
+        /// 削除条件（例: "tagged_at:>2024-01-01"）
+        #[arg(long)]
+        condition: Option<String>,
+    },
+    /// タグを付け替えます（OLD → NEW）。
+    Replace {
+        /// 対象を絞るクエリ兼 Replace 対象（例: "project:A"）
+        old: String,
+        /// 新しいタグ（例: "status:A"）
+        new_tag: String,
+    },
+    /// From のアイテムが持つタグ群を To のアイテムへ転写します。
+    Decal {
+        /// 転写元クエリ
+        from: String,
+        /// 転写先クエリ
+        to: String,
     },
     /// メモを作成します。
     Note {
@@ -242,9 +267,22 @@ fn main() -> Result<()> {
                 print_results(&store, &registry, &response, "list", n.unwrap_or(100), &mut std::io::stdout());
             }
         }
-        Commands::Tag { item, tag } => {
-            ttfm::tagging::tag_item(&store, &registry, item, tag)?;
-            safe_println!("Tagged '{}' with '{}'", item, tag);
+        Commands::Tag { search_query, edit_query } => {
+            let eq = edit_query.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("edit_query が必要です（EditQuery なしの登録は未実装）")
+            })?;
+            let resp = edit(&store, &registry, &cache, search_query, eq, QueryType::Tag, None, WriteOptions { yes: cli.yes })?;
+            safe_println!("Added {} tag(s).", resp.added);
+        }
+        Commands::Untag { search_query, tag_query, condition } => {
+            let resp = edit(&store, &registry, &cache, search_query, tag_query, QueryType::Untag, condition.as_deref(), WriteOptions { yes: cli.yes })?;
+            safe_println!("Deleted {} tag(s).", resp.deleted);
+        }
+        Commands::Replace { old: _, new_tag: _ } => {
+            anyhow::bail!("replace は未実装です");
+        }
+        Commands::Decal { from: _, to: _ } => {
+            anyhow::bail!("decal は未実装です");
         }
         Commands::Clear => unreachable!("Handled early"),
         Commands::Note { content } => {

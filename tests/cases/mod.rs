@@ -321,6 +321,7 @@ pub mod test_strict_grammar;
 pub mod test_validation;
 pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;
+pub mod test_edit;
 pub mod verify_search;
 pub mod verify_search_all;
 pub mod wasm_plugin_test;
