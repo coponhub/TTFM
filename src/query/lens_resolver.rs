@@ -36,7 +36,7 @@
 use crate::db::{Col, SqlType};
 use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{Label, LabelValue, SType, TagType};
+use crate::types::{ItemKind, Label, LabelValue, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
@@ -62,6 +62,15 @@ pub enum ResolvedNode {
     ColumnMatch {
         tag: SType,
         label: Label,
+    },
+    /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
+    /// item_references の定義行（item_kind=kind, content=value）を参照し、
+    /// 未登録なら value を representative とする Volatile を1行合成する。
+    DefinitionRef {
+        kind: ItemKind,
+        value: Label,
+        /// representative の型解決用オペランド（value.tag_type() の TagRef）。
+        operand: ResolvedOperand,
     },
     /// 物理的な条件。
     Match {
@@ -566,6 +575,14 @@ impl ResolvedNode {
             ResolvedNode::ColumnMatch { tag, label } => {
                 cond_column_match(*tag, label)
             }
+            ResolvedNode::DefinitionRef { kind, value, .. } => {
+                // 定義行: type='content' AND label_str=value AND item_kind=kind。
+                // （Volatile fallback は pick/fetch SQL 側で合成。Condition では Stored 部分のみ表現）
+                Condition::all()
+                    .add(Expr::col(Col::Type).eq("content"))
+                    .add(Expr::col(Col::LabelStr).eq(value.value().as_display_name()))
+                    .add(Expr::col(Col::ItemKind).eq(kind.as_str()))
+            }
             ResolvedNode::Match {
                 storage,
                 sql_type,
@@ -666,6 +683,9 @@ impl ResolvedNode {
                 }
             }
             ResolvedNode::Difference(l, _) => l.get_projection(),
+            // 定義参照は representative を projection と同じ decode 経路で型付けするため、
+            // value の型を投影型として返す。
+            ResolvedNode::DefinitionRef { value, .. } => Some(value.tag_type()),
             _ => None,
         }
     }
@@ -737,6 +757,7 @@ impl ResolvedNode {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
             ResolvedNode::Difference(l, _) => l.get_projection_operand(),
+            ResolvedNode::DefinitionRef { operand, .. } => Some(operand),
             _ => None,
         }
     }
@@ -1250,6 +1271,14 @@ pub(crate) fn resolve_query_node(
                 sql_type: desc.sql_type(),
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
+            })
+        }
+        QueryNode::DefinitionRef { kind, value } => {
+            let operand = resolve_type_ref_operand(lens, &value.tag_type())?;
+            Ok(ResolvedNode::DefinitionRef {
+                kind,
+                value,
+                operand,
             })
         }
         QueryNode::Comparison(cmp) => resolve_comparison(lens, cmp),

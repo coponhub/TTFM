@@ -409,14 +409,19 @@ impl DateTime {
     pub fn floor(&self) -> Option<chrono::NaiveDateTime> {
         use chrono::{NaiveDate, TimeZone};
         match self {
-            DateTime::Year(y) => NaiveDate::from_ymd_opt(*y, 1, 1)?.and_hms_opt(0, 0, 0),
+            DateTime::Year(y) => {
+                NaiveDate::from_ymd_opt(*y, 1, 1)?.and_hms_opt(0, 0, 0)
+            }
             DateTime::YearMonth { year, month } => {
                 NaiveDate::from_ymd_opt(*year, *month, 1)?.and_hms_opt(0, 0, 0)
             }
             DateTime::Date(d) => d.and_hms_opt(0, 0, 0),
-            DateTime::Instant(dt) => {
-                Some(chrono::Local.timestamp_opt(dt.timestamp(), 0).single()?.naive_local())
-            }
+            DateTime::Instant(dt) => Some(
+                chrono::Local
+                    .timestamp_opt(dt.timestamp(), 0)
+                    .single()?
+                    .naive_local(),
+            ),
         }
     }
 
@@ -429,12 +434,16 @@ impl DateTime {
             }
             DateTime::YearMonth { year, month } => {
                 let last_day = last_day_of_month(*year, *month)?;
-                NaiveDate::from_ymd_opt(*year, *month, last_day)?.and_hms_opt(23, 59, 59)
+                NaiveDate::from_ymd_opt(*year, *month, last_day)?
+                    .and_hms_opt(23, 59, 59)
             }
             DateTime::Date(d) => d.and_hms_opt(23, 59, 59),
-            DateTime::Instant(dt) => {
-                Some(chrono::Local.timestamp_opt(dt.timestamp(), 0).single()?.naive_local())
-            }
+            DateTime::Instant(dt) => Some(
+                chrono::Local
+                    .timestamp_opt(dt.timestamp(), 0)
+                    .single()?
+                    .naive_local(),
+            ),
         }
     }
 
@@ -448,7 +457,9 @@ impl DateTime {
     }
 
     /// 任意タイムゾーンの `chrono::DateTime` を `Instant` バリアントとして生成する。
-    pub fn from_localtime<Tz: chrono::TimeZone>(dt: chrono::DateTime<Tz>) -> Self {
+    pub fn from_localtime<Tz: chrono::TimeZone>(
+        dt: chrono::DateTime<Tz>,
+    ) -> Self {
         DateTime::Instant(dt.with_timezone(&chrono::Local))
     }
 
@@ -513,9 +524,11 @@ impl std::str::FromStr for DateTime {
         // 自然言語・相対日付（"today", "7d ago" 等）
         let s_lower = s.to_lowercase();
         let now = Local::now();
-        if let Ok(dt) =
-            chrono_english::parse_date_string(&s_lower, now, chrono_english::Dialect::Uk)
-        {
+        if let Ok(dt) = chrono_english::parse_date_string(
+            &s_lower,
+            now,
+            chrono_english::Dialect::Uk,
+        ) {
             return Ok(DateTime::from_localtime(dt));
         }
         if let Ok(dt) = dateparser::parse_with_timezone(s, &Local) {
@@ -551,10 +564,10 @@ fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
 #[strum(serialize_all = "snake_case")]
 pub enum LabelValue {
     String(String),
-    Integer(i64),   // -> "integer"
-    Boolean(bool),  // -> "boolean"
-    Double(u64),    // -> "double" (f64::to_bits() で保持)
-    Null,           // -> "null"
+    Integer(i64),  // -> "integer"
+    Boolean(bool), // -> "boolean"
+    Double(u64),   // -> "double" (f64::to_bits() で保持)
+    Null,          // -> "null"
     Literal(String),
     Date(DateTime), // -> "date"
 }
@@ -617,9 +630,7 @@ impl Label {
             | Label::Content(s)
             | Label::Extension(s)
             | Label::Path(s) => s.clone(),
-            Label::Rank(i)
-            | Label::Size(i)
-            | Label::Mtime(i) => i.to_string(),
+            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) => i.to_string(),
             Label::ItemId(i) => {
                 let o = Origin::within(*i);
                 format!("{}({})", o.short(), i - o.space_lo())
@@ -1232,20 +1243,32 @@ mod tests_types {
     fn test_datetime_from_str_ymd_hyphen() {
         use chrono::NaiveDate;
         let dt: DateTime = "2026-02-01".parse().unwrap();
-        assert_eq!(dt, DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+        assert_eq!(
+            dt,
+            DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap())
+        );
     }
 
     #[test]
     fn test_datetime_from_str_ymd_slash() {
         use chrono::NaiveDate;
         let dt: DateTime = "2026/02/01".parse().unwrap();
-        assert_eq!(dt, DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()));
+        assert_eq!(
+            dt,
+            DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap())
+        );
     }
 
     #[test]
     fn test_datetime_from_str_year_month() {
         let dt: DateTime = "2026-02".parse().unwrap();
-        assert_eq!(dt, DateTime::YearMonth { year: 2026, month: 2 });
+        assert_eq!(
+            dt,
+            DateTime::YearMonth {
+                year: 2026,
+                month: 2
+            }
+        );
     }
 
     #[test]
@@ -1282,8 +1305,17 @@ mod tests_types {
 
     #[test]
     fn test_datetime_year_month_variant() {
-        let dt = DateTime::YearMonth { year: 2026, month: 2 };
-        assert!(matches!(dt, DateTime::YearMonth { year: 2026, month: 2 }));
+        let dt = DateTime::YearMonth {
+            year: 2026,
+            month: 2,
+        };
+        assert!(matches!(
+            dt,
+            DateTime::YearMonth {
+                year: 2026,
+                month: 2
+            }
+        ));
     }
 
     #[test]
@@ -1318,7 +1350,10 @@ mod tests_types {
 
     #[test]
     fn test_label_value_date_year_month_as_display_name() {
-        let lv = LabelValue::Date(DateTime::YearMonth { year: 2026, month: 2 });
+        let lv = LabelValue::Date(DateTime::YearMonth {
+            year: 2026,
+            month: 2,
+        });
         assert_eq!(lv.as_display_name(), "2026-02");
     }
 
@@ -1350,18 +1385,45 @@ mod tests_types {
         let dt = DateTime::Year(2026);
         let floor = dt.floor().unwrap();
         let ceiling = dt.ceiling().unwrap();
-        assert_eq!(floor, NaiveDate::from_ymd_opt(2026, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
-        assert_eq!(ceiling, NaiveDate::from_ymd_opt(2026, 12, 31).unwrap().and_hms_opt(23, 59, 59).unwrap());
+        assert_eq!(
+            floor,
+            NaiveDate::from_ymd_opt(2026, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(
+            ceiling,
+            NaiveDate::from_ymd_opt(2026, 12, 31)
+                .unwrap()
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+        );
     }
 
     #[test]
     fn test_datetime_year_month_floor_ceiling() {
         use chrono::NaiveDate;
-        let dt = DateTime::YearMonth { year: 2026, month: 2 };
+        let dt = DateTime::YearMonth {
+            year: 2026,
+            month: 2,
+        };
         let floor = dt.floor().unwrap();
         let ceiling = dt.ceiling().unwrap();
-        assert_eq!(floor, NaiveDate::from_ymd_opt(2026, 2, 1).unwrap().and_hms_opt(0, 0, 0).unwrap());
-        assert_eq!(ceiling, NaiveDate::from_ymd_opt(2026, 2, 28).unwrap().and_hms_opt(23, 59, 59).unwrap());
+        assert_eq!(
+            floor,
+            NaiveDate::from_ymd_opt(2026, 2, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+        );
+        assert_eq!(
+            ceiling,
+            NaiveDate::from_ymd_opt(2026, 2, 28)
+                .unwrap()
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1384,8 +1446,16 @@ mod tests_types {
         let floor = dt.floor().unwrap();
         let ceiling = dt.ceiling().unwrap();
         // floor/ceiling は NaiveDateTime(local) → Local → timestamp で元の ts に戻る
-        let floor_ts = Local.from_local_datetime(&floor).earliest().unwrap().timestamp();
-        let ceiling_ts = Local.from_local_datetime(&ceiling).earliest().unwrap().timestamp();
+        let floor_ts = Local
+            .from_local_datetime(&floor)
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let ceiling_ts = Local
+            .from_local_datetime(&ceiling)
+            .earliest()
+            .unwrap()
+            .timestamp();
         assert_eq!(floor_ts, ts);
         assert_eq!(ceiling_ts, ts);
     }

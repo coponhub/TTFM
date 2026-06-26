@@ -420,7 +420,9 @@ mod tests {
 
     #[test]
     fn test_optimize_filter_pushdown() {
-        let query_str = "parentdir: &: (count(*:*) > 0) & type:file";
+        // フィルタ（非 Projection ノード）が nest context に押し込まれることを確認する。
+        // 旧 `type:file` は定義参照になったため、`X:*` ルールに従い `file:*` を使用する。
+        let query_str = "parentdir: &: (count(*:*) > 0) & file:*";
         let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
         let optimized = optimize(resolved);
 
@@ -437,25 +439,21 @@ mod tests {
             context: Some(ctx), ..
         } = proj_match
         else {
-            panic!("Context should be populated with type:file");
+            panic!("Context should be populated with file:*");
         };
 
-        fn is_type_file(n: &ResolvedNode) -> bool {
+        fn is_file_star(n: &ResolvedNode) -> bool {
             match n {
-                ResolvedNode::ColumnMatch { tag, label } => {
-                    tag.as_str() == "type" && label.as_str() == "file"
-                }
-                ResolvedNode::Match {
-                    tag_type, label, ..
-                } => tag_type.as_str() == "type" && label.as_str() == "file",
-                ResolvedNode::And(nodes) => nodes.iter().any(is_type_file),
+                ResolvedNode::ColumnMatch { tag, .. } => tag.as_str() == "file",
+                ResolvedNode::Match { tag_type, .. } => tag_type.as_str() == "file",
+                ResolvedNode::And(nodes) => nodes.iter().any(is_file_star),
                 _ => false,
             }
         }
 
         assert!(
-            is_type_file(&ctx),
-            "Context should contain type:file: {:?}",
+            is_file_star(&ctx),
+            "Context should contain file:*: {:?}",
             ctx
         );
     }

@@ -57,7 +57,8 @@ pub use precompute::{
     needs_nest_context,
 };
 use scalar::{
-    build_column_match_sql, build_resolved_match_sql,
+    build_column_match_sql, build_definition_ref_fetch_sql,
+    build_definition_ref_pick_sql, build_resolved_match_sql,
     build_resolved_scalar_sql, build_resolved_tag_tag_match_sql,
     build_scalar_match_sql,
 };
@@ -202,6 +203,11 @@ pub fn build_fetch_sql(
     n: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
+    // 定義参照（単体）: ハイブリッド1行 SQL を生成し、representative は projection と
+    // 同じ decode_nest 経路で型付けする（get_projection も Some を返す）。
+    if let ResolvedNode::DefinitionRef { kind, value, .. } = &resolver.resolved_query {
+        return Ok(build_definition_ref_fetch_sql(src, *kind, value));
+    }
     if resolver.get_projection().is_some() {
         if resolver.get_label_set_op_node().is_some()
             || resolver.get_nvalue_condition().is_none()

@@ -11,40 +11,14 @@ use anyhow::Result;
 use crate::cache::CacheManager;
 use crate::db::Store;
 use crate::tag::TagRegistry;
-use crate::types::Label;
 
-pub enum EditStrategy {
-    Append,
-    Replace,
-    ModifyInjection,
-    Relocate,
-    SetFileAttr,
-}
+pub use crate::tag::{Edit, EditStrategy};
 
 #[derive(Clone, Copy)]
 pub enum QueryType {
     Tag,
     Untag,
 }
-
-pub trait Edit: Send + Sync {
-    fn strategy(&self) -> EditStrategy;
-    fn validate(&self, new: &Label) -> Result<Label> {
-        Ok(new.clone())
-    }
-}
-
-pub struct AppendEdit;
-pub struct ReplaceEdit;
-pub struct RelocateEdit;
-pub struct SetFileAttrEdit;
-pub struct ModifyInjectionEdit;
-
-impl Edit for AppendEdit        { fn strategy(&self) -> EditStrategy { EditStrategy::Append } }
-impl Edit for ReplaceEdit       { fn strategy(&self) -> EditStrategy { EditStrategy::Replace } }
-impl Edit for RelocateEdit      { fn strategy(&self) -> EditStrategy { EditStrategy::Relocate } }
-impl Edit for SetFileAttrEdit   { fn strategy(&self) -> EditStrategy { EditStrategy::SetFileAttr } }
-impl Edit for ModifyInjectionEdit { fn strategy(&self) -> EditStrategy { EditStrategy::ModifyInjection } }
 
 #[derive(Default)]
 pub struct WriteOptions {
@@ -97,10 +71,10 @@ fn plan(
             // TypedTag: 満たすエントリがなければ modify をスキップ
             // Projection: 満たす具体ラベルを取得して per-entry で modify
             if tag_filter::eval_tag_predicate(node, None)? {
-                actions.extend(modify::modify(item, tag_query, query_type, registry)?);
+                actions.extend(modify::modify(item, Some(tag_query), query_type, registry)?);
             }
         } else {
-            actions.extend(modify::modify(item, tag_query, query_type, registry)?);
+            actions.extend(modify::modify(item, Some(tag_query), query_type, registry)?);
         }
         // TODO: Relocate / SetFileAttr は fs_operate へ振り分け（別フェーズ）
     }
@@ -111,13 +85,6 @@ fn plan(
 mod tests {
     use super::*;
     use crate::tag::TagRegistry;
-
-    #[test]
-    fn edit_strategies_are_correct() {
-        assert!(matches!(AppendEdit.strategy(), EditStrategy::Append));
-        assert!(matches!(ReplaceEdit.strategy(), EditStrategy::Replace));
-        assert!(matches!(RelocateEdit.strategy(), EditStrategy::Relocate));
-    }
 
     #[test]
     fn forbidden_tags_return_none() {

@@ -18,7 +18,8 @@ use crate::query::ast::{
     BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
 use crate::taggers::TagValue;
-use crate::types::{DBType, Label, LabelValue, Rank, SType, TagType, TypedTag};
+use crate::response::Item;
+use crate::types::{DBType, ItemKind, Label, LabelValue, Rank, SType, TagType, TypedTag};
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
 use chrono::TimeZone as _;
@@ -207,11 +208,27 @@ pub trait Query: Send + Sync {
     /// タグを QueryNode へ展開する。デフォルトはそのまま TypedTag。
     fn expand(
         &self,
-        _tagtype: &TagType,
-        _label: &Label,
+        tagtype: &TagType,
+        label: &Label,
         tag: &TypedTag,
     ) -> QueryNode {
-        QueryNode::TypedTag(tag.clone())
+        if let Some(kind) = self.item_kind() {
+            // 定義アイテム参照: tag:/type: などは item_references の定義行を参照する。
+            // value は自身の型を付与した representative（未登録時の Volatile 用）。
+            QueryNode::DefinitionRef {
+                kind,
+                value: Label::resolve(tagtype.clone(), label.value()),
+            }
+        } else {
+            QueryNode::TypedTag(tag.clone())
+        }
+    }
+
+    /// この TagFunction が「定義アイテム」を表すなら、その ItemKind を返す。
+    /// `tag:`→Tag, `type:`→Type のように、item_references の定義行を参照する種別を宣言する。
+    /// None（既定）の場合は通常のタグとして扱う。
+    fn item_kind(&self) -> Option<ItemKind> {
+        None
     }
 
     /// Projection（type:形式）を QueryNode へ展開する。
@@ -270,10 +287,32 @@ pub trait Display: Send + Sync {
 }
 
 // ============================================================
+// Edit trait
+// ============================================================
+
+pub enum EditStrategy {
+    Append,
+    Replace,
+    ModifyInjection,
+    Relocate,
+    SetFileAttr,
+}
+
+pub trait Edit: Send + Sync {
+    fn strategy(&self) -> EditStrategy;
+    fn validate(&self, new: &Label) -> Result<Label> {
+        Ok(new.clone())
+    }
+    fn inject(&self, _item: &Item) -> Option<Label> {
+        None
+    }
+}
+
+// ============================================================
 // TagFunction trait
 // ============================================================
 
-/// タグの統合定義単位。Index・Query・Display の3コンポーネントを束ねる。
+/// タグの統合定義単位。Index・Query・Display・Edit の4コンポーネントを束ねる。
 pub trait TagFunction: Send + Sync {
     fn name(&self) -> &str;
 
@@ -289,7 +328,7 @@ pub trait TagFunction: Send + Sync {
         None
     }
 
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
+    fn edit(&self) -> Option<&dyn Edit> {
         None
     }
 
@@ -654,12 +693,15 @@ impl TagFunction for FilenameFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::RelocateEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::FILENAME
     }
+}
+impl Edit for FilenameFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Relocate }
 }
 impl Index for FilenameFn {
     fn role(&self) -> ScanRole { ScanRole::Location }
@@ -712,9 +754,12 @@ impl TagFunction for ExtensionFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::RelocateEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
+}
+impl Edit for ExtensionFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Relocate }
 }
 impl Index for ExtensionFn {
     fn role(&self) -> ScanRole { ScanRole::Location }
@@ -766,12 +811,15 @@ impl TagFunction for PathFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::RelocateEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PATH
     }
+}
+impl Edit for PathFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Relocate }
 }
 impl Scan for PathFn {
     fn name() -> &'static str { "path" }
@@ -821,12 +869,15 @@ impl TagFunction for ParentDirFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::RelocateEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PARENT_DIR
     }
+}
+impl Edit for ParentDirFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Relocate }
 }
 impl Index for ParentDirFn {
     fn role(&self) -> ScanRole { ScanRole::Location }
@@ -939,11 +990,17 @@ impl TagFunction for ContentFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::ModifyInjectionEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::CONTENT
+    }
+}
+impl Edit for ContentFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::ModifyInjection }
+    fn inject(&self, item: &Item) -> Option<Label> {
+        Some(Label::Content(item.raw_repr()))
     }
 }
 impl Query for ContentFn {
@@ -1003,12 +1060,15 @@ impl TagFunction for NameFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::ReplaceEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::NAME
     }
+}
+impl Edit for NameFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Replace }
 }
 impl Query for NameFn {
     fn logical_type(&self) -> LogicalType {
@@ -1190,12 +1250,15 @@ impl TagFunction for MtimeFn {
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::SetFileAttrEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::MTIME
     }
+}
+impl Edit for MtimeFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::SetFileAttr }
 }
 impl Scan for MtimeFn {
     fn name() -> &'static str { "mtime" }
@@ -1509,11 +1572,22 @@ impl TagFunction for ItemKindFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::ModifyInjectionEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::ITEM_KIND
+    }
+}
+impl Edit for ItemKindFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::ModifyInjection }
+    fn inject(&self, item: &Item) -> Option<Label> {
+        let kind = match item.representative.as_slice() {
+            [l] if l.tag_type() == TagType::Base(SType::TypedTag) => ItemKind::Tag,
+            [l] if l.tag_type() == TagType::Base(SType::Type)     => ItemKind::Type,
+            _                                                      => ItemKind::Note,
+        };
+        Some(Label::from(kind))
     }
 }
 impl Query for ItemKindFn {
@@ -1545,9 +1619,12 @@ impl TagFunction for RankFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
-    fn edit(&self) -> Option<&dyn crate::edit::Edit> {
-        Some(&crate::edit::ReplaceEdit)
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
     }
+}
+impl Edit for RankFn {
+    fn strategy(&self) -> EditStrategy { EditStrategy::Replace }
 }
 impl Query for RankFn {
     fn logical_role(&self) -> LogicalRole {
@@ -1616,16 +1693,8 @@ impl Query for TypeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
-    fn expand(
-        &self,
-        _tt: &TagType,
-        label: &Label,
-        _tag: &TypedTag,
-    ) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Type,
-            label: label.clone(),
-        }
+    fn item_kind(&self) -> Option<ItemKind> {
+        Some(ItemKind::Type)
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -1682,16 +1751,8 @@ impl Query for TypedTagFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
-    fn expand(
-        &self,
-        _tt: &TagType,
-        label: &Label,
-        _tag: &TypedTag,
-    ) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::TypedTag,
-            label: label.clone(),
-        }
+    fn item_kind(&self) -> Option<ItemKind> {
+        Some(ItemKind::Tag)
     }
 }
 

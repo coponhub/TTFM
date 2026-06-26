@@ -278,7 +278,8 @@ fn is_set_operation(node: &QueryNode) -> bool {
         | QueryNode::Or(_)
         | QueryNode::Difference(_, _)
         | QueryNode::TypedTag(_)
-        | QueryNode::ColumnMatch { .. } => true,
+        | QueryNode::ColumnMatch { .. }
+        | QueryNode::DefinitionRef { .. } => true,
 
         // Projection は集合を返すが、Literal のみの場合はスカラー
         QueryNode::Projection(op) => !matches!(op, Operand::Literal(_)),
@@ -374,6 +375,7 @@ fn returns_projection(node: &QueryNode) -> bool {
         }
         QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }
+        | QueryNode::DefinitionRef { .. }
         | QueryNode::Comparison(_)
         | QueryNode::Aggregation(_) => false,
         QueryNode::Nest(nest) => returns_projection(&nest.left),

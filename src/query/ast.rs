@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::types::{Label, SType, TagType, TypedTag};
+use crate::types::{ItemKind, Label, SType, TagType, TypedTag};
 use std::collections::HashSet;
 
 // ========== Type Aliases ==========
@@ -139,6 +139,10 @@ pub enum QueryNode {
     Aggregation(AggregationNode),
     /// ネスト演算 (`Projection &: Projection` 等)
     Nest(NestNode),
+    /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
+    /// item_references の定義行（item_kind=kind, content=value）を参照し、
+    /// 未登録なら value を representative とする Volatile を合成する。
+    DefinitionRef { kind: ItemKind, value: Label },
 }
 
 impl QueryNode {
@@ -194,6 +198,9 @@ impl QueryNode {
             QueryNode::Nest(nest) => {
                 nest.left.collect_types(types);
                 nest.right.collect_types(types);
+            }
+            QueryNode::DefinitionRef { value, .. } => {
+                types.insert(value.tag_type().as_str().to_string());
             }
         }
     }

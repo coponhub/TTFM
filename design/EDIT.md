@@ -64,6 +64,9 @@ pub trait Edit: Send + Sync {
     fn strategy(&self) -> EditStrategy;
     /// 新しい値の検証・正規化 (省略可)。
     fn validate(&self, new: &Label) -> Result<Label> { Ok(new.clone()) }
+    /// Volatile item 登録時に item から注入するラベルを導出する (ModifyInjection 戦略のみ。省略可)。
+    /// `item_kind`/`content` のように関数固有の導出ロジックを持つ (§5.7)。
+    fn inject(&self, _item: &Item) -> Option<Label> { None }
 }
 
 pub enum EditStrategy {
@@ -73,24 +76,28 @@ pub enum EditStrategy {
                  // Lens が吸収するため、両者を区別しない (旧 ReplaceCol を統合)
 
     // --- ホスト内部専用 (組み込み TagFunction のみ) ---
-    Relocate,    // path/filename/parentdir/extension → FS rename + 再 index
-    SetFileAttr, // mtime → 実ファイルの OS ネイティブ属性 (タイムスタンプ等) を設定
+    Relocate,        // path/filename/parentdir/extension → FS rename + 再 index
+    SetFileAttr,     // mtime → 実ファイルの OS ネイティブ属性 (タイムスタンプ等) を設定
+    ModifyInjection, // item_kind/content → ユーザーは EditQuery に書けないが、modify が
+                     // Volatile item 登録時に inject() で内部注入する
 }
 ```
 
 ### 3.1 設計方針
-- **宣言的**: `Edit` は「どの戦略か」を宣言するのみで、物理的な実行はホストが行う
+- **自己実装**: `Edit` は `Index` / `Query` / `Display` と同じく各 `TagFunction` が自分で実装し、
+  `edit()` は `Some(self)` を返す。`strategy()` で戦略を宣言し、`ModifyInjection` の関数は
+  `inject()` に関数固有の導出ロジックを持つ (`item_kind`/`content`)。共有のゼロサイズ構造体は用いない。
+- **宣言的な実行委譲**: `Edit` は「どの戦略か」を宣言し、物理的な実行 (FS rename / カラム更新 /
+  再 index 等) はホストが担う。`inject()` だけは Volatile 登録ラベルを導出する純粋ロジックを持つ。
 - **デフォルトは編集不可**: `edit()` を実装しない (`None` を返す) タグは編集できない。
   これにより組み込み・プラグインが意図せず編集される事故を防ぐ。
 - `Forbidden` は `edit() == None` で表現する (列挙子としては持たない)。
   よって `type` / `tag` のための専用戦略は存在しない。
 
-### 3.2 プラグイン向け簡便化
+### 3.2 プラグイン向けの戦略公開
 - プラグインが選択できる戦略は **`Append` / `Replace` / Forbidden (未実装)** の3つ。
 - WIT の `edit` インターフェースは `enum edit-strategy { append, replace }` とする
-  (Relocate / SetFileAttr などのホスト内部戦略はプラグインに公開しない)。
-- ボイラープレート削減のため、ホスト側に既製の `Edit` 実装 (`AppendEdit` / `ReplaceEdit` 等の
-  ゼロサイズ構造体) を提供し、`edit()` から `Some(&ReplaceEdit)` のように1行で返せるようにする。
+  (`Relocate` / `SetFileAttr` / `ModifyInjection` などのホスト内部戦略はプラグインに公開しない)。
 - Wasm プラグインは `target!(edit)` で edit インターフェースを有効化し、
   `strategy()` で `append` / `replace` を返すだけで opt-in できる。
 
@@ -101,7 +108,8 @@ pub enum EditStrategy {
 | `mtime` | `SetFileAttr` (Windows/Unix 両対応) |
 | `rank` | `Replace` (カラム書き込みは Lens が吸収) |
 | `name` | `Replace` (単一値) |
-| `size` / `hash` / `file_id` / `item_kind` / `origin` | Forbidden |
+| `item_kind` / `content` | `ModifyInjection` (ユーザー不可。Volatile 登録時に `inject()` で内部注入) |
+| `size` / `hash` / `file_id` / `origin` | Forbidden |
 | `directory:` 等の Composite (複合タグ) | Forbidden |
 | `type` / `tag` (定義アイテムのメタ編集) | EditQuery の型に従う (リネーム/再分類は §6 の合成) |
 
@@ -260,8 +268,10 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
 確認プロンプトには「N 件を登録」と明示する。既に Stored の結果は no-op。
 
 結果の種類で登録のされ方が分かれる:
-- **定義 (tag / type) の登録 (A)**: 対応する定義アイテムを登録する (kind + content で冪等。既存なら重複しない)。
-  `q()` (Eval) で参照したい定義の Stored 化などに使う。
+- **定義 (tag / type) の登録 (A)**: 
+  対応する定義アイテムを登録する (kind + content で冪等。既存なら重複しない)。
+  - `size:<1 & tag:` のように指定できる
+  - `q()` (Eval) で参照したい定義の Stored 化などに使う。
 - **Projection / Nest / 計算値を note として残す (B)** (`label:` も含む):
   その時点の**結果全体を1つの `note` アイテム**として保存する。
   - note の `content` には結果の文字列表現を入れる。
