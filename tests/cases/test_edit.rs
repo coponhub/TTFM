@@ -157,6 +157,28 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
     Ok(())
 }
 
+// 計算値クエリを edit() で流すと、結果 note に query: が注入され DB に保存される。
+// （value タグを持つ集計／計算値のみが対象。由来保持 EDIT.md §5.7(B)）
+#[test]
+fn edit_calc_result_persists_query_tag() -> anyhow::Result<()> {
+    let (store, registry, cache, _dir) = setup();
+
+    // count(extension:txt) は単一スカラ（value タグ持ち Volatile）を返す
+    let search_query = "count(extension:txt)";
+    edit(&store, &registry, &cache, search_query, "rank:5", QueryType::Tag, None, WriteOptions::default())?;
+
+    // user_tags に type='query', label_str=元クエリ の行が保存されている
+    let path = store.path_for_target(TargetTable::UserTags);
+    let sql = format!(
+        "SELECT COUNT(*) FROM read_parquet('{}') WHERE type = 'query' AND label_str = '{}'",
+        path.to_string_lossy(),
+        search_query
+    );
+    let count: i64 = store.conn.query_row(&sql, [], |r| r.get(0))?;
+    assert_eq!(count, 1, "calc result note must carry the source query: tag");
+    Ok(())
+}
+
 // edit → untag: 付与済みの project:A を削除し、search で 0 件になる
 #[test]
 fn edit_untag_removes_user_tag() -> anyhow::Result<()> {

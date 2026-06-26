@@ -196,6 +196,17 @@ impl TagDelta {
     }
 }
 
+// scalar 結果の物理型タグ type:"integer" 等を value_type: へ正規化する。
+// type: は定義参照関数と衝突するため、永続化前にリネームする。
+fn rename_volatile_type(label: Label) -> Label {
+    use crate::types::SType;
+    if label.tag_type() == TagType::Base(SType::Type) {
+        Label::Other(TagType::Custom("value_type".to_string()), label.value())
+    } else {
+        label
+    }
+}
+
 // Volatile アイテムへの編集: directive の delta（into_actions 由来）を原子 delta へ平坦化し、
 // item.tags を種に順次適用、注入を加えて単一 Add にする。
 // 意味（Append/Replace/Untag）は into_actions が唯一源。
@@ -204,8 +215,9 @@ fn fold_volatile(
     actions: Vec<WriteAction>,
     registry: &TagRegistry,
 ) -> Vec<WriteAction> {
-    let mut tags: Vec<Label> =
-        item.tags.entries.iter().map(|e| e.label.clone()).collect();
+    let mut tags: Vec<Label> = item.tags.entries.iter()
+        .map(|e| rename_volatile_type(e.label.clone()))
+        .collect();
     actions
         .into_iter()
         .flat_map(TagDelta::flatten)
@@ -553,5 +565,49 @@ mod tests {
         let item = make_item(1, vec![]);
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
         assert!(actions.is_empty());
+    }
+
+    // 複合 representative（複数要素）の Volatile item: item_kind=note, content=全要素連結。
+    #[test]
+    fn modify_volatile_multi_repr_is_note_with_joined_content() {
+        use crate::types::{Intrinsic, LabelValue, Rank};
+        let repr = vec![
+            Label::resolve(TagType::Base(SType::TypedTag), LabelValue::String("project:A".to_string())),
+            Label::resolve(TagType::Base(SType::TypedTag), LabelValue::String("status:done".to_string())),
+        ];
+        let item = Item {
+            id: ItemId::Volatile(0),
+            item_kind: ItemKind::Volatile,
+            representative: repr,
+            rank: Rank::default(),
+            intrinsic: Intrinsic::default(),
+            tags: Tags::new(),
+            item_count: None,
+        };
+        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let tags = add_tags(&actions);
+        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "note")));
+        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project:A &: status:done")));
+    }
+
+    // scalar result の物理型タグ type:"integer" は value_type:"integer" にリネームされる。
+    #[test]
+    fn modify_volatile_type_tag_renamed_to_value_type() {
+        use crate::types::Origin;
+        let mut item = make_volatile_item(SType::TypedTag, "project:A");
+        item.tags.push(
+            Label::Other(TagType::Base(SType::Type), LabelValue::String("integer".to_string())),
+            Origin::System,
+        );
+        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let tags = add_tags(&actions);
+        assert!(
+            !has_append(tags, |l| l.tag_type() == TagType::Base(SType::Type)),
+            "type: tag must not appear after rename"
+        );
+        assert!(
+            has_append(tags, |l| l.tag_type() == TagType::Custom("value_type".to_string())),
+            "value_type: tag must appear"
+        );
     }
 }

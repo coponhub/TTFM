@@ -1033,6 +1033,7 @@ pub enum SType {
     // Schema Table Columns
     DataType,
     Value,
+    Query,
     // Type-specific tags
     Integer,
     Boolean,
@@ -1075,6 +1076,7 @@ impl SType {
             Self::LabelBool => "label_bool",
             Self::DataType => "data_type",
             Self::Value => "value",
+            Self::Query => "query",
             Self::Integer => "integer",
             Self::Boolean => "boolean",
             Self::Double => "double",
@@ -1129,6 +1131,7 @@ impl std::str::FromStr for SType {
             "label_bool" => Ok(Self::LabelBool),
             "data_type" => Ok(Self::DataType),
             "value" => Ok(Self::Value),
+            "query" => Ok(Self::Query),
             "integer" => Ok(Self::Integer),
             "boolean" => Ok(Self::Boolean),
             "double" => Ok(Self::Double),

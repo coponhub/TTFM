@@ -12,7 +12,8 @@ pub fn search_and_apply_captures(
     search_query: &str,
     edit_query: &str,
 ) -> Result<Vec<(Item, String)>> {
-    let resp = crate::search::search(store, registry, cache, search_query, SearchOptions::default())?;
+    let mut resp = crate::search::search(store, registry, cache, search_query, SearchOptions::default())?;
+    resp.query_into_tags();
     resp.results
         .into_iter()
         .map(|item| apply_captures(&item, edit_query).map(|q| (item, q)))

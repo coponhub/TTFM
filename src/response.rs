@@ -127,6 +127,8 @@ pub struct SearchResponse {
     pub progress: crate::types::Progress,
     /// クエリ実行時の警告メッセージ
     pub warnings: Vec<String>,
+    /// この SearchResponse を生成した SearchQuery 文字列
+    pub query: String,
 }
 
 /// 同一の属性（カラム）構成を持つアイテムのグループ。
@@ -220,7 +222,7 @@ impl SearchResponse {
 
 impl SearchResponse {
     /// 空の検索結果（初期状態）を作成します。
-    pub fn new_empty(cid: Option<String>, has_more: bool) -> Self {
+    pub fn new_empty(cid: Option<String>, has_more: bool, query: impl Into<String>) -> Self {
         Self {
             results: Vec::new(),
             cid,
@@ -232,11 +234,12 @@ impl SearchResponse {
                 is_done: true,
             },
             warnings: Vec::new(),
+            query: query.into(),
         }
     }
 
     /// キャッシュ生成が進行中のレスポンスを作成します。
-    pub fn new_unfinished(cid: &str, progress: crate::types::Progress) -> Self {
+    pub fn new_unfinished(cid: &str, progress: crate::types::Progress, query: impl Into<String>) -> Self {
         Self {
             results: Vec::new(),
             cid: Some(cid.to_string()),
@@ -244,6 +247,27 @@ impl SearchResponse {
             total_count: None,
             progress,
             warnings: Vec::new(),
+            query: query.into(),
+        }
+    }
+
+    /// `value` タグを持つ Volatile item に `query:` ラベルを注入する。
+    /// 計算値の由来保持（EDIT.md §5.7(B)）。
+    pub fn query_into_tags(&mut self) {
+        use crate::types::{Label, LabelValue, Origin, SType, TagType};
+        let query_str = self.query.clone();
+        let query_tag_type = TagType::Base(SType::Query);
+        let value_tag_type = TagType::Base(SType::Value);
+        for item in &mut self.results {
+            if !item.id.is_volatile() { continue; }
+            let has_value = item.tags.entries.iter()
+                .any(|e| e.label.tag_type() == value_tag_type);
+            if has_value {
+                item.tags.push(
+                    Label::Other(query_tag_type.clone(), LabelValue::String(query_str.clone())),
+                    Origin::System,
+                );
+            }
         }
     }
 
@@ -582,6 +606,7 @@ mod tests {
             has_more: false,
             progress: Progress::default(),
             warnings: Vec::new(),
+            query: String::new(),
         };
 
         let groups = response.iter_type_groups();
@@ -612,5 +637,36 @@ mod tests {
         assert!(result.representative.is_empty());
         assert_eq!(result.item_kind, ItemKind::Volatile);
         assert!(result.tags.is_empty());
+    }
+
+    // value タグを持つ Volatile item にのみ query: が注入される。
+    #[test]
+    fn query_into_tags_adds_query_only_to_value_items() {
+        use crate::types::{ItemKind, LabelValue, Origin, SType, TagType};
+
+        let query_str = "count(extension:rs)".to_string();
+
+        let mut item_with_value = Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
+        item_with_value.tags.push(
+            Label::Other(TagType::Base(SType::Value), LabelValue::Integer(42)),
+            Origin::System,
+        );
+
+        let item_without_value = Item::new_empty(ItemId::Volatile(1), ItemKind::Volatile);
+
+        let mut resp = SearchResponse {
+            results: vec![item_with_value, item_without_value],
+            query: query_str.clone(),
+            ..Default::default()
+        };
+        resp.query_into_tags();
+
+        let has_query = |item: &Item| {
+            item.tags.entries.iter().any(|e| {
+                e.label.tag_type() == TagType::Base(SType::Query)
+            })
+        };
+        assert!(has_query(&resp.results[0]), "value item should get query:");
+        assert!(!has_query(&resp.results[1]), "non-value item must not get query:");
     }
 }

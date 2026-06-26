@@ -124,6 +124,7 @@ pub fn search(
             is_done: !has_more,
         },
         warnings,
+        query: query.to_string(),
     })
 }
 
@@ -240,7 +241,7 @@ fn try_resolve_cache(
     }
 
     if !progress.is_finished() {
-        return Ok(Some(SearchResponse::new_unfinished(cid, progress)));
+        return Ok(Some(SearchResponse::new_unfinished(cid, progress, query)));
     }
 
     Ok(Some(search_from_cache(store, registry, cache, &cache_path, options.clone(), cid)?))
@@ -275,7 +276,7 @@ fn search_from_cache(
 
     let current_n = all_results.len();
     let mut response = if all_results.is_empty() {
-        SearchResponse::new_empty(Some(cid.to_string()), has_more)
+        SearchResponse::new_empty(Some(cid.to_string()), has_more, query.as_str())
     } else {
         SearchResponse {
             results: all_results,
@@ -288,6 +289,7 @@ fn search_from_cache(
                 is_done: !has_more,
             },
             warnings: Vec::new(),
+            query: query.to_string(),
         }
     };
     response.progress = cache.get_progress(cid)?;
