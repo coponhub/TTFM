@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -167,16 +167,17 @@ impl CustomFunc {
     {
         use crate::types::Origin;
         use strum::IntoEnumIterator;
-        let mut origins: Vec<(i64, Origin)> = Origin::iter()
-            .map(|o| (o.space_lo(), o))
-            .collect();
+        let mut origins: Vec<(i64, Origin)> =
+            Origin::iter().map(|o| (o.space_lo(), o)).collect();
         origins.sort_by(|a, b| b.0.cmp(&a.0));
 
         let mut sql = String::from("CASE");
         for (i, &(lo, origin)) in origins.iter().enumerate() {
             let val = value_for(origin);
             if i < origins.len() - 1 {
-                sql.push_str(&format!(" WHEN {item_id_expr} >= {lo} THEN {val}"));
+                sql.push_str(&format!(
+                    " WHEN {item_id_expr} >= {lo} THEN {val}"
+                ));
             } else {
                 sql.push_str(&format!(" ELSE {val} END"));
             }
@@ -282,10 +283,26 @@ impl CustomFunc {
     pub fn as_representative<E: Into<sea_query::SimpleExpr>>(
         expr: E,
     ) -> sea_query::SimpleExpr {
-        let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+        let union_type =
+            "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
         sea_query::Expr::cust_with_exprs(
             &format!("list_value(CAST($1 AS {}))", union_type),
             [expr.into()],
+        )
+    }
+
+    /// DuckDB `* REPLACE(value AS col)` を生成する。`*`（全列）を出しつつ
+    /// 指定列 `col` だけ `value` に差し替える select 項。
+    pub fn star_replace<E: Into<sea_query::SimpleExpr>>(
+        col: Col,
+        value: E,
+    ) -> sea_query::SimpleExpr {
+        sea_query::Expr::cust_with_exprs(
+            &format!(
+                "* REPLACE($1 AS \"{}\")",
+                sea_query::Iden::to_string(&col)
+            ),
+            [value.into()],
         )
     }
 

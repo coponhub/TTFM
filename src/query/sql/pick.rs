@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ use super::{
     label_to_unit_aware_expr, needs_aggregation_context, needs_nest_context,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src, SqlType};
+use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, SqlType, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
@@ -180,9 +180,9 @@ pub fn build_pick_agg(
                     keys,
                     matches,
                     is_or,
-                } => {
-                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
-                }
+                } => build_merged_nest_match_sql(
+                    src, keys, matches, *is_or, agg_ctx,
+                ),
                 ResolvedNode::Aggregation(agg) => build_agg(src, agg, agg_ctx),
                 ResolvedNode::AggregationMatch { agg, op, label } => {
                     build_agg_match(src, agg, *op, label, agg_ctx)
@@ -220,7 +220,9 @@ pub fn build_pick_agg(
                     storage,
                     sql_type,
                     ..
-                } => build_agg_tag_match(src, agg, *op, storage, *sql_type, agg_ctx),
+                } => build_agg_tag_match(
+                    src, agg, *op, storage, *sql_type, agg_ctx,
+                ),
                 _ => unreachable!(
                     "build_pick_agg called with nest node: use build_pick_nest"
                 ),
@@ -244,9 +246,9 @@ pub fn build_pick_nest(
                     keys,
                     matches,
                     is_or,
-                } => {
-                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
-                }
+                } => build_merged_nest_match_sql(
+                    src, keys, matches, *is_or, agg_ctx,
+                ),
                 ResolvedNode::Aggregation(agg) => {
                     build_agg_nest(src, agg, agg_ctx, nest_ctx)
                 }
@@ -266,7 +268,9 @@ pub fn build_pick_nest(
                     src, storage, *sql_type, *op, calc, agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
-                    build_agg_calc_match_nest(src, agg, *op, calc, agg_ctx, nest_ctx)
+                    build_agg_calc_match_nest(
+                        src, agg, *op, calc, agg_ctx, nest_ctx,
+                    )
                 }
                 ResolvedNode::CalculationCalculationMatch {
                     left_calc,
@@ -335,9 +339,7 @@ fn build_calculation_match_sql(
 ) -> SelectStatement {
     if calc.contains_tag() {
         let mut stmt = Query::select();
-        stmt.column(Col::ItemId)
-            .from(src)
-            .group_by_col(Col::ItemId);
+        stmt.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
         let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
         let label_expr = label_to_unit_aware_expr(label);
         stmt.and_having(
@@ -371,8 +373,8 @@ fn build_tag_calculation_match_sql(
     calc: &ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let needs_eav = calc.contains_tag()
-        || matches!(storage, StorageMapping::Basic { .. });
+    let needs_eav =
+        calc.contains_tag() || matches!(storage, StorageMapping::Basic { .. });
     if needs_eav {
         build_tag_calc_match_eav_sql(src, storage, sql_type, op, calc, agg_ctx)
     } else {
@@ -443,9 +445,7 @@ fn build_calculation_calculation_match_sql(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.column(Col::ItemId)
-        .from(src)
-        .group_by_col(Col::ItemId);
+    stmt.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
     let left_expr = build_agg_calc_eav_expr(left_calc, agg_ctx);
     let right_expr = build_agg_calc_eav_expr(right_calc, agg_ctx);
     stmt.and_having(Expr::expr(left_expr).binary(to_bin_op(op), right_expr));
@@ -535,9 +535,7 @@ fn build_tag_calc_match_eav_sql(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut q = Query::select();
-    q.column(Col::ItemId)
-        .from(src)
-        .group_by_col(Col::ItemId);
+    q.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
     let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
     let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
     q.and_having(left_expr.binary(to_bin_op(op), calc_expr));
@@ -646,8 +644,7 @@ fn build_agg_match(
 
     let mut final_cond = Condition::all();
     if let Some(key) = tag_type {
-        final_cond =
-            final_cond.add(Expr::col(Col::Type).eq(key));
+        final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
     }
 
     if cond.is_some() {

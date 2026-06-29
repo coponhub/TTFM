@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,10 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 use crate::cases::has_item_tags;
 use file_id::get_file_id;
 use tempfile::tempdir;
+use ttfm::search;
 
 #[test]
 fn test_incremental_indexing_full_flow() {
@@ -28,63 +28,109 @@ fn test_incremental_indexing_full_flow() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
     let all_files = "item_kind:file";
 
     // 1. 初回: a.txt を作成 (root + a.txt = 2)
     let path_a = root.join("a.txt");
     std::fs::write(&path_a, "initial content").unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, &cache, all_files, Default::default())
-            .unwrap()
-            .results
-            .len(),
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            all_files,
+            Default::default()
+        )
+        .unwrap()
+        .results
+        .len(),
         2
     );
     assert_eq!(
-        search::search(&store, &registry, &cache, "filename:a.txt", Default::default())
-            .unwrap()
-            .results
-            .len(),
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            "filename:a.txt",
+            Default::default()
+        )
+        .unwrap()
+        .results
+        .len(),
         1
     );
 
     // 2. 変更なし: そのまま再スキャン (2)
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, &cache, all_files, Default::default())
-            .unwrap()
-            .results
-            .len(),
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            all_files,
+            Default::default()
+        )
+        .unwrap()
+        .results
+        .len(),
         2
     );
 
     // 3. 追加: b.rs を作成 (root + a.txt + b.rs = 3)
     let path_b = root.join("b.rs");
     std::fs::write(&path_b, "fn main() {}").unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let res = search::search(&store, &registry, &cache, all_files, Default::default()).unwrap();
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        all_files,
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(res.results.len(), 3);
 
     // 4. 更新: a.txt の内容を変更 (サイズ変更)
     // 実体(ID)が変わらないことを確認
-    let old_id = search::search(&store, &registry, &cache, "filename:a.txt", Default::default())
-        .unwrap()
-        .results[0]
+    let old_id = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:a.txt",
+        Default::default(),
+    )
+    .unwrap()
+    .results[0]
         .id
         .clone();
     std::fs::write(&path_a, "updated content with more bytes").unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let res_edit = search::search(&store, &registry, &cache, "filename:a.txt", Default::default()).unwrap();
+    let res_edit = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:a.txt",
+        Default::default(),
+    )
+    .unwrap();
     let files_edit: Vec<_> = res_edit
         .results
         .iter()
@@ -98,17 +144,31 @@ fn test_incremental_indexing_full_flow() {
 
     // 5. 削除: b.rs を削除 (root + a.txt = 2)
     std::fs::remove_file(&path_b).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, &cache, all_files, Default::default())
-            .unwrap()
-            .results
-            .len(),
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            all_files,
+            Default::default()
+        )
+        .unwrap()
+        .results
+        .len(),
         2
     );
 
-    let res_b_del = search::search(&store, &registry, &cache, "filename:b.rs", Default::default()).unwrap();
+    let res_b_del = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:b.rs",
+        Default::default(),
+    )
+    .unwrap();
     let files_b_del: Vec<_> = res_b_del
         .results
         .iter()
@@ -123,7 +183,8 @@ fn test_incremental_indexing_full_flow() {
     // 6. 別名追加 (ハードリンク): a.txt の別名として c.txt を作成
     let path_c = root.join("c.txt");
     std::fs::hard_link(&path_a, &path_c).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
     // Inode 情報を直接取得して検索 (Uuid 形式のクエリを作成)
@@ -148,7 +209,9 @@ fn test_incremental_indexing_full_flow() {
     let uuid_str = uuid::Uuid::from_u64_pair(upper, lower).to_string();
     let query = format!("file_id:\"{}\"", uuid_str);
 
-    let _res_inode = search::search(&store, &registry, &cache, &query, Default::default()).unwrap();
+    let _res_inode =
+        search::search(&store, &registry, &cache, &query, Default::default())
+            .unwrap();
     let _files_inode: Vec<_> = _res_inode
         .results
         .iter()
@@ -177,15 +240,27 @@ fn test_system_items_registration() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
-    let results_physical = search::search(&store, &registry, &cache, "item_kind:tag & name:extension:txt", Default::default())
-        .unwrap();
+    let results_physical = search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:tag & name:extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results_physical.results.is_empty(),
         "Physical tag item should NOT be created automatically"
@@ -193,7 +268,9 @@ fn test_system_items_registration() {
 
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
-    let results_projection = search::search(&store, &registry, &cache, "tag:", Default::default()).unwrap();
+    let results_projection =
+        search::search(&store, &registry, &cache, "tag:", Default::default())
+            .unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert!(has_item_tags(&results_projection.results));
@@ -203,7 +280,8 @@ fn test_system_items_registration() {
     // 物理的な Item はなくても、oneview 上で結合されて値として取得できるはず
     // 転置: results には label items が格納されるため、name が "extension:txt" であることを確認
     let has_target_val = results_projection.results.iter().any(|r| {
-        r.item_kind == ttfm::ItemKind::Volatile && r.raw_repr() == "extension:txt"
+        r.item_kind == ttfm::ItemKind::Volatile
+            && r.raw_repr() == "extension:txt"
     });
     assert!(
         has_target_val,
@@ -211,7 +289,14 @@ fn test_system_items_registration() {
     );
 
     // 3. origin のプロジェクションも確認
-    let results_origin = search::search(&store, &registry, &cache, "origin:", Default::default()).unwrap();
+    let results_origin = search::search(
+        &store,
+        &registry,
+        &cache,
+        "origin:",
+        Default::default(),
+    )
+    .unwrap();
     assert!(has_item_tags(&results_origin.results));
     assert!(!results_origin.results.is_empty());
 
@@ -248,18 +333,32 @@ fn test_typedtag_listing_via_type_query() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 1. type:extension で検索 -> extension:txt アイテムが見つかるはず
-    let results = search::search(&store, &registry, &cache, "type:extension", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "type:extension",
+        Default::default(),
+    )
+    .unwrap();
     let tt_items: Vec<_> = results
         .results
         .iter()
         .filter(|r| {
-            r.item_kind == ttfm::ItemKind::Tag && r.raw_repr() == "extension:txt"
+            r.item_kind == ttfm::ItemKind::Tag
+                && r.raw_repr() == "extension:txt"
         })
         .collect();
     assert_eq!(
@@ -270,7 +369,14 @@ fn test_typedtag_listing_via_type_query() {
 
     // 2. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
     // オリジナル通りのフィルタロジックに戻す
-    let results = search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     let files: Vec<_> = results
         .results
         .iter()
@@ -300,13 +406,25 @@ fn test_no_empty_extension_system_item() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
-
-    let results = search::search(&store, &registry, &cache, "item_kind:tag & name:\"extension:\"", Default::default())
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
         .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:tag & name:\"extension:\"",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results.results.is_empty(),
         "Should NOT register 'extension:' system item"
@@ -323,19 +441,37 @@ fn test_definition_only_items_registration() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
-    assert!(!search::search(&store, &registry, &cache, "item_kind:type & name:name", Default::default())
-        .unwrap()
-        .results
-        .is_empty());
-    assert!(!search::search(&store, &registry, &cache, "item_kind:type & name:item_kind", Default::default())
-        .unwrap()
-        .results
-        .is_empty());
+    assert!(!search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:type & name:name",
+        Default::default()
+    )
+    .unwrap()
+    .results
+    .is_empty());
+    assert!(!search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:type & name:item_kind",
+        Default::default()
+    )
+    .unwrap()
+    .results
+    .is_empty());
 }
 
 /// 区画幅 B = 2^58。System 区画は [8B, 9B)。
@@ -417,17 +553,18 @@ fn indexed_files_live_in_file_space_without_collision() {
 
     let lo = 8 * SPACE_B;
     for id in &file_ids {
-        assert!(
-            *id >= lo,
-            "file id {id} not in File space [{lo}, ∞)"
-        );
+        assert!(*id >= lo, "file id {id} not in File space [{lo}, ∞)");
     }
 
     // ファイル（File 区画 [8B, ∞)）と定義（System 区画 [-B, 0)）は区画が異なるため衝突しない。
     let mut all = file_ids.clone();
     all.extend(def_ids.iter().copied());
     let unique: std::collections::HashSet<_> = all.iter().copied().collect();
-    assert_eq!(unique.len(), all.len(), "File and System ids must all be distinct");
+    assert_eq!(
+        unique.len(),
+        all.len(),
+        "File and System ids must all be distinct"
+    );
 }
 
 /// item_references が書き出し時点で item_id 昇順に整列していること。

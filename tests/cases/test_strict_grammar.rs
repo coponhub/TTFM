@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,9 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 use anyhow::Result;
 use tempfile::tempdir;
+use ttfm::search;
 
 #[test]
 fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
@@ -29,15 +29,28 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // This implies "Projection(size:) > Scalar(100)" which is invalid logic but valid loose grammar.
     // In strict grammar, this is a Parse Error.
     // Our post-processor should catch it.
-    let res = search::search(&store, &registry, &cache, "size: > 100", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size: > 100",
+        Default::default(),
+    );
 
     if res.is_ok() {
         // Fail the test if it unexpectedly succeeds (Loose grammar state)
@@ -77,11 +90,15 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
     let db_dir = root.join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
 
-    let res = search::search(&store, &registry, &cache, "1 >1", Default::default());
+    let res =
+        search::search(&store, &registry, &cache, "1 >1", Default::default());
 
     if res.is_ok() {
         panic!("Expected error for '1 >1', but it succeeded. Grammar is too loose.");
@@ -112,11 +129,20 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
     let db_dir = root.join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
 
-    let res = search::search(&store, &registry, &cache, "size:^=100", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size:^=100",
+        Default::default(),
+    );
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     println!("Actual error: {}", err_msg);
@@ -140,13 +166,26 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let db_dir = root.join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // Scalar comparison with projection in calculation should fail
-    let res = search::search(&store, &registry, &cache, "(mtime: / 100) < 100", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "(mtime: / 100) < 100",
+        Default::default(),
+    );
     assert!(
         res.is_err(),
         "Expected error for '(mtime: / 100) < 100' (projection in scalar comparison)"
@@ -161,7 +200,13 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     );
 
     // Label comparison with projection calculation should work
-    let res2 = search::search(&store, &registry, &cache, "(size: / 1024) :> 100", Default::default());
+    let res2 = search::search(
+        &store,
+        &registry,
+        &cache,
+        "(size: / 1024) :> 100",
+        Default::default(),
+    );
     assert!(
         res2.is_ok(),
         "Expected '(size: / 1024) :> 100' to succeed as label comparison, got: {:?}",
@@ -169,7 +214,10 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     );
 
     // Bare arithmetic with aggregation
-    let res3 = search::search(&store, &registry, &cache, 
+    let res3 = search::search(
+        &store,
+        &registry,
+        &cache,
         "count(extension:rs) + count(extension:c)",
         Default::default(),
     );

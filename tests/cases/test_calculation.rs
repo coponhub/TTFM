@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 /// 算術演算 (Calculation) 機能の統合テスト
 use super::default_scope;
 use super::inject_path_scope;
 use tempfile::tempdir;
+use ttfm::search;
 
 define_cases! {
     calc_literal_simple: {
@@ -362,22 +362,42 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res_explicit = search::search(&store, &registry, &cache, "sum((size: - 100))", Default::default())?;
+    let res_explicit = search::search(
+        &store,
+        &registry,
+        &cache,
+        "sum((size: - 100))",
+        Default::default(),
+    )?;
     assert!(
         !res_explicit.results.is_empty(),
         "Explicit paren should work"
     );
 
-    let res_bare = search::search(&store, &registry, &cache, "sum(size: - 100)", Default::default())?;
+    let res_bare = search::search(
+        &store,
+        &registry,
+        &cache,
+        "sum(size: - 100)",
+        Default::default(),
+    )?;
     assert!(!res_bare.results.is_empty(), "Bare calc should work");
 
     assert_eq!(
-        res_explicit.results[0].raw_repr(), res_bare.results[0].raw_repr(),
+        res_explicit.results[0].raw_repr(),
+        res_bare.results[0].raw_repr(),
         "bare_calculation and explicit paren should produce the same result"
     );
 

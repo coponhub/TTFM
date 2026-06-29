@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::tag::TagRegistry;
 use sea_query::PostgresQueryBuilder;
 use ttfm::db::Src;
 use ttfm::query::lens_resolver::Resolver;
 use ttfm::query::sql::BuildPick;
+use ttfm::tag::TagRegistry;
 
 fn normalize_sql(sql: &str) -> String {
     sql.split_whitespace()
@@ -32,10 +32,13 @@ fn test_build_optimized_merged_projection_sql_logical() {
     let query_str =
         "parentdir: &: (count(extension:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        .unwrap()
+        .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
+    let stmt =
+        ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Logical SQL: {}", sql);
 
@@ -68,10 +71,13 @@ fn test_build_optimized_merged_projection_sql_arithmetic() {
     let query_str =
         "(((parentdir: &: count(extension:rs))) / ((parentdir: &: count()))) :> 100";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        .unwrap()
+        .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
+    let stmt =
+        ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Arithmetic SQL: {}", sql);
 
@@ -110,10 +116,13 @@ fn test_build_optimized_merged_projection_sql_comparison() {
     let query_str =
         "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        .unwrap()
+        .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
 
-    let stmt = ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
+    let stmt =
+        ttfm::query::sql::PickNode::new(&Src::OneView, &optimized).build_pick();
     let sql = normalize_sql(&stmt.to_string(PostgresQueryBuilder));
     println!("Comparison SQL: {}", sql);
 

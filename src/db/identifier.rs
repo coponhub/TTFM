@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@
 //! 採番（attach）と文字列入力の正規化（parse）のみを持つ。
 //! 逆引き・表示は `Origin::within` / `Origin::short` / `Origin::space_lo` を直接使う。
 
-use crate::db::{Col, DuckDbFunc, Store, Tbl, TargetTable};
+use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
 use crate::types::Origin;
 use crate::util;
 use anyhow::{bail, Result};
@@ -39,9 +39,10 @@ pub fn parse(s: &str) -> Result<i64> {
         let offset: i64 = rest[open + 1..]
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid item_id offset: {s}"))?;
-        let origin = Origin::iter()
-            .find(|o| o.short() == label)
-            .ok_or_else(|| anyhow::anyhow!("unknown item_id origin: {label}"))?;
+        let origin =
+            Origin::iter().find(|o| o.short() == label).ok_or_else(|| {
+                anyhow::anyhow!("unknown item_id origin: {label}")
+            })?;
         return Ok(origin.space_lo() + offset);
     }
     s.parse()
@@ -52,7 +53,9 @@ pub fn parse(s: &str) -> Result<i64> {
 fn source_tables(origin: Origin) -> &'static [(TargetTable, Tbl)] {
     match origin {
         Origin::File => &[(TargetTable::FileReferences, Tbl::FileReferences)],
-        Origin::System | Origin::User => &[(TargetTable::ItemReferences, Tbl::ItemReferences)],
+        Origin::System | Origin::User => {
+            &[(TargetTable::ItemReferences, Tbl::ItemReferences)]
+        }
     }
 }
 
@@ -126,7 +129,7 @@ mod tests {
     fn spaces_tile_without_overlap() {
         let (slo, shi) = (Origin::System.space_lo(), Origin::System.space_hi());
         let (ulo, uhi) = (Origin::User.space_lo(), Origin::User.space_hi());
-        let (flo, _)   = (Origin::File.space_lo(), Origin::File.space_hi());
+        let (flo, _) = (Origin::File.space_lo(), Origin::File.space_hi());
         assert_eq!(shi, ulo); // System → User 隙間なし
         assert_eq!(uhi, flo); // User → File 隙間なし
         let _ = slo; // -B は定義上の下端

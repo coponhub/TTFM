@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,14 +22,17 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_unit_aware_expr, needs_nest_context,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, Src, SqlType};
+use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, SqlType, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use crate::types::{Label, SType};
-use sea_query::{Alias, BinOper, Expr, Query, SelectStatement, SimpleExpr};
+use crate::types::{ItemKind, Label, SType};
+use sea_query::{
+    Alias, BinOper, Expr, Func, Query, SelectStatement, SimpleExpr,
+};
 
-pub(super) fn build_resolved_match_sql(src: &Src, 
+pub(super) fn build_resolved_match_sql(
+    src: &Src,
     storage: &StorageMapping,
     sql_type: SqlType,
     op: ComparisonOp,
@@ -43,7 +46,8 @@ pub(super) fn build_resolved_match_sql(src: &Src,
     q
 }
 
-pub(super) fn build_column_match_sql(src: &Src, 
+pub(super) fn build_column_match_sql(
+    src: &Src,
     tag: SType,
     label: &Label,
 ) -> SelectStatement {
@@ -94,14 +98,75 @@ pub(super) fn build_column_match_sql(src: &Src,
             q.and_where(Expr::col(Col::LabelStr).is_null());
         }
         crate::types::LabelValue::Date(dt) => {
-            let t = if matches!(tag, SType::Label) { Col::LabelInt.into() } else { tag };
+            let t = if matches!(tag, SType::Label) {
+                Col::LabelInt.into()
+            } else {
+                tag
+            };
             q.and_where(Expr::col(t).eq(dt.to_timestamp()));
         }
     }
     q
 }
 
-pub(super) fn build_resolved_tag_tag_match_sql(src: &Src, 
+/// 定義行（type='content' AND label_str=val AND item_kind=kind）の指定カラムを
+/// スカラー副問合せで取得し、未登録時の既定値で COALESCE した式を返す。
+fn def_col_expr(
+    src: &Src,
+    col: Col,
+    kind: ItemKind,
+    val_str: &str,
+) -> SimpleExpr {
+    let sub = crate::query::sql::util::subquery(
+        Query::select()
+            .column(col)
+            .from(src)
+            .and_where(Expr::col(Col::Type).eq("content"))
+            .and_where(Expr::col(Col::LabelStr).eq(val_str))
+            .and_where(Expr::col(Col::ItemKind).eq(kind.as_str()))
+            .limit(1)
+            .to_owned(),
+    );
+    let default: SimpleExpr = match col {
+        Col::ItemKind => Expr::val(ItemKind::Volatile.as_str()).into(),
+        _ => Expr::val(0i64).into(),
+    };
+    Func::cust(crate::db::DuckDbFunc::Coalesce)
+        .args([sub, default])
+        .into()
+}
+
+/// 定義参照の pick SQL（登録済みなら Stored 行、未登録なら合成 Volatile 行を1行返す）。
+/// FROM 無し＋スカラー副問合せ COALESCE のため、常にちょうど1行を返す。
+pub(super) fn build_definition_ref_pick_sql(
+    src: &Src,
+    kind: ItemKind,
+    value: &Label,
+) -> SelectStatement {
+    let v = value.value().as_display_name();
+    Query::select()
+        .expr_as(def_col_expr(src, Col::ItemId, kind, &v), Col::ItemId)
+        .expr_as(def_col_expr(src, Col::Rank, kind, &v), Col::Rank)
+        .expr_as(def_col_expr(src, Col::ItemKind, kind, &v), Col::ItemKind)
+        .to_owned()
+}
+
+/// 定義参照の fetch SQL（pick 3 カラムに型付き representative＋空 tags を追加）。
+/// representative の型解決は projection と同じ decode_nest 経路で行われる。
+pub(super) fn build_definition_ref_fetch_sql(
+    src: &Src,
+    kind: ItemKind,
+    value: &Label,
+) -> SelectStatement {
+    let v = value.value().as_display_name();
+    let mut q = build_definition_ref_pick_sql(src, kind, value);
+    q.expr_as(CustomFunc::as_representative(Expr::val(v)), Representative)
+        .expr_as(CustomFunc::list_value([]), QueryResultCol::Tags);
+    q
+}
+
+pub(super) fn build_resolved_tag_tag_match_sql(
+    src: &Src,
     left_storage: &StorageMapping,
     left_sql_type: SqlType,
     op: ComparisonOp,
@@ -109,16 +174,15 @@ pub(super) fn build_resolved_tag_tag_match_sql(src: &Src,
     right_sql_type: SqlType,
 ) -> SelectStatement {
     let mut q = Query::select();
-    q.column(Col::ItemId)
-        .from(src)
-        .group_by_col(Col::ItemId);
+    q.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
     let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
     let right_expr = build_tag_value_agg_expr(right_storage, right_sql_type);
     q.and_having(left_expr.binary(to_bin_op(op), right_expr));
     q
 }
 
-pub(super) fn build_scalar_match_sql(src: &Src, 
+pub(super) fn build_scalar_match_sql(
+    src: &Src,
     left: &Label,
     op: ComparisonOp,
     right: &Label,
@@ -133,7 +197,8 @@ pub(super) fn build_scalar_match_sql(src: &Src,
     stmt
 }
 
-pub(super) fn build_resolved_scalar_sql(src: &Src,
+pub(super) fn build_resolved_scalar_sql(
+    src: &Src,
     op: &ResolvedOperand,
 ) -> SelectStatement {
     let agg_ctx = build_aggregation_context_for_operand(src, op);

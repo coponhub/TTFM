@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -31,10 +31,16 @@ fn test_parquet_physical_order() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, _cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, _cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // Verify base_tags.parquet order
     let path = store.path_for_target(TargetTable::BaseTags);
@@ -42,7 +48,8 @@ fn test_parquet_physical_order() {
     // Read raw rows without ORDER BY
     // DuckDB read_parquet typically follows physical order.
     // We extract type and label_str.
-    let rows: Vec<(String, Option<String>)> = store.conn
+    let rows: Vec<(String, Option<String>)> = store
+        .conn
         .prepare(&format!(
             "SELECT type, label_str FROM read_parquet('{}')",
             path.to_string_lossy()

@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,13 +17,16 @@ use crate::db::{SqlType, TargetTable};
 use crate::query::ast::{
     BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
+use crate::response::Item;
 use crate::taggers::TagValue;
-use crate::types::{DBType, Label, LabelValue, Rank, SType, TagType, TypedTag};
+use crate::types::{
+    DBType, ItemKind, Label, LabelValue, Origin, Rank, SType, TagType, TypedTag,
+};
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
 use chrono::TimeZone as _;
-use path_slash::PathExt as _;
 use indexmap::IndexMap;
+use path_slash::PathExt as _;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
@@ -80,7 +83,9 @@ where
     F::Value: Clone,
 {
     fn clone(&self) -> Self {
-        Self { value: self.value.clone() }
+        Self {
+            value: self.value.clone(),
+        }
     }
 }
 
@@ -105,7 +110,10 @@ pub struct DisplayFormat {
 
 impl DisplayFormat {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into() }
+        Self {
+            id: id.into(),
+            label: label.into(),
+        }
     }
 }
 
@@ -204,14 +212,36 @@ pub enum LogicalRole {
 
 /// クエリ展開と正規化のロジック。
 pub trait Query: Send + Sync {
+    /// read 時の値解決。デフォルトは passthrough（空＝reduce 無し）。
+    /// type 固有の選別（name の user 由来優先など）を宣言する type のみ上書きする。
+    fn read(&self) -> crate::query::lens_reader::ReadResolution {
+        crate::query::lens_reader::ReadResolution::default()
+    }
+
     /// タグを QueryNode へ展開する。デフォルトはそのまま TypedTag。
     fn expand(
         &self,
-        _tagtype: &TagType,
-        _label: &Label,
+        tagtype: &TagType,
+        label: &Label,
         tag: &TypedTag,
     ) -> QueryNode {
-        QueryNode::TypedTag(tag.clone())
+        if let Some(kind) = self.item_kind() {
+            // 定義アイテム参照: tag:/type: などは item_references の定義行を参照する。
+            // value は自身の型を付与した representative（未登録時の Volatile 用）。
+            QueryNode::DefinitionRef {
+                kind,
+                value: Label::resolve(tagtype.clone(), label.value()),
+            }
+        } else {
+            QueryNode::TypedTag(tag.clone())
+        }
+    }
+
+    /// この TagFunction が「定義アイテム」を表すなら、その ItemKind を返す。
+    /// `tag:`→Tag, `type:`→Type のように、item_references の定義行を参照する種別を宣言する。
+    /// None（既定）の場合は通常のタグとして扱う。
+    fn item_kind(&self) -> Option<ItemKind> {
+        None
     }
 
     /// Projection（type:形式）を QueryNode へ展開する。
@@ -235,7 +265,6 @@ pub trait Query: Send + Sync {
     }
 
     /// DB の `type` カラムに格納されるキー。None = タグ名をそのまま使用。
-    /// FilenameFn のみ Some("name") を返す（旧来の DB キー互換）。
     fn storage_key(&self) -> Option<&'static str> {
         None
     }
@@ -270,10 +299,32 @@ pub trait Display: Send + Sync {
 }
 
 // ============================================================
+// Edit trait
+// ============================================================
+
+pub enum EditStrategy {
+    Append,
+    Replace,
+    ModifyInjection,
+    Relocate,
+    SetFileAttr,
+}
+
+pub trait Edit: Send + Sync {
+    fn strategy(&self) -> EditStrategy;
+    fn validate(&self, new: &Label) -> Result<Label> {
+        Ok(new.clone())
+    }
+    fn inject(&self, _item: &Item) -> Option<Label> {
+        None
+    }
+}
+
+// ============================================================
 // TagFunction trait
 // ============================================================
 
-/// タグの統合定義単位。Index・Query・Display の3コンポーネントを束ねる。
+/// タグの統合定義単位。Index・Query・Display・Edit の4コンポーネントを束ねる。
 pub trait TagFunction: Send + Sync {
     fn name(&self) -> &str;
 
@@ -286,6 +337,10 @@ pub trait TagFunction: Send + Sync {
     }
 
     fn display(&self) -> Option<&dyn Display> {
+        None
+    }
+
+    fn edit(&self) -> Option<&dyn Edit> {
         None
     }
 
@@ -330,16 +385,14 @@ impl TagRegistry {
         self.functions.get(name).cloned()
     }
 
-    pub fn iter_arcs(
-        &self,
-    ) -> impl Iterator<Item = Arc<dyn TagFunction>> + '_ {
+    pub fn iter_arcs(&self) -> impl Iterator<Item = Arc<dyn TagFunction>> + '_ {
         self.functions.values().cloned()
     }
 
-    pub fn iter_all_for_rank(
-        &self,
-    ) -> impl Iterator<Item = (&str, Rank)> + '_ {
-        self.functions.values().map(|f| (f.name(), f.default_rank()))
+    pub fn iter_all_for_rank(&self) -> impl Iterator<Item = (&str, Rank)> + '_ {
+        self.functions
+            .values()
+            .map(|f| (f.name(), f.default_rank()))
     }
 
     /// 標準タグを全登録したレジストリを返す。
@@ -454,7 +507,8 @@ impl TagRegistry {
         let Some(disp) = func.display() else {
             return raw.to_string();
         };
-        let lv = raw.parse::<i64>()
+        let lv = raw
+            .parse::<i64>()
             .map(LabelValue::Integer)
             .unwrap_or_else(|_| LabelValue::String(raw.to_string()));
         disp.show(&lv, disp.formats().default)
@@ -490,7 +544,10 @@ impl TagRegistry {
                         self.register_plugin(adapter);
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to load plugin {:?}: {}", path, e);
+                        eprintln!(
+                            "Warning: Failed to load plugin {:?}: {}",
+                            path, e
+                        );
                     }
                 }
             }
@@ -503,9 +560,8 @@ impl TagRegistry {
         &mut self,
         status: &std::collections::HashMap<String, bool>,
     ) -> Result<()> {
-        let builtins: &[&[u8]] = &[
-            include_bytes!("../plugins/mimetype_plugin.component.wasm"),
-        ];
+        let builtins: &[&[u8]] =
+            &[include_bytes!("../plugins/mimetype_plugin.component.wasm")];
         for bytes in builtins {
             match crate::plugins::WasmPlugin::from_bytes(bytes) {
                 Ok(plugin) => {
@@ -633,7 +689,9 @@ impl Query for DirectoryFn {
     fn expand_projection(&self, _tt: &TagType) -> QueryNode {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, true)),
-            QueryNode::Projection(Operand::from(TagType::Base(SType::Filename))),
+            QueryNode::Projection(Operand::from(TagType::Base(
+                SType::Filename,
+            ))),
         ])
     }
 }
@@ -650,29 +708,43 @@ impl TagFunction for FilenameFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::FILENAME
     }
 }
+impl Edit for FilenameFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Relocate
+    }
+}
 impl Index for FilenameFn {
-    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn role(&self) -> ScanRole {
+        ScanRole::Location
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         get_safe_meta(path)?;
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         Ok(Some(LabelValue::String(name)))
     }
     fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
         Some(LabelValue::String(
-            path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
         ))
     }
 }
 impl Query for FilenameFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
-    }
-    fn storage_key(&self) -> Option<&'static str> {
-        Some("name")
     }
     fn expand(
         &self,
@@ -688,7 +760,9 @@ impl Query for FilenameFn {
     fn expand_projection(&self, _tt: &TagType) -> QueryNode {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
-            QueryNode::Projection(Operand::from(TagType::Base(SType::Filename))),
+            QueryNode::Projection(Operand::from(TagType::Base(
+                SType::Filename,
+            ))),
         ])
     }
 }
@@ -705,14 +779,27 @@ impl TagFunction for ExtensionFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
+}
+impl Edit for ExtensionFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Relocate
+    }
 }
 impl Index for ExtensionFn {
-    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn role(&self) -> ScanRole {
+        ScanRole::Location
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
-        Ok(path.extension().map(|e| LabelValue::String(e.to_string_lossy().to_lowercase())))
+        Ok(path
+            .extension()
+            .map(|e| LabelValue::String(e.to_string_lossy().to_lowercase())))
     }
     fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
-        path.extension().map(|e| LabelValue::String(e.to_string_lossy().to_lowercase()))
+        path.extension()
+            .map(|e| LabelValue::String(e.to_string_lossy().to_lowercase()))
     }
 }
 impl Query for ExtensionFn {
@@ -756,12 +843,22 @@ impl TagFunction for PathFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PATH
     }
 }
+impl Edit for PathFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Relocate
+    }
+}
 impl Scan for PathFn {
-    fn name() -> &'static str { "path" }
+    fn name() -> &'static str {
+        "path"
+    }
     type Value = String;
     const SCAN_ROLE: ScanRole = ScanRole::Location;
     fn scan(path: &Path, _: &SafeMetadata) -> Result<String> {
@@ -769,7 +866,9 @@ impl Scan for PathFn {
     }
 }
 impl Index for PathFn {
-    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn role(&self) -> ScanRole {
+        ScanRole::Location
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         Ok(Some(LabelValue::String(path.to_slash_lossy().to_string())))
     }
@@ -808,20 +907,32 @@ impl TagFunction for ParentDirFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::PARENT_DIR
     }
 }
+impl Edit for ParentDirFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Relocate
+    }
+}
 impl Index for ParentDirFn {
-    fn role(&self) -> ScanRole { ScanRole::Location }
+    fn role(&self) -> ScanRole {
+        ScanRole::Location
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
-        let parent = path.parent()
+        let parent = path
+            .parent()
             .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
         Ok(Some(LabelValue::String(parent)))
     }
     fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
-        path.parent().map(|p| LabelValue::String(p.to_slash_lossy().to_string()))
+        path.parent()
+            .map(|p| LabelValue::String(p.to_slash_lossy().to_string()))
     }
 }
 impl Query for ParentDirFn {
@@ -858,12 +969,15 @@ impl TagFunction for StemFn {
 }
 impl Index for StemFn {
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
-        let stem = path.file_stem()
+        let stem = path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         Ok(Some(LabelValue::String(stem)))
     }
-    fn target_table(&self) -> TargetTable { TargetTable::BaseTags }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::BaseTags
+    }
 }
 impl Query for StemFn {
     fn logical_type(&self) -> LogicalType {
@@ -889,8 +1003,12 @@ impl Index for IsDirFn {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Boolean(m.is_dir())))
     }
-    fn sql_type(&self) -> SqlType { SqlType::BOOLEAN }
-    fn target_table(&self) -> TargetTable { TargetTable::BaseTags }
+    fn sql_type(&self) -> SqlType {
+        SqlType::BOOLEAN
+    }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::BaseTags
+    }
 }
 impl Query for IsDirFn {
     fn logical_type(&self) -> LogicalType {
@@ -923,8 +1041,19 @@ impl TagFunction for ContentFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::CONTENT
+    }
+}
+impl Edit for ContentFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::ModifyInjection
+    }
+    fn inject(&self, item: &Item) -> Option<Label> {
+        Some(Label::Content(item.raw_repr()))
     }
 }
 impl Query for ContentFn {
@@ -947,7 +1076,9 @@ impl TagFunction for FileIdFn {
     }
 }
 impl Scan for FileIdFn {
-    fn name() -> &'static str { "file_id" }
+    fn name() -> &'static str {
+        "file_id"
+    }
     type Value = crate::types::FileRef;
     const SCAN_ROLE: ScanRole = ScanRole::ScanId;
     fn scan(path: &Path, _: &SafeMetadata) -> Result<crate::types::FileRef> {
@@ -955,16 +1086,24 @@ impl Scan for FileIdFn {
     }
 }
 impl Index for FileIdFn {
-    fn role(&self) -> ScanRole { ScanRole::ScanId }
+    fn role(&self) -> ScanRole {
+        ScanRole::ScanId
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         let r = crate::get_file_ref(path)?;
         Ok(Some(LabelValue::String(r.to_string())))
     }
     fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
-        crate::get_file_ref(path).ok().map(|r| LabelValue::String(r.to_string()))
+        crate::get_file_ref(path)
+            .ok()
+            .map(|r| LabelValue::String(r.to_string()))
     }
-    fn sql_type(&self) -> SqlType { SqlType::UUID }
-    fn target_table(&self) -> TargetTable { TargetTable::FileReferences }
+    fn sql_type(&self) -> SqlType {
+        SqlType::UUID
+    }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::FileReferences
+    }
     fn extract_tag_value(&self, path: &Path) -> Result<TagValue> {
         Ok(TagValue::Uuid(crate::get_file_ref(path)?))
     }
@@ -984,11 +1123,25 @@ impl TagFunction for NameFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::NAME
     }
 }
+impl Edit for NameFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Replace
+    }
+}
 impl Query for NameFn {
+    fn read(&self) -> crate::query::lens_reader::ReadResolution {
+        // §4.1: name は user 由来を優先し、無ければ filename にフォールバック。
+        crate::query::lens_reader::ReadResolution::default()
+            .prefer(TypedTag::new(SType::Origin, Origin::User.to_string()))
+            .fallback(TagType::Base(SType::Filename))
+    }
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
@@ -1022,7 +1175,9 @@ impl TagFunction for SizeFn {
     }
 }
 impl Scan for SizeFn {
-    fn name() -> &'static str { "size" }
+    fn name() -> &'static str {
+        "size"
+    }
     type Value = crate::types::FileSize;
     const SCAN_ROLE: ScanRole = ScanRole::Integrity;
     fn scan(_: &Path, meta: &SafeMetadata) -> Result<crate::types::FileSize> {
@@ -1030,12 +1185,16 @@ impl Scan for SizeFn {
     }
 }
 impl Index for SizeFn {
-    fn role(&self) -> ScanRole { ScanRole::Integrity }
+    fn role(&self) -> ScanRole {
+        ScanRole::Integrity
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Integer(m.len())))
     }
-    fn sql_type(&self) -> SqlType { SqlType::BIGINT }
+    fn sql_type(&self) -> SqlType {
+        SqlType::BIGINT
+    }
 }
 impl Query for SizeFn {
     fn logical_type(&self) -> LogicalType {
@@ -1063,7 +1222,7 @@ impl Display for SizeFn {
         DisplayFormats {
             default: DisplayFormat::new("si", "KB / MB"),
             options: vec![
-                DisplayFormat::new("si",     "KB / MB"),
+                DisplayFormat::new("si", "KB / MB"),
                 DisplayFormat::new("binary", "KiB / MiB"),
             ],
         }
@@ -1143,12 +1302,16 @@ impl crate::types::DateTime {
         let ceil_ts = self.ceiling().map(to_ts).unwrap_or(0);
 
         match op {
-            BasicOp::Eq => vec![(BasicOp::Ge, floor_ts), (BasicOp::Le, ceil_ts)],
+            BasicOp::Eq => {
+                vec![(BasicOp::Ge, floor_ts), (BasicOp::Le, ceil_ts)]
+            }
             BasicOp::Gt => vec![(BasicOp::Gt, ceil_ts)],
             BasicOp::Ge => vec![(BasicOp::Ge, floor_ts)],
             BasicOp::Lt => vec![(BasicOp::Lt, floor_ts)],
             BasicOp::Le => vec![(BasicOp::Le, ceil_ts)],
-            BasicOp::Ne => vec![(BasicOp::Lt, floor_ts), (BasicOp::Gt, ceil_ts)],
+            BasicOp::Ne => {
+                vec![(BasicOp::Lt, floor_ts), (BasicOp::Gt, ceil_ts)]
+            }
         }
     }
 }
@@ -1168,27 +1331,48 @@ impl TagFunction for MtimeFn {
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::MTIME
     }
 }
+impl Edit for MtimeFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::SetFileAttr
+    }
+}
 impl Scan for MtimeFn {
-    fn name() -> &'static str { "mtime" }
+    fn name() -> &'static str {
+        "mtime"
+    }
     type Value = crate::types::FileTimestamp;
     const SCAN_ROLE: ScanRole = ScanRole::Integrity;
-    fn scan(_: &Path, meta: &SafeMetadata) -> Result<crate::types::FileTimestamp> {
+    fn scan(
+        _: &Path,
+        meta: &SafeMetadata,
+    ) -> Result<crate::types::FileTimestamp> {
         Ok(crate::types::FileTimestamp(meta.modified()))
     }
 }
 impl Index for MtimeFn {
-    fn role(&self) -> ScanRole { ScanRole::Integrity }
+    fn role(&self) -> ScanRole {
+        ScanRole::Integrity
+    }
     fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Integer(m.modified())))
     }
-    fn sql_type(&self) -> SqlType { SqlType::BIGINT }
+    fn sql_type(&self) -> SqlType {
+        SqlType::BIGINT
+    }
 }
-fn mtime_range_op(first: &Operand, op: ComparisonOp, range: DatetimeRange) -> Vec<QueryNode> {
+fn mtime_range_op(
+    first: &Operand,
+    op: ComparisonOp,
+    range: DatetimeRange,
+) -> Vec<QueryNode> {
     let basic_op = match op {
         ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
     };
@@ -1200,38 +1384,62 @@ fn mtime_range_op(first: &Operand, op: ComparisonOp, range: DatetimeRange) -> Ve
         BasicOp::Eq => vec![
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
-                rest: vec![(make_op(BasicOp::Ge), Operand::Literal(Label::Mtime(range.start)))],
+                rest: vec![(
+                    make_op(BasicOp::Ge),
+                    Operand::Literal(Label::Mtime(range.start)),
+                )],
             }),
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
-                rest: vec![(make_op(BasicOp::Le), Operand::Literal(Label::Mtime(range.end)))],
+                rest: vec![(
+                    make_op(BasicOp::Le),
+                    Operand::Literal(Label::Mtime(range.end)),
+                )],
             }),
         ],
         BasicOp::Ne => vec![QueryNode::Or(vec![
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
-                rest: vec![(make_op(BasicOp::Lt), Operand::Literal(Label::Mtime(range.start)))],
+                rest: vec![(
+                    make_op(BasicOp::Lt),
+                    Operand::Literal(Label::Mtime(range.start)),
+                )],
             }),
             QueryNode::Comparison(ComparisonNode {
                 first: first.clone(),
-                rest: vec![(make_op(BasicOp::Gt), Operand::Literal(Label::Mtime(range.end)))],
+                rest: vec![(
+                    make_op(BasicOp::Gt),
+                    Operand::Literal(Label::Mtime(range.end)),
+                )],
             }),
         ])],
         BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
-            rest: vec![(make_op(BasicOp::Gt), Operand::Literal(Label::Mtime(range.end)))],
+            rest: vec![(
+                make_op(BasicOp::Gt),
+                Operand::Literal(Label::Mtime(range.end)),
+            )],
         })],
         BasicOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
-            rest: vec![(make_op(BasicOp::Ge), Operand::Literal(Label::Mtime(range.start)))],
+            rest: vec![(
+                make_op(BasicOp::Ge),
+                Operand::Literal(Label::Mtime(range.start)),
+            )],
         })],
         BasicOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
-            rest: vec![(make_op(BasicOp::Lt), Operand::Literal(Label::Mtime(range.start)))],
+            rest: vec![(
+                make_op(BasicOp::Lt),
+                Operand::Literal(Label::Mtime(range.start)),
+            )],
         })],
         BasicOp::Le => vec![QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
-            rest: vec![(make_op(BasicOp::Le), Operand::Literal(Label::Mtime(range.end)))],
+            rest: vec![(
+                make_op(BasicOp::Le),
+                Operand::Literal(Label::Mtime(range.end)),
+            )],
         })],
     }
 }
@@ -1240,10 +1448,10 @@ impl Display for MtimeFn {
         DisplayFormats {
             default: DisplayFormat::new("human", "Human Readable"),
             options: vec![
-                DisplayFormat::new("human",    "Human Readable"),
+                DisplayFormat::new("human", "Human Readable"),
                 DisplayFormat::new("relative", "Relative"),
-                DisplayFormat::new("iso",      "ISO 8601"),
-                DisplayFormat::new("raw",      "Raw"),
+                DisplayFormat::new("iso", "ISO 8601"),
+                DisplayFormat::new("raw", "Raw"),
             ],
         }
     }
@@ -1308,7 +1516,8 @@ fn parse_date_literal(s: &str) -> Option<crate::types::DateTime> {
         let y: i32 = parts[0].parse().ok()?;
         let m: u32 = parts[1].parse().ok()?;
         let d: u32 = parts[2].parse().ok()?;
-        return NaiveDate::from_ymd_opt(y, m, d).map(crate::types::DateTime::Date);
+        return NaiveDate::from_ymd_opt(y, m, d)
+            .map(crate::types::DateTime::Date);
     }
     // YYYY-MM / YYYY/MM
     if parts.len() == 2
@@ -1343,12 +1552,19 @@ impl Query for MtimeFn {
     ) -> QueryNode {
         if let LabelValue::Date(dt) = label.value() {
             let first = Operand::TypeRef(SType::Mtime.into());
-            let nodes: Vec<_> = dt.to_range(BasicOp::Eq).into_iter().map(|(b, ts)| {
-                QueryNode::Comparison(ComparisonNode {
-                    first: first.clone(),
-                    rest: vec![(ComparisonOp::Label(b), Operand::Literal(Label::Mtime(ts)))],
+            let nodes: Vec<_> = dt
+                .to_range(BasicOp::Eq)
+                .into_iter()
+                .map(|(b, ts)| {
+                    QueryNode::Comparison(ComparisonNode {
+                        first: first.clone(),
+                        rest: vec![(
+                            ComparisonOp::Label(b),
+                            Operand::Literal(Label::Mtime(ts)),
+                        )],
+                    })
                 })
-            }).collect();
+                .collect();
             return match nodes.len() {
                 1 => nodes.into_iter().next().unwrap(),
                 _ => QueryNode::And(nodes),
@@ -1403,12 +1619,16 @@ impl Query for MtimeFn {
                     ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
                 };
                 if let LabelValue::Date(dt) = label.value() {
-                    let nodes = dt.to_range(basic_op).into_iter().map(|(b, ts)| {
-                        QueryNode::Comparison(ComparisonNode {
-                            first: first.clone(),
-                            rest: vec![(make_op(b), Operand::Literal(Label::Mtime(ts)))],
-                        })
-                    });
+                    let nodes =
+                        dt.to_range(basic_op).into_iter().map(|(b, ts)| {
+                            QueryNode::Comparison(ComparisonNode {
+                                first: first.clone(),
+                                rest: vec![(
+                                    make_op(b),
+                                    Operand::Literal(Label::Mtime(ts)),
+                                )],
+                            })
+                        });
                     conditions.extend(nodes);
                     continue;
                 }
@@ -1484,8 +1704,26 @@ impl TagFunction for ItemKindFn {
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
     }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::ITEM_KIND
+    }
+}
+impl Edit for ItemKindFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::ModifyInjection
+    }
+    fn inject(&self, item: &Item) -> Option<Label> {
+        let kind = match item.representative.as_slice() {
+            [l] if l.tag_type() == TagType::Base(SType::TypedTag) => {
+                ItemKind::Tag
+            }
+            [l] if l.tag_type() == TagType::Base(SType::Type) => ItemKind::Type,
+            _ => ItemKind::Note,
+        };
+        Some(Label::from(kind))
     }
 }
 impl Query for ItemKindFn {
@@ -1516,6 +1754,14 @@ impl TagFunction for RankFn {
     }
     fn query(&self) -> Option<&dyn Query> {
         Some(self)
+    }
+    fn edit(&self) -> Option<&dyn Edit> {
+        Some(self)
+    }
+}
+impl Edit for RankFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Replace
     }
 }
 impl Query for RankFn {
@@ -1585,16 +1831,8 @@ impl Query for TypeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
-    fn expand(
-        &self,
-        _tt: &TagType,
-        label: &Label,
-        _tag: &TypedTag,
-    ) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::Type,
-            label: label.clone(),
-        }
+    fn item_kind(&self) -> Option<ItemKind> {
+        Some(ItemKind::Type)
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -1651,16 +1889,8 @@ impl Query for TypedTagFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
-    fn expand(
-        &self,
-        _tt: &TagType,
-        label: &Label,
-        _tag: &TypedTag,
-    ) -> QueryNode {
-        QueryNode::ColumnMatch {
-            tag: SType::TypedTag,
-            label: label.clone(),
-        }
+    fn item_kind(&self) -> Option<ItemKind> {
+        Some(ItemKind::Tag)
     }
 }
 
@@ -1832,7 +2062,10 @@ mod tests {
         let normalized = q.query().unwrap().normalize_label(&label);
         match normalized {
             Label::Date(crate::types::DateTime::Date(d)) => {
-                assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+                assert_eq!(
+                    d,
+                    chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()
+                );
             }
             other => panic!("expected Label::Date(Date(_)), got {:?}", other),
         }
@@ -1847,7 +2080,10 @@ mod tests {
             LabelValue::String("2026".to_string()),
         );
         let normalized = q.query().unwrap().normalize_label(&label);
-        assert_eq!(normalized, label, "bare YYYY should be unchanged by normalize_label");
+        assert_eq!(
+            normalized, label,
+            "bare YYYY should be unchanged by normalize_label"
+        );
     }
 
     #[test]
@@ -1882,7 +2118,10 @@ mod tests {
         let normalized = reg.normalize_label("mtime", &label);
         match normalized {
             Label::Date(crate::types::DateTime::Date(d)) => {
-                assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+                assert_eq!(
+                    d,
+                    chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
+                );
             }
             other => panic!("expected Label::Date(Date(_)), got {:?}", other),
         }
@@ -1940,8 +2179,8 @@ mod tests {
 
     #[test]
     fn test_datetime_to_range_date_eq() {
-        use chrono::NaiveDate;
         use crate::query::ast::BasicOp;
+        use chrono::NaiveDate;
         let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = crate::types::DateTime::Date(d);
         let ranges = dt.to_range(BasicOp::Eq);
@@ -1956,8 +2195,8 @@ mod tests {
 
     #[test]
     fn test_datetime_to_range_date_gt() {
-        use chrono::NaiveDate;
         use crate::query::ast::BasicOp;
+        use chrono::NaiveDate;
         let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = crate::types::DateTime::Date(d);
         let ranges = dt.to_range(BasicOp::Gt);
@@ -1978,8 +2217,8 @@ mod tests {
 
     #[test]
     fn test_datetime_to_range_instant_any_op() {
-        use chrono::{Local, TimeZone};
         use crate::query::ast::BasicOp;
+        use chrono::{Local, TimeZone};
         let local_dt = Local.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
         let ts = local_dt.timestamp();
         let dt = crate::types::DateTime::Instant(local_dt);
@@ -1993,20 +2232,32 @@ mod tests {
 
     #[test]
     fn test_mtime_expand_date_label_becomes_range() {
-        use chrono::NaiveDate;
         use crate::query::ast::{BasicOp, ComparisonOp};
         use crate::types::{DateTime, Label, SType, TagType, TypedTag};
+        use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let label = Label::Date(DateTime::Date(date));
         let tag_type = TagType::from(SType::Mtime);
         let typed_tag = TypedTag::new(SType::Mtime, label.clone());
-        let result = MtimeFn.query().unwrap().expand(&tag_type, &label, &typed_tag);
+        let result = MtimeFn
+            .query()
+            .unwrap()
+            .expand(&tag_type, &label, &typed_tag);
         // Date Eq → And([Ge(floor), Le(ceil)])
-        let QueryNode::And(nodes) = result else { panic!("expected And, got {:?}", result) };
+        let QueryNode::And(nodes) = result else {
+            panic!("expected And, got {:?}", result)
+        };
         assert_eq!(nodes.len(), 2);
-        let ops: Vec<_> = nodes.iter().map(|n| {
-            if let QueryNode::Comparison(c) = n { c.rest[0].0.clone() } else { panic!() }
-        }).collect();
+        let ops: Vec<_> = nodes
+            .iter()
+            .map(|n| {
+                if let QueryNode::Comparison(c) = n {
+                    c.rest[0].0.clone()
+                } else {
+                    panic!()
+                }
+            })
+            .collect();
         assert!(ops.contains(&ComparisonOp::Label(BasicOp::Ge)));
         assert!(ops.contains(&ComparisonOp::Label(BasicOp::Le)));
     }
@@ -2015,9 +2266,11 @@ mod tests {
 
     #[test]
     fn test_mtime_expand_comparison_date_label_gt() {
-        use chrono::NaiveDate;
-        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
         use crate::types::{DateTime, Label, LabelValue, SType, TagType};
+        use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = DateTime::Date(date);
         let node = ComparisonNode {
@@ -2029,18 +2282,27 @@ mod tests {
         };
         let result = MtimeFn.query().unwrap().expand_comparison(node);
         // Gt → ceil_ts で単一条件
-        let QueryNode::Comparison(c) = result else { panic!("expected Comparison, got {:?}", result) };
+        let QueryNode::Comparison(c) = result else {
+            panic!("expected Comparison, got {:?}", result)
+        };
         let (op, rhs) = &c.rest[0];
         assert_eq!(*op, ComparisonOp::Label(BasicOp::Gt));
-        let Operand::Literal(label) = rhs else { panic!() };
-        assert!(matches!(label.value(), LabelValue::Integer(_)), "should be Mtime(i64)");
+        let Operand::Literal(label) = rhs else {
+            panic!()
+        };
+        assert!(
+            matches!(label.value(), LabelValue::Integer(_)),
+            "should be Mtime(i64)"
+        );
     }
 
     #[test]
     fn test_mtime_expand_comparison_date_label_eq_expands_to_and() {
-        use chrono::NaiveDate;
-        use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand};
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
         use crate::types::{DateTime, Label, SType, TagType};
+        use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = DateTime::Date(date);
         let node = ComparisonNode {
@@ -2052,6 +2314,10 @@ mod tests {
         };
         let result = MtimeFn.query().unwrap().expand_comparison(node);
         // Eq → And([Ge, Le])
-        assert!(matches!(result, QueryNode::And(_)), "expected And for Eq, got {:?}", result);
+        assert!(
+            matches!(result, QueryNode::And(_)),
+            "expected And for Eq, got {:?}",
+            result
+        );
     }
 }

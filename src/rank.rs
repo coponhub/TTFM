@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,8 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::types::Rank;
 use crate::tag::TagRegistry;
+use crate::types::Rank;
 use sea_query::{CaseStatement, Condition, SimpleExpr};
 
 /// システムにおける標準的なランク（優先度）の定義。
@@ -67,7 +67,7 @@ pub fn build_rank_expr(
 pub fn update_ranks(
     store: &crate::db::Store,
     registry: &TagRegistry,
-    results: &[crate::response::SearchResult],
+    results: &[crate::response::Item],
     rank: i64,
 ) -> anyhow::Result<()> {
     let file_ids: Vec<i64> = results
@@ -88,7 +88,16 @@ pub fn update_ranks(
         batch_update_rank(store, &item_ids, false, rank)?;
     }
     let all_columns = registry.get_all_columns();
-    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    let reader = crate::query::lens_reader::Reader::build(
+        registry,
+        crate::db::Tbl::_OneView,
+    );
+    crate::oneview::OneView::recreate(
+        &store.conn,
+        &all_columns,
+        reader,
+        &store.db_dir,
+    )?;
     Ok(())
 }
 
@@ -102,7 +111,16 @@ pub fn set_rank_by_id(
 ) -> anyhow::Result<()> {
     batch_update_rank(store, &[id], is_file, rank)?;
     let all_columns = registry.get_all_columns();
-    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)?;
+    let reader = crate::query::lens_reader::Reader::build(
+        registry,
+        crate::db::Tbl::_OneView,
+    );
+    crate::oneview::OneView::recreate(
+        &store.conn,
+        &all_columns,
+        reader,
+        &store.db_dir,
+    )?;
     Ok(())
 }
 
@@ -130,9 +148,8 @@ pub fn get_type_ranks(
         .to_string(PostgresQueryBuilder);
 
     let mut stmt = store.conn.prepare(&query)?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
 
     let mut map = std::collections::HashMap::new();
     for row in rows {
@@ -148,7 +165,7 @@ fn batch_update_rank(
     is_file: bool,
     rank: i64,
 ) -> anyhow::Result<()> {
-    use crate::db::{Col, Tbl, TargetTable};
+    use crate::db::{Col, TargetTable, Tbl};
     use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
     use sea_query::{Expr, Query};
 
@@ -218,11 +235,26 @@ mod tests {
 
     fn create_registry() -> TagRegistry {
         let mut reg = TagRegistry::new();
-        reg.register_plugin(MockFunc { name: "high", rank: 100 });
-        reg.register_plugin(MockFunc { name: "low", rank: 1 });
-        reg.register_plugin(MockFunc { name: "zero", rank: 0 });
-        reg.register_plugin(MockFunc { name: "name", rank: 10 });
-        reg.register_plugin(MockFunc { name: "kind", rank: 5 });
+        reg.register_plugin(MockFunc {
+            name: "high",
+            rank: 100,
+        });
+        reg.register_plugin(MockFunc {
+            name: "low",
+            rank: 1,
+        });
+        reg.register_plugin(MockFunc {
+            name: "zero",
+            rank: 0,
+        });
+        reg.register_plugin(MockFunc {
+            name: "name",
+            rank: 10,
+        });
+        reg.register_plugin(MockFunc {
+            name: "kind",
+            rank: 5,
+        });
         reg
     }
 

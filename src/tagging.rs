@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -79,7 +79,9 @@ pub fn tag_item(
             .column(Col::ItemId)
             .from_subquery(
                 util::parquet_query(
-                    &store.path_for_target(TargetTable::Locations).to_string_lossy(),
+                    &store
+                        .path_for_target(TargetTable::Locations)
+                        .to_string_lossy(),
                 ),
                 Tbl::Locations,
             )
@@ -96,9 +98,10 @@ pub fn tag_item(
                 .and_where(Expr::col(Col::LabelStr).eq(item))
                 .to_string(PostgresQueryBuilder);
 
-            store.conn.query_row(&query_name, [], |r| r.get(0)).context(
-                format!("Item not found by path or name: {}", item),
-            )?
+            store
+                .conn
+                .query_row(&query_name, [], |r| r.get(0))
+                .context(format!("Item not found by path or name: {}", item))?
         }
     };
 
@@ -194,5 +197,14 @@ pub(crate) fn append_tag_to_parquet(
 
 fn refresh_view(store: &Store, registry: &TagRegistry) -> Result<()> {
     let all_columns = registry.get_all_columns();
-    crate::oneview::OneView::recreate(&store.conn, &all_columns, &store.db_dir)
+    let reader = crate::query::lens_reader::Reader::build(
+        registry,
+        crate::db::Tbl::_OneView,
+    );
+    crate::oneview::OneView::recreate(
+        &store.conn,
+        &all_columns,
+        reader,
+        &store.db_dir,
+    )
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::{search, tagging};
-use ttfm::types::ItemId;
 use crate::cases::has_item_tags;
 use std::fs::File;
 use tempfile::tempdir;
+use ttfm::types::ItemId;
+use ttfm::{search, tagging};
 
 // ──────────────────────────────────────────────
 // スタンドアロン: bare クエリの挙動確認
@@ -37,9 +37,19 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res = search::search(&store, &registry, &cache, "extension:", Default::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        Default::default(),
+    )?;
 
     assert!(
         res.results.iter().any(|r| r.raw_repr() == "txt"),
@@ -219,22 +229,41 @@ fn test_projection_queries() {
 
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 1. extension: (投影 - 転置: Label → Items)
     // 投影結果はラベル値（rs, txt）のリストとして返される
-    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'extension:': {:?}",
-        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
+        results
+            .results
+            .iter()
+            .map(|r| r.raw_repr())
+            .collect::<Vec<String>>()
     );
     assert_eq!(
         results.results.len(),
         2,
         "extension: should return 2 label values (rs, txt). Found: {:?}",
-        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
+        results
+            .results
+            .iter()
+            .map(|r| r.raw_repr())
+            .collect::<Vec<String>>()
     );
     // 転置: results には label items が格納される（name="rs", name="txt"）
     assert!(results.results.iter().any(|r| r.raw_repr() == "rs"));
@@ -242,10 +271,21 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
-    let results = search::search(&store, &registry, &cache, "directory:", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "directory:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'directory:': {:?}",
-        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
+        results
+            .results
+            .iter()
+            .map(|r| r.raw_repr())
+            .collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（test_dir など）
     assert!(
@@ -257,10 +297,21 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
-    let results = search::search(&store, &registry, &cache, "filename:", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'filename:': {:?}",
-        results.results.iter().map(|r| r.raw_repr()).collect::<Vec<String>>()
+        results
+            .results
+            .iter()
+            .map(|r| r.raw_repr())
+            .collect::<Vec<String>>()
     );
     // 転置: label items として filename 値が返される（:test.rs, :test.txt）
     assert_eq!(
@@ -279,12 +330,25 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results = search::search(&store, &registry, &cache, "origin:system", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "origin:system",
+        Default::default(),
+    )
+    .unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
-    let results = search::search(&store, &registry, &cache, "extension: & directory:", Default::default())
-        .unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension: & directory:",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(
         results.results.len(),
         0,
@@ -292,7 +356,9 @@ fn test_projection_queries() {
     );
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
-    let results = search::search(&store, &registry, &cache, "type:", Default::default()).unwrap();
+    let results =
+        search::search(&store, &registry, &cache, "type:", Default::default())
+            .unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
 
@@ -316,7 +382,9 @@ fn test_projection_queries() {
     }
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
-    let results = search::search(&store, &registry, &cache, "tag:", Default::default()).unwrap();
+    let results =
+        search::search(&store, &registry, &cache, "tag:", Default::default())
+            .unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
     assert!(has_item_tags(&results.results));
@@ -326,13 +394,17 @@ fn test_projection_queries() {
         .results
         .iter()
         .any(|r| r.get_tag_value("tag").is_some());
-    assert!(
-        has_tag,
-        "Items should have 'tag' tag values in SearchResult"
-    );
+    assert!(has_tag, "Items should have 'tag' tag values in Item");
 
     // 追加検証: extension: 結果の中身
-    let ext_results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
+    let ext_results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.raw_repr() == "test.rs" {
@@ -345,7 +417,9 @@ fn test_projection_queries() {
     // 8. rank: (投影 -> rank column)
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
-    let results = search::search(&store, &registry, &cache, "rank:", Default::default()).unwrap();
+    let results =
+        search::search(&store, &registry, &cache, "rank:", Default::default())
+            .unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
     println!("Matches for 'rank:': {} items", results.results.len());
@@ -363,11 +437,25 @@ fn test_projection_queries() {
     // 9. category: (投影 -> type='category')
     // label は SType::Label (仮想タグ) として予約されているため、
     // 任意のタグ名のテストには category を使用する。
-    let note_id = tagging::add_item(&store, &registry, "note", "Category Test Note").unwrap();
-    tagging::tag_item(&store, &registry, &note_id.to_string(), "category:important")
-        .unwrap();
+    let note_id =
+        tagging::add_item(&store, &registry, "note", "Category Test Note")
+            .unwrap();
+    tagging::tag_item(
+        &store,
+        &registry,
+        &note_id.to_string(),
+        "category:important",
+    )
+    .unwrap();
 
-    let results = search::search(&store, &registry, &cache, "category:", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "category:",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results.results.len() >= 1,
         "category: should match items with category tag"
@@ -381,7 +469,9 @@ fn test_projection_queries() {
 
     // 10. label: (Volatile Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
-    let results = search::search(&store, &registry, &cache, "label:", Default::default()).unwrap();
+    let results =
+        search::search(&store, &registry, &cache, "label:", Default::default())
+            .unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
     assert!(
         results.results.len() >= 3,
@@ -403,12 +493,23 @@ fn test_projection_returns_label_volatile_items() {
 
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // extension: で投影
-    let results = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
 
     // 検証1: type_for_projection が設定されている
     assert!(has_item_tags(&results.results));
@@ -419,7 +520,7 @@ fn test_projection_returns_label_volatile_items() {
         "projection should return label items"
     );
 
-    // 検証3: 各 SearchResult が Volatile ID を持っている
+    // 検証3: 各 Item が Volatile ID を持っている
     for item in &results.results {
         // ID が Volatile(u64) であることを確認
         if let ItemId::Volatile(_) = item.id {
@@ -454,8 +555,7 @@ fn test_projection_returns_label_volatile_items() {
                 "Label volatile item should have item_count (total_count)"
             );
 
-            let total_count_str =
-                item.item_count.as_ref().unwrap().as_str();
+            let total_count_str = item.item_count.as_ref().unwrap().as_str();
             let total_count: usize = total_count_str
                 .parse()
                 .expect("item_count should be parseable as usize");

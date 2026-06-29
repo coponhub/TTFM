@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@ pub mod ast;
 pub mod error;
 pub mod fetcher;
 pub mod lens_optimizer;
+pub mod lens_reader;
 pub mod lens_resolver;
 pub mod lens_schema;
 pub mod logical_resolver;
@@ -164,7 +165,9 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let resolver = Resolver::new("extension:rs", &TagRegistry::with_standard()).unwrap();
+        let resolver =
+            Resolver::new("extension:rs", &TagRegistry::with_standard())
+                .unwrap();
         let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);
@@ -192,7 +195,11 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let resolver = Resolver::new("type:file & extension:rs", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new(
+            "type:file & extension:rs",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
             .to_string(PostgresQueryBuilder);

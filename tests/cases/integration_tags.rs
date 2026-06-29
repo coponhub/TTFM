@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -74,7 +74,9 @@ fn test_integration_tag_tagging() {
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let file_path = dir.path().join("dummy.txt");
@@ -82,21 +84,44 @@ fn test_integration_tag_tagging() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
-    let registered_paths =
-        search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let registered_paths = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     tagging::tag_item(&store, &registry, &item, "project:mars").unwrap();
 
-    let tag_id = tagging::get_or_create_item(&store, &registry, "tag", "project:mars").unwrap();
-    tagging::tag_item(&store, &registry, &tag_id.to_string(), "priority:high").unwrap();
+    let tag_id =
+        tagging::get_or_create_item(&store, &registry, "tag", "project:mars")
+            .unwrap();
+    tagging::tag_item(&store, &registry, &tag_id.to_string(), "priority:high")
+        .unwrap();
 
-    let results = search::search(&store, &registry, &cache, "priority:high & item_kind:tag", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "priority:high & item_kind:tag",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].id, ItemId::from(tag_id));
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
-    let file_results = search::search(&store, &registry, &cache, "project:mars", Default::default()).unwrap();
+    let file_results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "project:mars",
+        Default::default(),
+    )
+    .unwrap();
     assert!(file_results
         .results
         .iter()
@@ -109,7 +134,9 @@ fn test_system_item_metadata_integration() {
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     File::create(dir.path().join("test.rs")).unwrap();
@@ -119,19 +146,43 @@ fn test_system_item_metadata_integration() {
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let ext_list = search::search(&store, &registry, &cache, "type:extension", Default::default()).unwrap();
+    let ext_list = search::search(
+        &store,
+        &registry,
+        &cache,
+        "type:extension",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
-        !ext_list.results.iter().any(|r| r.raw_repr() == "extension:"),
+        !ext_list
+            .results
+            .iter()
+            .any(|r| r.raw_repr() == "extension:"),
         "Empty extension tag should not exist"
     );
 
-    let results_physical = search::search(&store, &registry, &cache, "item_kind:tag & label:rs", Default::default()).unwrap();
+    let results_physical = search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:tag & label:rs",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results_physical.results.is_empty(),
         "Physical tag item should NOT be created automatically"
     );
 
-    let results_proj = search::search(&store, &registry, &cache, "extension:", Default::default()).unwrap();
+    let results_proj = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         !results_proj.results.is_empty(),
         "Should find label items via projection"

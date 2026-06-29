@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -142,7 +142,8 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self
-            .store.conn
+            .store
+            .conn
             .prepare(&sql)
             .context("Failed to prepare cache load query")?;
 
@@ -174,9 +175,14 @@ impl<'a> Indexer<'a> {
             self.ensure_empty_parquet_if_missing(&path, target, &all_cols)?;
         }
 
+        let reader = crate::query::lens_reader::Reader::build(
+            self.registry,
+            crate::db::Tbl::_OneView,
+        );
         crate::oneview::OneView::recreate(
             &self.store.conn,
             &all_cols,
+            reader,
             &self.store.db_dir,
         )?;
 
@@ -203,7 +209,8 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let count: i64 = self
-            .store.conn
+            .store
+            .conn
             .query_row(&count_sql, [], |r| r.get(0))
             .unwrap_or(0);
 
@@ -392,7 +399,8 @@ impl<'a> Indexer<'a> {
             .expr(Expr::cust("COUNT(*)"))
             .from(table)
             .to_string(PostgresQueryBuilder);
-        self.store.conn
+        self.store
+            .conn
             .query_row(&sql, [], |r| r.get(0))
             .map_err(Into::into)
     }
@@ -579,19 +587,23 @@ mod tests {
         let item_id: ItemId = ItemId::from(1);
         let locs_path = store.path_for_target(TargetTable::Locations);
 
-        store.conn.execute(
-            "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
-            [item_id.as_i64(), hash_val.0],
-        )
-        .unwrap();
-        store.conn.execute(
-            &format!(
-                "COPY temp_locs TO '{}' (FORMAT PARQUET)",
-                locs_path.to_string_lossy()
-            ),
-            [],
-        )
-        .unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
+                [item_id.as_i64(), hash_val.0],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                &format!(
+                    "COPY temp_locs TO '{}' (FORMAT PARQUET)",
+                    locs_path.to_string_lossy()
+                ),
+                [],
+            )
+            .unwrap();
 
         // 3. ロードして検証
         let cache = indexer.load_metadata_cache().unwrap();

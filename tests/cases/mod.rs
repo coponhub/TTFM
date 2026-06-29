@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -129,7 +129,7 @@ macro_rules! define_cases {
 // 共通ヘルパー関数
 // ──────────────────────────────────────────────
 
-pub(super) fn get_nvalue(item: &ttfm::SearchResult) -> Option<String> {
+pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
@@ -137,7 +137,7 @@ pub(super) fn get_nvalue(item: &ttfm::SearchResult) -> Option<String> {
         .map(|e| e.label.as_str().to_string())
 }
 
-pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
+pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
         .iter()
@@ -150,7 +150,7 @@ pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
 }
 
 /// 結果が item: タグを持つか（グループ表示 / projection パス）を判定します。
-pub(super) fn has_item_tags(results: &[ttfm::SearchResult]) -> bool {
+pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
     results.iter().any(|r| {
         r.tags
             .entries
@@ -291,7 +291,6 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
 pub mod cache_paged_test;
 pub mod identifier_test;
 pub mod indexing_integration;
-pub mod write_engine;
 pub mod integration_tags;
 pub mod rank_test;
 pub mod robustness_test;
@@ -304,6 +303,7 @@ mod test_chain_comparison;
 pub mod test_computation_fetching;
 pub mod test_date_regression;
 pub mod test_discrepancy;
+pub mod test_edit;
 pub mod test_errors;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
@@ -324,3 +324,4 @@ pub mod test_volatile_typed_tags;
 pub mod verify_search;
 pub mod verify_search_all;
 pub mod wasm_plugin_test;
+pub mod write_engine;

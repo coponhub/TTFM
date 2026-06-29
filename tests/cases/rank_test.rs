@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,8 +15,8 @@
 
 use std::fs;
 use tempfile::tempdir;
-use ttfm::{search, tagging};
 use ttfm::types::ItemId;
+use ttfm::{search, tagging};
 
 #[test]
 fn test_rank_sorting_files() {
@@ -31,22 +31,50 @@ fn test_rank_sorting_files() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 2. クエリでランクを設定
     // high.txt を 100 に
-    let res_high = search::search(&store, &registry, &cache, "filename:high.txt", Default::default()).unwrap();
-    ttfm::rank::update_ranks(&store, &registry, &res_high.results, 100).unwrap();
+    let res_high = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:high.txt",
+        Default::default(),
+    )
+    .unwrap();
+    ttfm::rank::update_ranks(&store, &registry, &res_high.results, 100)
+        .unwrap();
 
     // mid.txt を 50 に
-    let res_mid = search::search(&store, &registry, &cache, "filename:mid.txt", Default::default()).unwrap();
+    let res_mid = search::search(
+        &store,
+        &registry,
+        &cache,
+        "filename:mid.txt",
+        Default::default(),
+    )
+    .unwrap();
     ttfm::rank::update_ranks(&store, &registry, &res_mid.results, 50).unwrap();
 
     // 3. 検索して順序を確認
-    let results = search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
@@ -76,19 +104,38 @@ fn test_rank_batch_update() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
-    let results = search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 2);
     ttfm::rank::update_ranks(&store, &registry, &results.results, 10).unwrap();
 
     // 2. 結果を確認
-    let res = search::search(&store, &registry, &cache, "extension:txt | extension:rs", Default::default())
-        .unwrap();
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt | extension:rs",
+        Default::default(),
+    )
+    .unwrap();
     // ランク順に a.txt(10), b.txt(10), c.rs(0) のはず
     assert_eq!(res.results.len(), 3);
     assert!(res.results[0].primary_value().unwrap().contains(".txt"));
@@ -102,18 +149,30 @@ fn test_rank_set_by_id_low_level() {
     let db_dir = dir.path().join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
 
     fs::create_dir_all(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let id = tagging::add_item(&store, &registry, "note", "test note").unwrap();
     ttfm::rank::set_rank_by_id(&store, &registry, id, false, 500).unwrap();
 
-    let results = search::search(&store, &registry, &cache, "item_kind:note", Default::default()).unwrap();
+    let results = search::search(
+        &store,
+        &registry,
+        &cache,
+        "item_kind:note",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }

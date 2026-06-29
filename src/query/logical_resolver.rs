@@ -1,4 +1,4 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 Kensuke Aoyagi
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -278,7 +278,8 @@ fn is_set_operation(node: &QueryNode) -> bool {
         | QueryNode::Or(_)
         | QueryNode::Difference(_, _)
         | QueryNode::TypedTag(_)
-        | QueryNode::ColumnMatch { .. } => true,
+        | QueryNode::ColumnMatch { .. }
+        | QueryNode::DefinitionRef { .. } => true,
 
         // Projection は集合を返すが、Literal のみの場合はスカラー
         QueryNode::Projection(op) => !matches!(op, Operand::Literal(_)),
@@ -374,6 +375,7 @@ fn returns_projection(node: &QueryNode) -> bool {
         }
         QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }
+        | QueryNode::DefinitionRef { .. }
         | QueryNode::Comparison(_)
         | QueryNode::Aggregation(_) => false,
         QueryNode::Nest(nest) => returns_projection(&nest.left),
@@ -1063,7 +1065,8 @@ fn expand_aggregation(
             let expanded = expand_query_node(schema, *inner)?;
             if let QueryNode::Aggregation(ref inner) = expanded {
                 return Err(error::invalid_aggregation_over_scalar(
-                    error::agg_op_name(op), inner,
+                    error::agg_op_name(op),
+                    inner,
                 ));
             }
             if matches!(expanded, QueryNode::Comparison(_)) {
@@ -2231,7 +2234,11 @@ mod tests {
         let expanded = expand_operand(&lens, op).unwrap();
         match expanded {
             Operand::Literal(label) => {
-                assert_eq!(label.as_i64(), 1_048_576, "1MB should be 1048576 bytes");
+                assert_eq!(
+                    label.as_i64(),
+                    1_048_576,
+                    "1MB should be 1048576 bytes"
+                );
             }
             other => panic!("Expected Literal, got {:?}", other),
         }
@@ -2244,17 +2251,16 @@ mod tests {
         let op = Operand::Literal(crate::types::Label::from("2026-02-01"));
         let expanded = expand_operand(&lens, op).unwrap();
         match expanded {
-            Operand::Literal(label) => {
-                match label {
-                    crate::types::Label::Date(dt) => {
-                        assert!(
-                            matches!(dt, crate::types::DateTime::Date(_)),
-                            "Expected DateTime::Date, got {:?}", dt
-                        );
-                    }
-                    other => panic!("Expected Label::Date, got {:?}", other),
+            Operand::Literal(label) => match label {
+                crate::types::Label::Date(dt) => {
+                    assert!(
+                        matches!(dt, crate::types::DateTime::Date(_)),
+                        "Expected DateTime::Date, got {:?}",
+                        dt
+                    );
                 }
-            }
+                other => panic!("Expected Label::Date, got {:?}", other),
+            },
             other => panic!("Expected Literal, got {:?}", other),
         }
     }
