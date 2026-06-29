@@ -147,6 +147,8 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **Query Strictness**: Investigate implementing tag existence verification in `lens_resolver` to improve query strictness and detect typos.
 
 ### System & Maintenance
+- [ ] **Query SQL Lensification**: Move SQL construction out of the `fetcher`/`query::sql` builders and behind the Lens. The builders should only compose Lens-provided functions/combinators (as `NameFn` composes `Prefer`), leaving physical SQL construction entirely to the Lens. This makes read uniformly go through the StorageMapping abstraction (STORE.md §5) instead of touching `oneview` directly.
+    - [ ] Optimize performance by delaying name deduplication (uniquification) until after item ID selection.
 - [ ] **Plugin System Optimization**:
     - WASM instance management optimization (parallel initialization).
     - WASI security (restricting `preopened_dir`).

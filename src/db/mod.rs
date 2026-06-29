@@ -17,8 +17,8 @@ use crate::taggers::ColumnDef;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use sea_query::{
-    Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
-    IntoTableRef, SimpleExpr, Table, TableCreateStatement, TableRef,
+    Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden, IntoTableRef,
+    SimpleExpr, Table, TableCreateStatement, TableRef,
 };
 use std::path::{Path, PathBuf};
 use strum::{Display, EnumIter};
@@ -53,8 +53,9 @@ impl Store {
     pub fn open(db_dir: impl AsRef<Path>) -> Result<Self> {
         let db_dir = db_dir.as_ref().to_path_buf();
         if !db_dir.exists() {
-            std::fs::create_dir_all(&db_dir)
-                .with_context(|| format!("Failed to create db dir: {:?}", db_dir))?;
+            std::fs::create_dir_all(&db_dir).with_context(|| {
+                format!("Failed to create db dir: {:?}", db_dir)
+            })?;
         }
         let conn = Connection::open_in_memory()
             .context("Failed to open in-memory DuckDB connection")?;
@@ -64,16 +65,22 @@ impl Store {
     /// 同一インメモリDBを共有するクローンを返す（テスト用）。
     /// テーブルはすでに共有されるため initialize_tables は不要。
     pub fn try_clone(&self) -> Result<Self> {
-        let conn = self.conn.try_clone()
+        let conn = self
+            .conn
+            .try_clone()
             .context("Failed to clone DuckDB connection")?;
-        Ok(Self { conn, db_dir: self.db_dir.clone() })
+        Ok(Self {
+            conn,
+            db_dir: self.db_dir.clone(),
+        })
     }
 
     /// 指定されたディレクトリを物理削除する（Clear コマンド用）。
     pub fn delete_database(db_dir: &Path) -> Result<()> {
         if db_dir.exists() {
-            std::fs::remove_dir_all(db_dir)
-                .with_context(|| format!("Failed to remove db dir: {:?}", db_dir))?;
+            std::fs::remove_dir_all(db_dir).with_context(|| {
+                format!("Failed to remove db dir: {:?}", db_dir)
+            })?;
         }
         Ok(())
     }
@@ -117,6 +124,8 @@ pub enum Tbl {
     DataTypes,
     #[iden = "oneview"]
     OneView,
+    #[iden = "_oneview"]
+    _OneView,
 
     // --- Diff Tables ---
     FileReferencesDiff,
@@ -268,7 +277,6 @@ pub enum Val {
     Note,
     ItemKind,
     Rank,
-    Filename,
     Name,
     Unknown,
     Key,
@@ -379,14 +387,18 @@ impl Col {
         }
     }
 
-    pub fn for_label_value(v: &crate::types::LabelValue) -> Option<(Self, SimpleExpr)> {
+    pub fn for_label_value(
+        v: &crate::types::LabelValue,
+    ) -> Option<(Self, SimpleExpr)> {
         use crate::types::LabelValue;
         let col = v.sql_type().map(Self::from_sql_type)?;
         let expr: SimpleExpr = match v {
-            LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s.clone()).into(),
-            LabelValue::Integer(i)   => Expr::val(*i).into(),
+            LabelValue::String(s) | LabelValue::Literal(s) => {
+                Expr::val(s.clone()).into()
+            }
+            LabelValue::Integer(i) => Expr::val(*i).into(),
             LabelValue::Double(bits) => Expr::val(f64::from_bits(*bits)).into(),
-            LabelValue::Boolean(b)   => Expr::val(*b).into(),
+            LabelValue::Boolean(b) => Expr::val(*b).into(),
             _ => unreachable!(),
         };
         Some((col, expr))
@@ -409,10 +421,10 @@ impl crate::types::LabelValue {
     pub fn sql_type(&self) -> Option<SqlType> {
         match self {
             Self::String(_) | Self::Literal(_) => Some(SqlType::VARCHAR),
-            Self::Integer(_)                   => Some(SqlType::BIGINT),
-            Self::Double(_)                    => Some(SqlType::DOUBLE),
-            Self::Boolean(_)                   => Some(SqlType::BOOLEAN),
-            Self::Null | Self::Date(_)         => None,
+            Self::Integer(_) => Some(SqlType::BIGINT),
+            Self::Double(_) => Some(SqlType::DOUBLE),
+            Self::Boolean(_) => Some(SqlType::BOOLEAN),
+            Self::Null | Self::Date(_) => None,
         }
     }
 }

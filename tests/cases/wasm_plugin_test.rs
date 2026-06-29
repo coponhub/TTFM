@@ -16,11 +16,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use tempfile::tempdir;
-use ttfm::search;
 use ttfm::plugins::WasmPlugin;
+use ttfm::query::ast::{Operand, QueryNode};
+use ttfm::search;
 use ttfm::tag::{Index, TagFunction};
 use ttfm::types::{Label, LabelValue, TagType};
-use ttfm::query::ast::{Operand, QueryNode};
 use ttfm::SearchOptions;
 
 /// プラグインが display を実装している場合、
@@ -31,15 +31,26 @@ fn test_plugin_display_show_applied_in_format_display() {
 
     struct IconTag;
     impl TagFunction for IconTag {
-        fn name(&self) -> &str { "icon_tag" }
-        fn index(&self) -> Option<&dyn ttfm::tag::Index> { None }
-        fn query(&self) -> Option<&dyn ttfm::tag::Query> { None }
-        fn display(&self) -> Option<&dyn ttfm::tag::Display> { Some(self) }
+        fn name(&self) -> &str {
+            "icon_tag"
+        }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> {
+            None
+        }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> {
+            None
+        }
+        fn display(&self) -> Option<&dyn ttfm::tag::Display> {
+            Some(self)
+        }
     }
     impl Display for IconTag {
         fn formats(&self) -> DisplayFormats {
             DisplayFormats {
-                default: DisplayFormat { id: "icon".to_string(), label: "Icon".to_string() },
+                default: DisplayFormat {
+                    id: "icon".to_string(),
+                    label: "Icon".to_string(),
+                },
                 options: vec![],
             }
         }
@@ -58,8 +69,10 @@ fn test_plugin_display_show_applied_in_format_display() {
 
     // format_display が show() を呼んで "● modified" を返すことを確認
     let result = registry.format_display("icon_tag", "modified");
-    assert_eq!(result, "● modified",
-        "format_display が display::show() を呼んでいない");
+    assert_eq!(
+        result, "● modified",
+        "format_display が display::show() を呼んでいない"
+    );
 }
 
 /// プラグインが normalize_label を実装している場合、
@@ -73,12 +86,21 @@ fn test_plugin_normalize_label_applied_in_search() {
 
     struct ShortLabelTag;
     impl TagFunction for ShortLabelTag {
-        fn name(&self) -> &str { "my_status" }
-        fn index(&self) -> Option<&dyn ttfm::tag::Index> { Some(self) }
-        fn query(&self) -> Option<&dyn ttfm::tag::Query> { Some(self) }
+        fn name(&self) -> &str {
+            "my_status"
+        }
+        fn index(&self) -> Option<&dyn ttfm::tag::Index> {
+            Some(self)
+        }
+        fn query(&self) -> Option<&dyn ttfm::tag::Query> {
+            Some(self)
+        }
     }
     impl ttfm::tag::Index for ShortLabelTag {
-        fn extract(&self, _path: &StdPath) -> anyhow::Result<Option<LabelValue>> {
+        fn extract(
+            &self,
+            _path: &StdPath,
+        ) -> anyhow::Result<Option<LabelValue>> {
             // 全ファイルに "modified" タグを付与
             Ok(Some(LabelValue::String("modified".to_string())))
         }
@@ -88,7 +110,7 @@ fn test_plugin_normalize_label_applied_in_search() {
             match label.as_str().as_str() {
                 "m" => Label::from("modified"),
                 "c" => Label::from("clean"),
-                _   => label.clone(),
+                _ => label.clone(),
             }
         }
     }
@@ -113,7 +135,9 @@ fn test_plugin_normalize_label_applied_in_search() {
 
     // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
     let results = search::search(
-        &store, &registry, &cache,
+        &store,
+        &registry,
+        &cache,
         "my_status:m",
         SearchOptions::default(),
     )
@@ -130,7 +154,8 @@ fn test_plugin_normalize_label_applied_in_search() {
 fn test_wasm_plugin_mimetype() {
     let wasm_path = Path::new("plugins/sample_plugin.component.wasm");
 
-    let plugin = WasmPlugin::new(wasm_path).expect("Failed to load Wasm plugin");
+    let plugin =
+        WasmPlugin::new(wasm_path).expect("Failed to load Wasm plugin");
     let adapter = plugin.into_adapter().expect("Failed to create adapter");
 
     let name = adapter.name();
@@ -174,14 +199,24 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         let db_dir = dir.path().join("db_override");
         let mut registry = ttfm::tag::TagRegistry::with_standard();
         let store = ttfm::db::Store::open(&db_dir).unwrap();
-        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
         let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
         registry.load_from_dir(&user_plugins_dir, &status).unwrap();
         registry.load_builtins(&status).unwrap();
-        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
-        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
-            .unwrap()
-            .results
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .run(dir.path(), None::<&fn(usize)>, false)
+            .unwrap();
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            "mimetype:application/x-test-override",
+            SearchOptions::default(),
+        )
+        .unwrap()
+        .results
     };
 
     // ユーザープラグインなし: ビルトインが使われる
@@ -189,13 +224,23 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         let db_dir = dir.path().join("db_builtin");
         let mut registry = ttfm::tag::TagRegistry::with_standard();
         let store = ttfm::db::Store::open(&db_dir).unwrap();
-        ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
         let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
         registry.load_builtins(&status).unwrap();
-        ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false).unwrap();
-        search::search(&store, &registry, &cache, "mimetype:application/x-test-override", SearchOptions::default())
-            .unwrap()
-            .results
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .run(dir.path(), None::<&fn(usize)>, false)
+            .unwrap();
+        search::search(
+            &store,
+            &registry,
+            &cache,
+            "mimetype:application/x-test-override",
+            SearchOptions::default(),
+        )
+        .unwrap()
+        .results
     };
 
     assert!(
@@ -209,8 +254,9 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
 }
 
 fn load_sample_adapter() -> ttfm::plugins::WasmPluginAdapter {
-    let plugin = WasmPlugin::new(Path::new("plugins/sample_plugin.component.wasm"))
-        .expect("Failed to load sample plugin");
+    let plugin =
+        WasmPlugin::new(Path::new("plugins/sample_plugin.component.wasm"))
+            .expect("Failed to load sample plugin");
     plugin.into_adapter().expect("Failed to create adapter")
 }
 
@@ -218,14 +264,20 @@ fn load_sample_adapter() -> ttfm::plugins::WasmPluginAdapter {
 #[test]
 fn test_wasm_adapter_query_is_some() {
     let adapter = load_sample_adapter();
-    assert!(adapter.query().is_some(), "adapter.query() should return Some");
+    assert!(
+        adapter.query().is_some(),
+        "adapter.query() should return Some"
+    );
 }
 
 /// プラグインが display インターフェースを実装していれば adapter.display() は Some を返す
 #[test]
 fn test_wasm_adapter_display_is_some() {
     let adapter = load_sample_adapter();
-    assert!(adapter.display().is_some(), "adapter.display() should return Some");
+    assert!(
+        adapter.display().is_some(),
+        "adapter.display() should return Some"
+    );
 }
 
 /// プラグインが normalize-label で None を返す場合、ラベルは変更されない

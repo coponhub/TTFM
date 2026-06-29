@@ -168,10 +168,8 @@ impl SearchResponse {
     pub fn iter_type_groups(&self) -> Vec<TypeGroup<'_>> {
         use std::collections::{BTreeSet, HashMap};
 
-        let mut groups: HashMap<
-            (ItemKind, BTreeSet<TagType>),
-            Vec<&Item>,
-        > = HashMap::new();
+        let mut groups: HashMap<(ItemKind, BTreeSet<TagType>), Vec<&Item>> =
+            HashMap::new();
 
         for res in &self.results {
             let mut keys = BTreeSet::new();
@@ -222,7 +220,11 @@ impl SearchResponse {
 
 impl SearchResponse {
     /// 空の検索結果（初期状態）を作成します。
-    pub fn new_empty(cid: Option<String>, has_more: bool, query: impl Into<String>) -> Self {
+    pub fn new_empty(
+        cid: Option<String>,
+        has_more: bool,
+        query: impl Into<String>,
+    ) -> Self {
         Self {
             results: Vec::new(),
             cid,
@@ -239,7 +241,11 @@ impl SearchResponse {
     }
 
     /// キャッシュ生成が進行中のレスポンスを作成します。
-    pub fn new_unfinished(cid: &str, progress: crate::types::Progress, query: impl Into<String>) -> Self {
+    pub fn new_unfinished(
+        cid: &str,
+        progress: crate::types::Progress,
+        query: impl Into<String>,
+    ) -> Self {
         Self {
             results: Vec::new(),
             cid: Some(cid.to_string()),
@@ -259,27 +265,39 @@ impl SearchResponse {
         let query_tag_type = TagType::Base(SType::Query);
         let value_tag_type = TagType::Base(SType::Value);
         for item in &mut self.results {
-            if !item.id.is_volatile() { continue; }
-            let has_value = item.tags.entries.iter()
+            if !item.id.is_volatile() {
+                continue;
+            }
+            let has_value = item
+                .tags
+                .entries
+                .iter()
                 .any(|e| e.label.tag_type() == value_tag_type);
             if has_value {
                 item.tags.push(
-                    Label::Other(query_tag_type.clone(), LabelValue::String(query_str.clone())),
+                    Label::Other(
+                        query_tag_type.clone(),
+                        LabelValue::String(query_str.clone()),
+                    ),
                     Origin::System,
                 );
             }
         }
     }
 
-    /// 結果が Projection (ラベルグループ) 形式かどうかを `item:` タグの有無で判定します。
+    /// 結果が Projection (ラベルグループ) 形式かどうかを判定します。
+    /// projection の `item:` タグ（メンバー一覧）は検索 SQL が System origin で生成するため、
+    /// System origin の `item:` のみを判定対象とする。保存 note 由来やユーザー命名の `item:`
+    /// タグ（User origin）では誤発火しない。
     pub fn has_projection_results(&self) -> bool {
+        use crate::types::Origin;
         self.results
             .first()
             .map(|r| {
-                r.tags
-                    .entries
-                    .iter()
-                    .any(|e| e.label.tag_type().as_str() == "item")
+                r.tags.entries.iter().any(|e| {
+                    e.label.tag_type().as_str() == "item"
+                        && matches!(e.origin, Origin::System)
+                })
             })
             .unwrap_or(false)
     }
@@ -646,13 +664,15 @@ mod tests {
 
         let query_str = "count(extension:rs)".to_string();
 
-        let mut item_with_value = Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
+        let mut item_with_value =
+            Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_with_value.tags.push(
             Label::Other(TagType::Base(SType::Value), LabelValue::Integer(42)),
             Origin::System,
         );
 
-        let item_without_value = Item::new_empty(ItemId::Volatile(1), ItemKind::Volatile);
+        let item_without_value =
+            Item::new_empty(ItemId::Volatile(1), ItemKind::Volatile);
 
         let mut resp = SearchResponse {
             results: vec![item_with_value, item_without_value],
@@ -662,11 +682,49 @@ mod tests {
         resp.query_into_tags();
 
         let has_query = |item: &Item| {
-            item.tags.entries.iter().any(|e| {
-                e.label.tag_type() == TagType::Base(SType::Query)
-            })
+            item.tags
+                .entries
+                .iter()
+                .any(|e| e.label.tag_type() == TagType::Base(SType::Query))
         };
         assert!(has_query(&resp.results[0]), "value item should get query:");
-        assert!(!has_query(&resp.results[1]), "non-value item must not get query:");
+        assert!(
+            !has_query(&resp.results[1]),
+            "non-value item must not get query:"
+        );
+    }
+
+    // projection 表示判定は System origin の item タグのみで発火する。
+    // 保存 note 由来（User origin）やユーザー命名の item: タグでは発火しない。
+    #[test]
+    fn has_projection_results_only_for_system_item_tag() {
+        use crate::types::{ItemKind, LabelValue, Origin, TagType};
+
+        let item_tag = |origin| {
+            let mut it = Item::new_empty(ItemId::Stored(1), ItemKind::Note);
+            it.tags.push(
+                Label::Other(
+                    TagType::from("item"),
+                    LabelValue::String("foo.txt#User(1)".into()),
+                ),
+                origin,
+            );
+            it
+        };
+
+        let sys = SearchResponse {
+            results: vec![item_tag(Origin::System)],
+            ..Default::default()
+        };
+        assert!(sys.has_projection_results(), "System item tag → projection");
+
+        let usr = SearchResponse {
+            results: vec![item_tag(Origin::User)],
+            ..Default::default()
+        };
+        assert!(
+            !usr.has_projection_results(),
+            "User item tag → not projection"
+        );
     }
 }

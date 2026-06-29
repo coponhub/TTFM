@@ -13,8 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 use tempfile::tempdir;
+use ttfm::search;
 
 #[test]
 fn test_toplevel_arithmetic_without_parens(
@@ -26,14 +26,27 @@ fn test_toplevel_arithmetic_without_parens(
     // Setup file manager
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        &root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // 1. Aggregation - Aggregation
     // count() - count() = 0
-    let res = search::search(&store, &registry, &cache, "count() - count()", Default::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "count() - count()",
+        Default::default(),
+    )?;
     assert_eq!(res.results[0].raw_repr(), "0");
 
     // 2. Projection - Scalar
@@ -46,30 +59,70 @@ fn test_toplevel_arithmetic_without_parens(
     // Let's create a file with known size.
     let file_path = root.join("test.txt");
     std::fs::write(&file_path, "content")?; // 7 bytes
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        &root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // size: - 7 = 0
     // "size:" will return 7 for the file.
     // Existing test
-    let _res = search::search(&store, &registry, &cache, "size: - 7", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size: - 7",
+        Default::default(),
+    )?;
 
     // Addition
-    let _res = search::search(&store, &registry, &cache, "count() + 1", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "count() + 1",
+        Default::default(),
+    )?;
 
     // Multiplication
-    let _res = search::search(&store, &registry, &cache, "size: * 2", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size: * 2",
+        Default::default(),
+    )?;
 
     // Division
-    let _res = search::search(&store, &registry, &cache, "size: / 2", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size: / 2",
+        Default::default(),
+    )?;
 
     // Remainder
-    let _res = search::search(&store, &registry, &cache, "count() % 2", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "count() % 2",
+        Default::default(),
+    )?;
 
     // Set Difference Regression check
     // "type:file - type:dir" should be valid Set Difference, not Arithmetic.
     // If it were parsed as arithmetic, it would likely fail or result in Projection that fails at runtime (if interpreted as scalar).
     // But here we just check it parses successfully.
-    let _res = search::search(&store, &registry, &cache, "type:file - type:dir", Default::default())?;
+    let _res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "type:file - type:dir",
+        Default::default(),
+    )?;
 
     // Result should be 0 for the file item.
     // The previous test verification used aggregation results (scalar),

@@ -4,7 +4,7 @@ use super::{
 };
 use crate::response::Item;
 use crate::tag::TagRegistry;
-use crate::types::{ItemId, Label, LabelValue, TagType};
+use crate::types::{ItemId, Label, LabelValue, SType, TagType};
 use crate::util::DotOk;
 use anyhow::{bail, Result};
 
@@ -145,9 +145,42 @@ fn get_strategy(label: &Label, registry: &TagRegistry) -> EditStrategy {
 // 公開 API
 // ──────────────────────────────────────────────
 
-// Volatile 登録時に item から注入する ModifyInjection 戦略のラベル（content / item_kind）。
-fn injection_labels(item: &Item, registry: &TagRegistry) -> Vec<Label> {
-    registry
+// name が無い場合に representative または item_kind から Label::Name を out に補完する。
+// existing は既存タグ（directives 適用済み）、out は注入先（registry ラベルが既にある）。
+fn inject_name(item: &Item, existing: &[Label], out: &mut Vec<Label>) {
+    if existing
+        .iter()
+        .chain(out.iter())
+        .any(|l| l.tag_type() == TagType::Base(SType::Name))
+    {
+        return;
+    }
+    let name = if let Some(repr) = item.representative.first() {
+        repr.value().as_display_name()
+    } else {
+        out.iter()
+            .find_map(|l| {
+                if let Label::ItemKind(k) = l {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    };
+    if !name.is_empty() {
+        out.push(Label::Name(name));
+    }
+}
+
+// Volatile 登録時に item から注入するラベル群。
+// ModifyInjection 戦略のラベル（content / item_kind）と name 補完をまとめて返す。
+fn injection_labels(
+    item: &Item,
+    current_tags: &[Label],
+    registry: &TagRegistry,
+) -> Vec<Label> {
+    let mut labels: Vec<Label> = registry
         .iter_arcs()
         .filter_map(|f| {
             let e = f.edit()?;
@@ -155,7 +188,9 @@ fn injection_labels(item: &Item, registry: &TagRegistry) -> Vec<Label> {
                 .then(|| e.inject(item))
                 .flatten()
         })
-        .collect()
+        .collect();
+    inject_name(item, current_tags, &mut labels);
+    labels
 }
 
 // WriteAction（DB の Delete/Add encoding）を原子的なタグ操作へ平坦化したもの。
@@ -215,14 +250,18 @@ fn fold_volatile(
     actions: Vec<WriteAction>,
     registry: &TagRegistry,
 ) -> Vec<WriteAction> {
-    let mut tags: Vec<Label> = item.tags.entries.iter()
+    let mut tags: Vec<Label> = item
+        .tags
+        .entries
+        .iter()
         .map(|e| rename_volatile_type(e.label.clone()))
         .collect();
     actions
         .into_iter()
         .flat_map(TagDelta::flatten)
         .for_each(|d| d.apply(&mut tags));
-    tags.extend(injection_labels(item, registry));
+    let injections = injection_labels(item, &tags, registry);
+    tags.extend(injections);
     vec![WriteAction::Add {
         item: item.id.clone(),
         tags: tags.into_iter().map(TagOp::Append).collect(),
@@ -238,7 +277,9 @@ pub fn modify(
     let directives = match query {
         Some(q) => tokenize(q)?
             .into_iter()
-            .map(|(tag_type, value)| query_type.to_directive(tag_type, value, registry))
+            .map(|(tag_type, value)| {
+                query_type.to_directive(tag_type, value, registry)
+            })
             .collect::<Result<Vec<_>>>()?,
         None => vec![],
     };
@@ -293,7 +334,10 @@ mod tests {
 
     fn make_volatile_item(stype: SType, repr_value: &str) -> Item {
         use crate::types::{Intrinsic, LabelValue, Rank};
-        let repr_label = Label::resolve(TagType::Base(stype), LabelValue::String(repr_value.to_string()));
+        let repr_label = Label::resolve(
+            TagType::Base(stype),
+            LabelValue::String(repr_value.to_string()),
+        );
         Item {
             id: ItemId::Volatile(0),
             item_kind: ItemKind::Volatile,
@@ -363,7 +407,8 @@ mod tests {
     fn modify_append_custom_type() {
         let item = make_item(1, vec![]);
         let actions =
-            modify(&item, Some("project:A"), QueryType::Tag, &registry()).unwrap();
+            modify(&item, Some("project:A"), QueryType::Tag, &registry())
+                .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], WriteAction::Add { tags, .. } if matches!(&tags[0], TagOp::Append(_)))
@@ -373,9 +418,13 @@ mod tests {
     #[test]
     fn modify_tag_multiple_tokens() {
         let item = make_item(1, vec![]);
-        let actions =
-            modify(&item, Some("project:A status:done"), QueryType::Tag, &registry())
-                .unwrap();
+        let actions = modify(
+            &item,
+            Some("project:A status:done"),
+            QueryType::Tag,
+            &registry(),
+        )
+        .unwrap();
         assert_eq!(actions.len(), 2);
     }
 
@@ -396,23 +445,32 @@ mod tests {
     #[test]
     fn modify_tag_relocate_is_error() {
         let item = make_item(1, vec![]);
-        assert!(
-            modify(&item, Some("filename:foo.txt"), QueryType::Tag, &registry())
-                .is_err()
-        );
+        assert!(modify(
+            &item,
+            Some("filename:foo.txt"),
+            QueryType::Tag,
+            &registry()
+        )
+        .is_err());
     }
 
     #[test]
     fn modify_tag_modify_injection_is_error() {
         let item = make_item(1, vec![]);
-        assert!(modify(&item, Some("item_kind:note"), QueryType::Tag, &registry())
-            .is_err());
+        assert!(modify(
+            &item,
+            Some("item_kind:note"),
+            QueryType::Tag,
+            &registry()
+        )
+        .is_err());
     }
 
     #[test]
     fn modify_tag_projection_is_error() {
         let item = make_item(1, vec![]);
-        assert!(modify(&item, Some("project:"), QueryType::Tag, &registry()).is_err());
+        assert!(modify(&item, Some("project:"), QueryType::Tag, &registry())
+            .is_err());
     }
 
     #[test]
@@ -423,7 +481,8 @@ mod tests {
         );
         let item = make_item(1, vec![label.clone()]);
         let actions =
-            modify(&item, Some("project:A"), QueryType::Untag, &registry()).unwrap();
+            modify(&item, Some("project:A"), QueryType::Untag, &registry())
+                .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], WriteAction::Delete { tags, .. } if matches!(&tags[0], DeleteTarget::Tag(_)))
@@ -434,7 +493,8 @@ mod tests {
     fn modify_untag_nonexistent_label_is_noop() {
         let item = make_item(1, vec![]);
         let actions =
-            modify(&item, Some("project:Z"), QueryType::Untag, &registry()).unwrap();
+            modify(&item, Some("project:Z"), QueryType::Untag, &registry())
+                .unwrap();
         assert!(actions.is_empty());
     }
 
@@ -442,7 +502,8 @@ mod tests {
     fn modify_untag_projection() {
         let item = make_item(1, vec![]);
         let actions =
-            modify(&item, Some("project:"), QueryType::Untag, &registry()).unwrap();
+            modify(&item, Some("project:"), QueryType::Untag, &registry())
+                .unwrap();
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], WriteAction::Delete { tags, .. } if matches!(&tags[0], DeleteTarget::Type(_)))
@@ -484,21 +545,86 @@ mod tests {
     // DB Delete は出さない。
     fn add_tags(actions: &[WriteAction]) -> &[TagOp] {
         assert_eq!(actions.len(), 1, "Volatile must yield exactly one Add");
-        let WriteAction::Add { tags, .. } = &actions[0] else { panic!("expected Add") };
+        let WriteAction::Add { tags, .. } = &actions[0] else {
+            panic!("expected Add")
+        };
         tags
     }
     fn has_append(tags: &[TagOp], pred: impl Fn(&Label) -> bool) -> bool {
-        tags.iter().any(|t| matches!(t, TagOp::Append(l) if pred(l)))
+        tags.iter()
+            .any(|t| matches!(t, TagOp::Append(l) if pred(l)))
+    }
+
+    #[test]
+    fn modify_volatile_injects_name_from_representative() {
+        let item = make_volatile_item(SType::TypedTag, "project:A");
+        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let tags = add_tags(&actions);
+        assert!(
+            has_append(
+                tags,
+                |l| matches!(l, Label::Name(s) if s == "project:A")
+            ),
+            "name must be injected from representative when no name tag exists"
+        );
+    }
+
+    #[test]
+    fn modify_volatile_existing_name_not_duplicated() {
+        use crate::types::Origin;
+        let mut item = make_volatile_item(SType::TypedTag, "project:A");
+        item.tags
+            .push(Label::Name("custom name".to_string()), Origin::User);
+        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let tags = add_tags(&actions);
+        let names: Vec<_> = tags
+            .iter()
+            .filter(|t| matches!(t, TagOp::Append(Label::Name(_))))
+            .collect();
+        assert_eq!(names.len(), 1, "must not duplicate name tag");
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Name(s) if s == "custom name")
+        ));
+    }
+
+    #[test]
+    fn modify_volatile_no_representative_falls_back_to_item_kind() {
+        use crate::types::{Intrinsic, Rank};
+        let item = Item {
+            id: ItemId::Volatile(0),
+            item_kind: ItemKind::Volatile,
+            representative: vec![],
+            rank: Rank::default(),
+            intrinsic: Intrinsic::default(),
+            tags: Tags::new(),
+            item_count: None,
+        };
+        let actions =
+            modify(&item, Some("project:X"), QueryType::Tag, &registry())
+                .unwrap();
+        let tags = add_tags(&actions);
+        assert!(
+            has_append(tags, |l| matches!(l, Label::Name(s) if s == "note")),
+            "name must fall back to item_kind when representative is empty"
+        );
     }
 
     #[test]
     fn modify_volatile_tag_def_replace_single_add() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         assert!(has_append(tags, |l| matches!(l, Label::Rank(5))));
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project:A")));
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "tag")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "project:A")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+        ));
     }
 
     // item.tags に同 type が既存なら Replace は EditQuery 側のみ採用（重複しない）
@@ -507,47 +633,78 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags.push(Label::Rank(1), Origin::User);
-        let actions = modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         let ranks: Vec<_> = tags
             .iter()
             .filter(|t| matches!(t, TagOp::Append(Label::Rank(_))))
             .collect();
-        assert_eq!(ranks.len(), 1, "old rank dropped, only EditQuery rank remains");
+        assert_eq!(
+            ranks.len(),
+            1,
+            "old rank dropped, only EditQuery rank remains"
+        );
         assert!(has_append(tags, |l| matches!(l, Label::Rank(5))));
     }
 
     #[test]
     fn modify_volatile_tag_def_append_single_add() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(&item, Some("project:X"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("project:X"), QueryType::Tag, &registry())
+                .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project:A")));
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "tag")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "project:A")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+        ));
     }
 
     #[test]
     fn modify_volatile_type_def_single_add() {
         let item = make_volatile_item(SType::Type, "project");
-        let actions = modify(&item, Some("project:X"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("project:X"), QueryType::Tag, &registry())
+                .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project")));
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "type")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "project")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "type")
+        ));
     }
 
     #[test]
     fn modify_volatile_other_projection_single_add_note() {
         let item = make_volatile_item(SType::Parentdir, "/home/aki/projects");
-        let actions = modify(&item, Some("project:X"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("project:X"), QueryType::Tag, &registry())
+                .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "/home/aki/projects")));
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "note")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "/home/aki/projects")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "note")
+        ));
     }
 
     #[test]
     fn modify_stored_item_no_registration_action() {
         let item = make_item(1, vec![]);
-        let actions = modify(&item, Some("project:X"), QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify(&item, Some("project:X"), QueryType::Tag, &registry())
+                .unwrap();
         assert_eq!(actions.len(), 1);
     }
 
@@ -556,8 +713,14 @@ mod tests {
         let item = make_volatile_item(SType::TypedTag, "project:A");
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project:A")));
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "tag")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "project:A")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+        ));
     }
 
     #[test]
@@ -572,8 +735,14 @@ mod tests {
     fn modify_volatile_multi_repr_is_note_with_joined_content() {
         use crate::types::{Intrinsic, LabelValue, Rank};
         let repr = vec![
-            Label::resolve(TagType::Base(SType::TypedTag), LabelValue::String("project:A".to_string())),
-            Label::resolve(TagType::Base(SType::TypedTag), LabelValue::String("status:done".to_string())),
+            Label::resolve(
+                TagType::Base(SType::TypedTag),
+                LabelValue::String("project:A".to_string()),
+            ),
+            Label::resolve(
+                TagType::Base(SType::TypedTag),
+                LabelValue::String("status:done".to_string()),
+            ),
         ];
         let item = Item {
             id: ItemId::Volatile(0),
@@ -586,8 +755,14 @@ mod tests {
         };
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::ItemKind(s) if s == "note")));
-        assert!(has_append(tags, |l| matches!(l, Label::Content(s) if s == "project:A &: status:done")));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::ItemKind(s) if s == "note")
+        ));
+        assert!(has_append(
+            tags,
+            |l| matches!(l, Label::Content(s) if s == "project:A &: status:done")
+        ));
     }
 
     // scalar result の物理型タグ type:"integer" は value_type:"integer" にリネームされる。
@@ -596,7 +771,10 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags.push(
-            Label::Other(TagType::Base(SType::Type), LabelValue::String("integer".to_string())),
+            Label::Other(
+                TagType::Base(SType::Type),
+                LabelValue::String("integer".to_string()),
+            ),
             Origin::System,
         );
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
@@ -606,7 +784,8 @@ mod tests {
             "type: tag must not appear after rename"
         );
         assert!(
-            has_append(tags, |l| l.tag_type() == TagType::Custom("value_type".to_string())),
+            has_append(tags, |l| l.tag_type()
+                == TagType::Custom("value_type".to_string())),
             "value_type: tag must appear"
         );
     }

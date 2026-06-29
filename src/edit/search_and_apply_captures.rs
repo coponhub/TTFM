@@ -10,9 +10,15 @@ pub fn search_and_apply_captures(
     registry: &TagRegistry,
     cache: &CacheManager,
     search_query: &str,
-    edit_query: &str,
-) -> Result<Vec<(Item, String)>> {
-    let mut resp = crate::search::search(store, registry, cache, search_query, SearchOptions::default())?;
+    edit_query: Option<&str>,
+) -> Result<Vec<(Item, Option<String>)>> {
+    let mut resp = crate::search::search(
+        store,
+        registry,
+        cache,
+        search_query,
+        SearchOptions::default(),
+    )?;
     resp.query_into_tags();
     resp.results
         .into_iter()
@@ -20,7 +26,10 @@ pub fn search_and_apply_captures(
         .collect()
 }
 
-fn apply_captures(_item: &Item, edit_query: &str) -> Result<String> {
+fn apply_captures(
+    _item: &Item,
+    edit_query: Option<&str>,
+) -> Result<Option<String>> {
     // TODO: §8 {n} 展開（別フェーズ）
-    Ok(edit_query.to_string())
+    Ok(edit_query.map(|q| q.to_string()))
 }

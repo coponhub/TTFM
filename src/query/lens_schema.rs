@@ -20,8 +20,8 @@ use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
 use crate::types::{Label, LabelValue, SType, TagType};
 use duckdb::types::Value;
-use sea_query::{BinOper, Condition, SimpleExpr};
 use indexmap::IndexMap;
+use sea_query::{BinOper, Condition, SimpleExpr};
 use std::sync::Arc;
 
 /// タグの物理的な格納場所
@@ -488,6 +488,13 @@ impl Lens {
         self.registry.get(tag)
     }
 
+    /// 登録済みの (TagType, TagDescriptor) を反復する（read 解決の収集等で使用）。
+    pub fn descriptors(
+        &self,
+    ) -> impl Iterator<Item = (&TagType, &TagDescriptor)> {
+        self.registry.iter()
+    }
+
     /// 指定されたタグの定義を検索し、見つからない場合はデフォルトの Basic 定義を返します。
     /// 未知のタグは Any 型として扱い、算術演算を許容します（実行時に DB がチェック）。
     pub fn look_up_or_default(&self, tag: &TagType) -> TagDescriptor {
@@ -660,7 +667,6 @@ fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,7 +722,7 @@ mod tests {
         let lens = Lens::base_standard();
         let found = lens.look_up(&TagType::Base(SType::Filename)).unwrap();
         if let StorageMapping::Basic { tag_type, .. } = &found.storage {
-            assert_eq!(tag_type, "name");
+            assert_eq!(tag_type, "filename");
         } else {
             panic!("Expected Basic for filename, got {:?}", found.storage);
         }

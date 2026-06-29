@@ -14,8 +14,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::cache::CacheManager;
-use crate::db::{Store, TargetTable};
 use crate::db::Pronoun::*;
+use crate::db::{Store, TargetTable};
 use crate::response::SearchResponse;
 use crate::tag::TagRegistry;
 use crate::types::Progress;
@@ -50,7 +50,9 @@ pub fn search(
         ));
     }
 
-    if let Some(res) = try_resolve_cache(store, registry, cache, query, &options)? {
+    if let Some(res) =
+        try_resolve_cache(store, registry, cache, query, &options)?
+    {
         return Ok(res);
     }
 
@@ -152,14 +154,25 @@ pub fn spawn_cache_worker(
             )?;
             let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &conn);
 
-            let all_columns = crate::tag::TagRegistry::with_standard().get_all_columns();
-            crate::oneview::OneView::recreate(&conn, &all_columns, &db_dir)?;
+            let registry = crate::tag::TagRegistry::with_standard();
+            let all_columns = registry.get_all_columns();
+            let reader = crate::query::lens_reader::Reader::build(
+                &registry,
+                crate::db::Tbl::_OneView,
+            );
+            crate::oneview::OneView::recreate(
+                &conn,
+                &all_columns,
+                reader,
+                &db_dir,
+            )?;
 
             let created_at = chrono::Utc::now().to_rfc3339();
 
             let mut metadata = HashMap::new();
             metadata.insert(crate::cache::META_QUERY.to_string(), query_owned);
-            metadata.insert(crate::cache::META_CREATED_AT.to_string(), created_at);
+            metadata
+                .insert(crate::cache::META_CREATED_AT.to_string(), created_at);
             metadata.insert(
                 crate::cache::META_INDEX_VERSION.to_string(),
                 "1".to_string(),
@@ -244,7 +257,14 @@ fn try_resolve_cache(
         return Ok(Some(SearchResponse::new_unfinished(cid, progress, query)));
     }
 
-    Ok(Some(search_from_cache(store, registry, cache, &cache_path, options.clone(), cid)?))
+    Ok(Some(search_from_cache(
+        store,
+        registry,
+        cache,
+        &cache_path,
+        options.clone(),
+        cid,
+    )?))
 }
 
 fn search_from_cache(
@@ -276,7 +296,11 @@ fn search_from_cache(
 
     let current_n = all_results.len();
     let mut response = if all_results.is_empty() {
-        SearchResponse::new_empty(Some(cid.to_string()), has_more, query.as_str())
+        SearchResponse::new_empty(
+            Some(cid.to_string()),
+            has_more,
+            query.as_str(),
+        )
     } else {
         SearchResponse {
             results: all_results,
@@ -296,7 +320,6 @@ fn search_from_cache(
     Ok(response)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,7 +328,9 @@ mod tests {
     use std::fs::File;
     use tempfile::tempdir;
 
-    fn setup(db_dir: &std::path::Path) -> Result<(Store, TagRegistry, CacheManager)> {
+    fn setup(
+        db_dir: &std::path::Path,
+    ) -> Result<(Store, TagRegistry, CacheManager)> {
         let store = Store::open(db_dir)?;
         let registry = TagRegistry::with_standard();
         Indexer::new(&store, &registry).initialize_tables()?;
@@ -399,12 +424,51 @@ mod tests {
 
         let query = "extension:txt";
 
-        let res_full = search(&store, &registry, &cache, query, SearchOptions { n: Some(10), ..Default::default() })?;
+        let res_full = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                n: Some(10),
+                ..Default::default()
+            },
+        )?;
         assert_eq!(res_full.results.len(), 5);
 
-        let res_p1 = search(&store, &registry, &cache, query, SearchOptions { n: Some(2), offset: Some(0), ..Default::default() })?;
-        let res_p2 = search(&store, &registry, &cache, query, SearchOptions { n: Some(2), offset: Some(2), ..Default::default() })?;
-        let res_p3 = search(&store, &registry, &cache, query, SearchOptions { n: Some(2), offset: Some(4), ..Default::default() })?;
+        let res_p1 = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                n: Some(2),
+                offset: Some(0),
+                ..Default::default()
+            },
+        )?;
+        let res_p2 = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                n: Some(2),
+                offset: Some(2),
+                ..Default::default()
+            },
+        )?;
+        let res_p3 = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                n: Some(2),
+                offset: Some(4),
+                ..Default::default()
+            },
+        )?;
 
         assert_eq!(res_p1.results.len(), 2);
         assert_eq!(res_p2.results.len(), 2);
@@ -428,7 +492,17 @@ mod tests {
         let (store, registry, cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(&store, &registry, &cache, "extension:txt", SearchOptions { n: Some(10), offset: Some(10), ..Default::default() })?;
+        let res = search(
+            &store,
+            &registry,
+            &cache,
+            "extension:txt",
+            SearchOptions {
+                n: Some(10),
+                offset: Some(10),
+                ..Default::default()
+            },
+        )?;
 
         assert!(res.results.is_empty());
         assert!(!res.has_more);
@@ -451,7 +525,13 @@ mod tests {
         let (store, registry, cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(&store, &registry, &cache, "name:test.bin", SearchOptions::default())?;
+        let res = search(
+            &store,
+            &registry,
+            &cache,
+            "name:test.bin",
+            SearchOptions::default(),
+        )?;
         assert_eq!(res.results.len(), 1);
         let r = &res.results[0];
         assert_eq!(r.item_kind, ItemKind::File);
@@ -477,24 +557,39 @@ mod tests {
 
         let query = "extension:";
 
-        let res_db = search(&store, &registry, &cache, query, SearchOptions::default())?;
+        let res_db =
+            search(&store, &registry, &cache, query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
         assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
             |e| e.label.tag_type() == crate::types::TagType::from("item")
         )));
-        assert!(res_db.results.iter().all(|r| r.item_kind == ItemKind::Volatile));
+        assert!(res_db
+            .results
+            .iter()
+            .all(|r| r.item_kind == ItemKind::Volatile));
 
         let cid = "test-proj-cache-cid";
         spawn_cache_worker(store.db_dir.clone(), &cache, cid, query)?;
 
         let cache_path = cache.path_for(cid);
         for _ in 0..20 {
-            if cache_path.exists() { break; }
+            if cache_path.exists() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(cache_path.exists());
 
-        let res_cache = search(&store, &registry, &cache, query, SearchOptions { cid: Some(cid.to_string()), ..Default::default() })?;
+        let res_cache = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                cid: Some(cid.to_string()),
+                ..Default::default()
+            },
+        )?;
 
         let db_has_item_tag = res_db.results.iter().any(|r| {
             r.tags.entries.iter().any(|e| {
@@ -506,16 +601,45 @@ mod tests {
                 e.label.tag_type() == crate::types::TagType::from("item")
             })
         });
-        assert_eq!(db_has_item_tag, cache_has_item_tag, "item: tag presence mismatch");
-        assert_eq!(res_db.results.len(), res_cache.results.len(), "Result length mismatch");
+        assert_eq!(
+            db_has_item_tag, cache_has_item_tag,
+            "item: tag presence mismatch"
+        );
+        assert_eq!(
+            res_db.results.len(),
+            res_cache.results.len(),
+            "Result length mismatch"
+        );
 
-        for (i, (db_item, cache_item)) in res_db.results.iter().zip(res_cache.results.iter()).enumerate() {
-            assert_eq!(db_item.item_kind, cache_item.item_kind, "item_kind mismatch at index {}", i);
-            assert_eq!(db_item.raw_repr(), cache_item.raw_repr(), "representative mismatch at index {}", i);
+        for (i, (db_item, cache_item)) in res_db
+            .results
+            .iter()
+            .zip(res_cache.results.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                db_item.item_kind, cache_item.item_kind,
+                "item_kind mismatch at index {}",
+                i
+            );
+            assert_eq!(
+                db_item.raw_repr(),
+                cache_item.raw_repr(),
+                "representative mismatch at index {}",
+                i
+            );
             if !db_item.id.is_volatile() {
-                assert_eq!(db_item.id, cache_item.id, "id mismatch at index {}", i);
+                assert_eq!(
+                    db_item.id, cache_item.id,
+                    "id mismatch at index {}",
+                    i
+                );
             } else {
-                assert!(cache_item.id.is_volatile(), "id mismatch at index {} (expected volatile)", i);
+                assert!(
+                    cache_item.id.is_volatile(),
+                    "id mismatch at index {} (expected volatile)",
+                    i
+                );
             }
         }
 
@@ -542,15 +666,31 @@ mod tests {
 
         let cache_path = cache.path_for(cid);
         for _ in 0..20 {
-            if cache_path.exists() { break; }
+            if cache_path.exists() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(cache_path.exists(), "Cache should be created for complex query");
+        assert!(
+            cache_path.exists(),
+            "Cache should be created for complex query"
+        );
 
-        let res = search(&store, &registry, &cache, query, SearchOptions { n: Some(10), cid: Some(cid.to_string()), ..Default::default() })?;
+        let res = search(
+            &store,
+            &registry,
+            &cache,
+            query,
+            SearchOptions {
+                n: Some(10),
+                cid: Some(cid.to_string()),
+                ..Default::default()
+            },
+        )?;
         assert_eq!(res.results.len(), 2);
 
-        let names: Vec<String> = res.results.iter().map(|r| r.raw_repr()).collect();
+        let names: Vec<String> =
+            res.results.iter().map(|r| r.raw_repr()).collect();
         assert!(names.contains(&"readme.md".to_string()));
         assert!(names.contains(&"test.rs".to_string()));
 
@@ -564,7 +704,13 @@ mod tests {
         std::fs::create_dir(&db_dir)?;
         let (store, registry, cache) = setup(&db_dir)?;
 
-        let res = search(&store, &registry, &cache, "name:non-existent", SearchOptions::default())?;
+        let res = search(
+            &store,
+            &registry,
+            &cache,
+            "name:non-existent",
+            SearchOptions::default(),
+        )?;
         assert!(res.results.is_empty());
         assert!(!res.has_more);
         assert_eq!(res.cid, None);

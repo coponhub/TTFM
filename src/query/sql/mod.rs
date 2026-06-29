@@ -205,7 +205,9 @@ pub fn build_fetch_sql(
 ) -> anyhow::Result<SelectStatement> {
     // 定義参照（単体）: ハイブリッド1行 SQL を生成し、representative は projection と
     // 同じ decode_nest 経路で型付けする（get_projection も Some を返す）。
-    if let ResolvedNode::DefinitionRef { kind, value, .. } = &resolver.resolved_query {
+    if let ResolvedNode::DefinitionRef { kind, value, .. } =
+        &resolver.resolved_query
+    {
         return Ok(build_definition_ref_fetch_sql(src, *kind, value));
     }
     if resolver.get_projection().is_some() {
@@ -261,7 +263,8 @@ pub fn build_fetch_sql(
         // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
         // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
         ResolvedNode::And(nodes) | ResolvedNode::Or(nodes)
-            if !nodes.is_empty() && nodes.iter().all(|n| is_boolean_only_node(n)) =>
+            if !nodes.is_empty()
+                && nodes.iter().all(|n| is_boolean_only_node(n)) =>
         {
             return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
@@ -380,7 +383,8 @@ mod tests {
             label: Label::from("test"),
         };
         let pick = PickNode::new(&Src::OneView, &node);
-        let sql = build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0));
+        let sql =
+            build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0));
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 新スキーマ: "tag_type" フィールドが含まれる

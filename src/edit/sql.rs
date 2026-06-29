@@ -2,7 +2,10 @@ use super::lens_schema;
 use crate::db::{Col, Tbl};
 use crate::types::{Label, LabelValue};
 use crate::util::parquet_query;
-use sea_query::{CaseStatement, Expr, Order, Query, SimpleExpr, SelectStatement, UnionType, UpdateStatement};
+use sea_query::{
+    CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
+    UpdateStatement,
+};
 
 pub(crate) struct UserTagDelete {
     pub(crate) item_id: i64,
@@ -20,7 +23,10 @@ pub(crate) fn item_references_write(
         q.and_where(Expr::col(Col::ItemId).is_not_in(cascade_ids.to_vec()));
     }
     for (item_id, item_kind, content) in inserts {
-        q.union(UnionType::All, lens_schema::item_ref_row(item_id, item_kind, content).select());
+        q.union(
+            UnionType::All,
+            lens_schema::item_ref_row(item_id, item_kind, content).select(),
+        );
     }
     q.order_by(Col::ItemId, Order::Asc);
     q
@@ -39,7 +45,8 @@ pub(crate) fn user_tags_write(
     }
 
     for d in &deletes {
-        let mut row_match = Expr::col(Col::ItemId).eq(d.item_id)
+        let mut row_match = Expr::col(Col::ItemId)
+            .eq(d.item_id)
             .and(Expr::col(Col::Type).eq(d.tag_type.clone()));
         if let Some(ref v) = d.value {
             if let Some((col, val_expr)) = Col::for_label_value(v) {
@@ -51,7 +58,11 @@ pub(crate) fn user_tags_write(
 
     for (item_id, label) in inserts {
         let tag_type = label.tag_type().to_string();
-        q.union(UnionType::All, lens_schema::user_tags_row(item_id, tag_type, label.value()).select());
+        q.union(
+            UnionType::All,
+            lens_schema::user_tags_row(item_id, tag_type, label.value())
+                .select(),
+        );
     }
 
     q.order_by(Col::Type, Order::Asc)
@@ -61,7 +72,10 @@ pub(crate) fn user_tags_write(
     q
 }
 
-pub(crate) fn rank_case_update(tmp: Tbl, updates: &[(i64, i64)]) -> UpdateStatement {
+pub(crate) fn rank_case_update(
+    tmp: Tbl,
+    updates: &[(i64, i64)],
+) -> UpdateStatement {
     let rank_case: SimpleExpr = updates
         .iter()
         .fold(CaseStatement::new(), |acc, (id, rank)| {
@@ -75,7 +89,10 @@ pub(crate) fn rank_case_update(tmp: Tbl, updates: &[(i64, i64)]) -> UpdateStatem
         .value(Col::Rank, rank_case)
         .and_where(
             Expr::col(Col::ItemId).is_in(
-                updates.iter().map(|(id, _)| sea_query::Value::from(*id)).collect::<Vec<_>>(),
+                updates
+                    .iter()
+                    .map(|(id, _)| sea_query::Value::from(*id))
+                    .collect::<Vec<_>>(),
             ),
         )
         .to_owned()

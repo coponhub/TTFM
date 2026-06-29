@@ -20,7 +20,7 @@ use super::{
     build_aggregation_context, label_to_unit_aware_expr, subquery,
     wrap_in_subquery, BuildPick, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, Src, SqlType};
+use crate::db::{Col, CustomFunc, Pronoun::*, SqlType, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
@@ -158,7 +158,10 @@ pub(super) fn build_label_set_op_pick_sql(
     }
 }
 
-pub(super) fn build_boolean_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
+pub(super) fn build_boolean_sql(
+    src: &Src,
+    node: &ResolvedNode,
+) -> SelectStatement {
     let agg_ctx = build_aggregation_context(src, node);
     match node {
         ResolvedNode::AggregationMatch { agg, op, label } => {

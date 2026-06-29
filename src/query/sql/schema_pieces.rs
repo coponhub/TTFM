@@ -19,7 +19,8 @@ use sea_query::{BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
 // ── to_label_select 用 ────────────────────────────────────────────────────
 
 /// Column ストレージ用ラベル SELECT。`WHERE type = ?` フィルタなし。
-pub(crate) fn build_lens_select_column(src: &Src,
+pub(crate) fn build_lens_select_column(
+    src: &Src,
     col: Col,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
@@ -34,7 +35,8 @@ pub(crate) fn build_lens_select_column(src: &Src,
 }
 
 /// タグ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
-pub(crate) fn build_lens_select_tag(src: &Src,
+pub(crate) fn build_lens_select_tag(
+    src: &Src,
     col: Col,
     tag_type: &str,
     ids_sql: SelectStatement,
@@ -110,8 +112,9 @@ mod tests {
     #[test]
     fn test_build_lens_select_column_no_type_filter() {
         use sea_query::SqliteQueryBuilder;
-        let sql = build_lens_select_column(&Src::OneView, Col::Type, dummy_ids())
-            .to_string(SqliteQueryBuilder);
+        let sql =
+            build_lens_select_column(&Src::OneView, Col::Type, dummy_ids())
+                .to_string(SqliteQueryBuilder);
         assert!(
             !sql.contains("\"type\" = "),
             "Column select must not have type filter"
@@ -122,9 +125,13 @@ mod tests {
     #[test]
     fn test_build_lens_select_tag_has_type_filter() {
         use sea_query::SqliteQueryBuilder;
-        let sql =
-            build_lens_select_tag(&Src::OneView, Col::LabelStr, "parentdir", dummy_ids())
-                .to_string(SqliteQueryBuilder);
+        let sql = build_lens_select_tag(
+            &Src::OneView,
+            Col::LabelStr,
+            "parentdir",
+            dummy_ids(),
+        )
+        .to_string(SqliteQueryBuilder);
         assert!(
             sql.contains("parentdir"),
             "tag select must filter by tag_type"

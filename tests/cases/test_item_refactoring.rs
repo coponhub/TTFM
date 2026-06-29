@@ -14,10 +14,11 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use tempfile::tempdir;
+use ttfm::SearchOptions;
 use ttfm::{search, tagging};
-use ttfm::{SearchOptions};
 
-fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager) {
+fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)
+{
     let dir = Box::leak(Box::new(tempdir().unwrap()));
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
@@ -56,27 +57,45 @@ fn test_item_id_and_kind_refactoring() {
     let db_dir = dir.path().join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let db_dir_cache =
+        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
+    let (store, registry, cache) =
+        (db_dir_store, db_dir_registry, db_dir_cache);
 
     // 1. Stored items (File/Note)
-    let note_id = tagging::add_item(&store, &registry, "note", "TDD integration test memo").unwrap();
+    let note_id = tagging::add_item(
+        &store,
+        &registry,
+        "note",
+        "TDD integration test memo",
+    )
+    .unwrap();
     // note_id should be ItemId::Stored
     assert!(note_id.to_string().parse::<i64>().is_ok());
 
     // 2. tag_item does NOT persist label
-    tagging::tag_item(&store, &registry, &note_id.to_string(), "project:ttfm").unwrap();
+    tagging::tag_item(&store, &registry, &note_id.to_string(), "project:ttfm")
+        .unwrap();
 
     // 3. Volatile items from aggregation (with actual data)
     // Add some files to make count > 0
     std::fs::write(dir.path().join("file1.txt"), "content").unwrap();
     std::fs::write(dir.path().join("file2.txt"), "content").unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let res = search::search(&store, &registry, &cache, "count(item_id:)", SearchOptions::default())
-        .unwrap();
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "count(item_id:)",
+        SearchOptions::default(),
+    )
+    .unwrap();
     assert_eq!(res.results.len(), 1);
     // name may vary depending on env, so we just ensure it's a number > 0
     let count: i64 = res.results[0]
@@ -90,7 +109,14 @@ fn test_item_id_and_kind_refactoring() {
     assert!(res.results[0].id.is_volatile());
 
     // 4. Projection which should return volatile label items
-    let res_proj = search::search(&store, &registry, &cache, "extension:", SearchOptions::default()).unwrap();
+    let res_proj = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:",
+        SearchOptions::default(),
+    )
+    .unwrap();
     assert!(!res_proj.results.is_empty());
 
     // item_kind should be ItemKind::Volatile
@@ -112,7 +138,8 @@ fn test_item_id_and_kind_refactoring() {
 #[test]
 fn item_id_display_uses_local_form() {
     let (store, registry, cache) = setup_store();
-    let raw_id = tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+    let raw_id =
+        tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
     let o = ttfm::Origin::within(raw_id);
     let disp = format!("{}({})", o.short(), raw_id - o.space_lo());
@@ -122,10 +149,13 @@ fn item_id_display_uses_local_form() {
 
     // Item が同じ id を返す
     let results = search::search(
-        &store, &registry, &cache,
+        &store,
+        &registry,
+        &cache,
         &format!("item_id:{raw_id}"),
         SearchOptions::default(),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 1);
     let rid = results.results[0].id.as_i64();
     let ro = ttfm::Origin::within(rid);
@@ -136,7 +166,8 @@ fn item_id_display_uses_local_form() {
 #[test]
 fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let (store, registry, cache) = setup_store();
-    let raw_id = tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+    let raw_id =
+        tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
     let o = ttfm::Origin::within(raw_id);
     let disp = format!("{}({})", o.short(), raw_id - o.space_lo()); // e.g. "User(0)"
@@ -144,15 +175,26 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let q_local = format!("item_id:\"{disp}\"");
 
     let r_raw = search::search(
-        &store, &registry, &cache, &q_raw, SearchOptions::default(),
-    ).unwrap();
+        &store,
+        &registry,
+        &cache,
+        &q_raw,
+        SearchOptions::default(),
+    )
+    .unwrap();
     let r_local = search::search(
-        &store, &registry, &cache, &q_local, SearchOptions::default(),
-    ).unwrap();
+        &store,
+        &registry,
+        &cache,
+        &q_local,
+        SearchOptions::default(),
+    )
+    .unwrap();
 
     assert_eq!(r_raw.results.len(), 1, "raw id query should find item");
     assert_eq!(
-        r_local.results.len(), 1,
+        r_local.results.len(),
+        1,
         "local form query '{q_local}' should find same item (got {})",
         r_local.results.len()
     );

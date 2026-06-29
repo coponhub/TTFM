@@ -54,7 +54,6 @@ pub(super) fn wrap_with_item_id(
     proj_col: Col,
     proj_tag_type: Option<&str>,
 ) -> SelectStatement {
-
     let mut wrapped = Query::select();
     wrapped
         .column((View, Col::ItemId))
@@ -294,8 +293,10 @@ pub(super) fn build_agg_calc_subquery_nest(
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SimpleExpr {
-    let left = build_agg_operand_subquery_nest(src, &calc.left, agg_ctx, nest_ctx);
-    let right = build_agg_operand_subquery_nest(src, &calc.right, agg_ctx, nest_ctx);
+    let left =
+        build_agg_operand_subquery_nest(src, &calc.left, agg_ctx, nest_ctx);
+    let right =
+        build_agg_operand_subquery_nest(src, &calc.right, agg_ctx, nest_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
@@ -337,7 +338,9 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                         Expr::col(*column).into()
                     }
                     StorageMapping::Fixed(col) => Expr::col(*col).into(),
-                    StorageMapping::Composite => Expr::col(Col::LabelStr).into(),
+                    StorageMapping::Composite => {
+                        Expr::col(Col::LabelStr).into()
+                    }
                 }
             }
             ResolvedOperand::Calculation(calc) => {
@@ -419,9 +422,11 @@ pub(super) fn build_count_nvalue_sql(
     let (count_col, inner_tag_type) = resolve_count_target(inner);
     let mut stmt = Query::select();
 
-
     if let Some(tag_type) = inner_tag_type {
-                    stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+        stmt.expr_as(
+            CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+            Group,
+        );
         stmt.expr_as(Expr::col((Tags, count_col)).count_distinct(), Nvalue);
         stmt.from_as(src, Proj);
         stmt.join_as(
@@ -616,10 +621,14 @@ pub(super) fn build_nvalue_standalone_subquery(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
-        
+            let deduped =
+                build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
+
             let mut stmt = Query::select();
-                        stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+                Group,
+            );
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -648,7 +657,10 @@ pub(super) fn build_nvalue_standalone_subquery(
         ResolvedOperand::Literal(label) => {
             let val = label_to_simple_expr(label);
             let mut stmt = Query::select();
-            stmt.expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(Expr::col(proj_col)),
+                Group,
+            );
             stmt.expr_as(val, Nvalue);
             stmt.from(src);
             if let Some(tt) = proj_tag_type {
@@ -726,8 +738,12 @@ pub(super) fn build_nvalue_standalone_subquery(
             stmt.from_as(src, Proj);
             match nval_storage {
                 StorageMapping::Fixed(nv_col) => {
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+                    stmt.expr_as(
+                        CustomFunc::as_representative(Expr::col((
+                            Proj, proj_col,
+                        ))),
+                        Group,
+                    );
                     stmt.expr_as(
                         CustomFunc::any_value(Expr::col((Proj, *nv_col))),
                         Nvalue,
@@ -752,10 +768,16 @@ pub(super) fn build_nvalue_standalone_subquery(
                         sea_query::JoinType::LeftJoin,
                         nv_sub,
                         Sub,
-                        Expr::col((Proj, Col::ItemId)).equals((Sub, Col::ItemId)),
+                        Expr::col((Proj, Col::ItemId))
+                            .equals((Sub, Col::ItemId)),
                     );
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+
+                    stmt.expr_as(
+                        CustomFunc::as_representative(Expr::col((
+                            Proj, proj_col,
+                        ))),
+                        Group,
+                    );
                     stmt.expr_as(
                         CustomFunc::any_value(Func::coalesce([
                             Expr::col((Sub, Val)).into(),
@@ -765,8 +787,12 @@ pub(super) fn build_nvalue_standalone_subquery(
                     );
                 }
                 StorageMapping::Composite => {
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+                    stmt.expr_as(
+                        CustomFunc::as_representative(Expr::col((
+                            Proj, proj_col,
+                        ))),
+                        Group,
+                    );
                     stmt.expr_as(Expr::val(0.0f64), Nvalue);
                 }
             }
@@ -808,7 +834,8 @@ fn build_agg_inner(
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
-    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(src, agg, agg_ctx, nest_ctx)
+    if let Some(nvalue_agg_sql) =
+        build_agg_over_nvalue(src, agg, agg_ctx, nest_ctx)
     {
         return nvalue_agg_sql;
     }
@@ -1015,9 +1042,13 @@ fn build_nvalue_cte_inner(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
+            let deduped =
+                build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
-            stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+                Group,
+            );
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -1119,11 +1150,20 @@ fn build_pivot_keys_into_stmt(
                 StorageMapping::Composite => {
                     // Representative は既にリストなのでそのまま（または UNION[] キャスト）
                     stmt.expr_as(
-                        Expr::cust(format!("CAST(\"{}\" AS {}[])", sea_query::Iden::to_string(&crate::db::Pronoun::Representative), union_type)),
-                        Alias::new(&format!("key{}", i))
+                        Expr::cust(format!(
+                            "CAST(\"{}\" AS {}[])",
+                            sea_query::Iden::to_string(
+                                &crate::db::Pronoun::Representative
+                            ),
+                            union_type
+                        )),
+                        Alias::new(&format!("key{}", i)),
                     );
                     // NULLチェック
-                    stmt.and_having(Expr::col(crate::db::Pronoun::Representative).is_not_null());
+                    stmt.and_having(
+                        Expr::col(crate::db::Pronoun::Representative)
+                            .is_not_null(),
+                    );
                 }
             },
             ResolvedOperand::Calculation(calc) => {
@@ -1150,9 +1190,10 @@ pub(super) fn build_nest_pivot_cte(
     nvalue: Option<&ResolvedOperand>,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
-        build_agg_calc_eav_expr(calc, agg_ctx)
-    });
+    let (mut stmt, type_filters) =
+        build_pivot_keys_into_stmt(src, keys, |calc| {
+            build_agg_calc_eav_expr(calc, agg_ctx)
+        });
 
     if let Some(nv) = nvalue {
         let nv_expr = build_agg_operand_eav_expr(nv, agg_ctx);
@@ -1171,9 +1212,10 @@ pub(super) fn build_nest_pivot_cte_no_agg(
     src: &Src,
     keys: &[ResolvedOperand],
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
-        build_calculation_eav_expr(calc)
-    });
+    let (mut stmt, type_filters) =
+        build_pivot_keys_into_stmt(src, keys, |calc| {
+            build_calculation_eav_expr(calc)
+        });
 
     if !type_filters.is_empty() {
         stmt.and_where(Expr::col(Col::Type).is_in(type_filters));

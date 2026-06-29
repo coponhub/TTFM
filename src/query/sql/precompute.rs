@@ -49,7 +49,10 @@ pub fn needs_aggregation_context(node: &ResolvedNode) -> bool {
     })
 }
 
-pub fn build_aggregation_context(src: &Src, node: &ResolvedNode) -> AggregationContext {
+pub fn build_aggregation_context(
+    src: &Src,
+    node: &ResolvedNode,
+) -> AggregationContext {
     let mut ctx = AggregationContext::new();
     build_agg_context_into(node, &mut ctx);
     materialize_agg_context(src, &mut ctx);
@@ -196,7 +199,10 @@ pub fn build_nest_context(src: &Src, node: &ResolvedNode) -> NestContext {
     ctx
 }
 
-pub fn build_nest_context_for_operand(src: &Src, op: &ResolvedOperand) -> NestContext {
+pub fn build_nest_context_for_operand(
+    src: &Src,
+    op: &ResolvedOperand,
+) -> NestContext {
     let mut ctx = NestContext::new();
     for o in op.walk() {
         if let ResolvedOperand::Aggregation(agg) = o {
@@ -359,9 +365,9 @@ fn build_filter_operand_expr(
 ) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_tag_value_agg_expr(storage, *sql_type)
-        }
+        ResolvedOperand::TagRef {
+            storage, sql_type, ..
+        } => build_tag_value_agg_expr(storage, *sql_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -369,6 +375,8 @@ fn build_filter_operand_expr(
                 calc.left.is_string_type() && calc.right.is_string_type();
             apply_arithmetic_op(&calc.op, left, right, is_string)
         }
-        ResolvedOperand::Aggregation(agg) => subquery(build_agg(src, agg, agg_ctx)),
+        ResolvedOperand::Aggregation(agg) => {
+            subquery(build_agg(src, agg, agg_ctx))
+        }
     })
 }

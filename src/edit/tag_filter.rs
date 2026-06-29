@@ -6,7 +6,10 @@ pub fn parse_tag_condition(_condition: &str) -> Result<QueryNode> {
     todo!("parse_tag_condition")
 }
 
-pub fn eval_tag_predicate(_node: &QueryNode, _tagged_at: Option<i64>) -> Result<bool> {
+pub fn eval_tag_predicate(
+    _node: &QueryNode,
+    _tagged_at: Option<i64>,
+) -> Result<bool> {
     // TODO: TagCondition 評価（別フェーズ）
     todo!("eval_tag_predicate")
 }

@@ -13,13 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::tag::TagRegistry;
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
     default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
     inject_path_scope, scope_path_from_dir,
 };
 use tempfile::tempdir;
+use ttfm::tag::TagRegistry;
 use ttfm::{search, tagging};
 
 // ──────────────────────────────────────────────
@@ -2367,6 +2367,30 @@ define_cases! {
             Ok(())
         },
     },
+    // item_references アイテムに rank を付けて rank: projection で検索したとき重複しないことを確認。
+    // OneView は item_references を Name/ItemKind/Content に unpivot するため、修正前は
+    // all_hits で同一 item_id が3重に返っていた。
+    rank_projection_no_duplicate_items: {
+        setup: |_dir| Ok(()),
+        modify: Some(|store, registry, _dir| {
+            let id = tagging::add_item(store, registry, "tag", "rank_projection_no_duplicate_items")?;
+            ttfm::rank::set_rank_by_id(store, registry, id, false, 50)
+        }),
+        format_query: |q, _dir| format!("({}) & tag:\"rank_projection_no_duplicate_items\"", q),
+        query: "rank:",
+        assert: |res, _dir| {
+            assert_eq!(res.results.len(), 1, "should be exactly 1 rank group: {:?}",
+                res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>());
+            let group = &res.results[0];
+            let item_vals: Vec<String> = group.tags.entries.iter()
+                .filter(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+                .map(|e| e.label.value().as_display_name())
+                .collect();
+            assert_eq!(item_vals.len(), 1,
+                "rank=50 group must have exactly 1 item (no duplicates), got: {:?}", item_vals);
+            Ok(())
+        },
+    },
 }
 
 // ──────────────────────────────────────────────
@@ -2438,8 +2462,10 @@ fn test_nest_parse_with_aggregation() {
 
 #[test]
 fn test_nest_left_must_be_projection() {
-    let result =
-        ttfm::query::lens_resolver::Resolver::new("extension:rs &: name:", &TagRegistry::with_standard());
+    let result = ttfm::query::lens_resolver::Resolver::new(
+        "extension:rs &: name:",
+        &TagRegistry::with_standard(),
+    );
     assert!(result.is_err(), "non-projection left should fail");
 }
 
@@ -2449,7 +2475,10 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: count(extension:jpg)",
+        &TagRegistry::with_standard(),
+    )
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2457,17 +2486,22 @@ fn test_nest_resolves_to_projection_with_nvalue() {
 
 #[test]
 fn test_nest_resolves_sum_nvalue() {
-    let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: sum(size:)", &TagRegistry::with_standard())
-            .unwrap();
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: sum(size:)",
+        &TagRegistry::with_standard(),
+    )
+    .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
 
 #[test]
 fn test_plain_projection_no_nvalue() {
-    let resolver =
-        ttfm::query::lens_resolver::Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "extension:",
+        &TagRegistry::with_standard(),
+    )
+    .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(
         resolver.get_nvalue().is_none(),
@@ -2481,25 +2515,37 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("extension:rs &: count(*:*)", &TagRegistry::with_standard())
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "extension:rs &: count(*:*)",
+        &TagRegistry::with_standard()
+    )
     .is_err());
 }
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("count(*:*) &: extension:", &TagRegistry::with_standard())
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "count(*:*) &: extension:",
+        &TagRegistry::with_standard()
+    )
     .is_err());
 }
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new("(size: > 100) &: extension:", &TagRegistry::with_standard())
+    assert!(ttfm::query::lens_resolver::Resolver::new(
+        "(size: > 100) &: extension:",
+        &TagRegistry::with_standard()
+    )
     .is_err());
 }
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new("parentdir: &: (count(extension:jpg) > 1)", &TagRegistry::with_standard())
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: (count(extension:jpg) > 1)",
+        &TagRegistry::with_standard(),
+    )
     .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
@@ -2528,7 +2574,10 @@ fn test_nest_resolver_all_aggregations() {
         "filename: &: sum(size:)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
+        let result = ttfm::query::lens_resolver::Resolver::new(
+            query,
+            &TagRegistry::with_standard(),
+        );
         assert!(
             result.is_ok(),
             "'{}' should resolve: {}",
@@ -2547,8 +2596,11 @@ fn test_nest_resolver_all_aggregations() {
 
 #[test]
 fn test_nest_scalar_right_resolves() {
-    let resolver =
-        ttfm::query::lens_resolver::Resolver::new("parentdir: &: 100", &TagRegistry::with_standard()).unwrap();
+    let resolver = ttfm::query::lens_resolver::Resolver::new(
+        "parentdir: &: 100",
+        &TagRegistry::with_standard(),
+    )
+    .unwrap();
     assert!(resolver.get_projection().is_some());
     assert!(resolver.get_nvalue().is_some());
 }
@@ -2564,7 +2616,10 @@ fn test_nest_comparison_resolver_patterns() {
         "extension: &: (count(*:*) > 2)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
+        let result = ttfm::query::lens_resolver::Resolver::new(
+            query,
+            &TagRegistry::with_standard(),
+        );
         assert!(
             result.is_ok(),
             "'{}': {}",
@@ -2594,7 +2649,10 @@ fn test_nest_query_vs_calc_resolves() {
         "parentdir: &: (avg(size:) > (sum(size:) / count()))",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(query, &TagRegistry::with_standard());
+        let result = ttfm::query::lens_resolver::Resolver::new(
+            query,
+            &TagRegistry::with_standard(),
+        );
         assert!(
             result.is_ok(),
             "'{}': {}",
@@ -2621,10 +2679,20 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "parentdir: &: extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "parentdir: &: extension:",
+        ttfm::SearchOptions::default(),
+    )?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2642,10 +2710,20 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "parentdir: &: (size: * 2)", ttfm::SearchOptions::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "parentdir: &: (size: * 2)",
+        ttfm::SearchOptions::default(),
+    )?;
     assert!(!res.results.is_empty());
     Ok(())
 }
@@ -2667,15 +2745,31 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res = search::search(&store, &registry, &cache, "type: & parentdir:", ttfm::SearchOptions::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "type: & parentdir:",
+        ttfm::SearchOptions::default(),
+    )?;
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res = search::search(&store, &registry, &cache, "type: | extension:", ttfm::SearchOptions::default())?;
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "type: | extension:",
+        ttfm::SearchOptions::default(),
+    )?;
     assert!(
         !res.results.is_empty(),
         "type: | extension: should return labels from both"

@@ -17,10 +17,10 @@ use crate::db::{identifier, Store, TargetTable};
 use crate::indexing::indexer::{
     DynamicRow, ScanHash, TagRow, TaggingResult, TempScanEntry,
 };
+use crate::tag::TagRegistry;
 use crate::taggers::{ColumnDef, TagValue};
 use crate::types::{ItemId, Origin};
 use crate::util::DotOk;
-use crate::tag::TagRegistry;
 use anyhow::Result;
 use rayon::prelude::*;
 use std::path::Path;
@@ -269,8 +269,8 @@ impl TriageAccumulator {
 mod tests {
     use super::*;
     use crate::db::SqlType;
-    use crate::indexing::ScanEntry;
     use crate::indexing::indexer::calc_scanhash;
+    use crate::indexing::ScanEntry;
     use crate::util::SafeMetadata;
 
     #[test]

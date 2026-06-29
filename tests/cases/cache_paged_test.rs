@@ -18,7 +18,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use tempfile::tempdir;
 use ttfm::search;
-use ttfm::{SearchOptions};
+use ttfm::SearchOptions;
 
 #[test]
 fn test_search_cache_flow() -> anyhow::Result<()> {
@@ -42,7 +42,11 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // 1. Initial Search (n=10)
     let options = SearchOptions {
@@ -50,7 +54,8 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         ..Default::default()
     };
     // Query must match all files
-    let res = search::search(&store, &registry, &cache, "extension:txt", options)?;
+    let res =
+        search::search(&store, &registry, &cache, "extension:txt", options)?;
 
     assert_eq!(res.results.len(), 10);
     assert!(res.has_more, "Should have more results");
@@ -60,7 +65,10 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     let mut finished = false;
     for _ in 0..100 {
         // max 10s
-        let res_cid = search::search(&store, &registry, &cache, 
+        let res_cid = search::search(
+            &store,
+            &registry,
+            &cache,
             "extension:txt",
             SearchOptions {
                 cid: Some(cid.clone()),
@@ -84,7 +92,13 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         offset: Some(10),
         cid: Some(cid.clone()),
     };
-    let res_page2 = search::search(&store, &registry, &cache, "extension:txt", options_page2)?;
+    let res_page2 = search::search(
+        &store,
+        &registry,
+        &cache,
+        "extension:txt",
+        options_page2,
+    )?;
 
     assert_eq!(
         res_page2.results.len(),
@@ -99,7 +113,10 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
 
     // 4. Verify data consistency (Sort order should be rank DESC, item_id DESC)
     // Results from cache should match what we expect from a fresh search
-    let res_fresh_page2 = search::search(&store, &registry, &cache, 
+    let res_fresh_page2 = search::search(
+        &store,
+        &registry,
+        &cache,
         "extension:txt",
         SearchOptions {
             n: Some(10),

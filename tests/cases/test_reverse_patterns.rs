@@ -110,7 +110,13 @@ fn test_reverse_pattern_scalar_gt_projection() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "100 > size:", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "100 > size:",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -139,7 +145,13 @@ fn test_reverse_pattern_aggregation_label_op() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "sum(size:) :> 100", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "sum(size:) :> 100",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -168,7 +180,13 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "1 :> 100", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "1 :> 100",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -179,7 +197,13 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     );
     assert!(err_msg.contains("-->"), "Expected pretty printing");
 
-    let res = search::search(&store, &registry, &cache, "100 :< size:", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "100 :< size:",
+        Default::default(),
+    );
     assert!(
         res.is_ok(),
         "Valid query '100 :< size:' should be allowed. Error: {:?}",
@@ -198,7 +222,13 @@ fn test_double_colon_suggestion_fix() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
     let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "size: > path:", Default::default());
+    let res = search::search(
+        &store,
+        &registry,
+        &cache,
+        "size: > path:",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();

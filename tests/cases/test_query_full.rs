@@ -13,10 +13,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::tag::TagRegistry;
 use super::has_item_tags;
 use std::fs::File;
 use ttfm::query::lens_resolver::Resolver;
+use ttfm::tag::TagRegistry;
 
 // ──────────────────────────────────────────────
 // define_cases! 移行済み (FileManager e2e テスト)

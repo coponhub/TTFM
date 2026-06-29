@@ -15,10 +15,10 @@
 
 use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
+use crate::tag::TagRegistry;
 use crate::taggers::TagValue;
 use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
-use crate::tag::TagRegistry;
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
@@ -321,9 +321,7 @@ impl MergeQueryParts {
         ItemRow::all_columns()
     }
 
-    pub(crate) fn registry_variants(
-        registry: &TagRegistry,
-    ) -> SelectStatement {
+    pub(crate) fn registry_variants(registry: &TagRegistry) -> SelectStatement {
         let mut iter = registry.iter_all_for_rank();
         let Some((first_name, first_rank)) = iter.next() else {
             let mut q = Query::select();
@@ -332,7 +330,8 @@ impl MergeQueryParts {
         };
 
         let mut query =
-            ItemRow::new_type(Expr::val(first_name).into(), first_rank).select();
+            ItemRow::new_type(Expr::val(first_name).into(), first_rank)
+                .select();
 
         for (name, rank) in iter {
             query.union(

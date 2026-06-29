@@ -1,9 +1,9 @@
 use tempfile::tempdir;
 use ttfm::db::{Store, TargetTable};
+use ttfm::edit::write::{write, DeleteTarget, TagOp, WriteAction};
 use ttfm::indexing::Indexer;
 use ttfm::tag::TagRegistry;
 use ttfm::types::{ItemId, Label, LabelValue, SType, TagType};
-use ttfm::edit::write::{write, DeleteTarget, TagOp, WriteAction};
 
 fn setup() -> (Store, TagRegistry, tempfile::TempDir) {
     let dir = tempdir().unwrap();
@@ -77,22 +77,29 @@ fn write_add_volatile_creates_item_ref_and_user_tag() {
     assert_eq!(resp.new_item_ids.len(), 1);
     let new_id = resp.new_item_ids[0];
     // User 空間 [0, 2^58) に採番されていること
-    assert!(new_id >= 0 && new_id < (1i64 << 58), "id {new_id} not in User space");
+    assert!(
+        new_id >= 0 && new_id < (1i64 << 58),
+        "id {new_id} not in User space"
+    );
 
     // item_references に新規行が存在すること
     let items = read_item_ids_with_kind(&store);
     assert!(
-        items.iter().any(|(id, kind, content)| *id == new_id && kind == "tag" && content == "project:A"),
+        items.iter().any(|(id, kind, content)| *id == new_id
+            && kind == "tag"
+            && content == "project:A"),
         "item_references missing row for id {new_id}: {items:?}"
     );
 
     // user_tags に project:A が存在すること
     let tags = read_user_tags(&store);
     assert!(
-        tags.iter().any(|(id, ty, val)| *id == new_id && ty == "project" && val == "A"),
+        tags.iter().any(|(id, ty, val)| *id == new_id
+            && ty == "project"
+            && val == "A"),
         "user_tags missing project:A for id {new_id}: {tags:?}"
     );
-    assert_eq!(resp.added, 1);
+    assert_eq!(resp.updated, 4); // ItemKind + Content + project:A + new item_id
 }
 
 // ──────────────────────────────────────────────
@@ -105,26 +112,44 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
     // bool:true と bool:false を両方追加
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![
-            TagOp::Append(Label::Other(TagType::from("flag"), LabelValue::Boolean(true))),
-            TagOp::Append(Label::Other(TagType::from("flag"), LabelValue::Boolean(false))),
-        ],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![
+                TagOp::Append(Label::Other(
+                    TagType::from("flag"),
+                    LabelValue::Boolean(true),
+                )),
+                TagOp::Append(Label::Other(
+                    TagType::from("flag"),
+                    LabelValue::Boolean(false),
+                )),
+            ],
+        }],
+    )
+    .unwrap();
     assert_eq!(read_user_tags(&store).len(), 2);
 
     // true だけ削除
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Tag(Label::Other(
-            TagType::from("flag"),
-            LabelValue::Boolean(true),
-        ))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Tag(Label::Other(
+                TagType::from("flag"),
+                LabelValue::Boolean(true),
+            ))],
+        }],
+    )
+    .unwrap();
 
     let tags = read_user_tags(&store);
-    assert_eq!(tags.len(), 1, "only true should be deleted, false should remain: {tags:?}");
+    assert_eq!(
+        tags.len(),
+        1,
+        "only true should be deleted, false should remain: {tags:?}"
+    );
 }
 
 #[test]
@@ -133,23 +158,40 @@ fn write_delete_by_type_removes_user_tags() {
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
     // まずタグを2件追加
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![
-            TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string()))),
-            TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("B".to_string()))),
-        ],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![
+                TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("A".to_string()),
+                )),
+                TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("B".to_string()),
+                )),
+            ],
+        }],
+    )
+    .unwrap();
     assert_eq!(read_user_tags(&store).len(), 2);
 
     // type 指定で全削除
-    let resp = write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Type(TagType::from("project"))],
-    }]).unwrap();
+    let resp = write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Type(TagType::from("project"))],
+        }],
+    )
+    .unwrap();
 
     assert_eq!(resp.deleted, 1);
-    assert!(read_user_tags(&store).is_empty(), "user_tags should be empty after delete");
+    assert!(
+        read_user_tags(&store).is_empty(),
+        "user_tags should be empty after delete"
+    );
 }
 
 #[test]
@@ -157,22 +199,36 @@ fn write_delete_by_label_removes_specific_tag() {
     let (store, registry, _dir) = setup();
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![
-            TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string()))),
-            TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("B".to_string()))),
-        ],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![
+                TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("A".to_string()),
+                )),
+                TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("B".to_string()),
+                )),
+            ],
+        }],
+    )
+    .unwrap();
 
     // label 指定で A のみ削除
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Tag(Label::Other(
-            TagType::from("project"),
-            LabelValue::String("A".to_string()),
-        ))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Tag(Label::Other(
+                TagType::from("project"),
+                LabelValue::String("A".to_string()),
+            ))],
+        }],
+    )
+    .unwrap();
 
     let tags = read_user_tags(&store);
     assert_eq!(tags.len(), 1);
@@ -181,11 +237,21 @@ fn write_delete_by_label_removes_specific_tag() {
 
 fn read_file_ids(store: &Store) -> Vec<i64> {
     let path = store.path_for_target(TargetTable::FileReferences);
-    if !path.exists() { return vec![]; }
-    let sql = format!("SELECT item_id FROM read_parquet('{}') ORDER BY item_id", path.to_string_lossy());
-    store.conn.prepare(&sql).unwrap()
-        .query_map([], |r| r.get(0)).unwrap()
-        .collect::<Result<Vec<_>, _>>().unwrap()
+    if !path.exists() {
+        return vec![];
+    }
+    let sql = format!(
+        "SELECT item_id FROM read_parquet('{}') ORDER BY item_id",
+        path.to_string_lossy()
+    );
+    store
+        .conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 fn setup_with_indexed_file() -> (Store, TagRegistry, i64, tempfile::TempDir) {
@@ -198,8 +264,12 @@ fn setup_with_indexed_file() -> (Store, TagRegistry, i64, tempfile::TempDir) {
 
     let registry = TagRegistry::with_standard();
     let store = Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
 
     let file_id = read_file_ids(&store)[0];
     (store, registry, file_id, dir)
@@ -214,27 +284,44 @@ fn write_cascade_delete_reports_deleted_count() {
     let (store, registry, _dir) = setup();
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
-    let resp = write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
-    }]).unwrap();
+    let resp = write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
+        }],
+    )
+    .unwrap();
 
-    assert!(resp.deleted > 0, "cascade delete should report deleted > 0, got {}", resp.deleted);
+    assert!(
+        resp.deleted > 0,
+        "cascade delete should report deleted > 0, got {}",
+        resp.deleted
+    );
 }
 
 #[test]
 fn write_cascade_delete_removes_item_from_item_references() {
     let (store, registry, _dir) = setup();
-    let id = ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
-    assert!(read_item_ids_with_kind(&store).iter().any(|(i, _, _)| *i == id));
+    let id =
+        ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
+    assert!(read_item_ids_with_kind(&store)
+        .iter()
+        .any(|(i, _, _)| *i == id));
 
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
+        }],
+    )
+    .unwrap();
 
     assert!(
-        !read_item_ids_with_kind(&store).iter().any(|(i, _, _)| *i == id),
+        !read_item_ids_with_kind(&store)
+            .iter()
+            .any(|(i, _, _)| *i == id),
         "item {id} should be removed from item_references after cascade delete"
     );
 }
@@ -242,20 +329,35 @@ fn write_cascade_delete_removes_item_from_item_references() {
 #[test]
 fn write_cascade_delete_also_removes_user_tags() {
     let (store, registry, _dir) = setup();
-    let id = ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
+    let id =
+        ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string())))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![TagOp::Append(Label::Other(
+                TagType::from("project"),
+                LabelValue::String("A".to_string()),
+            ))],
+        }],
+    )
+    .unwrap();
     assert_eq!(read_user_tags(&store).len(), 1);
 
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
+        }],
+    )
+    .unwrap();
 
-    assert!(read_user_tags(&store).is_empty(), "user_tags should be empty after cascade delete");
+    assert!(
+        read_user_tags(&store).is_empty(),
+        "user_tags should be empty after cascade delete"
+    );
 }
 
 #[test]
@@ -263,10 +365,14 @@ fn write_cascade_delete_file_origin_removes_from_file_references() {
     let (store, _registry, file_id, _dir) = setup_with_indexed_file();
     assert!(read_file_ids(&store).contains(&file_id));
 
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(file_id),
-        tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(file_id),
+            tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
+        }],
+    )
+    .unwrap();
 
     assert!(
         !read_file_ids(&store).contains(&file_id),
@@ -280,10 +386,13 @@ fn write_cascade_delete_file_origin_removes_from_file_references() {
 
 fn read_rank(store: &Store, item_id: i64) -> Option<i64> {
     let path = store.path_for_target(TargetTable::ItemReferences);
-    if !path.exists() { return None; }
+    if !path.exists() {
+        return None;
+    }
     let sql = format!(
         "SELECT rank FROM read_parquet('{}') WHERE item_id = {}",
-        path.to_string_lossy(), item_id
+        path.to_string_lossy(),
+        item_id
     );
     store.conn.query_row(&sql, [], |r| r.get(0)).ok()
 }
@@ -291,12 +400,17 @@ fn read_rank(store: &Store, item_id: i64) -> Option<i64> {
 #[test]
 fn write_rank_update_changes_rank_in_item_references() {
     let (store, registry, _dir) = setup();
-    let id = ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
+    let id =
+        ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![TagOp::Append(Label::Rank(5))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![TagOp::Append(Label::Rank(5))],
+        }],
+    )
+    .unwrap();
 
     assert_eq!(read_rank(&store, id), Some(5));
 }
@@ -309,7 +423,13 @@ fn write_rank_update_changes_rank_in_item_references() {
 fn write_add_stored_appends_user_tag() {
     let (store, _, _dir) = setup();
     // add_item で User 空間の既存アイテムを作成
-    let existing_id = ttfm::tagging::add_item(&store, &TagRegistry::with_standard(), "note", "my note").unwrap();
+    let existing_id = ttfm::tagging::add_item(
+        &store,
+        &TagRegistry::with_standard(),
+        "note",
+        "my note",
+    )
+    .unwrap();
 
     let resp = write(
         &store,
@@ -323,7 +443,7 @@ fn write_add_stored_appends_user_tag() {
     )
     .unwrap();
 
-    assert_eq!(resp.added, 1);
+    assert_eq!(resp.updated, 1);
     assert_eq!(resp.deleted, 0);
     assert!(resp.new_item_ids.is_empty());
 
@@ -343,25 +463,85 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
     let (store, registry, _dir) = setup();
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string())))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![TagOp::Append(Label::Other(
+                TagType::from("project"),
+                LabelValue::String("A".to_string()),
+            ))],
+        }],
+    )
+    .unwrap();
 
-    write(&store, vec![
-        WriteAction::Delete {
-            item: ItemId::Stored(id),
-            tags: vec![DeleteTarget::Type(TagType::from("project"))],
-        },
-        WriteAction::Add {
-            item: ItemId::Stored(id),
-            tags: vec![TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("B".to_string())))],
-        },
-    ]).unwrap();
+    write(
+        &store,
+        vec![
+            WriteAction::Delete {
+                item: ItemId::Stored(id),
+                tags: vec![DeleteTarget::Type(TagType::from("project"))],
+            },
+            WriteAction::Add {
+                item: ItemId::Stored(id),
+                tags: vec![TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("B".to_string()),
+                ))],
+            },
+        ],
+    )
+    .unwrap();
 
     let tags = read_user_tags(&store);
-    assert_eq!(tags.len(), 1, "should have exactly one project tag: {tags:?}");
+    assert_eq!(
+        tags.len(),
+        1,
+        "should have exactly one project tag: {tags:?}"
+    );
     assert_eq!(tags[0].2, "B", "project tag should be B: {tags:?}");
+}
+
+#[test]
+fn write_replace_delete_not_counted_in_deleted() {
+    let (store, registry, _dir) = setup();
+    let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
+
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![TagOp::Append(Label::Other(
+                TagType::from("project"),
+                LabelValue::String("A".to_string()),
+            ))],
+        }],
+    )
+    .unwrap();
+
+    let resp = write(
+        &store,
+        vec![
+            WriteAction::Delete {
+                item: ItemId::Stored(id),
+                tags: vec![DeleteTarget::Type(TagType::from("project"))],
+            },
+            WriteAction::Add {
+                item: ItemId::Stored(id),
+                tags: vec![TagOp::Replace(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("B".to_string()),
+                ))],
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        resp.deleted, 0,
+        "Replace companion delete must not count as deleted"
+    );
+    assert_eq!(resp.updated, 1);
 }
 
 // ──────────────────────────────────────────────
@@ -374,16 +554,26 @@ fn write_multiple_items_in_one_batch() {
     let id1 = ttfm::tagging::add_item(&store, &registry, "note", "n1").unwrap();
     let id2 = ttfm::tagging::add_item(&store, &registry, "note", "n2").unwrap();
 
-    write(&store, vec![
-        WriteAction::Add {
-            item: ItemId::Stored(id1),
-            tags: vec![TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string())))],
-        },
-        WriteAction::Add {
-            item: ItemId::Stored(id2),
-            tags: vec![TagOp::Append(Label::Other(TagType::from("project"), LabelValue::String("A".to_string())))],
-        },
-    ]).unwrap();
+    write(
+        &store,
+        vec![
+            WriteAction::Add {
+                item: ItemId::Stored(id1),
+                tags: vec![TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("A".to_string()),
+                ))],
+            },
+            WriteAction::Add {
+                item: ItemId::Stored(id2),
+                tags: vec![TagOp::Append(Label::Other(
+                    TagType::from("project"),
+                    LabelValue::String("A".to_string()),
+                ))],
+            },
+        ],
+    )
+    .unwrap();
 
     let tags = read_user_tags(&store);
     assert_eq!(tags.len(), 2, "both items should have project:A: {tags:?}");
@@ -397,10 +587,13 @@ fn write_multiple_items_in_one_batch() {
 
 fn read_file_rank(store: &Store, item_id: i64) -> Option<i64> {
     let path = store.path_for_target(TargetTable::FileReferences);
-    if !path.exists() { return None; }
+    if !path.exists() {
+        return None;
+    }
     let sql = format!(
         "SELECT rank FROM read_parquet('{}') WHERE item_id = {}",
-        path.to_string_lossy(), item_id
+        path.to_string_lossy(),
+        item_id
     );
     store.conn.query_row(&sql, [], |r| r.get(0)).ok()
 }
@@ -410,10 +603,14 @@ fn write_rank_update_changes_rank_in_file_references() {
     let (store, _registry, file_id, _dir) = setup_with_indexed_file();
     let initial = read_file_rank(&store, file_id).unwrap_or(0);
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(file_id),
-        tags: vec![TagOp::Append(Label::Rank(initial + 7))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(file_id),
+            tags: vec![TagOp::Append(Label::Rank(initial + 7))],
+        }],
+    )
+    .unwrap();
 
     assert_eq!(read_file_rank(&store, file_id), Some(initial + 7));
 }
@@ -430,19 +627,30 @@ fn write_delete_by_double_label_removes_only_matching_value() {
     let v1 = LabelValue::Double(1.0f64.to_bits());
     let v2 = LabelValue::Double(2.0f64.to_bits());
 
-    write(&store, vec![WriteAction::Add {
-        item: ItemId::Stored(id),
-        tags: vec![
-            TagOp::Append(Label::Other(TagType::from("score"), v1.clone())),
-            TagOp::Append(Label::Other(TagType::from("score"), v2)),
-        ],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Add {
+            item: ItemId::Stored(id),
+            tags: vec![
+                TagOp::Append(Label::Other(TagType::from("score"), v1.clone())),
+                TagOp::Append(Label::Other(TagType::from("score"), v2)),
+            ],
+        }],
+    )
+    .unwrap();
     assert_eq!(read_user_tags(&store).len(), 2);
 
-    write(&store, vec![WriteAction::Delete {
-        item: ItemId::Stored(id),
-        tags: vec![DeleteTarget::Tag(Label::Other(TagType::from("score"), v1))],
-    }]).unwrap();
+    write(
+        &store,
+        vec![WriteAction::Delete {
+            item: ItemId::Stored(id),
+            tags: vec![DeleteTarget::Tag(Label::Other(
+                TagType::from("score"),
+                v1,
+            ))],
+        }],
+    )
+    .unwrap();
 
     let tags = read_user_tags(&store);
     assert_eq!(tags.len(), 1, "only score:1.0 should be deleted: {tags:?}");

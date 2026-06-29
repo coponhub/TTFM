@@ -38,9 +38,11 @@ pub mod util;
 
 pub use db::{Store, TargetTable};
 pub use query::{parse, QueryNode};
-pub use response::{SearchResponse, Item};
+pub use response::{Item, SearchResponse};
 pub use taggers::{ColumnDef, TagValue, Tagger};
-pub use types::{FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag};
+pub use types::{
+    FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag,
+};
 
 mod cache;
 pub use cache::CacheManager;
@@ -48,8 +50,8 @@ pub mod search;
 pub use search::SearchOptions;
 pub mod edit;
 pub mod tagging;
-pub use tagging::{add_item, get_or_create_item, tag_item};
 pub use rank::{get_type_ranks, set_rank_by_id, update_ranks};
+pub use tagging::{add_item, get_or_create_item, tag_item};
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
 pub fn get_file_ref(path: &Path) -> Result<FileRef> {
@@ -136,7 +138,8 @@ mod tests_store {
         // Manually create empty user_tags.parquet to ensure existence
         let path = db_dir.join("user_tags.parquet");
         store.conn.execute("CREATE TABLE temp_create (item_id BIGINT, type VARCHAR, label_str VARCHAR, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN)", []).unwrap();
-        store.conn
+        store
+            .conn
             .execute(
                 &format!(
                     "COPY temp_create TO '{}' (FORMAT PARQUET)",

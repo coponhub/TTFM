@@ -54,7 +54,9 @@ pub(super) fn try_dispatch_common(
             op,
             label,
             ..
-        } => Ok(build_resolved_match_sql(src, storage, *sql_type, *op, label)),
+        } => Ok(build_resolved_match_sql(
+            src, storage, *sql_type, *op, label,
+        )),
         ResolvedNode::TagTagMatch {
             left_storage,
             left_sql_type,
