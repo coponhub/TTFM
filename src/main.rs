@@ -113,7 +113,11 @@ enum Commands {
         cid: Option<String>,
     },
     /// 作成されたインデックスファイルを削除します。
-    Clear,
+    Clear {
+        /// データベース全体（設定やタグ情報など）を削除します。
+        #[arg(short, long)]
+        all: bool,
+    },
     /// マッチしたアイテムにタグを付与します。
     Tag {
         /// 対象を絞るクエリ（例: "filename:foo.txt"）
@@ -164,10 +168,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Clear コマンドの場合は完全な初期化をスキップし、破損したDBでも削除できるようにする
-    if matches!(cli.command, Commands::Clear) {
+    if let Commands::Clear { all } = cli.command {
         let home = ttfm::get_ttfm_home()?;
-        Store::delete_database(home.join("db").as_path())?;
-        safe_println!("Database cleared successfully.");
+        if all {
+            Store::delete_database(home.join("db").as_path())?;
+            safe_println!("Database cleared successfully.");
+        } else {
+            let store = Store::open(home.join("db"))?;
+            store.clear_index()?;
+            safe_println!("File indexes cleared successfully.");
+        }
         return Ok(());
     }
 
@@ -326,7 +336,7 @@ fn main() -> Result<()> {
         Commands::Decal { from: _, to: _ } => {
             anyhow::bail!("decal は未実装です");
         }
-        Commands::Clear => unreachable!("Handled early"),
+        Commands::Clear { .. } => unreachable!("Handled early"),
         Commands::Note { content } => {
             let id =
                 ttfm::tagging::add_item(&store, &registry, "note", content)?;

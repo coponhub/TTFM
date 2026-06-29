@@ -110,6 +110,43 @@ impl Store {
     pub fn temp_live_path(&self) -> PathBuf {
         self.db_dir.join("live_ids.parquet")
     }
+
+    /// ファイルインデックスに関連する Parquet ファイルおよびキャッシュを削除する。
+    pub fn clear_index(&self) -> Result<()> {
+        let targets = [
+            TargetTable::FileReferences,
+            TargetTable::Locations,
+            TargetTable::BaseTags,
+        ];
+        for target in targets {
+            let path = self.path_for_target(target);
+            if path.exists() {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!("Failed to remove index file: {:?}", path)
+                })?;
+            }
+        }
+
+        // 一時ファイルの削除
+        let temp_files = [self.temp_scan_path(), self.temp_live_path()];
+        for path in temp_files {
+            if path.exists() {
+                std::fs::remove_file(&path).with_context(|| {
+                    format!("Failed to remove temporary file: {:?}", path)
+                })?;
+            }
+        }
+
+        // キャッシュディレクトリの削除
+        let cache_dir = self.db_dir.join("cache");
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).with_context(|| {
+                format!("Failed to remove cache directory: {:?}", cache_dir)
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 /// データベースのテーブル名を表す識別子。
@@ -728,5 +765,58 @@ mod tests {
             "should contain partition key: {}",
             sql
         );
+    }
+
+    #[test]
+    fn test_clear_index() {
+        use std::fs;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_dir = temp_dir.path().to_path_buf();
+
+        // 削除対象のダミーファイルを作成
+        let files_to_delete = [
+            db_dir.join("file_references.parquet"),
+            db_dir.join("locations.parquet"),
+            db_dir.join("base_tags.parquet"),
+            db_dir.join("current_scan.parquet"),
+            db_dir.join("live_ids.parquet"),
+        ];
+        // 削除対象のダミーディレクトリを作成
+        let cache_dir = db_dir.join("cache");
+        let cache_file = cache_dir.join("dummy_cache.parquet");
+
+        // 残す対象のダミーファイルを作成
+        let files_to_keep = [
+            db_dir.join("user_tags.parquet"),
+            db_dir.join("item_references.parquet"),
+            db_dir.join("system_tags.parquet"),
+        ];
+
+        // 物理ファイル・ディレクトリ作成
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(&cache_file, b"cache").unwrap();
+        for file in &files_to_delete {
+            fs::write(file, b"test").unwrap();
+        }
+        for file in &files_to_keep {
+            fs::write(file, b"keep").unwrap();
+        }
+
+        // Storeをオープン
+        let store = Store::open(&db_dir).unwrap();
+
+        // clear_index を呼び出し
+        store.clear_index().unwrap();
+
+        // 削除されたことを検証
+        for file in &files_to_delete {
+            assert!(!file.exists(), "File should be deleted: {:?}", file);
+        }
+        assert!(!cache_dir.exists(), "Cache directory should be deleted");
+
+        // 残っていることを検証
+        for file in &files_to_keep {
+            assert!(file.exists(), "File should be kept: {:?}", file);
+        }
     }
 }
