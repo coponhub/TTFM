@@ -17,7 +17,7 @@ use tempfile::tempdir;
 use ttfm::SearchOptions;
 use ttfm::{search, tagging};
 
-fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)
+fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry)
 {
     let dir = Box::leak(Box::new(tempdir().unwrap()));
     let db_dir = dir.path().join(".ttfm/db");
@@ -26,8 +26,7 @@ fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    let cache = ttfm::CacheManager::new(db_dir.join("cache"), 0);
-    (store, registry, cache)
+    (store, registry)
 }
 
 /// User 区画 [0, B) の幅 B = 2^58。
@@ -60,10 +59,8 @@ fn test_item_id_and_kind_refactoring() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     // 1. Stored items (File/Note)
     let note_id = tagging::add_item(
@@ -91,7 +88,6 @@ fn test_item_id_and_kind_refactoring() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(item_id:)",
         SearchOptions::default(),
     )
@@ -112,7 +108,6 @@ fn test_item_id_and_kind_refactoring() {
     let res_proj = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         SearchOptions::default(),
     )
@@ -137,7 +132,7 @@ fn test_item_id_and_kind_refactoring() {
 /// Item.id.as_i64() を通すと identifier::display の形式になることを確認。
 #[test]
 fn item_id_display_uses_local_form() {
-    let (store, registry, cache) = setup_store();
+    let (store, registry) = setup_store();
     let raw_id =
         tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
@@ -151,7 +146,6 @@ fn item_id_display_uses_local_form() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         &format!("item_id:{raw_id}"),
         SearchOptions::default(),
     )
@@ -165,7 +159,7 @@ fn item_id_display_uses_local_form() {
 /// item_id:"User(0)" クエリは item_id:0 と同一アイテムを返す（ローカル形式の往復）。
 #[test]
 fn item_id_quoted_local_form_resolves_same_as_raw_id() {
-    let (store, registry, cache) = setup_store();
+    let (store, registry) = setup_store();
     let raw_id =
         tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
@@ -177,7 +171,6 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let r_raw = search::search(
         &store,
         &registry,
-        &cache,
         &q_raw,
         SearchOptions::default(),
     )
@@ -185,7 +178,6 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let r_local = search::search(
         &store,
         &registry,
-        &cache,
         &q_local,
         SearchOptions::default(),
     )

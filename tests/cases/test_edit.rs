@@ -7,10 +7,10 @@ use ttfm::{
     indexing::Indexer,
     tag::TagRegistry,
     types::{SType, TagType},
-    CacheManager, SearchOptions,
+    SearchOptions,
 };
 
-fn setup() -> (Store, TagRegistry, CacheManager, TempDir) {
+fn setup() -> (Store, TagRegistry, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let root = base.join("files");
@@ -24,19 +24,17 @@ fn setup() -> (Store, TagRegistry, CacheManager, TempDir) {
     Indexer::new(&store, &registry)
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
-    let cache = CacheManager::new(db_dir.join("cache"), 0);
-    (store, registry, cache, dir)
+    (store, registry, dir)
 }
 
 // edit → tag: filename:foo.txt に project:A を付与し、search で確認できる
 #[test]
 fn edit_tag_adds_user_tag() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     let resp = edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -48,7 +46,6 @@ fn edit_tag_adds_user_tag() -> anyhow::Result<()> {
     let results = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "project:A",
         SearchOptions::default(),
     )?;
@@ -59,13 +56,12 @@ fn edit_tag_adds_user_tag() -> anyhow::Result<()> {
 // Volatile な tag 定義に EditQuery → DB に登録されて rank が付く
 #[test]
 fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // foo.txt に project:A を付与して tag 定義を作る
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -77,7 +73,6 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     let results = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -100,7 +95,6 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     let results2 = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -116,13 +110,12 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
 // Volatile な Projection (parentdir:) に EditQuery → note として登録される
 #[test]
 fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // parentdir: → Volatile な Projection アイテムが返る
     let results = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "parentdir:",
         SearchOptions::default(),
     )?;
@@ -153,12 +146,11 @@ fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
 #[test]
 fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
 {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -169,7 +161,6 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
     let results = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -189,7 +180,6 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
     let results2 = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -202,13 +192,12 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
 // 未登録なら Volatile、item_references に登録済みなら Stored。
 #[test]
 fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // foo.txt に project:A を付与（user_tag は出来るが tag 定義アイテムは未登録）
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -220,7 +209,6 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
     let r = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -239,7 +227,6 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
     let r2 = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -256,14 +243,13 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
 // （value タグを持つ集計／計算値のみが対象。由来保持 EDIT.md §5.7(B)）
 #[test]
 fn edit_calc_result_persists_query_tag() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // count(extension:txt) は単一スカラ（value タグ持ち Volatile）を返す
     let search_query = "count(extension:txt)";
     edit(
         &store,
         &registry,
-        &cache,
         search_query,
         Some("rank:5"),
         QueryType::Tag,
@@ -289,13 +275,12 @@ fn edit_calc_result_persists_query_tag() -> anyhow::Result<()> {
 // §5.7: SearchQuery のみ（EditQuery なし）で edit() を呼ぶと定義が登録される。
 #[test]
 fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // foo.txt に project:A を付与（tag 定義は未登録 Volatile のまま）
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -305,7 +290,6 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
     let r = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -318,7 +302,6 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
     edit(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         None,
         QueryType::Tag,
@@ -328,7 +311,6 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
     let r2 = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -344,13 +326,12 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
 // representative の name 解決が非NULL（lens 一般 read）で user_tags 名を引く必要がある回帰テスト。
 #[test]
 fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // foo.txt に project:A を付与 → tag 定義(Volatile) と user_tag が出来る
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -362,7 +343,6 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
     let r = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "tag:\"project:A\"",
         SearchOptions::default(),
     )?;
@@ -378,7 +358,6 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
     let proj = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "rank:",
         SearchOptions::default(),
     )?;
@@ -406,13 +385,12 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
 // user名(user_tags) が type='name' で併存する。§4.1 で user 名を優先表示する回帰テスト。
 #[test]
 fn renamed_file_shows_user_name() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     // foo.txt（name=filename）に user 名を付与（rename 相当）
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("name:renamed_foo"),
         QueryType::Tag,
@@ -440,7 +418,6 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
     let r = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         SearchOptions::default(),
     )?;
@@ -464,12 +441,11 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
 // edit → untag: 付与済みの project:A を削除し、search で 0 件になる
 #[test]
 fn edit_untag_removes_user_tag() -> anyhow::Result<()> {
-    let (store, registry, cache, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Tag,
@@ -480,7 +456,6 @@ fn edit_untag_removes_user_tag() -> anyhow::Result<()> {
     let resp = edit(
         &store,
         &registry,
-        &cache,
         "filename:foo.txt",
         Some("project:A"),
         QueryType::Untag,
@@ -492,10 +467,54 @@ fn edit_untag_removes_user_tag() -> anyhow::Result<()> {
     let results = ttfm::search::search(
         &store,
         &registry,
-        &cache,
         "project:A",
         SearchOptions::default(),
     )?;
     assert_eq!(results.results.len(), 0);
+    Ok(())
+}
+
+// edit → tag: 150 件（>旧仮実装の 100 件上限）を一括タグ付けし、全件に付与されることを確認。
+// 旧 unwrap_or(100) では先頭 100 件で切れて RED になる回帰テスト。
+#[test]
+fn edit_tag_applies_to_all_over_100_files() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..150 {
+        std::fs::write(root.join(format!("f{i:03}.txt")), "content").unwrap();
+    }
+
+    let db_dir = base.join("db");
+    let registry = TagRegistry::with_standard();
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let resp = edit(
+        &store,
+        &registry,
+        "extension:txt",
+        Some("project:bulk"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+    )?;
+    assert_eq!(resp.updated, 150, "all 150 files should be tagged");
+
+    let results = ttfm::search::search(
+        &store,
+        &registry,
+        "project:bulk",
+        SearchOptions::default(),
+    )?;
+    assert_eq!(
+        results.results.len(),
+        150,
+        "search should return all 150 tagged files"
+    );
     Ok(())
 }

@@ -36,7 +36,6 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -46,7 +45,6 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         Default::default(),
     )?;
@@ -232,7 +230,6 @@ fn test_projection_queries() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -242,7 +239,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         Default::default(),
     )
@@ -274,7 +270,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "directory:",
         Default::default(),
     )
@@ -300,7 +295,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:",
         Default::default(),
     )
@@ -333,7 +327,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "origin:system",
         Default::default(),
     )
@@ -344,7 +337,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension: & directory:",
         Default::default(),
     )
@@ -357,7 +349,7 @@ fn test_projection_queries() {
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results =
-        search::search(&store, &registry, &cache, "type:", Default::default())
+        search::search(&store, &registry, "type:", Default::default())
             .unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
@@ -383,7 +375,7 @@ fn test_projection_queries() {
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
     let results =
-        search::search(&store, &registry, &cache, "tag:", Default::default())
+        search::search(&store, &registry, "tag:", Default::default())
             .unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
@@ -400,7 +392,6 @@ fn test_projection_queries() {
     let ext_results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         Default::default(),
     )
@@ -418,7 +409,7 @@ fn test_projection_queries() {
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
     let results =
-        search::search(&store, &registry, &cache, "rank:", Default::default())
+        search::search(&store, &registry, "rank:", Default::default())
             .unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
@@ -451,7 +442,6 @@ fn test_projection_queries() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "category:",
         Default::default(),
     )
@@ -470,7 +460,7 @@ fn test_projection_queries() {
     // 10. label: (Volatile Tag -> All Labels)
     // label: は「全てのタグのラベル」を集約する揮発性プロジェクション。
     let results =
-        search::search(&store, &registry, &cache, "label:", Default::default())
+        search::search(&store, &registry, "label:", Default::default())
             .unwrap();
     // 全てのアイテムは何かしらのラベル（name, item_kind 等）を持つためヒットする
     assert!(
@@ -496,7 +486,6 @@ fn test_projection_returns_label_volatile_items() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -505,7 +494,6 @@ fn test_projection_returns_label_volatile_items() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         Default::default(),
     )

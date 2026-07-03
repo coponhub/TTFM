@@ -119,10 +119,8 @@ fn test_complex_comparisons() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
@@ -133,7 +131,6 @@ fn test_complex_comparisons() {
         search::search(
             &store,
             &registry,
-            &cache,
             query_agg_agg,
             Default::default()
         )
@@ -146,7 +143,6 @@ fn test_complex_comparisons() {
         search::search(
             &store,
             &registry,
-            &cache,
             query_agg_calc,
             Default::default()
         )
@@ -159,7 +155,6 @@ fn test_complex_comparisons() {
         search::search(
             &store,
             &registry,
-            &cache,
             query_proj_calc,
             Default::default()
         )
@@ -171,7 +166,6 @@ fn test_complex_comparisons() {
     let res_forbidden = search::search(
         &store,
         &registry,
-        &cache,
         query_forbidden,
         Default::default(),
     );
@@ -184,7 +178,6 @@ fn test_complex_comparisons() {
     let res_agg_proj = search::search(
         &store,
         &registry,
-        &cache,
         query_agg_proj,
         Default::default(),
     );
@@ -201,15 +194,12 @@ fn test_arithmetic_projection_syntax() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     let result = search::search(
         &store,
         &registry,
-        &cache,
         "(size: / 1024)",
         Default::default(),
     );
@@ -222,7 +212,6 @@ fn test_arithmetic_projection_syntax() -> Result<()> {
     let result2 = search::search(
         &store,
         &registry,
-        &cache,
         "extension:rs & (size: * 2)",
         Default::default(),
     );

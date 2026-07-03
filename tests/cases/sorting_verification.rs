@@ -34,10 +34,8 @@ fn test_parquet_physical_order() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, _cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();

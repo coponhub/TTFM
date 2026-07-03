@@ -31,10 +31,8 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &data_dir,
         None::<&fn(usize)>,
@@ -48,7 +46,6 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let res_tag = search::search(
         &store,
         &registry,
-        &cache,
         "(size: + 1)",
         Default::default(),
     )?;
@@ -63,7 +60,6 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "(1 + 2)",
         Default::default(),
     )?;
@@ -75,7 +71,6 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "('a' + 'b')",
         Default::default(),
     )?;
@@ -85,7 +80,6 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "('a' * 'b')",
         Default::default(),
     )?;
@@ -104,16 +98,13 @@ fn test_literal_comparison() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     // 1. Integer Comparison (True)
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "10 > 2",
         Default::default(),
     )?;
@@ -122,7 +113,7 @@ fn test_literal_comparison() -> anyhow::Result<()> {
 
     // 2. Integer Comparison (False)
     let res =
-        search::search(&store, &registry, &cache, "1 > 2", Default::default())?;
+        search::search(&store, &registry, "1 > 2", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "FALSE");
 
@@ -130,7 +121,6 @@ fn test_literal_comparison() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "'b' > 'a'",
         Default::default(),
     )?;
@@ -150,14 +140,12 @@ fn test_literal_set_operation_error() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     // リテラル同士の集合演算はパーサーレベルで拒否される
     let res =
-        search::search(&store, &registry, &cache, "1 & 2", Default::default());
+        search::search(&store, &registry, "1 & 2", Default::default());
     assert!(
         res.is_err(),
         "Set operation between literals should be an error"
@@ -174,7 +162,6 @@ fn test_literal_string_error_cases() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let cases = vec![
         // String同士の無効な算術演算
@@ -189,7 +176,6 @@ fn test_literal_string_error_cases() -> anyhow::Result<()> {
         let result = search::search(
             &store,
             &registry,
-            &cache,
             query,
             Default::default(),
         );

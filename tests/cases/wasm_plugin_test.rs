@@ -118,7 +118,6 @@ fn test_plugin_normalize_label_applied_in_search() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join("db");
     let store = ttfm::db::Store::open(&db_dir).unwrap();
-    let cache = ttfm::CacheManager::new(db_dir.join("cache"), 0);
 
     let mut registry = ttfm::tag::TagRegistry::with_standard();
     registry.register(ShortLabelTag);
@@ -137,7 +136,6 @@ fn test_plugin_normalize_label_applied_in_search() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "my_status:m",
         SearchOptions::default(),
     )
@@ -202,7 +200,6 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .initialize_tables()
             .unwrap();
-        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
         registry.load_from_dir(&user_plugins_dir, &status).unwrap();
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
@@ -211,7 +208,6 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         search::search(
             &store,
             &registry,
-            &cache,
             "mimetype:application/x-test-override",
             SearchOptions::default(),
         )
@@ -227,7 +223,6 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .initialize_tables()
             .unwrap();
-        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(dir.path(), None::<&fn(usize)>, false)
@@ -235,7 +230,6 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         search::search(
             &store,
             &registry,
-            &cache,
             "mimetype:application/x-test-override",
             SearchOptions::default(),
         )

@@ -69,14 +69,13 @@ define_cases! {
             Ok(())
         },
         modify: Some(|store, registry, dir| {
-            let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
             let wide_path = format!("name:wide_image.jpg & path:{}/*", dir.to_string_lossy());
-            let res_wide = search::search(store, registry, &cache, &wide_path, Default::default())?;
+            let res_wide = search::search(store, registry, &wide_path, Default::default())?;
             anyhow::ensure!(!res_wide.results.is_empty(), "wide_image.jpg not found");
             let wide_id = res_wide.results[0].id.to_string();
 
             let tall_path = format!("name:tall_image.jpg & path:{}/*", dir.to_string_lossy());
-            let res_tall = search::search(store, registry, &cache, &tall_path, Default::default())?;
+            let res_tall = search::search(store, registry, &tall_path, Default::default())?;
             anyhow::ensure!(!res_tall.results.is_empty(), "tall_image.jpg not found");
             let tall_id = res_tall.results[0].id.to_string();
 
@@ -108,12 +107,10 @@ fn test_reverse_pattern_scalar_gt_projection() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "100 > size:",
         Default::default(),
     );
@@ -143,12 +140,10 @@ fn test_reverse_pattern_aggregation_label_op() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "sum(size:) :> 100",
         Default::default(),
     );
@@ -178,12 +173,10 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "1 :> 100",
         Default::default(),
     );
@@ -200,7 +193,6 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "100 :< size:",
         Default::default(),
     );
@@ -220,12 +212,10 @@ fn test_double_colon_suggestion_fix() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: > path:",
         Default::default(),
     );

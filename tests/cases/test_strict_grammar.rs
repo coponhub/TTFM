@@ -31,10 +31,8 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -47,7 +45,6 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: > 100",
         Default::default(),
     );
@@ -92,13 +89,11 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     let res =
-        search::search(&store, &registry, &cache, "1 >1", Default::default());
+        search::search(&store, &registry, "1 >1", Default::default());
 
     if res.is_ok() {
         panic!("Expected error for '1 >1', but it succeeded. Grammar is too loose.");
@@ -131,15 +126,12 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size:^=100",
         Default::default(),
     );
@@ -168,10 +160,8 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -182,7 +172,6 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "(mtime: / 100) < 100",
         Default::default(),
     );
@@ -203,7 +192,6 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let res2 = search::search(
         &store,
         &registry,
-        &cache,
         "(size: / 1024) :> 100",
         Default::default(),
     );
@@ -217,7 +205,6 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let res3 = search::search(
         &store,
         &registry,
-        &cache,
         "count(extension:rs) + count(extension:c)",
         Default::default(),
     );

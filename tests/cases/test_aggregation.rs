@@ -275,7 +275,6 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -285,7 +284,6 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let res1 = search::search(
         &store,
         &registry,
-        &cache,
         "count(extension:txt) ^ 0",
         Default::default(),
     )?;
@@ -298,7 +296,6 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let res2 = search::search(
         &store,
         &registry,
-        &cache,
         "count(extension:txt) ^ 2",
         Default::default(),
     )?;
@@ -321,7 +318,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -331,7 +327,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(item_id:)",
         Default::default(),
     )?;
@@ -341,7 +336,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(item_kind:)",
         Default::default(),
     )?;
@@ -351,7 +345,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(rank:)",
         Default::default(),
     )?;
@@ -361,7 +354,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(origin:)",
         Default::default(),
     )?;
@@ -371,7 +363,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(path:)",
         Default::default(),
     )?;
@@ -381,7 +372,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(parentdir:)",
         Default::default(),
     )?;
@@ -391,7 +381,6 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "count(filename:)",
         Default::default(),
     )?;
@@ -415,7 +404,6 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -425,7 +413,6 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     let res2 = search::search(
         &store,
         &registry,
-        &cache,
         "max(mtime:) < 2027-01-01",
         Default::default(),
     )?;
@@ -449,7 +436,6 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -459,7 +445,6 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "max(extension:txt & mtime:) < 2027-02-01",
         Default::default(),
     )?;
@@ -481,7 +466,6 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -491,7 +475,6 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "max(mtime:) == 2026",
         Default::default(),
     )?;
@@ -502,7 +485,6 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     let res_false = search::search(
         &store,
         &registry,
-        &cache,
         "max(mtime:) == 2025",
         Default::default(),
     )?;
@@ -542,14 +524,12 @@ impl TestContext {
         ttfm::indexing::Indexer::new(&store, &registry)
             .initialize_tables()
             .unwrap();
-        let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(&self.root, None::<&fn(usize)>, false)
             .unwrap();
         search::search(
             &store,
             &registry,
-            &cache,
             query,
             ttfm::SearchOptions::default(),
         )
@@ -584,14 +564,13 @@ fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
         false,
     )?;
 
-    let res = search::search(&store, &registry, &cache,
+    let res = search::search(&store, &registry,
         "sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)",
         Default::default(),
     )?;
@@ -635,7 +614,6 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &root,
         None::<&fn(usize)>,
@@ -645,14 +623,12 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let res_any_top = search::search(
         &store,
         &registry,
-        &cache,
         "count()",
         Default::default(),
     )?;
     let res_wild_top = search::search(
         &store,
         &registry,
-        &cache,
         "count(*:*)",
         Default::default(),
     )?;
@@ -667,7 +643,6 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let res_indirect = search::search(
         &store,
         &registry,
-        &cache,
         &query_indirect,
         Default::default(),
     )?;

@@ -51,10 +51,8 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     let index_path_store = ttfm::db::Store::open(&index_path)?;
     ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry)
         .initialize_tables()?;
-    let index_path_cache =
-        ttfm::CacheManager::new(index_path_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (index_path_store, index_path_registry, index_path_cache);
+    let (store, registry) =
+        (index_path_store, index_path_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -100,7 +98,6 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
         let response = search::search(
             &store,
             &registry,
-            &cache,
             query,
             Default::default(),
         )
@@ -150,7 +147,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &data_dir,
         None::<&fn(usize)>,
@@ -162,7 +158,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :> 300",
         Default::default(),
     )?;
@@ -173,7 +168,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "200 :< size: :< 800",
         Default::default(),
     )?;
@@ -188,7 +182,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "width: :> 500",
         Default::default(),
     )?;
@@ -200,7 +193,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :> 300 & width: :> 500",
         Default::default(),
     )?;
@@ -212,7 +204,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "width:>500",
         Default::default(),
     )?;
@@ -227,7 +218,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :>= 500",
         Default::default(),
     )?;
@@ -239,7 +229,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :<= 500 & is_dir:false",
         Default::default(),
     )?;
@@ -250,7 +239,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: := 500",
         Default::default(),
     )?;
@@ -261,7 +249,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :^= 500 & is_dir:false",
         Default::default(),
     )?;
@@ -271,7 +258,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "size: :^ 500 & is_dir:false",
         Default::default(),
     )?;
@@ -281,7 +267,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "width: := 640",
         Default::default(),
     )?;
@@ -304,7 +289,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "mtime:today",
         Default::default(),
     )?;
@@ -313,7 +297,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     println!("Testing 'mtime:\"{}\"'...", today_str);
     let query = format!("mtime:\"{}\"", today_str);
     let res =
-        search::search(&store, &registry, &cache, &query, Default::default())?;
+        search::search(&store, &registry, &query, Default::default())?;
     assert!(res.results.len() >= 3, "Should match specific date (today)");
 
     // 過去のファイルを準備 (Linux の touch コマンドを使用)
@@ -335,7 +319,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "mtime:yesterday",
         Default::default(),
     )?;
@@ -348,7 +331,6 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "mtime:<today",
         Default::default(),
     )?;
@@ -384,10 +366,8 @@ fn test_or_negation_complex_behavior() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
@@ -398,7 +378,7 @@ fn test_or_negation_complex_behavior() {
     let query = "item_kind:file - extension:rs";
 
     let results =
-        search::search(&store, &registry, &cache, query, Default::default())
+        search::search(&store, &registry, query, Default::default())
             .unwrap();
 
     let mut found_txt_file = false;
@@ -448,10 +428,8 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
@@ -462,7 +440,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:*alpha*",
         Default::default(),
     )
@@ -480,7 +457,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project*",
         Default::default(),
     )
@@ -493,7 +469,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project",
         Default::default(),
     )
@@ -504,7 +479,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project_alpha.pdf",
         Default::default(),
     )
@@ -515,7 +489,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project_alph?.pdf",
         Default::default(),
     )
@@ -527,7 +500,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project_[ab]*",
         Default::default(),
     )
@@ -538,7 +510,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:project_[!a]eta*",
         Default::default(),
     )
@@ -549,7 +520,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:\"project_[ab]*\"",
         Default::default(),
     )
@@ -560,7 +530,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "filename:\"project_alpha.pdf\"",
         Default::default(),
     )
@@ -571,7 +540,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "\"filename\":project_alpha.pdf",
         Default::default(),
     )
@@ -583,7 +551,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "*name:project_alpha.pdf",
         Default::default(),
     )
@@ -596,7 +563,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:^pd",
         Default::default(),
     )
@@ -610,7 +576,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "[f]ilename:project_alpha.pdf",
         Default::default(),
     )
@@ -620,7 +585,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "[!f]ilename:project_alpha.pdf",
         Default::default(),
     )
@@ -631,7 +595,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "file?ame:project_alpha.pdf",
         Default::default(),
     )
@@ -653,7 +616,6 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         r"filename:\[WIP\]_*",
         Default::default(),
     )
@@ -691,10 +653,8 @@ fn test_complex_search_combinations() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -704,7 +664,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:r*",
         Default::default(),
     )
@@ -726,7 +685,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:rs & size:>0",
         Default::default(),
     )
@@ -741,7 +699,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "name:*.toml | name:^LIC",
         Default::default(),
     )
@@ -760,7 +717,6 @@ fn test_complex_search_combinations() {
     let all_rs = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:rs",
         Default::default(),
     )
@@ -770,7 +726,6 @@ fn test_complex_search_combinations() {
     let results_diff = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:rs - name:mod*",
         Default::default(),
     )
@@ -790,7 +745,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "(exte*:rs | exte*:toml) & size:>0",
         Default::default(),
     )
@@ -802,7 +756,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "name:*.rs & name:mai*",
         Default::default(),
     )
@@ -814,7 +767,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "name:[m]ain.rs",
         Default::default(),
     )
@@ -826,7 +778,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "exte*:r?",
         Default::default(),
     )
@@ -837,7 +788,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "nam*:*.rs",
         Default::default(),
     )
@@ -849,7 +799,6 @@ fn test_complex_search_combinations() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:^fi & name:*.rs",
         Default::default(),
     )
@@ -876,10 +825,8 @@ fn test_escaping_behavior() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -888,7 +835,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r"name:colon\:file.txt",
         Default::default(),
     )
@@ -900,7 +846,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r"name:space\ file.txt",
         Default::default(),
     )
@@ -912,7 +857,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r"name:caret\^file.txt",
         Default::default(),
     )
@@ -924,7 +868,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r#"name:"colon:file.txt""#,
         Default::default(),
     )
@@ -935,7 +878,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r"name:colon\:*.txt",
         Default::default(),
     )
@@ -946,7 +888,6 @@ fn test_escaping_behavior() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         r"name:colon\:* | name:space\ *",
         Default::default(),
     )
@@ -988,10 +929,8 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
     let index_path_store = ttfm::db::Store::open(&index_path)?;
     ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry)
         .initialize_tables()?;
-    let index_path_cache =
-        ttfm::CacheManager::new(index_path_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (index_path_store, index_path_registry, index_path_cache);
+    let (store, registry) =
+        (index_path_store, index_path_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -1002,7 +941,6 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "parentdir:src & extension:rs",
         Default::default(),
     )?;

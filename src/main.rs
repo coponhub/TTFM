@@ -24,7 +24,7 @@ use ttfm::config::Config;
 use ttfm::db::Store;
 use ttfm::edit::{edit, QueryType, WriteOptions};
 use ttfm::tag::TagRegistry;
-use ttfm::{CacheManager, SearchOptions};
+use ttfm::SearchOptions;
 
 macro_rules! safe_print {
     ($($arg:tt)*) => {
@@ -205,8 +205,6 @@ fn main() -> Result<()> {
 
     let store = Store::open(home.join("db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache =
-        CacheManager::new(store.db_dir.join("cache"), 3 * 1024 * 1024 * 1024);
 
     match &cli.command {
         Commands::Index { path, dry_run } => {
@@ -249,12 +247,13 @@ fn main() -> Result<()> {
                 safe_println!("Searching for: '{}'", query);
             }
             let opts = ttfm::SearchOptions {
-                n: *n,
+                n: Some(n.unwrap_or(100)),
                 offset: *offset,
                 cid: cid.clone(),
+                ..Default::default()
             };
             let response =
-                ttfm::search::search(&store, &registry, &cache, query, opts)?;
+                ttfm::search::search(&store, &registry, query, opts)?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -278,12 +277,13 @@ fn main() -> Result<()> {
                 safe_println!("Listing files...");
             }
             let opts = ttfm::SearchOptions {
-                n: *n,
+                n: Some(n.unwrap_or(100)),
                 offset: *offset,
                 cid: cid.clone(),
+                ..Default::default()
             };
             let response =
-                ttfm::search::search(&store, &registry, &cache, "", opts)?;
+                ttfm::search::search(&store, &registry, "", opts)?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -304,7 +304,6 @@ fn main() -> Result<()> {
             let resp = edit(
                 &store,
                 &registry,
-                &cache,
                 search_query,
                 edit_query.as_deref(),
                 QueryType::Tag,
@@ -321,7 +320,6 @@ fn main() -> Result<()> {
             let resp = edit(
                 &store,
                 &registry,
-                &cache,
                 search_query,
                 Some(tag_query.as_str()),
                 QueryType::Untag,
@@ -346,7 +344,6 @@ fn main() -> Result<()> {
             let response = ttfm::search::search(
                 &store,
                 &registry,
-                &cache,
                 item,
                 SearchOptions::default(),
             )?;
@@ -816,7 +813,6 @@ mod tests {
         let db_dir = dir.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         let (store, registry) = make_store_and_registry(&db_dir);
-        let cache = CacheManager::new(db_dir.join("cache"), 0);
 
         let test_file = dir.path().join("sized.bin");
         std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
@@ -827,9 +823,8 @@ mod tests {
         let response = ttfm::search::search(
             &store,
             &registry,
-            &cache,
             "name:sized.bin",
-            ttfm::SearchOptions::default(),
+            ttfm::SearchOptions { n: Some(100), ..Default::default() },
         )
         .unwrap();
         assert!(
@@ -864,7 +859,6 @@ mod tests {
         let db_dir = dir.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
         let (store, registry) = make_store_and_registry(&db_dir);
-        let cache = CacheManager::new(db_dir.join("cache"), 0);
 
         let test_file = dir.path().join("dated.txt");
         std::fs::write(&test_file, b"hi").unwrap();
@@ -875,9 +869,8 @@ mod tests {
         let response = ttfm::search::search(
             &store,
             &registry,
-            &cache,
             "name:dated.txt",
-            ttfm::SearchOptions::default(),
+            ttfm::SearchOptions { n: Some(100), ..Default::default() },
         )
         .unwrap();
         assert!(!response.results.is_empty());

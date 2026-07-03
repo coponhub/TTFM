@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// 検索オプションを制御する構造体。
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SearchOptions {
     /// 取得件数 (None または 0 は全件)
     pub n: Option<usize>,
@@ -34,13 +34,23 @@ pub struct SearchOptions {
     pub offset: Option<usize>,
     /// 利用するキャッシュ ID
     pub cid: Option<String>,
+    /// キャッシュを使うか (既定 true。ただし n=None/0 の全件検索では無効)
+    pub cache: bool,
 }
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self { n: None, offset: None, cid: None, cache: true }
+    }
+}
+
+/// キャッシュ上限サイズ (3 GiB)。
+const CACHE_MAX_BYTES: i64 = 3 * 1024 * 1024 * 1024;
 
 /// クエリ文字列を使用してインデックスを検索します。
 pub fn search(
     store: &Store,
     registry: &TagRegistry,
-    cache: &CacheManager,
     query: &str,
     options: SearchOptions,
 ) -> Result<SearchResponse> {
@@ -50,15 +60,52 @@ pub fn search(
         ));
     }
 
-    if let Some(res) =
-        try_resolve_cache(store, registry, cache, query, &options)?
+    let n = options.n.unwrap_or(0);
+    let offset = options.offset.unwrap_or(0);
+
+    // キャッシュ無効パス。cache:false、または「全件(n=0)かつ読み込む cid も無い」場合。
+    // cid があれば n に関わらずキャッシュ読みを試みる（下の有効パスへ）。
+    if !options.cache || (n == 0 && options.cid.is_none()) {
+        let (results, has_more, warnings) =
+            search_core(store, registry, query, n, offset)?;
+        return Ok(SearchResponse::from_results(
+            results, None, has_more, n, offset, query, warnings,
+        ));
+    }
+
+    // ここから先はキャッシュ有効が確定。CacheManager は必ず生成する。
+    let cache = CacheManager::new(store.db_dir.join("cache"), CACHE_MAX_BYTES);
+
+    if let Some(res) = try_resolve_cache(store, registry, &cache, query, &options)?
     {
         return Ok(res);
     }
 
-    let n = options.n.unwrap_or(100);
-    let offset = options.offset.unwrap_or(0);
+    let (results, has_more, warnings) =
+        search_core(store, registry, query, n, offset)?;
 
+    let cid = if has_more {
+        let new_cid = uuid::Uuid::new_v4().to_string();
+        spawn_cache_worker(store.db_dir.clone(), &cache, &new_cid, query)?;
+        Some(new_cid)
+    } else {
+        None
+    };
+
+    Ok(SearchResponse::from_results(
+        results, cid, has_more, n, offset, query, warnings,
+    ))
+}
+
+/// 検索のコア処理。resolver 生成・fetch・スカラー表示整形・ページングを行う。
+/// キャッシュには一切依存しない。
+fn search_core(
+    store: &Store,
+    registry: &TagRegistry,
+    query: &str,
+    n: usize,
+    offset: usize,
+) -> Result<(Vec<crate::response::Item>, bool, Vec<String>)> {
     let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?;
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
 
@@ -100,34 +147,7 @@ pub fn search(
         results.truncate(n);
     }
 
-    let (total_count, progress_total) = if has_more {
-        (None, None)
-    } else {
-        let total = offset + results.len();
-        (Some(total), Some(total))
-    };
-
-    let cid = if has_more {
-        let new_cid = uuid::Uuid::new_v4().to_string();
-        spawn_cache_worker(store.db_dir.clone(), cache, &new_cid, query)?;
-        Some(new_cid)
-    } else {
-        None
-    };
-
-    Ok(SearchResponse {
-        results,
-        cid,
-        has_more,
-        total_count,
-        progress: Progress {
-            current: total_count.unwrap_or(n),
-            total: progress_total,
-            is_done: !has_more,
-        },
-        warnings,
-        query: query.to_string(),
-    })
+    Ok((results, has_more, warnings))
 }
 
 /// 非同期に全件検索結果を Parquet キャッシュとして書き出します。
@@ -275,7 +295,7 @@ fn search_from_cache(
     options: SearchOptions,
     cid: &str,
 ) -> Result<SearchResponse> {
-    let n = options.n.unwrap_or(100);
+    let n = options.n.unwrap_or(0);
     let offset = options.offset.unwrap_or(0);
     let path_str = path.to_string_lossy().to_string();
 
@@ -419,7 +439,7 @@ mod tests {
             File::create(root.join(format!("file{:02}.txt", i)))?;
         }
 
-        let (store, registry, cache) = setup(&db_dir)?;
+        let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
         let query = "extension:txt";
@@ -427,7 +447,6 @@ mod tests {
         let res_full = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 n: Some(10),
@@ -439,7 +458,6 @@ mod tests {
         let res_p1 = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 n: Some(2),
@@ -450,7 +468,6 @@ mod tests {
         let res_p2 = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 n: Some(2),
@@ -461,7 +478,6 @@ mod tests {
         let res_p3 = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 n: Some(2),
@@ -482,6 +498,63 @@ mod tests {
     }
 
     #[test]
+    fn test_default_options_returns_all() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let db_dir = root.join("db");
+        std::fs::create_dir(&db_dir)?;
+
+        for i in 1..=150 {
+            File::create(root.join(format!("file{:03}.txt", i)))?;
+        }
+
+        let (store, registry, _cache) = setup(&db_dir)?;
+        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+
+        let res = search(
+            &store,
+            &registry,
+            "extension:txt",
+            SearchOptions::default(),
+        )?;
+        assert_eq!(res.results.len(), 150);
+        assert!(!res.has_more);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cache_false_disables_worker() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let db_dir = root.join("db");
+        std::fs::create_dir(&db_dir)?;
+
+        for i in 1..=5 {
+            File::create(root.join(format!("file{:02}.txt", i)))?;
+        }
+
+        let (store, registry, _cache) = setup(&db_dir)?;
+        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+
+        let res = search(
+            &store,
+            &registry,
+            "extension:txt",
+            SearchOptions {
+                n: Some(2),
+                cache: false,
+                ..Default::default()
+            },
+        )?;
+
+        assert!(res.has_more, "finite n over more results should set has_more");
+        assert!(res.cid.is_none(), "cache=false must not issue a cid");
+
+        Ok(())
+    }
+
+    #[test]
     fn test_search_paging_out_of_bounds() -> Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
@@ -489,13 +562,12 @@ mod tests {
         std::fs::create_dir(&db_dir)?;
 
         File::create(root.join("a.txt"))?;
-        let (store, registry, cache) = setup(&db_dir)?;
+        let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
         let res = search(
             &store,
             &registry,
-            &cache,
             "extension:txt",
             SearchOptions {
                 n: Some(10),
@@ -522,13 +594,12 @@ mod tests {
         let path = root.join("test.bin");
         std::fs::write(&path, vec![0u8; 123])?;
 
-        let (store, registry, cache) = setup(&db_dir)?;
+        let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
         let res = search(
             &store,
             &registry,
-            &cache,
             "name:test.bin",
             SearchOptions::default(),
         )?;
@@ -558,7 +629,7 @@ mod tests {
         let query = "extension:";
 
         let res_db =
-            search(&store, &registry, &cache, query, SearchOptions::default())?;
+            search(&store, &registry, query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
         assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
             |e| e.label.tag_type() == crate::types::TagType::from("item")
@@ -583,7 +654,6 @@ mod tests {
         let res_cache = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 cid: Some(cid.to_string()),
@@ -679,7 +749,6 @@ mod tests {
         let res = search(
             &store,
             &registry,
-            &cache,
             query,
             SearchOptions {
                 n: Some(10),
@@ -702,12 +771,11 @@ mod tests {
         let dir = tempdir()?;
         let db_dir = dir.path().join("db");
         std::fs::create_dir(&db_dir)?;
-        let (store, registry, cache) = setup(&db_dir)?;
+        let (store, registry, _cache) = setup(&db_dir)?;
 
         let res = search(
             &store,
             &registry,
-            &cache,
             "name:non-existent",
             SearchOptions::default(),
         )?;

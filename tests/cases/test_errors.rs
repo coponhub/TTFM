@@ -22,22 +22,21 @@ use ttfm::search;
 // =========================================================================
 
 fn make_store_registry_cache(
-) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)> {
+) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry)> {
     let dir = tempdir()?;
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     // dir を drop させないためリーク（テスト内の短命な用途）
     std::mem::forget(dir);
-    Ok((store, registry, cache))
+    Ok((store, registry))
 }
 
 fn assert_over_agg_error(query: &str) {
-    let (store, registry, cache) = make_store_registry_cache().unwrap();
+    let (store, registry) = make_store_registry_cache().unwrap();
     let result =
-        search::search(&store, &registry, &cache, query, Default::default());
+        search::search(&store, &registry, query, Default::default());
     assert!(
         result.is_err(),
         "Expected error for over-aggregation query '{query}', but got Ok"
@@ -84,10 +83,8 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &files_dir,
         None::<&fn(usize)>,
@@ -98,7 +95,6 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
     let result = search::search(
         &store,
         &registry,
-        &cache,
         "size: > 100",
         Default::default(),
     );
@@ -140,10 +136,8 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &files_dir,
         None::<&fn(usize)>,
@@ -156,7 +150,6 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     let ok_result1 = search::search(
         &store,
         &registry,
-        &cache,
         ok_query1,
         Default::default(),
     );
@@ -172,7 +165,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
     let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
     let result2 =
-        search::search(&store, &registry, &cache, query2, Default::default());
+        search::search(&store, &registry, query2, Default::default());
     assert!(
         result2.is_ok(),
         "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
@@ -184,7 +177,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
     let result =
-        search::search(&store, &registry, &cache, query, Default::default());
+        search::search(&store, &registry, query, Default::default());
 
     assert!(
         result.is_ok(),

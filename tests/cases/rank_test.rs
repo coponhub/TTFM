@@ -34,10 +34,8 @@ fn test_rank_sorting_files() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -47,7 +45,6 @@ fn test_rank_sorting_files() {
     let res_high = search::search(
         &store,
         &registry,
-        &cache,
         "filename:high.txt",
         Default::default(),
     )
@@ -59,7 +56,6 @@ fn test_rank_sorting_files() {
     let res_mid = search::search(
         &store,
         &registry,
-        &cache,
         "filename:mid.txt",
         Default::default(),
     )
@@ -70,7 +66,6 @@ fn test_rank_sorting_files() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         Default::default(),
     )
@@ -107,10 +102,8 @@ fn test_rank_batch_update() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -119,7 +112,6 @@ fn test_rank_batch_update() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         Default::default(),
     )
@@ -131,7 +123,6 @@ fn test_rank_batch_update() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt | extension:rs",
         Default::default(),
     )
@@ -152,10 +143,8 @@ fn test_rank_set_by_id_low_level() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     fs::create_dir_all(&db_dir).unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
@@ -168,7 +157,6 @@ fn test_rank_set_by_id_low_level() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:note",
         Default::default(),
     )

@@ -257,6 +257,38 @@ impl SearchResponse {
         }
     }
 
+    /// 検索結果から通常のレスポンスを組み立てます。
+    /// `has_more` 時は総数不明、それ以外は `offset + 件数` を総数とします。
+    pub fn from_results(
+        results: Vec<Item>,
+        cid: Option<String>,
+        has_more: bool,
+        n: usize,
+        offset: usize,
+        query: impl Into<String>,
+        warnings: Vec<String>,
+    ) -> Self {
+        let (total_count, progress_total) = if has_more {
+            (None, None)
+        } else {
+            let total = offset + results.len();
+            (Some(total), Some(total))
+        };
+        Self {
+            results,
+            cid,
+            has_more,
+            total_count,
+            progress: crate::types::Progress {
+                current: total_count.unwrap_or(n),
+                total: progress_total,
+                is_done: !has_more,
+            },
+            warnings,
+            query: query.into(),
+        }
+    }
+
     /// `value` タグを持つ Volatile item に `query:` ラベルを注入する。
     /// 計算値の由来保持（EDIT.md §5.7(B)）。
     pub fn query_into_tags(&mut self) {

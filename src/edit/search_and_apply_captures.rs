@@ -1,4 +1,3 @@
-use crate::cache::CacheManager;
 use crate::db::Store;
 use crate::response::Item;
 use crate::search::SearchOptions;
@@ -8,14 +7,12 @@ use anyhow::Result;
 pub fn search_and_apply_captures(
     store: &Store,
     registry: &TagRegistry,
-    cache: &CacheManager,
     search_query: &str,
     edit_query: Option<&str>,
 ) -> Result<Vec<(Item, Option<String>)>> {
     let mut resp = crate::search::search(
         store,
         registry,
-        cache,
         search_query,
         SearchOptions::default(),
     )?;

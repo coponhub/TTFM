@@ -28,16 +28,13 @@ fn test_search_progress_zero_results() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
 
     // 0件検索 (name:non-existent)
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "name:non_existent",
         SearchOptions::default(),
     )?;
@@ -77,10 +74,8 @@ fn test_search_progress_finished_small_results() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -91,7 +86,6 @@ fn test_search_progress_finished_small_results() -> Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         SearchOptions::default(),
     )?;

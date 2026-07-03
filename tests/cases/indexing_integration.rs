@@ -31,10 +31,8 @@ fn test_incremental_indexing_full_flow() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     let all_files = "item_kind:file";
 
     // 1. 初回: a.txt を作成 (root + a.txt = 2)
@@ -47,7 +45,6 @@ fn test_incremental_indexing_full_flow() {
         search::search(
             &store,
             &registry,
-            &cache,
             all_files,
             Default::default()
         )
@@ -60,7 +57,6 @@ fn test_incremental_indexing_full_flow() {
         search::search(
             &store,
             &registry,
-            &cache,
             "filename:a.txt",
             Default::default()
         )
@@ -78,7 +74,6 @@ fn test_incremental_indexing_full_flow() {
         search::search(
             &store,
             &registry,
-            &cache,
             all_files,
             Default::default()
         )
@@ -98,7 +93,6 @@ fn test_incremental_indexing_full_flow() {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         all_files,
         Default::default(),
     )
@@ -110,7 +104,6 @@ fn test_incremental_indexing_full_flow() {
     let old_id = search::search(
         &store,
         &registry,
-        &cache,
         "filename:a.txt",
         Default::default(),
     )
@@ -126,7 +119,6 @@ fn test_incremental_indexing_full_flow() {
     let res_edit = search::search(
         &store,
         &registry,
-        &cache,
         "filename:a.txt",
         Default::default(),
     )
@@ -151,7 +143,6 @@ fn test_incremental_indexing_full_flow() {
         search::search(
             &store,
             &registry,
-            &cache,
             all_files,
             Default::default()
         )
@@ -164,7 +155,6 @@ fn test_incremental_indexing_full_flow() {
     let res_b_del = search::search(
         &store,
         &registry,
-        &cache,
         "filename:b.rs",
         Default::default(),
     )
@@ -210,7 +200,7 @@ fn test_incremental_indexing_full_flow() {
     let query = format!("file_id:\"{}\"", uuid_str);
 
     let _res_inode =
-        search::search(&store, &registry, &cache, &query, Default::default())
+        search::search(&store, &registry, &query, Default::default())
             .unwrap();
     let _files_inode: Vec<_> = _res_inode
         .results
@@ -243,10 +233,8 @@ fn test_system_items_registration() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -256,7 +244,6 @@ fn test_system_items_registration() {
     let results_physical = search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:tag & name:extension:txt",
         Default::default(),
     )
@@ -269,7 +256,7 @@ fn test_system_items_registration() {
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
     let results_projection =
-        search::search(&store, &registry, &cache, "tag:", Default::default())
+        search::search(&store, &registry, "tag:", Default::default())
             .unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
@@ -292,7 +279,6 @@ fn test_system_items_registration() {
     let results_origin = search::search(
         &store,
         &registry,
-        &cache,
         "origin:",
         Default::default(),
     )
@@ -336,10 +322,8 @@ fn test_typedtag_listing_via_type_query() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -348,7 +332,6 @@ fn test_typedtag_listing_via_type_query() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "type:extension",
         Default::default(),
     )
@@ -372,7 +355,6 @@ fn test_typedtag_listing_via_type_query() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         Default::default(),
     )
@@ -409,10 +391,8 @@ fn test_no_empty_extension_system_item() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -420,7 +400,6 @@ fn test_no_empty_extension_system_item() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:tag & name:\"extension:\"",
         Default::default(),
     )
@@ -444,10 +423,8 @@ fn test_definition_only_items_registration() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -455,7 +432,6 @@ fn test_definition_only_items_registration() {
     assert!(!search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:type & name:name",
         Default::default()
     )
@@ -465,7 +441,6 @@ fn test_definition_only_items_registration() {
     assert!(!search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:type & name:item_kind",
         Default::default()
     )

@@ -42,7 +42,6 @@ pub(super) struct SharedFixture {
     pub root: tempfile::TempDir,
     pub store: std::sync::Mutex<ttfm::db::Store>,
     pub registry: ttfm::tag::TagRegistry,
-    pub cache: ttfm::CacheManager,
 }
 
 // ──────────────────────────────────────────────
@@ -87,15 +86,10 @@ macro_rules! define_cases {
                         });
                     }
                 }
-                let cache = ttfm::CacheManager::new(
-                    store.db_dir.join("cache"),
-                    0,
-                );
                 crate::cases::SharedFixture {
                     root,
                     store: std::sync::Mutex::new(store),
                     registry,
-                    cache,
                 }
             })
         }
@@ -109,7 +103,6 @@ macro_rules! define_cases {
             let res = ttfm::search::search(
                 &store,
                 &fix.registry,
-                &fix.cache,
                 &query,
                 ttfm::SearchOptions::default(),
             )?;

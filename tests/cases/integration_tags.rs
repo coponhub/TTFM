@@ -25,9 +25,8 @@ define_cases! {
             Ok(())
         },
         modify: Some(|store, registry, dir| {
-            let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
             let query = format!("extension:txt & path:{}/*", dir.to_string_lossy());
-            let res = search::search(store, registry, &cache, &query, Default::default())?;
+            let res = search::search(store, registry, &query, Default::default())?;
             anyhow::ensure!(!res.results.is_empty(), "No txt file found in case dir");
             let item = res.results[0].primary_value().unwrap_or_default();
             tagging::tag_item(store, registry, &item, "status:reviewed")?;
@@ -77,7 +76,6 @@ fn test_integration_tag_tagging() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let file_path = dir.path().join("dummy.txt");
     File::create(&file_path).unwrap();
@@ -87,7 +85,6 @@ fn test_integration_tag_tagging() {
     let registered_paths = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         Default::default(),
     )
@@ -105,7 +102,6 @@ fn test_integration_tag_tagging() {
     let results = search::search(
         &store,
         &registry,
-        &cache,
         "priority:high & item_kind:tag",
         Default::default(),
     )
@@ -117,7 +113,6 @@ fn test_integration_tag_tagging() {
     let file_results = search::search(
         &store,
         &registry,
-        &cache,
         "project:mars",
         Default::default(),
     )
@@ -137,7 +132,6 @@ fn test_system_item_metadata_integration() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     File::create(dir.path().join("test.rs")).unwrap();
     File::create(dir.path().join("no_ext")).unwrap();
@@ -149,7 +143,6 @@ fn test_system_item_metadata_integration() {
     let ext_list = search::search(
         &store,
         &registry,
-        &cache,
         "type:extension",
         Default::default(),
     )
@@ -165,7 +158,6 @@ fn test_system_item_metadata_integration() {
     let results_physical = search::search(
         &store,
         &registry,
-        &cache,
         "item_kind:tag & label:rs",
         Default::default(),
     )
@@ -178,7 +170,6 @@ fn test_system_item_metadata_integration() {
     let results_proj = search::search(
         &store,
         &registry,
-        &cache,
         "extension:",
         Default::default(),
     )

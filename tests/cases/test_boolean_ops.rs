@@ -37,7 +37,6 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &data_dir,
         None::<&fn(usize)>,
@@ -46,7 +45,7 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
 
     // デバッグ: 全アイテム数を確認 (実ファイル/ディレクトリのみ。インデックスルートの data は除く)
     let all_items =
-        search::search(&store, &registry, &cache, "", Default::default())?;
+        search::search(&store, &registry, "", Default::default())?;
     let files_only: Vec<_> = all_items
         .results
         .iter()
@@ -67,7 +66,6 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let res_sum = search::search(
         &store,
         &registry,
-        &cache,
         query_sum,
         Default::default(),
     )?;
@@ -82,7 +80,6 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let res_sum_filter = search::search(
         &store,
         &registry,
-        &cache,
         query_sum_filter,
         Default::default(),
     )?;
@@ -99,7 +96,6 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let res_calc = search::search(
         &store,
         &registry,
-        &cache,
         query_calc,
         Default::default(),
     )?;
@@ -115,7 +111,6 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     let res_cmp = search::search(
         &store,
         &registry,
-        &cache,
         query_cmp,
         Default::default(),
     )?;

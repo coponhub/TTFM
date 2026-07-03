@@ -38,10 +38,8 @@ fn test_search_all_no_paging() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -55,7 +53,7 @@ fn test_search_all_no_paging() -> anyhow::Result<()> {
     };
     // Query must match all files
     let res =
-        search::search(&store, &registry, &cache, "extension:txt", options)?;
+        search::search(&store, &registry, "extension:txt", options)?;
 
     assert_eq!(res.results.len(), 25, "Should retrieve all 25 items");
     assert!(!res.has_more, "Should not have more results when n is None");

@@ -2684,12 +2684,10 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
         None::<&fn(usize)>,
         false,
     )?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "parentdir: &: extension:",
         ttfm::SearchOptions::default(),
     )?;
@@ -2715,12 +2713,10 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
         None::<&fn(usize)>,
         false,
     )?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "parentdir: &: (size: * 2)",
         ttfm::SearchOptions::default(),
     )?;
@@ -2750,13 +2746,11 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
         None::<&fn(usize)>,
         false,
     )?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "type: & parentdir:",
         ttfm::SearchOptions::default(),
     )?;
@@ -2766,7 +2760,6 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     let res = search::search(
         &store,
         &registry,
-        &cache,
         "type: | extension:",
         ttfm::SearchOptions::default(),
     )?;

@@ -7,7 +7,6 @@ pub(crate) mod sql;
 mod tag_filter;
 pub mod write;
 
-use crate::cache::CacheManager;
 use crate::db::Store;
 use crate::tag::TagRegistry;
 use anyhow::Result;
@@ -34,7 +33,6 @@ pub struct EditResponse {
 pub fn edit(
     store: &Store,
     registry: &TagRegistry,
-    cache: &CacheManager,
     search_query: &str,
     edit_query: Option<&str>,
     query_type: QueryType,
@@ -44,7 +42,6 @@ pub fn edit(
     let item_edits = search_and_apply_captures::search_and_apply_captures(
         store,
         registry,
-        cache,
         search_query,
         edit_query,
     )?;

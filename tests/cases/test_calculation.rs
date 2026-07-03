@@ -364,10 +364,8 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let db_dir_cache =
-        ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) =
-        (db_dir_store, db_dir_registry, db_dir_cache);
+    let (store, registry) =
+        (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -377,7 +375,6 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     let res_explicit = search::search(
         &store,
         &registry,
-        &cache,
         "sum((size: - 100))",
         Default::default(),
     )?;
@@ -389,7 +386,6 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     let res_bare = search::search(
         &store,
         &registry,
-        &cache,
         "sum(size: - 100)",
         Default::default(),
     )?;

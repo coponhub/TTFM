@@ -41,7 +41,6 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -55,7 +54,7 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     };
     // Query must match all files
     let res =
-        search::search(&store, &registry, &cache, "extension:txt", options)?;
+        search::search(&store, &registry, "extension:txt", options)?;
 
     assert_eq!(res.results.len(), 10);
     assert!(res.has_more, "Should have more results");
@@ -68,7 +67,6 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         let res_cid = search::search(
             &store,
             &registry,
-            &cache,
             "extension:txt",
             SearchOptions {
                 cid: Some(cid.clone()),
@@ -91,11 +89,11 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         n: Some(10),
         offset: Some(10),
         cid: Some(cid.clone()),
+        ..Default::default()
     };
     let res_page2 = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         options_page2,
     )?;
@@ -116,7 +114,6 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     let res_fresh_page2 = search::search(
         &store,
         &registry,
-        &cache,
         "extension:txt",
         SearchOptions {
             n: Some(10),
