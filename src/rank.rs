@@ -28,7 +28,7 @@ impl SystemRank {
     pub const PARENT_DIR: Rank = 6;
     pub const ITEM_KIND: Rank = 5;
     pub const CONTENT: Rank = 4;
-    pub const FILENAME: Rank = 9;
+    pub const FILENAME: Rank = 2;
     pub const DEFAULT: Rank = 0;
     pub const PATH: Rank = -1;
 }
@@ -61,44 +61,6 @@ pub fn build_rank_expr(
         .case(guard_condition, key_rank_expr)
         .finally(default_rank)
         .into()
-}
-
-/// 検索結果リストに対して優先度を一括設定し、OneView を再構築します。
-pub fn update_ranks(
-    store: &crate::db::Store,
-    registry: &TagRegistry,
-    results: &[crate::response::Item],
-    rank: i64,
-) -> anyhow::Result<()> {
-    let file_ids: Vec<i64> = results
-        .iter()
-        .filter(|r| r.item_kind == crate::types::ItemKind::File)
-        .map(|r| r.id.as_i64())
-        .collect();
-    let item_ids: Vec<i64> = results
-        .iter()
-        .filter(|r| r.item_kind != crate::types::ItemKind::File)
-        .map(|r| r.id.as_i64())
-        .collect();
-
-    if !file_ids.is_empty() {
-        batch_update_rank(store, &file_ids, true, rank)?;
-    }
-    if !item_ids.is_empty() {
-        batch_update_rank(store, &item_ids, false, rank)?;
-    }
-    let all_columns = registry.get_all_columns();
-    let reader = crate::query::lens_reader::Reader::build(
-        registry,
-        crate::db::Tbl::_OneView,
-    );
-    crate::oneview::OneView::recreate(
-        &store.conn,
-        &all_columns,
-        reader,
-        &store.db_dir,
-    )?;
-    Ok(())
 }
 
 /// IDを指定して優先度を設定します。

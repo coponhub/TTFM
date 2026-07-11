@@ -34,8 +34,7 @@ fn test_parquet_physical_order() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();

@@ -31,8 +31,7 @@ fn test_binder_error() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         dir.path(),
         None::<&fn(usize)>,

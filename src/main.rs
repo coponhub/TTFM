@@ -24,21 +24,6 @@ use ttfm::config::Config;
 use ttfm::db::Store;
 use ttfm::edit::{edit, QueryType, WriteOptions};
 use ttfm::tag::TagRegistry;
-use ttfm::SearchOptions;
-
-macro_rules! safe_print {
-    ($($arg:tt)*) => {
-        {
-            use std::io::Write;
-            write!(std::io::stdout(), $($arg)*).unwrap_or_else(|e| {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    std::process::exit(0);
-                }
-                panic!("failed printing to stdout: {}", e);
-            });
-        }
-    };
-}
 
 macro_rules! safe_println {
     ($($arg:tt)*) => {
@@ -153,13 +138,6 @@ enum Commands {
     Note {
         /// メモの内容
         content: String,
-    },
-    /// アイテムに優先度（RANK）を設定します。
-    Rank {
-        /// 対象のクエリ（例: "extension:rs"）
-        item: String,
-        /// 設定する優先度（数値が大きいほど上位に表示）
-        value: i64,
     },
 }
 
@@ -282,8 +260,7 @@ fn main() -> Result<()> {
                 cid: cid.clone(),
                 ..Default::default()
             };
-            let response =
-                ttfm::search::search(&store, &registry, "", opts)?;
+            let response = ttfm::search::search(&store, &registry, "", opts)?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -339,42 +316,6 @@ fn main() -> Result<()> {
             let id =
                 ttfm::tagging::add_item(&store, &registry, "note", content)?;
             safe_println!("Created note (ID: {})", id);
-        }
-        Commands::Rank { item, value } => {
-            let response = ttfm::search::search(
-                &store,
-                &registry,
-                item,
-                SearchOptions::default(),
-            )?;
-            if response.results.is_empty() {
-                safe_println!("No items matched query: '{}'", item);
-                return Ok(());
-            }
-
-            safe_println!("Matched {} items.", response.results.len());
-            let do_update = if cli.yes {
-                true
-            } else {
-                safe_print!("Set rank to {}? [y/N]: ", value);
-                use std::io::{self, Write};
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                input.trim().to_lowercase() == "y"
-            };
-
-            if do_update {
-                ttfm::rank::update_ranks(
-                    &store,
-                    &registry,
-                    &response.results,
-                    *value,
-                )?;
-                safe_println!("Updated {} items.", response.results.len());
-            } else {
-                safe_println!("Aborted.");
-            }
         }
     }
 
@@ -466,11 +407,15 @@ fn print_results(
     let term_width = get_terminal_width();
 
     // volatile スカラー結果のフォーマット済み representative をテーブル上部に表示
-    if let Some(res) = response
-        .results
-        .iter()
-        .find(|r| r.id.is_volatile() && !r.representative.is_empty())
-    {
+    // ("value" タグ (System origin) を持つ結果に限定し、定義アイテムを持つ結果等の誤爆を防ぐ)
+    if let Some(res) = response.results.first().filter(|r| {
+        r.id.is_volatile()
+            && !r.representative.is_empty()
+            && r.tags.entries.iter().any(|e| {
+                e.label.tag_type().as_str() == "value"
+                    && matches!(e.origin, ttfm::types::Origin::Builtin)
+            })
+    }) {
         let repr = format_representative(registry, res);
         writeln!(writer, "\x1b[1m{}\x1b[0m", repr).unwrap_or(());
     }
@@ -502,11 +447,7 @@ fn print_results(
         let mut col_widths = vec![0; sorted_keys.len()];
 
         for res in &group.results {
-            item_id_width = item_id_width.max({
-                let id = res.id.as_i64();
-                let o = ttfm::Origin::within(id);
-                format!("{}({})", o.short(), id - o.space_lo()).len()
-            });
+            item_id_width = item_id_width.max(res.id.to_string().len());
             for (i, key) in sorted_keys.iter().enumerate() {
                 let val = res.get_tag_value(key.as_str()).unwrap_or_default();
                 col_widths[i] = col_widths[i].max(val.chars().count());
@@ -526,11 +467,7 @@ fn print_results(
 
                 // item_id
                 let id_str = res_opt
-                    .map(|r| {
-                        let id = r.id.as_i64();
-                        let o = ttfm::Origin::within(id);
-                        format!("{}({})", o.short(), id - o.space_lo())
-                    })
+                    .map(|r| r.id.to_string())
                     .unwrap_or_else(|| "item_id".to_string());
                 let available = term_width.saturating_sub(current_width);
                 if available == 0 {
@@ -781,7 +718,7 @@ mod tests {
             vec![Label::Name("test_label".to_string())];
         res_with_nvalue.apply_tag(
             Label::resolve(TagType::from("nvalue"), LabelValue::Integer(9986)),
-            Origin::System,
+            Origin::Builtin,
         );
 
         let registry = TagRegistry::with_standard();
@@ -824,7 +761,10 @@ mod tests {
             &store,
             &registry,
             "name:sized.bin",
-            ttfm::SearchOptions { n: Some(100), ..Default::default() },
+            ttfm::SearchOptions {
+                n: Some(100),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(
@@ -870,7 +810,10 @@ mod tests {
             &store,
             &registry,
             "name:dated.txt",
-            ttfm::SearchOptions { n: Some(100), ..Default::default() },
+            ttfm::SearchOptions {
+                n: Some(100),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(!response.results.is_empty());
@@ -890,6 +833,80 @@ mod tests {
         assert!(
             output.contains("2026") || output.contains("2025"),
             "mtime should show year, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_print_results_bold_header_for_scalar_result() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "500");
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+
+        std::fs::write(dir.path().join("sized.bin"), vec![0u8; 1024]).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .run(dir.path(), None::<&fn(usize)>, false)
+            .unwrap();
+
+        let response = ttfm::search::search(
+            &store,
+            &registry,
+            "sum(size:)",
+            ttfm::SearchOptions::default(),
+        )
+        .unwrap();
+
+        let mut out = Vec::<u8>::new();
+        print_results(
+            &store,
+            &registry,
+            &response,
+            "sum(size:)",
+            100,
+            &mut out,
+        );
+        std::env::remove_var("COLUMNS");
+
+        let output = String::from_utf8(out).unwrap();
+        let first_line = output.lines().next().unwrap_or("");
+        assert!(
+            !first_line.contains("item_id"),
+            "scalar result should still show the bold representative \
+             header before the table, got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_print_results_no_bold_header_for_definition_item_results() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "500");
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+
+        let response = ttfm::search::search(
+            &store,
+            &registry,
+            "type:*",
+            ttfm::SearchOptions::default(),
+        )
+        .unwrap();
+
+        let mut out = Vec::<u8>::new();
+        print_results(&store, &registry, &response, "type:*", 100, &mut out);
+        std::env::remove_var("COLUMNS");
+
+        let output = String::from_utf8(out).unwrap();
+        let first_line = output.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("item_id"),
+            "definition item results should not misfire the scalar bold header, \
+             expected the table header first, got:\n{}",
             output
         );
     }

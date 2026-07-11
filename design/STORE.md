@@ -49,7 +49,8 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `item_id`: `item_references.item_id` への外部キー
 - `type`: タグの種類
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
-- ※ システム定義Item（`filename` Type等）に対してシステムが付与するタグ（例: `origin:system`）。
+- ※ 定義アイテムの index 時登録の廃止（ITEM.md §8）に伴い、現在このテーブルへの書き手は存在しない
+  （oneview の UNION 元としては残存）。
 
 ### 3.2 `user_tags` テーブル (User Tags)
 - **ファイルパス**: `.ttfm/db/user_tags.parquet`
@@ -66,7 +67,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `item_id`: 対象のID
 - `item_kind`: アイテムの種類 (`file`, `note`, `type`, `tag` 等。`label` は Volatile のみ)
 - `rank`: 対象の優先度（ソート用）
-- `origin`: タグの出典 (`system` または `user`)
+- `origin`: タグの由来(**Origin**)
 - `type`: タグの種類
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（それぞれの物理カラムから合流）
 - `tag`: タグ全体（`type:label`）を表す文字列
@@ -74,7 +75,11 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `tagged_at`: 付与日時 (epoch)。`user_tags` 由来の行のみ値を持ち、`base_tags` / `system_tags` 由来は NULL。
 
 ### 4.1 Origin & Name Resolution
-- **Origin**: `base_tags` と `system_tags` 由来の行は `system`、`user_tags` 由来の行は `user` とする。
+- **Origin**:
+  - `file_references/locations/base_tags` 由来の行は`file`(indexingでのplugin関与タグも含む)、 
+  - `item_references` 由来の行はItemIDで判定(現状は`builtin/plugin/user`)
+  - `system_tags` 由来の行は `builtin`
+  - `user_tags` 由来の行は `user`
 - **Name**: ユーザー定義（`user_tags` 内の `type:name`）を優先し、存在しなければ `locations.filename` を採用する。
 
 ## 5. Storage Mapping (Lens) — 論理タグ ↔ 物理スキーマ
@@ -102,5 +107,5 @@ StorageMapping は3種:
     - label_str ASC
     - item_id ASC
 - `item_references` は保存時に `item_id ASC` でソートする
-    - System 区画（8B+）と User 区画（0+）が混在するため、zone map の枝刈りを有効にするには書き出し時点でのソートが必要
-    - 書き出し経路: `tagging::add_item` / `indexer::update_system_items` / `rank::batch_update_rank`
+    - item idは区画毎の連続値になっているため、特定の区画にアクセスする際zone mapによる最適化が期待できる
+    - 書き出し経路: `tagging::add_item` / edit の write エンジン / `rank::batch_update_rank`

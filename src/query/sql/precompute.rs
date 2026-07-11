@@ -157,6 +157,27 @@ fn precompute_agg_into(
     let inner = agg.inner_node();
     let key = inner as *const ResolvedNode as usize;
 
+    // rest は split のたびに新しく合成されるノードでポインタが安定しないため、
+    // rest 自身ではなく inner のポインタ（key）に登録する。
+    if matches!(agg, ResolvedAggregationNode::Count(_)) {
+        if let Some((defs, rest)) = inner.split_definition_branches() {
+            if !ctx.definition_counts.contains_key(&key)
+                && !ctx.definition_count_nodes.contains_key(&key)
+            {
+                ctx.definition_count_nodes
+                    .insert(key, defs.into_iter().cloned().collect());
+            }
+            if let Some(rest_node) = rest {
+                if !ctx.agg_filters.contains_key(&key)
+                    && !ctx.filter_nodes.contains_key(&key)
+                {
+                    ctx.filter_nodes.insert(key, rest_node);
+                }
+            }
+            return;
+        }
+    }
+
     if !ctx.agg_filters.contains_key(&key)
         && !ctx.filter_nodes.contains_key(&key)
     {
@@ -275,6 +296,12 @@ fn materialize_agg_context(src: &Src, ctx: &mut AggregationContext) {
         ctx.inner_nodes.drain().collect();
     for (key, node) in inner_nodes {
         ctx.agg_inner_sqls.insert(key, build_filter_sql(src, &node));
+    }
+    let definition_count_nodes: Vec<(usize, Vec<ResolvedNode>)> =
+        ctx.definition_count_nodes.drain().collect();
+    for (key, defs) in definition_count_nodes {
+        let sql = crate::query::lens_builder::count_definitions(src, &defs);
+        ctx.definition_counts.insert(key, sql);
     }
 }
 

@@ -31,8 +31,7 @@ fn test_incremental_indexing_full_flow() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     let all_files = "item_kind:file";
 
     // 1. 初回: a.txt を作成 (root + a.txt = 2)
@@ -42,27 +41,17 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(
-            &store,
-            &registry,
-            all_files,
-            Default::default()
-        )
-        .unwrap()
-        .results
-        .len(),
+        search::search(&store, &registry, all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
         2
     );
     assert_eq!(
-        search::search(
-            &store,
-            &registry,
-            "filename:a.txt",
-            Default::default()
-        )
-        .unwrap()
-        .results
-        .len(),
+        search::search(&store, &registry, "filename:a.txt", Default::default())
+            .unwrap()
+            .results
+            .len(),
         1
     );
 
@@ -71,15 +60,10 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(
-            &store,
-            &registry,
-            all_files,
-            Default::default()
-        )
-        .unwrap()
-        .results
-        .len(),
+        search::search(&store, &registry, all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
         2
     );
 
@@ -90,39 +74,26 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let res = search::search(
-        &store,
-        &registry,
-        all_files,
-        Default::default(),
-    )
-    .unwrap();
+    let res = search::search(&store, &registry, all_files, Default::default())
+        .unwrap();
     assert_eq!(res.results.len(), 3);
 
     // 4. 更新: a.txt の内容を変更 (サイズ変更)
     // 実体(ID)が変わらないことを確認
-    let old_id = search::search(
-        &store,
-        &registry,
-        "filename:a.txt",
-        Default::default(),
-    )
-    .unwrap()
-    .results[0]
-        .id
-        .clone();
+    let old_id =
+        search::search(&store, &registry, "filename:a.txt", Default::default())
+            .unwrap()
+            .results[0]
+            .id
+            .clone();
     std::fs::write(&path_a, "updated content with more bytes").unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let res_edit = search::search(
-        &store,
-        &registry,
-        "filename:a.txt",
-        Default::default(),
-    )
-    .unwrap();
+    let res_edit =
+        search::search(&store, &registry, "filename:a.txt", Default::default())
+            .unwrap();
     let files_edit: Vec<_> = res_edit
         .results
         .iter()
@@ -140,25 +111,16 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(
-            &store,
-            &registry,
-            all_files,
-            Default::default()
-        )
-        .unwrap()
-        .results
-        .len(),
+        search::search(&store, &registry, all_files, Default::default())
+            .unwrap()
+            .results
+            .len(),
         2
     );
 
-    let res_b_del = search::search(
-        &store,
-        &registry,
-        "filename:b.rs",
-        Default::default(),
-    )
-    .unwrap();
+    let res_b_del =
+        search::search(&store, &registry, "filename:b.rs", Default::default())
+            .unwrap();
     let files_b_del: Vec<_> = res_b_del
         .results
         .iter()
@@ -200,8 +162,7 @@ fn test_incremental_indexing_full_flow() {
     let query = format!("file_id:\"{}\"", uuid_str);
 
     let _res_inode =
-        search::search(&store, &registry, &query, Default::default())
-            .unwrap();
+        search::search(&store, &registry, &query, Default::default()).unwrap();
     let _files_inode: Vec<_> = _res_inode
         .results
         .iter()
@@ -233,8 +194,7 @@ fn test_system_items_registration() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -256,8 +216,7 @@ fn test_system_items_registration() {
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
     let results_projection =
-        search::search(&store, &registry, "tag:", Default::default())
-            .unwrap();
+        search::search(&store, &registry, "tag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert!(has_item_tags(&results_projection.results));
@@ -276,36 +235,33 @@ fn test_system_items_registration() {
     );
 
     // 3. origin のプロジェクションも確認
-    let results_origin = search::search(
-        &store,
-        &registry,
-        "origin:",
-        Default::default(),
-    )
-    .unwrap();
+    let results_origin =
+        search::search(&store, &registry, "origin:", Default::default())
+            .unwrap();
     assert!(has_item_tags(&results_origin.results));
     assert!(!results_origin.results.is_empty());
 
-    // 転置: results には label items が格納され、name が "system" であることを確認
-    let system_label = results_origin
+    // 転置: results には label items が格納され、name が "file" であることを確認
+    // (hello.txt はスキャン抽出タグのみを持つ File 由来アイテムのため、origin は "file")
+    let file_label = results_origin
         .results
         .iter()
-        .find(|r| r.raw_repr() == "system")
-        .expect("system label not found for origin check");
+        .find(|r| r.raw_repr() == "file")
+        .expect("file label not found for origin check");
     assert_eq!(
-        system_label.item_kind,
+        file_label.item_kind,
         ttfm::ItemKind::Volatile,
         "Should be a label item"
     );
     // このラベルの tags に "item:hello.txt#..." が含まれているはず
-    let has_hello_txt = system_label
+    let has_hello_txt = file_label
         .tags
         .entries
         .iter()
         .any(|entry| entry.label.as_str().contains("hello.txt"));
     assert!(
         has_hello_txt,
-        "system origin label should contain reference to hello.txt"
+        "file origin label should contain reference to hello.txt"
     );
 }
 
@@ -322,20 +278,15 @@ fn test_typedtag_listing_via_type_query() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. type:extension で検索 -> extension:txt アイテムが見つかるはず
-    let results = search::search(
-        &store,
-        &registry,
-        "type:extension",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "type:extension", Default::default())
+            .unwrap();
     let tt_items: Vec<_> = results
         .results
         .iter()
@@ -352,13 +303,9 @@ fn test_typedtag_listing_via_type_query() {
 
     // 2. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
     // オリジナル通りのフィルタロジックに戻す
-    let results = search::search(
-        &store,
-        &registry,
-        "extension:txt",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "extension:txt", Default::default())
+            .unwrap();
     let files: Vec<_> = results
         .results
         .iter()
@@ -391,8 +338,7 @@ fn test_no_empty_extension_system_item() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
@@ -411,7 +357,7 @@ fn test_no_empty_extension_system_item() {
 }
 
 #[test]
-fn test_definition_only_items_registration() {
+fn test_definition_only_items_not_registered() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let db_dir = root.join(".ttfm/db");
@@ -423,13 +369,13 @@ fn test_definition_only_items_registration() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
 
-    assert!(!search::search(
+    // 初期登録が廃止されたため、type 定義専用アイテムは自動生成されない。
+    assert!(search::search(
         &store,
         &registry,
         "item_kind:type & name:name",
@@ -438,7 +384,7 @@ fn test_definition_only_items_registration() {
     .unwrap()
     .results
     .is_empty());
-    assert!(!search::search(
+    assert!(search::search(
         &store,
         &registry,
         "item_kind:type & name:item_kind",
@@ -471,9 +417,9 @@ fn read_item_ids(
         .unwrap()
 }
 
-/// インデックス後、システム定義（item_references の全行）は System 区画 [-B, 0) に入る。
+/// 初期登録が廃止されたため、indexing だけでは item_references に行は生成されない。
 #[test]
-fn indexed_system_definitions_live_in_system_space() {
+fn indexing_alone_creates_no_system_definitions() {
     let dir = tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let db_dir = base.join("db");
@@ -491,14 +437,10 @@ fn indexed_system_definitions_live_in_system_space() {
         .unwrap();
 
     let def_ids = read_item_ids(&store, ttfm::db::TargetTable::ItemReferences);
-    assert!(!def_ids.is_empty(), "system definitions should exist");
-    let (lo, hi) = (-SPACE_B, 0_i64);
-    for id in &def_ids {
-        assert!(
-            (lo..hi).contains(id),
-            "definition id {id} not in System space [{lo}, {hi})"
-        );
-    }
+    assert!(
+        def_ids.is_empty(),
+        "plain indexing must not create physical item_references rows"
+    );
 }
 
 /// インデックス後、ファイル（file_references）は File 区画 [8B, ∞) に入る。
@@ -543,8 +485,8 @@ fn indexed_files_live_in_file_space_without_collision() {
 }
 
 /// item_references が書き出し時点で item_id 昇順に整列していること。
-/// indexer 後に add_item を呼ぶと System 区画(8B+) と User 区画(0+) が混在する。
-/// ORDER BY なしで書くと System 行の後ろに User 行(0)が付くため非昇順になる。
+/// 複数回 add_item すると採番順とファイル書き出し順が食い違いうるため、
+/// ORDER BY が効いていることを保証する。
 #[test]
 fn item_references_sorted_by_item_id_after_add_item() {
     let dir = tempdir().unwrap();
@@ -559,15 +501,12 @@ fn item_references_sorted_by_item_id_after_add_item() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .initialize_tables()
         .unwrap();
-    // System 定義が item_references に書き込まれる（ids in [-B, 0)）。
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    // User item を追加（id は User 区画 [0, B) から採番 → 0）。
-    // ORDER BY なしで書くと既存の System 行（負値）の末尾に User 行(id=0)が付いても
-    // 昇順になるが、将来的に逆転しうるケースのための ORDER BY 保証テスト。
-    ttfm::tagging::add_item(&store, &registry, "type", "my_type").unwrap();
+    ttfm::tagging::add_item(&store, &registry, "type", "my_type_a").unwrap();
+    ttfm::tagging::add_item(&store, &registry, "type", "my_type_b").unwrap();
 
     let path = store.path_for_target(ttfm::db::TargetTable::ItemReferences);
     let sql = format!(
@@ -583,7 +522,7 @@ fn item_references_sorted_by_item_id_after_add_item() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    assert!(ids.len() >= 2, "should have both System and User items");
+    assert!(ids.len() >= 2, "should have both added items");
     assert!(
         ids.windows(2).all(|w| w[0] <= w[1]),
         "item_references not sorted by item_id (ORDER BY missing): {:?}",

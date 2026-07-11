@@ -134,8 +134,8 @@ define_cases! {
         query: "max(nonexistent_tag:)",
         assert: |res, _dir| {
             let r = res.results.first().expect("Expected a result for MAX aggregation");
-            let types = r.get_all_values("type");
-            assert!(types.contains(&"numeric".to_string()), "Expected type:numeric, got {:?}", types);
+            let types = r.get_all_values("bitical_type");
+            assert!(types.contains(&"numeric".to_string()), "Expected bitical_type:numeric, got {:?}", types);
             Ok(())
         },
     },
@@ -342,12 +342,8 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(item_kind) failed: {}", val);
 
-    let res = search::search(
-        &store,
-        &registry,
-        "count(rank:)",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "count(rank:)", Default::default())?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(rank) failed: {}", val);
 
@@ -360,12 +356,8 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(origin) failed: {}", val);
 
-    let res = search::search(
-        &store,
-        &registry,
-        "count(path:)",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "count(path:)", Default::default())?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(path) failed: {}", val);
 
@@ -527,13 +519,8 @@ impl TestContext {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(&self.root, None::<&fn(usize)>, false)
             .unwrap();
-        search::search(
-            &store,
-            &registry,
-            query,
-            ttfm::SearchOptions::default(),
-        )
-        .unwrap()
+        search::search(&store, &registry, query, ttfm::SearchOptions::default())
+            .unwrap()
     }
 }
 
@@ -620,18 +607,10 @@ fn test_count_empty_args() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res_any_top = search::search(
-        &store,
-        &registry,
-        "count()",
-        Default::default(),
-    )?;
-    let res_wild_top = search::search(
-        &store,
-        &registry,
-        "count(*:*)",
-        Default::default(),
-    )?;
+    let res_any_top =
+        search::search(&store, &registry, "count()", Default::default())?;
+    let res_wild_top =
+        search::search(&store, &registry, "count(*:*)", Default::default())?;
     assert_eq!(
         res_any_top.results[0].raw_repr(),
         res_wild_top.results[0].raw_repr()
@@ -640,12 +619,8 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let root_str = root.to_slash_lossy();
     let query_indirect =
         format!("count() - count(*:* - parentdir:\"{}\")", root_str);
-    let res_indirect = search::search(
-        &store,
-        &registry,
-        &query_indirect,
-        Default::default(),
-    )?;
+    let res_indirect =
+        search::search(&store, &registry, &query_indirect, Default::default())?;
     assert_eq!(res_indirect.results[0].raw_repr(), "5");
 
     Ok(())

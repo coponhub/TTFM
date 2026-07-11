@@ -31,8 +31,7 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         &data_dir,
         None::<&fn(usize)>,
@@ -43,12 +42,8 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     // size: + 1
     // The file size is 7 bytes ("content"). 7 + 1 = 8.
     // Grammar requires parens for top-level calculation: "(size: + 1)"
-    let res_tag = search::search(
-        &store,
-        &registry,
-        "(size: + 1)",
-        Default::default(),
-    )?;
+    let res_tag =
+        search::search(&store, &registry, "(size: + 1)", Default::default())?;
     assert!(!res_tag.results.is_empty(), "size: + 1 should match");
     // Result name should be the calculated value
     assert_eq!(res_tag.results[0].raw_repr(), "8", "size: + 1 should be 8");
@@ -57,32 +52,19 @@ fn test_literal_arithmetic() -> anyhow::Result<()> {
     // (1 + 2) - Parentheses are likely required for pure calculation to distinguish from other patterns?
     // Or maybe just "1 + 2" should work. The parser error suggests it expects structure.
     // Try "(1 + 2)" as per my implementation plan note.
-    let res = search::search(
-        &store,
-        &registry,
-        "(1 + 2)",
-        Default::default(),
-    )?;
+    let res = search::search(&store, &registry, "(1 + 2)", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "3");
 
     // 3. String Arithmetic
     // ('a' + 'b') -> "a, b"
-    let res = search::search(
-        &store,
-        &registry,
-        "('a' + 'b')",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "('a' + 'b')", Default::default())?;
     assert_eq!(res.results[0].raw_repr(), "a, b");
 
     // ('a' * 'b') -> "ab"
-    let res = search::search(
-        &store,
-        &registry,
-        "('a' * 'b')",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "('a' * 'b')", Default::default())?;
     assert_eq!(res.results[0].raw_repr(), "ab");
 
     Ok(())
@@ -98,32 +80,21 @@ fn test_literal_comparison() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
     // 1. Integer Comparison (True)
-    let res = search::search(
-        &store,
-        &registry,
-        "10 > 2",
-        Default::default(),
-    )?;
+    let res = search::search(&store, &registry, "10 > 2", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "TRUE");
 
     // 2. Integer Comparison (False)
-    let res =
-        search::search(&store, &registry, "1 > 2", Default::default())?;
+    let res = search::search(&store, &registry, "1 > 2", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "FALSE");
 
     // 3. String Comparison
-    let res = search::search(
-        &store,
-        &registry,
-        "'b' > 'a'",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "'b' > 'a'", Default::default())?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "TRUE");
 
@@ -140,12 +111,10 @@ fn test_literal_set_operation_error() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
     // リテラル同士の集合演算はパーサーレベルで拒否される
-    let res =
-        search::search(&store, &registry, "1 & 2", Default::default());
+    let res = search::search(&store, &registry, "1 & 2", Default::default());
     assert!(
         res.is_err(),
         "Set operation between literals should be an error"
@@ -173,12 +142,8 @@ fn test_literal_string_error_cases() -> anyhow::Result<()> {
     ];
 
     for (query, expected_err_part) in cases {
-        let result = search::search(
-            &store,
-            &registry,
-            query,
-            Default::default(),
-        );
+        let result =
+            search::search(&store, &registry, query, Default::default());
         assert!(result.is_err(), "Query '{}' should fail", query);
         let err_msg = result.err().unwrap().to_string();
         assert!(

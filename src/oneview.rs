@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, SqlType, TargetTable, Tbl, Val};
+use crate::db::{Col, SqlType, TargetTable, Tbl};
 use crate::query::lens_reader::Reader;
 use crate::taggers::ColumnDef;
 use crate::types::ItemKind;
@@ -134,9 +134,15 @@ enum OneViewSource<'a> {
 // ----------------------------------------------------------------------------
 
 fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
+    use crate::types::Origin;
     match source {
         OneViewSource::Tag(s) if s.table == Tbl::UserTags => {
-            Expr::val(Into::<&'static str>::into(Val::User))
+            Expr::val(Origin::User.as_str())
+                .cast_as(SqlType::VARCHAR)
+                .into()
+        }
+        OneViewSource::Tag(s) if s.table == Tbl::SystemTags => {
+            Expr::val(Origin::Builtin.as_str())
                 .cast_as(SqlType::VARCHAR)
                 .into()
         }
@@ -148,7 +154,9 @@ fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
             .into()
         }
         OneViewSource::Tag(_) | OneViewSource::Physical { .. } => {
-            Expr::val(Into::<&'static str>::into(Val::System))
+            // base_tags (スキャン抽出タグ) と Physical (FileReferences/Locations)
+            // はいずれも File 由来。
+            Expr::val(Origin::File.as_str())
                 .cast_as(SqlType::VARCHAR)
                 .into()
         }

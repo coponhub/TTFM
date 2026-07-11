@@ -605,6 +605,15 @@ impl CustomExpr {
     }
 }
 
+/// GLOB パターンマッチングを行います（`*`, `?`, `[...]`, `[!...]` に対応、
+/// `glob` crate の `Pattern` に委譲）。
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    match glob::Pattern::new(pattern) {
+        Ok(p) => p.matches(text),
+        Err(_) => pattern == text,
+    }
+}
+
 // ========================================================
 // Tests
 // ========================================================
@@ -612,6 +621,21 @@ impl CustomExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_glob_match() {
+        assert!(glob_match("builtin", "builtin"));
+        assert!(glob_match("b*", "builtin"));
+        assert!(glob_match("*in", "builtin"));
+        assert!(glob_match("b*n", "builtin"));
+        assert!(glob_match("b?iltin", "builtin"));
+        assert!(!glob_match("user", "builtin"));
+        assert!(!glob_match("b*", "user"));
+        assert!(glob_match("b[uv]iltin", "builtin"));
+        assert!(!glob_match("b[uv]iltin", "biltin"));
+        assert!(glob_match("b[!v]iltin", "builtin"));
+        assert!(!glob_match("b[!u]iltin", "builtin"));
+    }
 
     #[test]
     fn test_safe_metadata_real() {

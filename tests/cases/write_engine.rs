@@ -56,10 +56,11 @@ fn read_item_ids_with_kind(store: &Store) -> Vec<(i64, String, String)> {
 
 #[test]
 fn write_add_volatile_creates_item_ref_and_user_tag() {
-    let (store, _, _dir) = setup();
+    let (store, registry, _dir) = setup();
 
     let resp = write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Volatile(0),
             tags: vec![
@@ -114,6 +115,7 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
     // bool:true と bool:false を両方追加
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
@@ -134,6 +136,7 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
     // true だけ削除
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Tag(Label::Other(
@@ -160,6 +163,7 @@ fn write_delete_by_type_removes_user_tags() {
     // まずタグを2件追加
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
@@ -180,6 +184,7 @@ fn write_delete_by_type_removes_user_tags() {
     // type 指定で全削除
     let resp = write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Type(TagType::from("project"))],
@@ -201,6 +206,7 @@ fn write_delete_by_label_removes_specific_tag() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
@@ -220,6 +226,7 @@ fn write_delete_by_label_removes_specific_tag() {
     // label 指定で A のみ削除
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Tag(Label::Other(
@@ -286,6 +293,7 @@ fn write_cascade_delete_reports_deleted_count() {
 
     let resp = write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
@@ -311,6 +319,7 @@ fn write_cascade_delete_removes_item_from_item_references() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
@@ -334,6 +343,7 @@ fn write_cascade_delete_also_removes_user_tags() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
@@ -347,6 +357,7 @@ fn write_cascade_delete_also_removes_user_tags() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
@@ -362,11 +373,12 @@ fn write_cascade_delete_also_removes_user_tags() {
 
 #[test]
 fn write_cascade_delete_file_origin_removes_from_file_references() {
-    let (store, _registry, file_id, _dir) = setup_with_indexed_file();
+    let (store, registry, file_id, _dir) = setup_with_indexed_file();
     assert!(read_file_ids(&store).contains(&file_id));
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(file_id),
             tags: vec![DeleteTarget::Type(TagType::Base(SType::ItemId))],
@@ -405,6 +417,7 @@ fn write_rank_update_changes_rank_in_item_references() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Rank(5))],
@@ -421,7 +434,7 @@ fn write_rank_update_changes_rank_in_item_references() {
 
 #[test]
 fn write_add_stored_appends_user_tag() {
-    let (store, _, _dir) = setup();
+    let (store, registry, _dir) = setup();
     // add_item で User 空間の既存アイテムを作成
     let existing_id = ttfm::tagging::add_item(
         &store,
@@ -433,6 +446,7 @@ fn write_add_stored_appends_user_tag() {
 
     let resp = write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(existing_id),
             tags: vec![TagOp::Append(Label::Other(
@@ -465,6 +479,7 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
@@ -477,6 +492,7 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
 
     write(
         &store,
+        &registry,
         vec![
             WriteAction::Delete {
                 item: ItemId::Stored(id),
@@ -509,6 +525,7 @@ fn write_replace_delete_not_counted_in_deleted() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
@@ -521,6 +538,7 @@ fn write_replace_delete_not_counted_in_deleted() {
 
     let resp = write(
         &store,
+        &registry,
         vec![
             WriteAction::Delete {
                 item: ItemId::Stored(id),
@@ -556,6 +574,7 @@ fn write_multiple_items_in_one_batch() {
 
     write(
         &store,
+        &registry,
         vec![
             WriteAction::Add {
                 item: ItemId::Stored(id1),
@@ -600,11 +619,12 @@ fn read_file_rank(store: &Store, item_id: i64) -> Option<i64> {
 
 #[test]
 fn write_rank_update_changes_rank_in_file_references() {
-    let (store, _registry, file_id, _dir) = setup_with_indexed_file();
+    let (store, registry, file_id, _dir) = setup_with_indexed_file();
     let initial = read_file_rank(&store, file_id).unwrap_or(0);
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(file_id),
             tags: vec![TagOp::Append(Label::Rank(initial + 7))],
@@ -629,6 +649,7 @@ fn write_delete_by_double_label_removes_only_matching_value() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
@@ -642,6 +663,7 @@ fn write_delete_by_double_label_removes_only_matching_value() {
 
     write(
         &store,
+        &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Tag(Label::Other(

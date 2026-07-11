@@ -36,11 +36,20 @@ pub struct SearchOptions {
     pub cid: Option<String>,
     /// キャッシュを使うか (既定 true。ただし n=None/0 の全件検索では無効)
     pub cache: bool,
+    /// 明示的な並び順（複数キー可）。空なら resolve 済みクエリからの判定、
+    /// それも無ければ既定（rank 降順）にフォールバックする。
+    pub order: Vec<crate::types::Order>,
 }
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        Self { n: None, offset: None, cid: None, cache: true }
+        Self {
+            n: None,
+            offset: None,
+            cid: None,
+            cache: true,
+            order: Vec::new(),
+        }
     }
 }
 
@@ -67,7 +76,7 @@ pub fn search(
     // cid があれば n に関わらずキャッシュ読みを試みる（下の有効パスへ）。
     if !options.cache || (n == 0 && options.cid.is_none()) {
         let (results, has_more, warnings) =
-            search_core(store, registry, query, n, offset)?;
+            search_core(store, registry, query, n, offset, &options.order)?;
         return Ok(SearchResponse::from_results(
             results, None, has_more, n, offset, query, warnings,
         ));
@@ -76,13 +85,14 @@ pub fn search(
     // ここから先はキャッシュ有効が確定。CacheManager は必ず生成する。
     let cache = CacheManager::new(store.db_dir.join("cache"), CACHE_MAX_BYTES);
 
-    if let Some(res) = try_resolve_cache(store, registry, &cache, query, &options)?
+    if let Some(res) =
+        try_resolve_cache(store, registry, &cache, query, &options)?
     {
         return Ok(res);
     }
 
     let (results, has_more, warnings) =
-        search_core(store, registry, query, n, offset)?;
+        search_core(store, registry, query, n, offset, &options.order)?;
 
     let cid = if has_more {
         let new_cid = uuid::Uuid::new_v4().to_string();
@@ -105,17 +115,26 @@ fn search_core(
     query: &str,
     n: usize,
     offset: usize,
+    order: &[crate::types::Order],
 ) -> Result<(Vec<crate::response::Item>, bool, Vec<String>)> {
-    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?;
+    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?
+        .with_order(order);
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
 
-    let warnings = if resolver.is_label_set_intersect() {
-        vec![
+    let mut warnings = Vec::new();
+    if resolver.is_label_set_intersect() {
+        warnings.push(
             "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
-        ]
-    } else {
-        Vec::new()
-    };
+        );
+    }
+    if resolver.has_definition_count_in_nest() {
+        warnings.push(
+            "count(type:*) inside a Nest ('&:') counts the type definitions, \
+             which is the same for every group. Did you mean count(type:) \
+             to count the types actually attached in each group?"
+                .to_string(),
+        );
+    }
 
     let mut results = fetcher.fetch(n, offset)?;
 
@@ -137,7 +156,7 @@ fn search_core(
             if let Some(raw) = raw {
                 let formatted = registry.format_display(tt.as_str(), &raw);
                 result.representative = vec![Label::Name(formatted.clone())];
-                result.tags.push(Label::Name(formatted), Origin::System);
+                result.tags.push(Label::Name(formatted), Origin::Builtin);
             }
         }
     }
@@ -304,7 +323,8 @@ fn search_from_cache(
         .get(crate::cache::META_QUERY)
         .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
 
-    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?;
+    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?
+        .with_order(&options.order);
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
     let src = crate::db::Src::Parquet(path_str);
 
@@ -548,7 +568,10 @@ mod tests {
             },
         )?;
 
-        assert!(res.has_more, "finite n over more results should set has_more");
+        assert!(
+            res.has_more,
+            "finite n over more results should set has_more"
+        );
         assert!(res.cid.is_none(), "cache=false must not issue a cid");
 
         Ok(())

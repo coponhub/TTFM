@@ -16,8 +16,10 @@
 mod agg_pieces;
 mod boolean;
 mod calc_pieces;
+pub(crate) mod definition;
 mod low_dispatcher;
 mod nest;
+mod order;
 mod pick;
 mod precompute;
 mod scalar;
@@ -57,8 +59,7 @@ pub use precompute::{
     needs_nest_context,
 };
 use scalar::{
-    build_column_match_sql, build_definition_ref_fetch_sql,
-    build_definition_ref_pick_sql, build_resolved_match_sql,
+    build_column_match_sql, build_resolved_match_sql,
     build_resolved_scalar_sql, build_resolved_tag_tag_match_sql,
     build_scalar_match_sql,
 };
@@ -77,6 +78,23 @@ fn build_fetch_items_sql(
     pick: &PickNode<'_>,
     limit: Option<usize>,
     offset: Option<usize>,
+    orders: &[crate::query::lens_resolver::ResolvedOrder],
+) -> SelectStatement {
+    build_fetch_items_sql_impl(src, pick, limit, offset, false, orders)
+}
+
+/// `with_definition_schema` が true の場合、定義枝と束ねられるよう
+/// fetch 行スキーマを定義アイテムの SQL の列順に揃える（align_schema_with_definitions）。
+/// `orders` は明示的な並び順。ページング用の id サブクエリと外側の両方に
+/// 同じ ORDER BY を適用し（先頭に置き、既定の並びはタイブレーカーに残す）、
+/// ページ境界と表示順を一致させる。
+fn build_fetch_items_sql_impl(
+    src: &Src,
+    pick: &PickNode<'_>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    with_definition_schema: bool,
+    orders: &[crate::query::lens_resolver::ResolvedOrder],
 ) -> SelectStatement {
     let node = pick.node();
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
@@ -86,7 +104,11 @@ fn build_fetch_items_sql(
     match node {
         ResolvedNode::Aggregation(_)
         | ResolvedNode::AggregationMatch { .. } => {
-            return pick.build_pick();
+            let mut sql = pick.build_pick();
+            if with_definition_schema {
+                align_schema_with_definitions(&mut sql, None);
+            }
+            return sql;
         }
         _ => {}
     }
@@ -95,9 +117,14 @@ fn build_fetch_items_sql(
 
     // 1. ID 絞り込みサブクエリ
     let mut id_query = Query::select();
+    id_query.column(Col::ItemId).from_subquery(pick_sql, Pk);
+    order::apply_resolved_order(
+        &mut id_query,
+        orders,
+        src,
+        Expr::col((Pk, Col::ItemId)).into(),
+    );
     id_query
-        .column(Col::ItemId)
-        .from_subquery(pick_sql, Pk)
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
@@ -133,11 +160,37 @@ fn build_fetch_items_sql(
         .expr_as(tags_expr, crate::db::QueryResultCol::Tags)
         .from(src)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
-        .group_by_col(Col::ItemId)
-        .order_by(Col::Rank, sea_query::Order::Desc)
+        .group_by_col(Col::ItemId);
+    order::apply_resolved_order(&mut q, orders, src, order::src_item_id(src));
+    q.order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
+    if with_definition_schema {
+        let name_expr = CustomFunc::any_value(
+            Expr::case(
+                Expr::col(Col::Type).eq("name"),
+                Expr::col(Col::LabelStr),
+            )
+            .finally(Expr::val(None::<String>)),
+        );
+        align_schema_with_definitions(&mut q, Some(name_expr));
+    }
+
     q
+}
+
+/// fetch 行スキーマを定義アイテムの SQL（build_definition_fetch_sql）の列順に
+/// 揃える: 末尾に NULL の representative 列と並び替え専用の name 列
+/// （name タグの値。デコードには使わない）を追加する。
+fn align_schema_with_definitions(
+    q: &mut SelectStatement,
+    name_expr: Option<sea_query::SimpleExpr>,
+) {
+    q.expr_as(Expr::val(None::<String>), Representative)
+        .expr_as(
+            name_expr.unwrap_or_else(|| Expr::val(None::<String>).into()),
+            Col::Name,
+        );
 }
 
 pub fn build_flat_table_sql(
@@ -203,12 +256,23 @@ pub fn build_fetch_sql(
     n: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
-    // 定義参照（単体）: ハイブリッド1行 SQL を生成し、representative は projection と
-    // 同じ decode_nest 経路で型付けする（get_projection も Some を返す）。
-    if let ResolvedNode::DefinitionRef { kind, value, .. } =
-        &resolver.resolved_query
+    // 並び順（resolver が保持する解決済みの Order）。アイテム行を返す経路
+    // （items / 定義枝）にのみ適用し、ラベルグループ（Nest/Projection）と
+    // スカラー・ブーリアンには適用しない。
+    let orders = resolver.resolved_order();
+    // 定義参照（単体または Or だけで到達可能な枝）を含む場合:
+    // 定義枝と src 由来枝を fetch レベルで束ねる（add_definitions）。
+    // representative は projection と同じ decode_nest 経路で型付けする。
+    if let Some((defs, rest)) =
+        resolver.resolved_query.split_definition_branches()
     {
-        return Ok(build_definition_ref_fetch_sql(src, *kind, value));
+        let rest_fetch = rest.as_ref().map(|rest_node| {
+            let pick = PickNode::new(src, rest_node);
+            build_fetch_items_sql_impl(src, &pick, None, None, true, &[])
+        });
+        return crate::query::lens_builder::add_definitions(
+            src, &defs, rest_fetch, n, offset, orders,
+        );
     }
     if resolver.get_projection().is_some() {
         if resolver.get_label_set_op_node().is_some()
@@ -219,7 +283,13 @@ pub fn build_fetch_sql(
         // nvalue比較あり → Lv.1 フラットリスト（items path）
         let pick = PickNode::new(src, &resolver.resolved_query);
         let limit = if n > 0 { Some(n + 1) } else { None };
-        return Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)));
+        return Ok(build_fetch_items_sql(
+            src,
+            &pick,
+            limit,
+            Some(offset),
+            orders,
+        ));
     }
     let limit = if n > 0 { Some(n + 1) } else { None };
     match &resolver.resolved_query {
@@ -271,7 +341,13 @@ pub fn build_fetch_sql(
         _ => {}
     }
     let pick = PickNode::new(src, &resolver.resolved_query);
-    Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)))
+    Ok(build_fetch_items_sql(
+        src,
+        &pick,
+        limit,
+        Some(offset),
+        orders,
+    ))
 }
 
 #[cfg(test)]
@@ -384,7 +460,7 @@ mod tests {
         };
         let pick = PickNode::new(&Src::OneView, &node);
         let sql =
-            build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0));
+            build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0), &[]);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 新スキーマ: "tag_type" フィールドが含まれる

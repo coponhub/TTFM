@@ -41,12 +41,15 @@ pub struct WriteResponse {
 
 pub fn write(
     store: &Store,
+    registry: &crate::tag::TagRegistry,
     actions: Vec<WriteAction>,
 ) -> Result<WriteResponse> {
-    // 1. Volatile → Stored 採番
+    // 1. Volatile/Settling → Stored 採番
     let (resolved, new_item_ids) = resolve_volatiles(store, actions)?;
+    // 2. 未実体化の組み込み型定義（Sys 区画・行なし）に kind/content を補う
+    let resolved = inject_builtin_definitions(store, registry, resolved)?;
 
-    // 2. カウント
+    // 3. カウント
     let (updated, deleted) = {
         let mut add: std::collections::HashMap<i64, usize> =
             std::collections::HashMap::new();
@@ -70,7 +73,7 @@ pub fn write(
         (u, d)
     };
 
-    // 3. 変更を収集
+    // 4. 変更を収集
     let mut ir_inserts: Vec<(i64, String, String)> = vec![];
     let mut ir_rank_updates: Vec<(i64, i64)> = vec![];
     let mut fr_rank_updates: Vec<(i64, i64)> = vec![];
@@ -143,7 +146,7 @@ pub fn write(
         }
     }
 
-    // 4. 書き込み（順序固定: item_references → user_tags → rank 更新）
+    // 5. 書き込み（順序固定: item_references → user_tags → rank 更新）
     if !ir_inserts.is_empty() || !user_cascade.is_empty() {
         let path = store.path_for_target(TargetTable::ItemReferences);
         sql::item_references_write(
@@ -207,7 +210,7 @@ pub fn write_and_refresh(
     registry: &crate::tag::TagRegistry,
     actions: Vec<WriteAction>,
 ) -> Result<WriteResponse> {
-    let resp = write(store, actions)?;
+    let resp = write(store, registry, actions)?;
     let all_cols = registry.get_all_columns();
     let reader = crate::query::lens_reader::Reader::build(
         registry,
@@ -223,7 +226,7 @@ pub fn write_and_refresh(
 }
 
 // ──────────────────────────────────────────────
-// Volatile 採番
+// Volatile/Settling 採番
 // ──────────────────────────────────────────────
 
 fn resolve_volatiles(
@@ -232,42 +235,47 @@ fn resolve_volatiles(
 ) -> Result<(Vec<WriteAction>, Vec<i64>)> {
     use std::collections::HashMap;
 
-    if let Some(WriteAction::Delete {
-        item: ItemId::Volatile(c),
-        ..
-    }) = actions.iter().find(|a| {
-        matches!(
-            a,
-            WriteAction::Delete {
-                item: ItemId::Volatile(_),
-                ..
-            }
-        )
+    if let Some(item) = actions.iter().find_map(|a| match a {
+        WriteAction::Delete { item, .. } if !item.is_stored() => {
+            Some(item.clone())
+        }
+        _ => None,
     }) {
-        anyhow::bail!("cannot delete a Volatile item (counter={c}) that has not been stored yet");
+        anyhow::bail!(
+            "cannot delete an unresolved item ({item}) that has not been stored yet"
+        );
     }
 
-    let mut counters: Vec<u64> = actions
-        .iter()
-        .filter_map(|a| match a {
-            WriteAction::Add {
-                item: ItemId::Volatile(c),
-                ..
-            } => Some(*c),
-            _ => None,
-        })
-        .collect();
-    counters.sort_unstable();
-    counters.dedup();
+    // Volatile は User 区画、Settling は指定された区画へ、それぞれ採番する。
+    // counter 空間は共有するが variant が違うため衝突しない。
+    let mut by_origin: HashMap<Origin, Vec<u64>> = HashMap::new();
+    for action in &actions {
+        if let WriteAction::Add { item, .. } = action {
+            match item {
+                ItemId::Volatile(c) => {
+                    by_origin.entry(Origin::User).or_default().push(*c)
+                }
+                ItemId::Settling(origin, c) => {
+                    by_origin.entry(*origin).or_default().push(*c)
+                }
+                ItemId::Stored(_) => {}
+            }
+        }
+    }
 
-    if counters.is_empty() {
+    if by_origin.is_empty() {
         return Ok((actions, vec![]));
     }
 
-    let new_ids =
-        crate::db::identifier::next(store, Origin::User, counters.len())?;
-    let mapping: HashMap<u64, i64> =
-        counters.into_iter().zip(new_ids.iter().copied()).collect();
+    let mut mapping: HashMap<u64, i64> = HashMap::new();
+    let mut new_ids: Vec<i64> = vec![];
+    for (origin, mut counters) in by_origin {
+        counters.sort_unstable();
+        counters.dedup();
+        let ids = crate::db::identifier::next(store, origin, counters.len())?;
+        new_ids.extend(ids.iter().copied());
+        mapping.extend(counters.into_iter().zip(ids));
+    }
 
     let resolved = actions
         .into_iter()
@@ -279,11 +287,95 @@ fn resolve_volatiles(
                 item: ItemId::Stored(*mapping.get(&c).unwrap()),
                 tags,
             },
+            WriteAction::Add {
+                item: ItemId::Settling(_, c),
+                tags,
+            } => WriteAction::Add {
+                item: ItemId::Stored(*mapping.get(&c).unwrap()),
+                tags,
+            },
             other => other,
         })
         .collect();
 
     Ok((resolved, new_ids))
+}
+
+// ──────────────────────────────────────────────
+// 組み込み型定義（Sys 区画）の初回実体化
+// ──────────────────────────────────────────────
+
+// Sys 区画の id を持つが item_references にまだ行が無い Add に、
+// registry から導出した kind/content を補って行を作れるようにする。
+// 行が既にあれば触らない（通常の rank/tag 更新に任せる）。
+fn inject_builtin_definitions(
+    store: &Store,
+    registry: &crate::tag::TagRegistry,
+    actions: Vec<WriteAction>,
+) -> Result<Vec<WriteAction>> {
+    let sys_ids: Vec<i64> = actions
+        .iter()
+        .filter_map(|a| match a {
+            WriteAction::Add { item, .. } if item.is_stored() => {
+                let id = item.as_i64();
+                (Origin::within(id) == Origin::Builtin).then_some(id)
+            }
+            _ => None,
+        })
+        .collect();
+
+    if sys_ids.is_empty() {
+        return Ok(actions);
+    }
+
+    let existing = existing_item_ids(store, &sys_ids)?;
+
+    Ok(actions
+        .into_iter()
+        .map(|action| match action {
+            WriteAction::Add { item, mut tags } if item.is_stored() => {
+                let id = item.as_i64();
+                if Origin::within(id) == Origin::Builtin
+                    && !existing.contains(&id)
+                {
+                    let offset = (id - Origin::Builtin.block_lo()) as u32;
+                    if let Some(name) = registry.builtin_name_for_offset(offset)
+                    {
+                        tags.push(TagOp::Append(Label::ItemKind(
+                            "type".to_string(),
+                        )));
+                        tags.push(TagOp::Append(Label::Content(
+                            name.to_string(),
+                        )));
+                    }
+                }
+                WriteAction::Add { item, tags }
+            }
+            other => other,
+        })
+        .collect())
+}
+
+// 指定 id のうち、既に item_references に行があるものの集合を返す。
+fn existing_item_ids(
+    store: &Store,
+    ids: &[i64],
+) -> Result<std::collections::HashSet<i64>> {
+    let path = store.path_for_target(TargetTable::ItemReferences);
+    if !path.exists() {
+        return Ok(Default::default());
+    }
+    let sql = Query::select()
+        .column(Col::ItemId)
+        .from_subquery(
+            parquet_query(&path.to_string_lossy()),
+            Tbl::ItemReferences,
+        )
+        .and_where(Expr::col(Col::ItemId).is_in(ids.to_vec()))
+        .to_owned();
+    Ok(crate::query::fetcher::fetch_ids(&store.conn, &sql)?
+        .into_iter()
+        .collect())
 }
 
 // ──────────────────────────────────────────────

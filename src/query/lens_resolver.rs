@@ -34,9 +34,11 @@
 //! ```
 
 use crate::db::{Col, SqlType};
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    ComparisonNode, ComparisonOp, DefinitionRef, Operand, QueryNode,
+};
 use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{ItemKind, Label, LabelValue, SType, TagType};
+use crate::types::{Label, LabelValue, Rank, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
@@ -67,10 +69,12 @@ pub enum ResolvedNode {
     /// item_references の定義行（item_kind=kind, content=value）を参照し、
     /// 未登録なら value を representative とする Volatile を1行合成する。
     DefinitionRef {
-        kind: ItemKind,
-        value: Label,
+        def: DefinitionRef,
         /// representative の型解決用オペランド（value.tag_type() の TagRef）。
         operand: ResolvedOperand,
+        /// 未登録(Volatile)時の rank フォールバック値。
+        /// 参照先タグ型が登録する TagFunction::default_rank()（未登録なら SystemRank::DEFAULT）。
+        default_rank: Rank,
     },
     /// 物理的な条件。
     Match {
@@ -575,16 +579,16 @@ impl ResolvedNode {
             ResolvedNode::ColumnMatch { tag, label } => {
                 cond_column_match(*tag, label)
             }
-            ResolvedNode::DefinitionRef { kind, value, .. } => {
+            ResolvedNode::DefinitionRef { def, .. } => {
                 // 定義行: type='content' AND label_str=value AND item_kind=kind。
                 // （Volatile fallback は pick/fetch SQL 側で合成。Condition では Stored 部分のみ表現）
                 Condition::all()
                     .add(Expr::col(Col::Type).eq("content"))
                     .add(
                         Expr::col(Col::LabelStr)
-                            .eq(value.value().as_display_name()),
+                            .eq(def.value.value().as_display_name()),
                     )
-                    .add(Expr::col(Col::ItemKind).eq(kind.as_str()))
+                    .add(Expr::col(Col::ItemKind).eq(def.kind.as_str()))
             }
             ResolvedNode::Match {
                 storage,
@@ -691,10 +695,85 @@ impl ResolvedNode {
     }
 
     /// 結果行が representative を持ち nest decode 経路でデコードすべきか。
-    /// projection に加え、単独 DefinitionRef も representative を持つため true。
+    /// projection に加え、Or 経由で到達可能な DefinitionRef 枝を含む場合も
+    /// true（fetch SQL の representative 列の有無と decode 経路の選択を
+    /// 同一条件に揃える）。
     pub fn has_representative(&self) -> bool {
-        self.get_projection().is_some()
-            || matches!(self, ResolvedNode::DefinitionRef { .. })
+        self.get_projection().is_some() || self.has_definition_branch()
+    }
+
+    /// ルートから Or だけを辿って DefinitionRef 枝に到達できるか。
+    fn has_definition_branch(&self) -> bool {
+        match self {
+            ResolvedNode::DefinitionRef { .. } => true,
+            ResolvedNode::Or(nodes) => {
+                nodes.iter().any(|n| n.has_definition_branch())
+            }
+            _ => false,
+        }
+    }
+
+    /// ルートから Or だけで到達可能な DefinitionRef 枝と、それ以外の枝に
+    /// 分割する。定義枝を含まない場合は None。
+    /// 残りの枝は単一なら元のノード、複数なら Or として返す。
+    pub fn split_definition_branches(
+        &self,
+    ) -> Option<(Vec<&ResolvedNode>, Option<ResolvedNode>)> {
+        fn walk<'a>(
+            node: &'a ResolvedNode,
+            defs: &mut Vec<&'a ResolvedNode>,
+            rest: &mut Vec<ResolvedNode>,
+        ) {
+            match node {
+                ResolvedNode::Or(nodes) => {
+                    for child in nodes {
+                        walk(child, defs, rest);
+                    }
+                }
+                ResolvedNode::DefinitionRef { .. } => defs.push(node),
+                other => rest.push(other.clone()),
+            }
+        }
+        let mut defs = Vec::new();
+        let mut rest = Vec::new();
+        walk(self, &mut defs, &mut rest);
+        if defs.is_empty() {
+            return None;
+        }
+        let rest_node = match rest.len() {
+            0 => None,
+            1 => rest.pop(),
+            _ => Some(ResolvedNode::Or(rest)),
+        };
+        Some((defs, rest_node))
+    }
+
+    /// Nest（`&:`）の nvalue に、定義枝（DefinitionRef、Or 経由も含む）を含む
+    /// Count が現れるかどうかを返す。トップレベルの `count(type:*)` は対象外
+    /// （Nest の nvalue としてのみ検出する）。
+    pub fn has_definition_count_in_nest(&self) -> bool {
+        fn nvalue_has_definition_count(op: &ResolvedOperand) -> bool {
+            op.walk().into_iter().any(|o| {
+                matches!(
+                    o,
+                    ResolvedOperand::Aggregation(
+                        ResolvedAggregationNode::Count(inner)
+                    ) if inner.split_definition_branches().is_some()
+                )
+            })
+        }
+        self.walk().into_iter().any(|n| match n {
+            ResolvedNode::Nest {
+                nvalue: Some(nv), ..
+            } => nvalue_has_definition_count(nv),
+            ResolvedNode::NestMatch { nvalue, .. } => {
+                nvalue_has_definition_count(nvalue)
+            }
+            ResolvedNode::MergedNestMatch { matches, .. } => matches
+                .iter()
+                .any(|m| nvalue_has_definition_count(&m.nvalue)),
+            _ => false,
+        })
     }
 
     /// Or が異なるタグ型のオペランドを混在させる「混在投影」クエリかどうかを返します。
@@ -1292,12 +1371,18 @@ pub(crate) fn resolve_query_node(
                 label,
             })
         }
-        QueryNode::DefinitionRef { kind, value } => {
-            let operand = resolve_type_ref_operand(lens, &value.tag_type())?;
+        QueryNode::DefinitionRef(def) => {
+            let operand = resolve_type_ref_operand(lens, &def.value.tag_type())?;
+            let target_name = def.value.value().as_display_name();
+            let default_rank = lens
+                .look_up(&TagType::from(target_name.as_str()))
+                .and_then(|desc| desc.logical_function.as_ref())
+                .map(|f| f.default_rank())
+                .unwrap_or(crate::rank::SystemRank::DEFAULT);
             Ok(ResolvedNode::DefinitionRef {
-                kind,
-                value,
+                def,
                 operand,
+                default_rank,
             })
         }
         QueryNode::Comparison(cmp) => resolve_comparison(lens, cmp),
@@ -2572,6 +2657,24 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
     }
 }
 
+// ========== ResolvedOrder ==========
+
+/// 並び順キー（Order.key）の物理解決結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedOrderKey {
+    /// 全行に共通の直接カラム（rank / item_id）
+    Column(Col),
+    /// EAV タグ値（type = tag_type の行の col の値）
+    Tag { tag_type: String, col: Col },
+}
+
+/// 検索結果の並び順（types::Order）の物理解決結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOrder {
+    pub key: ResolvedOrderKey,
+    pub desc: bool,
+}
+
 // ========== Resolver 構造体 ==========
 
 /// クエリの論理展開と物理解決を統合する構造体
@@ -2579,6 +2682,8 @@ pub struct Resolver {
     lens: Lens,
     pub expanded_query: QueryNode,
     pub resolved_query: ResolvedNode,
+    /// 解決済みの並び順（with_order で設定。空 = SQL 側の既定の並び）
+    resolved_order: Vec<ResolvedOrder>,
 }
 
 impl Resolver {
@@ -2617,12 +2722,65 @@ impl Resolver {
             lens,
             expanded_query: expanded,
             resolved_query: optimized,
+            resolved_order: Vec::new(),
         })
     }
 
     /// Lens への参照を返す（Fetcherで使用）
     pub fn lens(&self) -> &Lens {
         &self.lens
+    }
+
+    /// 並び順を物理解決して保持する。優先順位は
+    /// 「明示指定（order） > resolve 済みクエリからの判定 > 既定（空）」。
+    /// rank / item_id は全行に共通の直接カラム、それ以外の型は EAV タグ値
+    /// （値カラムは Lens の論理型から決定。未登録型は label_str）。
+    /// 解決結果が空の場合は SQL 側の既定の並びに委ねる。
+    pub fn with_order(mut self, order: &[crate::types::Order]) -> Self {
+        use crate::query::logical_schema::LogicalSchema;
+        let effective: Vec<crate::types::Order> = if order.is_empty() {
+            self.preferred_order_from_query()
+        } else {
+            order.to_vec()
+        };
+        self.resolved_order = effective
+            .iter()
+            .map(|o| {
+                let key = match o.key.as_str() {
+                    "rank" => ResolvedOrderKey::Column(Col::Rank),
+                    "item_id" => ResolvedOrderKey::Column(Col::ItemId),
+                    k => ResolvedOrderKey::Tag {
+                        tag_type: k.to_string(),
+                        col: crate::query::lens_schema::logical_type_to_col(
+                            self.lens.get_logical_type(&o.key),
+                        ),
+                    },
+                };
+                ResolvedOrder { key, desc: o.desc }
+            })
+            .collect();
+        self
+    }
+
+    /// resolve 済みクエリが単独の DefinitionRef なら、その定義種別の
+    /// TagFunction が Display で宣言する優先 Order を返す。
+    /// 複合クエリ（And/Or 等）や宣言が無い場合は空（= 既定の並び）。
+    fn preferred_order_from_query(&self) -> Vec<crate::types::Order> {
+        let ResolvedNode::DefinitionRef { def, .. } = &self.resolved_query
+        else {
+            return Vec::new();
+        };
+        self.lens
+            .look_up(&TagType::from(def.kind.as_str()))
+            .and_then(|d| d.logical_function.as_ref())
+            .and_then(|f| f.display())
+            .map(|d| d.preferred_order())
+            .unwrap_or_default()
+    }
+
+    /// 解決済みの並び順を返す（SQL 生成で使用。空 = 既定の並び）。
+    pub fn resolved_order(&self) -> &[ResolvedOrder] {
+        &self.resolved_order
     }
 
     /// 投影対象の型を返す
@@ -2654,6 +2812,11 @@ impl Resolver {
                 ..
             })
         )
+    }
+
+    /// Nest（`&:`）の nvalue に、定義枝を含む Count が現れるかどうかを返す。
+    pub fn has_definition_count_in_nest(&self) -> bool {
+        self.resolved_query.has_definition_count_in_nest()
     }
 
     /// トップレベル集約を返す
@@ -3688,8 +3851,14 @@ mod tests_integration {
         );
         let tag_type = value.tag_type();
         ResolvedNode::DefinitionRef {
-            kind: crate::types::ItemKind::Tag,
-            value,
+            def: DefinitionRef {
+                kind: crate::types::ItemKind::Tag,
+                value,
+                candidates: Vec::new(),
+                origins: Vec::new(),
+                reserved: Vec::new(),
+                recorded: true,
+            },
             operand: ResolvedOperand::TagRef {
                 tag_type,
                 storage: StorageMapping::Basic {
@@ -3698,6 +3867,7 @@ mod tests_integration {
                 },
                 sql_type: crate::db::SqlType::VARCHAR,
             },
+            default_rank: 0,
         }
     }
 

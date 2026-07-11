@@ -18,6 +18,7 @@ use std::path::Path;
 use tempfile::tempdir;
 use ttfm::plugins::WasmPlugin;
 use ttfm::query::ast::{Operand, QueryNode};
+use ttfm::query::logical_schema::LogicalSchema;
 use ttfm::search;
 use ttfm::tag::{Index, TagFunction};
 use ttfm::types::{Label, LabelValue, TagType};
@@ -35,9 +36,6 @@ fn test_plugin_display_show_applied_in_format_display() {
             "icon_tag"
         }
         fn index(&self) -> Option<&dyn ttfm::tag::Index> {
-            None
-        }
-        fn query(&self) -> Option<&dyn ttfm::tag::Query> {
             None
         }
         fn display(&self) -> Option<&dyn ttfm::tag::Display> {
@@ -92,8 +90,8 @@ fn test_plugin_normalize_label_applied_in_search() {
         fn index(&self) -> Option<&dyn ttfm::tag::Index> {
             Some(self)
         }
-        fn query(&self) -> Option<&dyn ttfm::tag::Query> {
-            Some(self)
+        fn query(&self) -> &dyn ttfm::tag::Query {
+            self
         }
     }
     impl ttfm::tag::Index for ShortLabelTag {
@@ -254,16 +252,6 @@ fn load_sample_adapter() -> ttfm::plugins::WasmPluginAdapter {
     plugin.into_adapter().expect("Failed to create adapter")
 }
 
-/// プラグインが query インターフェースを実装していれば adapter.query() は Some を返す
-#[test]
-fn test_wasm_adapter_query_is_some() {
-    let adapter = load_sample_adapter();
-    assert!(
-        adapter.query().is_some(),
-        "adapter.query() should return Some"
-    );
-}
-
 /// プラグインが display インターフェースを実装していれば adapter.display() は Some を返す
 #[test]
 fn test_wasm_adapter_display_is_some() {
@@ -278,7 +266,7 @@ fn test_wasm_adapter_display_is_some() {
 #[test]
 fn test_wasm_adapter_normalize_label_default() {
     let adapter = load_sample_adapter();
-    let query = adapter.query().expect("adapter.query() should be Some");
+    let query = adapter.query();
     let label = Label::from("hello");
     assert_eq!(query.normalize_label(&label).as_str(), "hello");
 }
@@ -287,11 +275,16 @@ fn test_wasm_adapter_normalize_label_default() {
 #[test]
 fn test_wasm_adapter_expand_default_returns_typed_tag() {
     let adapter = load_sample_adapter();
-    let query = adapter.query().expect("adapter.query() should be Some");
+    let query = adapter.query();
     let tag_type = TagType::from("sample");
     let label = Label::from("foo");
     let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
-    let node = query.expand(&tag_type, &label, &typed_tag);
+    let node = query.expand(
+        &tag_type,
+        &label,
+        &typed_tag,
+        &ttfm::query::lens_schema::Lens::base_standard(),
+    );
     assert_eq!(node, QueryNode::TypedTag(typed_tag));
 }
 
@@ -299,7 +292,7 @@ fn test_wasm_adapter_expand_default_returns_typed_tag() {
 #[test]
 fn test_wasm_adapter_expand_projection_default() {
     let adapter = load_sample_adapter();
-    let query = adapter.query().expect("adapter.query() should be Some");
+    let query = adapter.query();
     let tag_type = TagType::from("sample");
     let node = query.expand_projection(&tag_type);
     let expected = QueryNode::Projection(Operand::from(tag_type));
@@ -314,4 +307,108 @@ fn test_wasm_adapter_display_formats_default() {
     let formats = display.formats();
     assert_eq!(formats.default.id, "raw");
     assert!(formats.options.is_empty());
+}
+
+/// indexing のみ実装（query 未 export）のプラグインでも adapter.query() は
+/// 常に使え（Option ではない）、デフォルト展開が使われる（Step 4.1）
+#[test]
+fn test_wasm_adapter_query_available_without_query_export() {
+    let plugin =
+        WasmPlugin::new(Path::new("plugins/mimetype_plugin.component.wasm"))
+            .expect("Failed to load mimetype plugin");
+    let adapter = plugin.into_adapter().expect("Failed to create adapter");
+
+    // query 未 export でも adapter.query() は &dyn Query を返す
+    let query = adapter.query();
+
+    let tag_type = TagType::from("mimetype");
+    let label = Label::from("text/plain");
+    let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
+    let node = query.expand(
+        &tag_type,
+        &label,
+        &typed_tag,
+        &ttfm::query::lens_schema::Lens::base_standard(),
+    );
+    assert_eq!(node, QueryNode::TypedTag(typed_tag));
+}
+
+/// indexing のみのプラグイン型も Lens::iter_all_for_rank に載る（定義一覧の完全化）
+#[test]
+fn test_lens_iter_all_for_rank_includes_indexing_only_plugin_type() {
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    let plugin =
+        WasmPlugin::new(Path::new("plugins/mimetype_plugin.component.wasm"))
+            .expect("Failed to load mimetype plugin");
+    let adapter = plugin.into_adapter().expect("Failed to create adapter");
+    registry.register_plugin(adapter);
+
+    let lens = ttfm::query::lens_schema::Lens::from_registry(&registry);
+    let all = lens.iter_all_for_rank();
+    let mimetype = all.iter().find(|(t, _, _)| t.as_str() == "mimetype");
+    assert!(
+        mimetype.is_some(),
+        "indexing のみのプラグイン型 (mimetype) が Lens 列挙に含まれていない"
+    );
+    assert!(
+        matches!(
+            mimetype.unwrap().2,
+            ttfm::types::ItemId::Settling(ttfm::types::Origin::Plugin, _)
+        ),
+        "プラグイン登録型は固定 Sys id を持たない"
+    );
+}
+
+/// 実 WASM プラグイン（native mock ではなく実コンポーネント）を register_plugin
+/// した場合も、その型の定義アイテムを編集すると Plugin 区画へ実体化されることを
+/// 確認する smoke テスト（Step 7）。
+#[test]
+fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
+    use ttfm::db::Store;
+    use ttfm::edit::{edit, QueryType, WriteOptions};
+    use ttfm::indexing::Indexer;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("foo.txt"), "content").unwrap();
+
+    let db_dir = dir.path().join("db");
+    let mut registry = ttfm::tag::TagRegistry::with_standard();
+    let adapter = load_sample_adapter();
+    let name = adapter.name().to_string();
+    registry.register_plugin(adapter);
+
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    edit(
+        &store,
+        &registry,
+        &format!("type:\"{name}\""),
+        Some("rank:5"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+    )
+    .expect("edit should materialize the plugin type definition");
+
+    let results =
+        search::search(&store, &registry, "type:*", SearchOptions::default())
+            .unwrap();
+    let plugin_item = results
+        .results
+        .iter()
+        .find(|r| r.raw_repr() == name)
+        .expect("type: should include the real WASM plugin's type after materialization");
+
+    assert!(plugin_item.id.is_stored());
+    assert_eq!(
+        ttfm::types::Origin::within(plugin_item.id.as_i64()),
+        ttfm::types::Origin::Plugin
+    );
+    assert_eq!(plugin_item.rank, 5);
 }

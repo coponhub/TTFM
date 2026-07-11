@@ -3477,6 +3477,7 @@ dependencies = [
  "duckdb",
  "file-id",
  "filetime",
+ "glob",
  "ignore",
  "indexmap",
  "indicatif",

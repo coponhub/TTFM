@@ -18,7 +18,7 @@
 //! 区画レイアウト（Origin → 区画 index / lo / hi / short ラベル）は
 //! `types::Origin` が唯一の定義点。このモジュールは DB アクセスが必要な
 //! 採番（attach）と文字列入力の正規化（parse）のみを持つ。
-//! 逆引き・表示は `Origin::within` / `Origin::short` / `Origin::space_lo` を直接使う。
+//! 逆引き・表示は `Origin::within` / `Origin::short` / `Origin::block_lo` を直接使う。
 
 use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
 use crate::types::Origin;
@@ -43,7 +43,7 @@ pub fn parse(s: &str) -> Result<i64> {
             Origin::iter().find(|o| o.short() == label).ok_or_else(|| {
                 anyhow::anyhow!("unknown item_id origin: {label}")
             })?;
-        return Ok(origin.space_lo() + offset);
+        return Ok(origin.block_lo() + offset);
     }
     s.parse()
         .map_err(|_| anyhow::anyhow!("invalid item_id: {s}"))
@@ -53,7 +53,7 @@ pub fn parse(s: &str) -> Result<i64> {
 fn source_tables(origin: Origin) -> &'static [(TargetTable, Tbl)] {
     match origin {
         Origin::File => &[(TargetTable::FileReferences, Tbl::FileReferences)],
-        Origin::System | Origin::User => {
+        Origin::Builtin | Origin::User | Origin::Plugin => {
             &[(TargetTable::ItemReferences, Tbl::ItemReferences)]
         }
     }
@@ -61,9 +61,9 @@ fn source_tables(origin: Origin) -> &'static [(TargetTable, Tbl)] {
 
 /// origin の区画 `[lo, hi)` 内の現在の最大 item_id を読む。
 /// 区画内に行が無ければ `lo - 1` を返す（→ 採番は lo から始まる）。
-fn max_in_space(store: &Store, origin: Origin) -> Result<i64> {
-    let lo = origin.space_lo();
-    let hi = origin.space_hi();
+fn max_in_block(store: &Store, origin: Origin) -> Result<i64> {
+    let lo = origin.block_lo();
+    let hi = origin.block_hi();
     let mut max = lo - 1;
     for (target, alias) in source_tables(origin) {
         let path = store.path_for_target(*target);
@@ -90,7 +90,7 @@ fn max_in_space(store: &Store, origin: Origin) -> Result<i64> {
 /// 区画内 MAX から **必ず +1 ずつ昇順**に連番（減算は無い）。区画が空なら
 /// 下端 lo から。公称幅を超えても直上 origin の手前まで採番でき、エラーにしない。
 pub fn next(store: &Store, origin: Origin, count: usize) -> Result<Vec<i64>> {
-    let start = max_in_space(store, origin)? + 1;
+    let start = max_in_block(store, origin)? + 1;
     Ok((0..count as i64).map(|i| start + i).collect())
 }
 
@@ -103,75 +103,92 @@ mod tests {
 
     fn fmt_id(id: i64) -> String {
         let o = Origin::within(id);
-        format!("{}({})", o.short(), id - o.space_lo())
+        format!("{}({})", o.short(), id - o.block_lo())
     }
 
     #[test]
-    fn space_system_owns_negative_side() {
-        // System: index -1 → lo = -B, hi = 0 (User の lo)
-        assert_eq!(Origin::System.space_lo(), -B);
-        assert_eq!(Origin::System.space_hi(), 0);
+    fn block_builtin_owns_negative_side() {
+        // Builtin: index -1 → lo = -B, hi = 0 (User の lo)
+        assert_eq!(Origin::Builtin.block_lo(), -B);
+        assert_eq!(Origin::Builtin.block_hi(), 0);
     }
 
     #[test]
-    fn space_user_owns_zero_to_file() {
-        assert_eq!(Origin::User.space_lo(), 0);
-        assert_eq!(Origin::User.space_hi(), 8 * B);
+    fn block_user_owns_zero_to_file() {
+        assert_eq!(Origin::User.block_lo(), 0);
+        assert_eq!(Origin::User.block_hi(), 8 * B);
     }
 
     #[test]
-    fn space_file_owns_up_to_i64_max() {
-        assert_eq!(Origin::File.space_lo(), 8 * B);
-        assert_eq!(Origin::File.space_hi(), i64::MAX);
+    fn block_file_owns_8b_to_16b() {
+        assert_eq!(Origin::File.block_lo(), 8 * B);
+        assert_eq!(Origin::File.block_hi(), 16 * B);
     }
 
     #[test]
-    fn spaces_tile_without_overlap() {
-        let (slo, shi) = (Origin::System.space_lo(), Origin::System.space_hi());
-        let (ulo, uhi) = (Origin::User.space_lo(), Origin::User.space_hi());
-        let (flo, _) = (Origin::File.space_lo(), Origin::File.space_hi());
-        assert_eq!(shi, ulo); // System → User 隙間なし
+    fn block_plugin_owns_16b_to_i64_max() {
+        assert_eq!(Origin::Plugin.block_lo(), 16 * B);
+        assert_eq!(Origin::Plugin.block_hi(), i64::MAX);
+    }
+
+    #[test]
+    fn blocks_tile_without_overlap() {
+        let (slo, shi) =
+            (Origin::Builtin.block_lo(), Origin::Builtin.block_hi());
+        let (ulo, uhi) = (Origin::User.block_lo(), Origin::User.block_hi());
+        let (flo, fhi) = (Origin::File.block_lo(), Origin::File.block_hi());
+        let (plo, _) = (Origin::Plugin.block_lo(), Origin::Plugin.block_hi());
+        assert_eq!(shi, ulo); // Builtin → User 隙間なし
         assert_eq!(uhi, flo); // User → File 隙間なし
+        assert_eq!(fhi, plo); // File → Plugin 隙間なし
         let _ = slo; // -B は定義上の下端
     }
 
     #[test]
     fn short_labels() {
-        assert_eq!(Origin::System.short(), "Sys");
+        assert_eq!(Origin::Builtin.short(), "Sys");
         assert_eq!(Origin::User.short(), "User");
         assert_eq!(Origin::File.short(), "File");
+        assert_eq!(Origin::Plugin.short(), "Plg");
     }
 
     #[test]
-    fn within_inside_system_space() {
-        // System: [-B, 0)
-        assert_eq!(Origin::within(-B), Origin::System);
-        assert_eq!(Origin::within(-5), Origin::System);
-        assert_eq!(Origin::within(-1), Origin::System);
+    fn within_inside_builtin_block() {
+        // Builtin: [-B, 0)
+        assert_eq!(Origin::within(-B), Origin::Builtin);
+        assert_eq!(Origin::within(-5), Origin::Builtin);
+        assert_eq!(Origin::within(-1), Origin::Builtin);
     }
 
     #[test]
-    fn within_inside_user_space() {
+    fn within_inside_user_block() {
         assert_eq!(Origin::within(0), Origin::User);
         assert_eq!(Origin::within(10), Origin::User);
         assert_eq!(Origin::within(B - 1), Origin::User);
     }
 
     #[test]
-    fn within_inside_file_space() {
+    fn within_inside_file_block() {
         assert_eq!(Origin::within(8 * B), Origin::File);
         assert_eq!(Origin::within(8 * B + 10), Origin::File);
-        assert_eq!(Origin::within(30 * B), Origin::File);
+        assert_eq!(Origin::within(15 * B), Origin::File);
     }
 
     #[test]
-    fn within_below_all_spaces_falls_to_system() {
-        // -B 未満は全区画より下 → lo 最小 (System=-B) に縮退
-        assert_eq!(Origin::within(-B - 1), Origin::System);
+    fn within_inside_plugin_block() {
+        assert_eq!(Origin::within(16 * B), Origin::Plugin);
+        assert_eq!(Origin::within(16 * B + 10), Origin::Plugin);
+        assert_eq!(Origin::within(30 * B), Origin::Plugin);
     }
 
     #[test]
-    fn within_gap_maps_to_space_directly_below() {
+    fn within_below_all_blocks_falls_to_builtin() {
+        // -B 未満は全区画より下 → lo 最小 (Builtin=-B) に縮退
+        assert_eq!(Origin::within(-B - 1), Origin::Builtin);
+    }
+
+    #[test]
+    fn within_gap_maps_to_block_directly_below() {
         // gap [B, 8B) は User (lo=0 が直下)
         assert_eq!(Origin::within(B), Origin::User);
         assert_eq!(Origin::within(4 * B), Origin::User);
@@ -186,6 +203,8 @@ mod tests {
         assert_eq!(fmt_id(-B + 10), "Sys(10)");
         assert_eq!(fmt_id(8 * B), "File(0)");
         assert_eq!(fmt_id(8 * B + 10), "File(10)");
+        assert_eq!(fmt_id(16 * B), "Plg(0)");
+        assert_eq!(fmt_id(16 * B + 10), "Plg(10)");
     }
 
     #[test]
@@ -196,6 +215,8 @@ mod tests {
         assert_eq!(parse("User(0)").unwrap(), 0);
         assert_eq!(parse("File(0)").unwrap(), 8 * B);
         assert_eq!(parse("File(10)").unwrap(), 8 * B + 10);
+        assert_eq!(parse("Plg(0)").unwrap(), 16 * B);
+        assert_eq!(parse("Plg(10)").unwrap(), 16 * B + 10);
     }
 
     #[test]
@@ -215,7 +236,17 @@ mod tests {
 
     #[test]
     fn display_parse_roundtrip() {
-        for id in [0_i64, 10, B - 1, 8 * B, 8 * B + 10, -B, -B + 5] {
+        for id in [
+            0_i64,
+            10,
+            B - 1,
+            8 * B,
+            8 * B + 10,
+            -B,
+            -B + 5,
+            16 * B,
+            16 * B + 10,
+        ] {
             assert_eq!(parse(&fmt_id(id)).unwrap(), id);
         }
     }

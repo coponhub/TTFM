@@ -43,6 +43,15 @@ pub(super) fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
         .to_owned()
 }
 
+/// SQL を `SELECT * FROM (sql) AS sub` でラップします。
+/// fetch 行スキーマ（全カラム）のまま UNION で結合する際に使用します。
+pub(super) fn wrap_in_subquery_star(q: SelectStatement) -> SelectStatement {
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from_subquery(q, Sub)
+        .to_owned()
+}
+
 /// `Label` の値を単純な SQL 式に変換します。
 pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
     use crate::types::LabelValue;
@@ -157,10 +166,15 @@ pub struct AggregationContext {
     pub agg_filters: HashMap<usize, SelectStatement>,
     /// Count(inner) かつ inner_tag_type が None の場合の inner 全体 SQL (Phase 3 で参照)
     pub agg_inner_sqls: HashMap<usize, SelectStatement>,
+    /// Count(inner) が定義枝 (DefinitionRef, Or 経由も含む) を含む場合の
+    /// 定義枝 distinct 件数 SQL。キーは inner_node ポインタ（Phase 3 で参照）。
+    pub definition_counts: HashMap<usize, SelectStatement>,
     /// Phase 1 収集: フィルタノード (Phase 2 で SQL 化して agg_filters へ移動)
     pub filter_nodes: HashMap<usize, ResolvedNode>,
     /// Phase 1 収集: Count inner ノード (Phase 2 で SQL 化して agg_inner_sqls へ移動)
     pub inner_nodes: HashMap<usize, ResolvedNode>,
+    /// Phase 1 収集: 定義枝ノード群 (Phase 2 で SQL 化して definition_counts へ移動)
+    pub definition_count_nodes: HashMap<usize, Vec<ResolvedNode>>,
 }
 
 impl AggregationContext {
@@ -168,8 +182,10 @@ impl AggregationContext {
         Self {
             agg_filters: HashMap::new(),
             agg_inner_sqls: HashMap::new(),
+            definition_counts: HashMap::new(),
             filter_nodes: HashMap::new(),
             inner_nodes: HashMap::new(),
+            definition_count_nodes: HashMap::new(),
         }
     }
 }

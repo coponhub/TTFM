@@ -16,6 +16,7 @@
 pub mod ast;
 pub mod error;
 pub mod fetcher;
+pub mod lens_builder;
 pub mod lens_optimizer;
 pub mod lens_reader;
 pub mod lens_resolver;

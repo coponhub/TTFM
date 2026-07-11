@@ -51,6 +51,10 @@ impl Directive {
                 "tag type '{}' requires fs_operate, not modify (plan contract violation)",
                 label.tag_type()
             ),
+            Directive::Tag(label, EditStrategy::RemoveOnly) => bail!(
+                "tag type '{}' cannot be added, only removed (RemoveOnly)",
+                label.tag_type()
+            ),
             Directive::DeleteType(tag_type) => vec![WriteAction::Delete {
                 item: id.clone(),
                 tags: vec![DeleteTarget::Type(tag_type)],
@@ -82,11 +86,15 @@ impl QueryType {
             ),
             (QueryType::Tag, Some(v)) => {
                 let label = Label::resolve(tag_type, v);
-                let strategy = get_strategy(&label, registry);
+                let strategy = get_strategy(&label, registry)?;
                 Ok(Directive::Tag(label, strategy))
             }
-            (QueryType::Untag, None) => Ok(Directive::DeleteType(tag_type)),
+            (QueryType::Untag, None) => {
+                check_untag_allowed(&tag_type, registry)?;
+                Ok(Directive::DeleteType(tag_type))
+            }
             (QueryType::Untag, Some(v)) => {
+                check_untag_allowed(&tag_type, registry)?;
                 Ok(Directive::DeleteTag(Label::resolve(tag_type, v)))
             }
         }
@@ -132,13 +140,35 @@ fn tokenize(query: &str) -> Result<Vec<(TagType, Option<LabelValue>)>> {
 }
 
 // registry から label の EditStrategy を取り出す純粋ヘルパー。
-// 未登録のカスタム型はデフォルト Append。
-fn get_strategy(label: &Label, registry: &TagRegistry) -> EditStrategy {
-    registry
-        .get(label.tag_type().as_str())
-        .and_then(|f| f.edit())
-        .map(|e| e.strategy())
-        .unwrap_or(EditStrategy::Append)
+// 未登録のカスタム型はデフォルト Append。登録済みだが edit() 未定義なら Forbidden(即エラー)。
+fn get_strategy(label: &Label, registry: &TagRegistry) -> Result<EditStrategy> {
+    match registry.get(label.tag_type().as_str()) {
+        Some(f) => match f.edit() {
+            Some(e) => Ok(e.strategy()),
+            None => bail!(
+                "tag type '{}' is registered but not editable (Forbidden)",
+                label.tag_type()
+            ),
+        },
+        None => Ok(EditStrategy::Append),
+    }
+}
+
+// Untag 方向の Forbidden 判定。registry ヒットかつ edit() None なら拒否
+// (strategy の値は見ない。RemoveOnly 等 edit() Some のものは通す)。
+fn check_untag_allowed(
+    tag_type: &TagType,
+    registry: &TagRegistry,
+) -> Result<()> {
+    if let Some(f) = registry.get(tag_type.as_str()) {
+        if f.edit().is_none() {
+            bail!(
+                "tag type '{}' is registered but not editable (Forbidden)",
+                tag_type.as_str()
+            );
+        }
+    }
+    Ok(())
 }
 
 // ──────────────────────────────────────────────
@@ -231,17 +261,6 @@ impl TagDelta {
     }
 }
 
-// scalar 結果の物理型タグ type:"integer" 等を value_type: へ正規化する。
-// type: は定義参照関数と衝突するため、永続化前にリネームする。
-fn rename_volatile_type(label: Label) -> Label {
-    use crate::types::SType;
-    if label.tag_type() == TagType::Base(SType::Type) {
-        Label::Other(TagType::Custom("value_type".to_string()), label.value())
-    } else {
-        label
-    }
-}
-
 // Volatile アイテムへの編集: directive の delta（into_actions 由来）を原子 delta へ平坦化し、
 // item.tags を種に順次適用、注入を加えて単一 Add にする。
 // 意味（Append/Replace/Untag）は into_actions が唯一源。
@@ -250,12 +269,8 @@ fn fold_volatile(
     actions: Vec<WriteAction>,
     registry: &TagRegistry,
 ) -> Vec<WriteAction> {
-    let mut tags: Vec<Label> = item
-        .tags
-        .entries
-        .iter()
-        .map(|e| rename_volatile_type(e.label.clone()))
-        .collect();
+    let mut tags: Vec<Label> =
+        item.tags.entries.iter().map(|e| e.label.clone()).collect();
     actions
         .into_iter()
         .flat_map(TagDelta::flatten)
@@ -291,7 +306,7 @@ pub fn modify(
         .flatten()
         .collect();
 
-    if item.id.is_volatile() {
+    if !item.id.is_stored() {
         fold_volatile(item, actions, registry).to_ok()
     } else {
         actions.to_ok()
@@ -454,6 +469,72 @@ mod tests {
         .is_err());
     }
 
+    // ── EDIT.md §2 Forbidden (バグ C) ─────────────────
+
+    #[test]
+    fn modify_tag_registered_without_edit_is_forbidden() {
+        let item = make_item(1, vec![]);
+        assert!(
+            modify(&item, Some("hash:xxx"), QueryType::Tag, &registry())
+                .is_err(),
+            "registered type without edit() must be Forbidden, not Append"
+        );
+    }
+
+    #[test]
+    fn modify_tag_type_value_is_forbidden() {
+        let item = make_item(1, vec![]);
+        assert!(
+            modify(&item, Some("type:foo"), QueryType::Tag, &registry())
+                .is_err(),
+            "type: is a meta type and must be Forbidden as an EditQuery value"
+        );
+    }
+
+    #[test]
+    fn modify_tag_item_id_is_forbidden() {
+        let item = make_item(1, vec![]);
+        assert!(
+            modify(&item, Some("item_id:5"), QueryType::Tag, &registry())
+                .is_err(),
+            "item_id: must reject Tag direction (RemoveOnly: append not allowed)"
+        );
+    }
+
+    #[test]
+    fn modify_untag_registered_without_edit_is_forbidden() {
+        let item = make_item(1, vec![]);
+        assert!(
+            modify(&item, Some("hash:xxx"), QueryType::Untag, &registry())
+                .is_err(),
+            "Forbidden must also block Untag direction"
+        );
+    }
+
+    #[test]
+    fn modify_untag_item_id_is_allowed() {
+        let item = make_item(1, vec![]);
+        let actions =
+            modify(&item, Some("item_id:"), QueryType::Untag, &registry())
+                .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(
+            matches!(&actions[0], WriteAction::Delete { tags, .. } if matches!(&tags[0], DeleteTarget::Type(TagType::Base(SType::ItemId)))),
+            "untag item_id: must be allowed (RemoveOnly) and produce item deletion"
+        );
+    }
+
+    #[test]
+    fn modify_tag_stem_is_relocate_not_forbidden() {
+        let item = make_item(1, vec![]);
+        let err = modify(&item, Some("stem:foo"), QueryType::Tag, &registry())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("fs_operate"),
+            "stem must be classified as Relocate, not Forbidden: {err}"
+        );
+    }
+
     #[test]
     fn modify_tag_modify_injection_is_error() {
         let item = make_item(1, vec![]);
@@ -553,6 +634,22 @@ mod tests {
     fn has_append(tags: &[TagOp], pred: impl Fn(&Label) -> bool) -> bool {
         tags.iter()
             .any(|t| matches!(t, TagOp::Append(l) if pred(l)))
+    }
+
+    #[test]
+    fn modify_settling_item_also_folds_into_single_add() {
+        use crate::types::Origin;
+        let mut item = make_volatile_item(SType::Type, "project");
+        item.id = ItemId::Volatile(0).settle(Origin::User);
+        let actions =
+            modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
+        assert_eq!(actions.len(), 1, "Settling item must fold into one Add");
+        match &actions[0] {
+            WriteAction::Add { item: id, .. } => {
+                assert_eq!(*id, item.id, "Add must target the same Settling id")
+            }
+            other => panic!("expected Add, got {:?}", other),
+        }
     }
 
     #[test]
@@ -765,9 +862,9 @@ mod tests {
         ));
     }
 
-    // scalar result の物理型タグ type:"integer" は value_type:"integer" にリネームされる。
+    // bitical_type: 移行後、type: タグはもうリネームされず素通りする。
     #[test]
-    fn modify_volatile_type_tag_renamed_to_value_type() {
+    fn modify_type_tag_no_longer_renamed() {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags.push(
@@ -775,18 +872,17 @@ mod tests {
                 TagType::Base(SType::Type),
                 LabelValue::String("integer".to_string()),
             ),
-            Origin::System,
+            Origin::Builtin,
         );
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         assert!(
-            !has_append(tags, |l| l.tag_type() == TagType::Base(SType::Type)),
-            "type: tag must not appear after rename"
-        );
-        assert!(
-            has_append(tags, |l| l.tag_type()
-                == TagType::Custom("value_type".to_string())),
-            "value_type: tag must appear"
+            has_append(tags, |l| l.tag_type() == TagType::Base(SType::Type)
+                && matches!(
+                    l.value(),
+                    LabelValue::String(s) if s == "integer"
+                )),
+            "type: tag must pass through unchanged"
         );
     }
 }

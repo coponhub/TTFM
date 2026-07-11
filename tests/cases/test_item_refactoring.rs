@@ -17,8 +17,7 @@ use tempfile::tempdir;
 use ttfm::SearchOptions;
 use ttfm::{search, tagging};
 
-fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry)
-{
+fn setup_store() -> (ttfm::db::Store, ttfm::tag::TagRegistry) {
     let dir = Box::leak(Box::new(tempdir().unwrap()));
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
@@ -59,8 +58,7 @@ fn test_item_id_and_kind_refactoring() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
     // 1. Stored items (File/Note)
     let note_id = tagging::add_item(
@@ -137,7 +135,7 @@ fn item_id_display_uses_local_form() {
         tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
     let o = ttfm::Origin::within(raw_id);
-    let disp = format!("{}({})", o.short(), raw_id - o.space_lo());
+    let disp = format!("{}({})", o.short(), raw_id - o.block_lo());
     // User 区画 [0, B) なので "User(N)" 形式
     assert!(disp.starts_with("User("), "expected User(N), got {disp}");
     assert!(disp.ends_with(')'), "expected User(N), got {disp}");
@@ -153,7 +151,7 @@ fn item_id_display_uses_local_form() {
     assert_eq!(results.results.len(), 1);
     let rid = results.results[0].id.as_i64();
     let ro = ttfm::Origin::within(rid);
-    assert_eq!(format!("{}({})", ro.short(), rid - ro.space_lo()), disp);
+    assert_eq!(format!("{}({})", ro.short(), rid - ro.block_lo()), disp);
 }
 
 /// item_id:"User(0)" クエリは item_id:0 と同一アイテムを返す（ローカル形式の往復）。
@@ -164,24 +162,16 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
         tagging::add_item(&store, &registry, "type", "my_type").unwrap();
 
     let o = ttfm::Origin::within(raw_id);
-    let disp = format!("{}({})", o.short(), raw_id - o.space_lo()); // e.g. "User(0)"
+    let disp = format!("{}({})", o.short(), raw_id - o.block_lo()); // e.g. "User(0)"
     let q_raw = format!("item_id:{raw_id}");
     let q_local = format!("item_id:\"{disp}\"");
 
-    let r_raw = search::search(
-        &store,
-        &registry,
-        &q_raw,
-        SearchOptions::default(),
-    )
-    .unwrap();
-    let r_local = search::search(
-        &store,
-        &registry,
-        &q_local,
-        SearchOptions::default(),
-    )
-    .unwrap();
+    let r_raw =
+        search::search(&store, &registry, &q_raw, SearchOptions::default())
+            .unwrap();
+    let r_local =
+        search::search(&store, &registry, &q_local, SearchOptions::default())
+            .unwrap();
 
     assert_eq!(r_raw.results.len(), 1, "raw id query should find item");
     assert_eq!(

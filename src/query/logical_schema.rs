@@ -24,7 +24,7 @@
 //! - テスト用モックなど任意の実装も可能。
 
 use crate::query::ast::{ComparisonNode, QueryNode};
-use crate::types::{Label, TagType};
+use crate::types::{ItemId, Label, Rank, TagType};
 
 /// クエリエンジンの論理レイヤーで扱う型。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -51,4 +51,10 @@ pub trait LogicalSchema {
     fn normalize_label_any(&self, label: &Label) -> Label;
     /// 比較ノードを展開する（日付範囲化・ラベル正規化等）。
     fn expand_comparison(&self, node: ComparisonNode) -> QueryNode;
+    /// 登録済みタグの型名と default_rank を列挙する。
+    /// 3要素目は出所を表す ItemId: 組み込み（`with_standard` の Rust
+    /// TagFunction）は固定 Sys id を持つ `Stored`、プラグイン登録型は
+    /// `Settling(Origin::Plugin, _)`（未確定の counter はダミー値で構わない。
+    /// このリストは SQL 生成の使い捨てで write の実解決には流れない）。
+    fn iter_all_for_rank(&self) -> Vec<(TagType, Rank, ItemId)>;
 }

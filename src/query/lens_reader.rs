@@ -141,7 +141,7 @@ impl Reader {
         let overridden: Vec<(TagType, ReadResolution)> = lens
             .descriptors()
             .filter_map(|(t, d)| {
-                let res = d.logical_function.as_ref()?.query()?.read();
+                let res = d.logical_function.as_ref()?.query().read();
                 (!res.rules().is_empty()).then(|| (t.clone(), res))
             })
             .collect();

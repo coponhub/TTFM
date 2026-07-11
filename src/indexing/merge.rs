@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, SqlType, Store, TargetTable, Tbl};
+use crate::db::{Col, Store, TargetTable, Tbl};
+// use crate::db::SqlType;
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::tag::TagRegistry;
 use crate::taggers::TagValue;
@@ -21,9 +22,8 @@ use crate::types::ItemId;
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
-use sea_query::{
-    Condition, Expr, Iden, JoinType, Order, Query, SelectStatement, SimpleExpr,
-};
+use sea_query::{Condition, Expr, Iden, Order, Query, SelectStatement};
+// use sea_query::{JoinType, SimpleExpr};
 use std::path::Path;
 
 // ========================================================
@@ -286,101 +286,101 @@ impl<'a> BaseTagMerger<'a> {
     }
 }
 
-// ========================================================
-// 2. Query Builder for Merging
-// ========================================================
-pub(crate) struct MergeQueryParts;
-
-// 唯一の定義箇所。ここが Single Source of Truth となります。
-crate::define_item_schema! {
-    ItemRow {
-        kind    => ItemKind,
-        content => Content,
-        name    => Name,
-        rank    => Rank,
-        type_   => Type,
-        label   => Label,
-    }
-}
-
-impl ItemRow {
-    pub(crate) fn new_type(content: SimpleExpr, rank: i64) -> Self {
-        Self {
-            kind: Expr::val("type").into(),
-            content: content.clone(),
-            name: content.clone(),
-            rank: Expr::val(rank).into(),
-            type_: content,
-            label: util::null_as(SqlType::VARCHAR),
-        }
-    }
-}
-
-impl MergeQueryParts {
-    pub(crate) fn item_columns() -> Vec<Col> {
-        ItemRow::all_columns()
-    }
-
-    pub(crate) fn registry_variants(registry: &TagRegistry) -> SelectStatement {
-        let mut iter = registry.iter_all_for_rank();
-        let Some((first_name, first_rank)) = iter.next() else {
-            let mut q = Query::select();
-            q.expr(Expr::val(1)).and_where(Expr::val(1).eq(0));
-            return q;
-        };
-
-        let mut query =
-            ItemRow::new_type(Expr::val(first_name).into(), first_rank)
-                .select();
-
-        for (name, rank) in iter {
-            query.union(
-                sea_query::UnionType::Distinct,
-                ItemRow::new_type(Expr::val(name).into(), rank).select(),
-            );
-        }
-        query
-    }
-
-    pub(crate) fn filter_new(
-        candidates: SelectStatement,
-        items_path: &str,
-    ) -> SelectStatement {
-        Query::select()
-            .columns(Self::item_columns().into_iter().map(|c| (Tbl::Item, c)))
-            .distinct()
-            .from_subquery(candidates, Tbl::Item)
-            .join_subquery(
-                JoinType::LeftJoin,
-                util::parquet_query(items_path),
-                Tbl::ItemReferences,
-                Condition::all()
-                    .add(
-                        Expr::col((Tbl::Item, Col::ItemKind)).eq(Expr::col((
-                            Tbl::ItemReferences,
-                            Col::ItemKind,
-                        ))),
-                    )
-                    .add(
-                        Expr::col((Tbl::Item, Col::Content))
-                            .eq(Expr::col((Tbl::ItemReferences, Col::Content))),
-                    ),
-            )
-            .and_where(Expr::col((Tbl::ItemReferences, Col::ItemId)).is_null())
-            .to_owned()
-    }
-
-    pub(crate) fn assign_ids(start_id: i64) -> SelectStatement {
-        Query::select()
-            .expr_as(
-                crate::db::CustomFunc::assign_id_window(start_id),
-                Col::ItemId,
-            )
-            .columns(Self::item_columns())
-            .from(Tbl::Item)
-            .to_owned()
-    }
-}
+// // ========================================================
+// // 2. Query Builder for Merging
+// // ========================================================
+// pub(crate) struct MergeQueryParts;
+//
+// // 唯一の定義箇所。ここが Single Source of Truth となります。
+// crate::define_item_schema! {
+//     ItemRow {
+//         kind    => ItemKind,
+//         content => Content,
+//         name    => Name,
+//         rank    => Rank,
+//         type_   => Type,
+//         label   => Label,
+//     }
+// }
+//
+// impl ItemRow {
+//     pub(crate) fn new_type(content: SimpleExpr, rank: i64) -> Self {
+//         Self {
+//             kind: Expr::val("type").into(),
+//             content: content.clone(),
+//             name: content.clone(),
+//             rank: Expr::val(rank).into(),
+//             type_: content,
+//             label: util::null_as(SqlType::VARCHAR),
+//         }
+//     }
+// }
+//
+// impl MergeQueryParts {
+//     pub(crate) fn item_columns() -> Vec<Col> {
+//         ItemRow::all_columns()
+//     }
+//
+//     pub(crate) fn registry_variants(registry: &TagRegistry) -> SelectStatement {
+//         let mut iter = registry.iter_all_for_rank();
+//         let Some((first_name, first_rank)) = iter.next() else {
+//             let mut q = Query::select();
+//             q.expr(Expr::val(1)).and_where(Expr::val(1).eq(0));
+//             return q;
+//         };
+//
+//         let mut query =
+//             ItemRow::new_type(Expr::val(first_name).into(), first_rank)
+//                 .select();
+//
+//         for (name, rank) in iter {
+//             query.union(
+//                 sea_query::UnionType::Distinct,
+//                 ItemRow::new_type(Expr::val(name).into(), rank).select(),
+//             );
+//         }
+//         query
+//     }
+//
+//     pub(crate) fn filter_new(
+//         candidates: SelectStatement,
+//         items_path: &str,
+//     ) -> SelectStatement {
+//         Query::select()
+//             .columns(Self::item_columns().into_iter().map(|c| (Tbl::Item, c)))
+//             .distinct()
+//             .from_subquery(candidates, Tbl::Item)
+//             .join_subquery(
+//                 JoinType::LeftJoin,
+//                 util::parquet_query(items_path),
+//                 Tbl::ItemReferences,
+//                 Condition::all()
+//                     .add(
+//                         Expr::col((Tbl::Item, Col::ItemKind)).eq(Expr::col((
+//                             Tbl::ItemReferences,
+//                             Col::ItemKind,
+//                         ))),
+//                     )
+//                     .add(
+//                         Expr::col((Tbl::Item, Col::Content))
+//                             .eq(Expr::col((Tbl::ItemReferences, Col::Content))),
+//                     ),
+//             )
+//             .and_where(Expr::col((Tbl::ItemReferences, Col::ItemId)).is_null())
+//             .to_owned()
+//     }
+//
+//     pub(crate) fn assign_ids(start_id: i64) -> SelectStatement {
+//         Query::select()
+//             .expr_as(
+//                 crate::db::CustomFunc::assign_id_window(start_id),
+//                 Col::ItemId,
+//             )
+//             .columns(Self::item_columns())
+//             .from(Tbl::Item)
+//             .to_owned()
+//     }
+// }
 
 // ========================================================
 // 3. Internal Utility (Merge context only)

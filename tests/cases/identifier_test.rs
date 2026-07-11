@@ -84,15 +84,15 @@ fn next_file_reads_file_references() {
 }
 
 #[test]
-fn next_system_reads_item_references() {
-    // System 区画 [-B, 0) — item_references の System 行 max=-B+5 → 次は -B+6。
+fn next_builtin_reads_item_references() {
+    // Builtin 区画 [-B, 0) — item_references の Builtin 行 max=-B+5 → 次は -B+6。
     let (store, _dir) = store_with(&[(TargetTable::ItemReferences, &[-B + 5])]);
-    assert_eq!(next(&store, Origin::System, 1).unwrap(), vec![-B + 6]);
+    assert_eq!(next(&store, Origin::Builtin, 1).unwrap(), vec![-B + 6]);
 }
 
 #[test]
-fn next_user_ignores_system_rows_in_item_references() {
-    // item_references に System(-B+5) / User(7) 混在。User 採番は User 区画のみ見る。
+fn next_user_ignores_builtin_rows_in_item_references() {
+    // item_references に Builtin(-B+5) / User(7) 混在。User 採番は User 区画のみ見る。
     let (store, _dir) =
         store_with(&[(TargetTable::ItemReferences, &[7, -B + 5])]);
     assert_eq!(next(&store, Origin::User, 1).unwrap(), vec![8]);

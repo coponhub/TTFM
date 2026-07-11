@@ -31,6 +31,7 @@ uuid = { version = "1.19.0", features = ["v4", "v5"] }
 pest = "2.7"
 pest_derive = "2.7"
 indexmap = "2"
+glob = "0.3.3"
 
 [dev-dependencies]
 filetime = "0.2.27"
@@ -41,4 +42,9 @@ rstest = "0.25"
 [profile.dev.package."*"]
 debug = 0
 strip = "debuginfo"
+
+# DuckDB (C++ bundled build) は -O0 だとクエリ実行が公式バイナリ比で約10倍遅く、
+# テスト全体を支配するため、ここだけ最適化してビルドする（初回のみ再コンパイルが走る）
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
 

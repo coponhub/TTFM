@@ -31,11 +31,29 @@ pub(super) struct QueryTestCase {
             &Path,
         ) -> anyhow::Result<()>,
     >,
+    /// 宣言的タグ指定: (case_dir 相対パス, タグ列) のリスト。
+    /// 全ケース分をまとめて1回の write で適用するため、modify フックでの
+    /// tag_item 逐次呼び出しより大幅に速い。単純なタグ付与はこちらを使う。
+    pub tags: &'static [(&'static str, &'static str)],
     /// クエリを実行前に加工する関数。デフォルトは `default_scope`。
     /// outer-agg クエリ等、特殊なスコープ付与が必要なケースで上書きする。
     pub format_query: fn(&str, &Path) -> String,
     pub query: &'static str,
     pub assert: fn(&SearchResponse, &Path) -> anyhow::Result<()>,
+}
+
+impl QueryTestCase {
+    /// define_cases! の struct update 用デフォルト値。
+    /// ケース定義で省略されたフィールドはここから補われる。
+    pub(super) const DEFAULTS: QueryTestCase = QueryTestCase {
+        name: "",
+        setup: |_| Ok(()),
+        modify: None,
+        tags: &[],
+        format_query: default_scope,
+        query: "",
+        assert: |_, _| Ok(()),
+    };
 }
 
 pub(super) struct SharedFixture {
@@ -51,7 +69,11 @@ pub(super) struct SharedFixture {
 macro_rules! define_cases {
     ($( $name:ident: { $($field:tt)* } ),* $(,)?) => {
         static CASES: &[crate::cases::QueryTestCase] = &[
-            $(crate::cases::QueryTestCase { name: stringify!($name), $($field)* }),*
+            $(crate::cases::QueryTestCase {
+                name: stringify!($name),
+                $($field)*
+                ..crate::cases::QueryTestCase::DEFAULTS
+            }),*
         ];
 
         static FIXTURE: std::sync::OnceLock<crate::cases::SharedFixture>
@@ -78,6 +100,18 @@ macro_rules! define_cases {
                 ttfm::indexing::Indexer::new(&store, &registry)
                     .run(root.path(), None::<&fn(usize)>, false)
                     .expect("index_directory");
+                // 宣言的タグ指定（tags フィールド）を全ケース分集めて 1 回の write で適用
+                let tag_specs: Vec<(std::path::PathBuf, &str)> = CASES
+                    .iter()
+                    .flat_map(|case| {
+                        let case_dir = root.path().join(case.name);
+                        case.tags.iter().map(move |(rel, tags)| {
+                            (case_dir.join(rel), *tags)
+                        })
+                    })
+                    .collect();
+                crate::cases::apply_tags_batch(&store, &registry, &tag_specs)
+                    .unwrap_or_else(|e| panic!("apply_tags_batch failed: {}", e));
                 for case in CASES {
                     if let Some(modify) = case.modify {
                         let case_dir = root.path().join(case.name);
@@ -155,6 +189,66 @@ pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
 /// デフォルト: `(Q) & path:<dir>/*` — 通常の nest / 比較クエリ用
 pub(super) fn default_scope(query: &str, dir: &Path) -> String {
     format!("({}) & path:{}/*", query, dir.to_string_lossy())
+}
+
+/// 宣言的タグ指定（QueryTestCase::tags）の一括適用。
+/// path→item_id を 1 クエリで解決し、modify で WriteAction を収集して
+/// write_and_refresh を 1 回だけ呼ぶ（parquet 書き換え＋ビュー再作成が全体で1回）。
+pub(super) fn apply_tags_batch(
+    store: &ttfm::db::Store,
+    registry: &ttfm::tag::TagRegistry,
+    specs: &[(std::path::PathBuf, &str)],
+) -> anyhow::Result<()> {
+    use ttfm::types::{Intrinsic, ItemId, Rank, Tags};
+
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let loc_path = store.path_for_target(ttfm::TargetTable::Locations);
+    let in_list = specs
+        .iter()
+        .map(|(p, _)| format!("'{}'", p.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT path, item_id FROM read_parquet('{}') WHERE path IN ({})",
+        loc_path.to_string_lossy(),
+        in_list
+    );
+    let mut ids = std::collections::HashMap::new();
+    let mut stmt = store.conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (path, id) = row?;
+        ids.insert(path, id);
+    }
+
+    let mut actions = Vec::new();
+    for (path, tags) in specs {
+        let path_str = path.to_string_lossy();
+        let id = *ids.get(path_str.as_ref()).ok_or_else(|| {
+            anyhow::anyhow!("apply_tags_batch: not indexed: {}", path.display())
+        })?;
+        let item = ttfm::Item {
+            id: ItemId::Stored(id),
+            item_kind: ttfm::ItemKind::File,
+            representative: vec![],
+            rank: Rank::default(),
+            intrinsic: Intrinsic::default(),
+            tags: Tags::new(),
+            item_count: None,
+        };
+        actions.extend(ttfm::edit::modify::modify(
+            &item,
+            Some(tags),
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?);
+    }
+    ttfm::edit::write::write_and_refresh(store, registry, actions)?;
+    Ok(())
 }
 
 /// クエリ内の `path:` を `path:<dir>/` に書き換えて相対サブパスを絶対パスに解決し、
@@ -308,9 +402,11 @@ pub mod test_projection;
 pub mod test_query_full;
 pub mod test_reverse_patterns;
 pub mod test_scalar_format;
+pub mod test_search_order;
 pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
+pub mod test_type_definitions;
 pub mod test_validation;
 pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;

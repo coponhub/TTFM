@@ -15,10 +15,10 @@
 
 use super::nest::filter;
 use super::{
-    build_column_match_sql, build_definition_ref_pick_sql,
-    build_label_set_op_pick_sql, build_resolved_and_sql,
-    build_resolved_diff_sql, build_resolved_match_sql, build_resolved_or_sql,
-    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
+    build_column_match_sql, build_label_set_op_pick_sql,
+    build_resolved_and_sql, build_resolved_diff_sql, build_resolved_match_sql,
+    build_resolved_or_sql, build_resolved_tag_tag_match_sql,
+    build_scalar_match_sql,
 };
 use crate::db::Src;
 use crate::query::lens_resolver::ResolvedNode;
@@ -45,8 +45,12 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::ColumnMatch { tag, label } => {
             Ok(build_column_match_sql(src, *tag, label))
         }
-        ResolvedNode::DefinitionRef { kind, value, .. } => {
-            Ok(build_definition_ref_pick_sql(src, *kind, value))
+        ResolvedNode::DefinitionRef { def, default_rank, .. } => {
+            Ok(crate::query::lens_builder::filter_definitions(
+                src,
+                def,
+                *default_rank,
+            ))
         }
         ResolvedNode::Match {
             storage,

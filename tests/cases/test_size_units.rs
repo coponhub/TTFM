@@ -57,8 +57,7 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -79,12 +78,8 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
     ];
 
     for (query, expected) in cases {
-        let results = search::search(
-            &store,
-            &registry,
-            query,
-            Default::default(),
-        )?;
+        let results =
+            search::search(&store, &registry, query, Default::default())?;
         assert_eq!(
             results.results.len(),
             expected,

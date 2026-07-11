@@ -175,6 +175,7 @@ impl SearchResponse {
             let mut keys = BTreeSet::new();
 
             // 固定メタデータ
+            keys.insert(TagType::from(SType::Origin));
             if res.intrinsic.size.is_some() {
                 keys.insert(TagType::from(SType::Size));
             }
@@ -311,15 +312,15 @@ impl SearchResponse {
                         query_tag_type.clone(),
                         LabelValue::String(query_str.clone()),
                     ),
-                    Origin::System,
+                    Origin::Builtin,
                 );
             }
         }
     }
 
     /// 結果が Projection (ラベルグループ) 形式かどうかを判定します。
-    /// projection の `item:` タグ（メンバー一覧）は検索 SQL が System origin で生成するため、
-    /// System origin の `item:` のみを判定対象とする。保存 note 由来やユーザー命名の `item:`
+    /// projection の `item:` タグ（メンバー一覧）は検索 SQL が Builtin origin で生成するため、
+    /// Builtin origin の `item:` のみを判定対象とする。保存 note 由来やユーザー命名の `item:`
     /// タグ（User origin）では誤発火しない。
     pub fn has_projection_results(&self) -> bool {
         use crate::types::Origin;
@@ -328,7 +329,7 @@ impl SearchResponse {
             .map(|r| {
                 r.tags.entries.iter().any(|e| {
                     e.label.tag_type().as_str() == "item"
-                        && matches!(e.origin, Origin::System)
+                        && matches!(e.origin, Origin::Builtin)
                 })
             })
             .unwrap_or(false)
@@ -389,11 +390,9 @@ impl Item {
     pub fn apply_raw_tag(&mut self, row: RawTagRow) {
         use crate::types::{Label, LabelValue, Origin, TagType};
 
-        let origin = if row.origin == "system" {
-            Origin::System
-        } else {
-            Origin::User
-        };
+        // oneview の origin 列は常に小分類 (builtin/user/file/plugin) の妥当な文字列。
+        // 想定外の値は安全側 (非User) の Builtin にフォールバックする。
+        let origin = row.origin.parse::<Origin>().unwrap_or(Origin::Builtin);
         let label_val = LabelValue::from(row.value);
         let label = Label::resolve(TagType::from(row.tag_type), label_val);
         self.apply_tag(label, origin);
@@ -413,15 +412,39 @@ impl Item {
             .or_else(|| self.get_tag_value("filename"))
     }
 
-    /// アイテム全体の集約された由来を取得します。
-    /// 一つでもユーザー付与のタグがあれば Origin::User を返します。
+    /// アイテム自身の由来 (Origin, 小分類) を解決します。
+    /// 1. tags 内に origin タグ（oneview 属性）があればそれを使用
+    /// 2. なければ ItemID から判定（Stored は区画、Settling は保持値）
+    /// 3. なければ、簡易判定（代表名がビルトイン型名かどうか）
     pub fn origin(&self) -> Origin {
-        self.tags
+        if let Some(e) = self
+            .tags
             .entries
             .iter()
-            .any(|e| matches!(e.origin, Origin::User))
-            .then(|| Origin::User)
-            .unwrap_or(Origin::System)
+            .find(|e| e.label.tag_type() == TagType::Base(SType::Origin))
+        {
+            if let Ok(o) = e.label.as_str().parse::<Origin>() {
+                return o;
+            }
+        }
+
+        match self.id {
+            ItemId::Stored(id) => return Origin::within(id),
+            ItemId::Settling(origin, _) => return origin,
+            ItemId::Volatile(_) => {}
+        }
+
+        let name_repr = self.primary_value().unwrap_or_default();
+        if <SType as std::str::FromStr>::from_str(&name_repr).is_ok() {
+            Origin::Builtin
+        } else {
+            Origin::User
+        }
+    }
+
+    /// アイテム全体の大分類 (LargeOrigin) を取得します。`origin()` の収束値です。
+    pub fn large_origin(&self) -> crate::types::LargeOrigin {
+        self.origin().large()
     }
 
     /// 指定されたキーのタグ値を文字列として取得します。
@@ -482,7 +505,10 @@ impl Item {
                 return self.representative.clone();
             }
             TagType::Base(SType::Origin) => {
-                return vec![Label::from(self.origin().to_string())];
+                return vec![Label::resolve(
+                    TagType::Base(SType::Origin),
+                    LabelValue::String(self.origin().to_string()),
+                )];
             }
             // 仮想ラベル: type: (タグの型一覧)
             TagType::Base(SType::Type) => {
@@ -590,7 +616,7 @@ mod tests {
         let mut tags = Tags::new();
         tags.push(
             Label::resolve(TagType::from("extension"), "rs".into()),
-            Origin::System,
+            Origin::Builtin,
         );
         tags.push(
             Label::resolve(TagType::from("project"), "A".into()),
@@ -700,7 +726,7 @@ mod tests {
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_with_value.tags.push(
             Label::Other(TagType::Base(SType::Value), LabelValue::Integer(42)),
-            Origin::System,
+            Origin::Builtin,
         );
 
         let item_without_value =
@@ -726,10 +752,11 @@ mod tests {
         );
     }
 
-    // projection 表示判定は System origin の item タグのみで発火する。
-    // 保存 note 由来（User origin）やユーザー命名の item: タグでは発火しない。
+    // 本物の Projection 結果かどうかは、item タグが Builtin origin かどうかで見分ける
+    // （検索 SQL が合成したものだけが Builtin origin になるため）。保存 note 由来や
+    // ユーザー命名の item: タグ（User origin）を誤って本物と判定しないことを確認する。
     #[test]
-    fn has_projection_results_only_for_system_item_tag() {
+    fn has_projection_results_detects_genuine_projection_via_builtin_origin() {
         use crate::types::{ItemKind, LabelValue, Origin, TagType};
 
         let item_tag = |origin| {
@@ -744,19 +771,112 @@ mod tests {
             it
         };
 
-        let sys = SearchResponse {
-            results: vec![item_tag(Origin::System)],
+        let genuine = SearchResponse {
+            results: vec![item_tag(Origin::Builtin)],
             ..Default::default()
         };
-        assert!(sys.has_projection_results(), "System item tag → projection");
+        assert!(
+            genuine.has_projection_results(),
+            "Builtin origin の item タグは本物の Projection 結果と判定されるべき"
+        );
 
-        let usr = SearchResponse {
+        let not_genuine = SearchResponse {
             results: vec![item_tag(Origin::User)],
             ..Default::default()
         };
         assert!(
-            !usr.has_projection_results(),
-            "User item tag → not projection"
+            !not_genuine.has_projection_results(),
+            "User origin の item タグは本物の Projection 結果ではないと判定されるべき"
         );
+    }
+
+    #[test]
+    fn test_item_get_all_labels_origin() {
+        use crate::types::{LabelValue, Origin, SType, TagType};
+
+        // 1. tags の中に origin タグがある場合
+        let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
+        item.tags.push(
+            Label::Other(
+                TagType::Base(SType::Origin),
+                LabelValue::String("plugin".to_string()),
+            ),
+            Origin::Plugin,
+        );
+        let labels = item.get_all_labels(&TagType::Base(SType::Origin));
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].as_str(), "plugin");
+
+        // 2. tags になく、id が Stored の場合（区画から解決）
+        let item_stored = Item::new_empty(ItemId::Stored(-10), ItemKind::File); // Builtin 区画
+        let labels = item_stored.get_all_labels(&TagType::Base(SType::Origin));
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].as_str(), "builtin");
+
+        // 3. tags になく、id が Settling の場合（Settlingの保持値を使用）
+        let item_settling =
+            Item::new_empty(ItemId::Settling(Origin::File, 0), ItemKind::File);
+        let labels =
+            item_settling.get_all_labels(&TagType::Base(SType::Origin));
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].as_str(), "file");
+
+        // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
+        let mut item_fallback =
+            Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
+        item_fallback.representative = vec![Label::Name("size".to_string())];
+        let labels =
+            item_fallback.get_all_labels(&TagType::Base(SType::Origin));
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].as_str(), "builtin");
+    }
+
+    #[test]
+    fn test_item_origin() {
+        use crate::types::{LabelValue, Origin, SType, TagType};
+
+        // 1. tags の中に origin タグがある場合
+        let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
+        item.tags.push(
+            Label::Other(
+                TagType::Base(SType::Origin),
+                LabelValue::String("plugin".to_string()),
+            ),
+            Origin::Plugin,
+        );
+        assert_eq!(item.origin(), Origin::Plugin);
+
+        // 2. tags になく、id が Stored の場合（区画から解決）
+        let item_stored = Item::new_empty(ItemId::Stored(-10), ItemKind::File); // Builtin 区画
+        assert_eq!(item_stored.origin(), Origin::Builtin);
+
+        // 3. tags になく、id が Settling の場合（Settlingの保持値を使用）
+        let item_settling =
+            Item::new_empty(ItemId::Settling(Origin::File, 0), ItemKind::File);
+        assert_eq!(item_settling.origin(), Origin::File);
+
+        // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
+        let mut item_fallback =
+            Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
+        item_fallback.representative = vec![Label::Name("size".to_string())];
+        assert_eq!(item_fallback.origin(), Origin::Builtin);
+
+        let mut item_fallback_user =
+            Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
+        item_fallback_user.representative =
+            vec![Label::Name("my_custom_type".to_string())];
+        assert_eq!(item_fallback_user.origin(), Origin::User);
+    }
+
+    #[test]
+    fn test_item_large_origin() {
+        use crate::types::{LargeOrigin, Origin};
+
+        let item_user = Item::new_empty(ItemId::Stored(1), ItemKind::File); // User 区画
+        assert_eq!(item_user.large_origin(), LargeOrigin::User);
+
+        let item_plugin =
+            Item::new_empty(ItemId::Settling(Origin::Plugin, 0), ItemKind::File);
+        assert_eq!(item_plugin.large_origin(), LargeOrigin::System);
     }
 }

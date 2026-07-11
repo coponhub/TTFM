@@ -148,7 +148,7 @@ impl CustomFunc {
 
     /// ID割り当て用のウィンドウ関数式を生成します。
     /// start_id を先頭（最初の行）として昇順に採番します
-    /// （System 区画内で start_id, start_id+1, ... と積み上げる）。
+    /// （Builtin 区画内で start_id, start_id+1, ... と積み上げる）。
     pub fn assign_id_window(start_id: i64) -> sea_query::SimpleExpr {
         sea_query::Expr::cust_with_exprs(
             "$1 + (row_number() OVER (ORDER BY rank DESC, content ASC) - 1)",
@@ -168,10 +168,10 @@ impl CustomFunc {
         use crate::types::Origin;
         use strum::IntoEnumIterator;
         let mut origins: Vec<(i64, Origin)> =
-            Origin::iter().map(|o| (o.space_lo(), o)).collect();
+            Origin::iter().map(|o| (o.block_lo(), o)).collect();
         origins.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let mut sql = String::from("CASE");
+        let mut sql = format!("CASE WHEN {item_id_expr} IS NULL THEN NULL");
         for (i, &(lo, origin)) in origins.iter().enumerate() {
             let val = value_for(origin);
             if i < origins.len() - 1 {
@@ -187,13 +187,13 @@ impl CustomFunc {
 
     pub fn item_id_display(item_id_expr: &str) -> String {
         Self::item_id_case_expr(item_id_expr, |o| {
-            let lo = o.space_lo();
+            let lo = o.block_lo();
             let label = o.short();
             format!("CONCAT('{label}(', CAST({item_id_expr} - ({lo}) AS VARCHAR), ')')")
         })
     }
 
-    /// item_id から Origin 名（"system" / "user" / "file"）を返す SQL 式。
+    /// item_id から Origin 名（"builtin" / "user" / "file" / "plugin"）を返す SQL 式。
     pub fn item_id_origin(item_id_expr: &str) -> String {
         Self::item_id_case_expr(item_id_expr, |o| format!("'{o}'"))
     }

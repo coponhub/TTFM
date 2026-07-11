@@ -50,7 +50,7 @@ pub mod search;
 pub use search::SearchOptions;
 pub mod edit;
 pub mod tagging;
-pub use rank::{get_type_ranks, set_rank_by_id, update_ranks};
+pub use rank::{get_type_ranks, set_rank_by_id};
 pub use tagging::{add_item, get_or_create_item, tag_item};
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。

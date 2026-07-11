@@ -36,6 +36,7 @@ impl<'a> Fetcher<'a> {
     /// クエリの種別を ResolvedNode の構造から判断し、適切な結果を返す単一エントリポイント。
     ///
     /// `n` は要求件数（0 = 全件）。内部で n+1 件取得して has_more 判定を呼び出し側に委ねる。
+    /// 並び順は resolver が保持する（Resolver::with_order。未設定なら既定）。
     pub fn fetch(&self, n: usize, offset: usize) -> Result<Vec<Item>> {
         self.fetch_from(&Src::OneView, n, offset)
     }
@@ -190,8 +191,29 @@ impl<'a> Fetcher<'a> {
             res.representative = representative;
         }
 
+        // 揮発アイテムに origin タグが付与されていれば、区画（Origin）だけ
+        // 確定した Settling へ変換する（`res.get_tag_value("origin")` は
+        // SType::Origin 用の集約フォールバックに吸われてしまうため使えず、
+        // 生の raw_tags を直接見る）。
+        if res.id.is_volatile() {
+            if let Some(origin) = raw_tags
+                .iter()
+                .find(|t| t.tag_type == "origin")
+                .and_then(|t| match LabelValue::from(t.value.clone()) {
+                    LabelValue::String(s) => {
+                        s.parse::<crate::types::Origin>().ok()
+                    }
+                    _ => None,
+                })
+            {
+                res.id = res.id.settle(origin);
+            }
+        }
+
         for tag_row in raw_tags {
             match tag_row.tag_type.as_str() {
+                // settle() 済みで役目を終えた内部信号。res.tags には出さない。
+                "origin" => {}
                 "item_count" => {
                     let lv = LabelValue::from(tag_row.value);
                     if !matches!(lv, LabelValue::Null) {
@@ -223,6 +245,7 @@ impl<'a> Fetcher<'a> {
                 }
             }
         }
+
         Ok(res)
     }
 }
@@ -234,16 +257,17 @@ fn read_base_from_row(
     use duckdb::types::Value;
 
     let item_kind: String = row.get(SType::ItemKind.name().as_str())?;
-    let id_val: i64 = row.get(SType::ItemId.name().as_str())?;
+    let id_val: Option<i64> = row.get(SType::ItemId.name().as_str())?;
 
     let kind = item_kind
         .as_str()
         .parse::<ItemKind>()
         .unwrap_or(ItemKind::Volatile);
-    let id = if kind.is_volatile() {
-        ItemId::Volatile(id_val as u64)
-    } else {
-        ItemId::Stored(id_val)
+    // 揮発行の item_id は SQL 側では常に NULL（UNION の型合わせのみ）で、
+    // 真の一意な揮発 id はここで採番する（NULL ⇔ 揮発行）。
+    let id = match id_val {
+        Some(v) => ItemId::Stored(v),
+        None => ItemId::new_volatile(),
     };
 
     let mut res = crate::response::Item::new_empty(id, kind);

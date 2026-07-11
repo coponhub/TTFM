@@ -69,8 +69,8 @@ define_cases! {
         assert: |res, _dir| {
             assert_eq!(res.results[0].raw_repr(), "NULL", "sum of unknown tag + 1 should be NULL");
             assert!(
-                res.results[0].get_all_values("type").contains(&"numeric".to_string()),
-                "type should be 'numeric' for NULL aggregation result"
+                res.results[0].get_all_values("bitical_type").contains(&"numeric".to_string()),
+                "bitical_type should be 'numeric' for NULL aggregation result"
             );
             Ok(())
         },

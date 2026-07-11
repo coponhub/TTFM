@@ -13,22 +13,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{
-    identifier, Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl,
-};
+use crate::db::{Col, Store, TargetTable, Tbl};
+// use crate::db::{identifier, DuckDbFunc, Pronoun::*};
 use crate::indexing::ScanEntry;
 use crate::tag::TagRegistry;
 use crate::taggers::{ColumnDef, TagValue};
-use crate::types::{ItemId, Origin};
-use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
+use crate::types::ItemId;
+// use crate::types::Origin;
+use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+// use crate::util::ParquetExt;
 use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rustc_hash::FxHashMap;
-use sea_query::{Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
+use sea_query::{Expr, PostgresQueryBuilder, Query, Table};
+// use sea_query::{ExprTrait, Func};
 use std::path::Path;
 
 use super::diff;
-use super::merge::{self, MergeQueryParts};
+use super::merge;
+// use super::merge::MergeQueryParts;
 use super::scan;
 use super::triage;
 
@@ -119,7 +122,8 @@ impl<'a> Indexer<'a> {
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            |data| self.update_system_items(data),
+            // |data| self.update_system_items(data),
+            |_data| Ok(()),
         )?;
 
         Ok(count)
@@ -187,7 +191,7 @@ impl<'a> Indexer<'a> {
         )?;
 
         self.ensure_data_types()?;
-        self.update_system_items(None)?;
+        // self.update_system_items(None)?;
         Ok(())
     }
 
@@ -277,163 +281,163 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-    /// システム定義アイテム（拡張子、タグ型など）をデータベースに登録・更新します。
-    pub fn update_system_items(
-        &self,
-        data_candidates: Option<sea_query::SelectStatement>,
-    ) -> Result<()> {
-        let items_path =
-            self.store.path_for_target(TargetTable::ItemReferences);
-        let system_tags_path =
-            self.store.path_for_target(TargetTable::SystemTags);
-        let items_str = items_path.to_string_lossy();
-
-        let mut all_candidates =
-            MergeQueryParts::registry_variants(self.registry);
-        if let Some(data) = data_candidates {
-            all_candidates.union(sea_query::UnionType::Distinct, data);
-        }
-
-        MergeQueryParts::filter_new(all_candidates, &items_str)
-            .create_temp_table_as(&self.store.conn, Tbl::Item)?;
-
-        if self.count_table(Tbl::Item)? == 0 {
-            Tbl::Item.drop_table(&self.store.conn)?;
-            return Ok(());
-        }
-
-        let start_id = identifier::next(&self.store, Origin::System, 1)?[0];
-        let tmp_items = items_path.with_extension("parquet.tmp");
-        let tmp_stags = system_tags_path.with_extension("parquet.tmp");
-
-        MergeQueryParts::assign_ids(start_id)
-            .create_temp_table_as(&self.store.conn, Tbl::IdItem)?;
-
-        // query_union.union(sea_query::UnionType::All, ...);
-
-        let mut lhs = Query::select();
-        lhs.columns(Col::item_references_columns()).from_function(
-            Func::cust(DuckDbFunc::ReadParquet)
-                .arg(Expr::val(items_str.to_string())),
-            Diff,
-        );
-
-        let mut query_union = lhs;
-        query_union.union(
-            sea_query::UnionType::All,
-            Query::select()
-                .columns(Col::item_references_columns())
-                .from(Tbl::IdItem)
-                .to_owned(),
-        );
-        query_union.order_by(Col::ItemId, sea_query::Order::Asc);
-        query_union.save_parquet(&self.store.conn, &tmp_items)?;
-        // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
-        let p1 = Query::select()
-            .column(sea_query::Asterisk)
-            .from_subquery(
-                crate::util::parquet_query(&system_tags_path.to_string_lossy()),
-                Tbl::SystemTags,
-            )
-            .to_owned();
-
-        // 共通のメタデータタグ (kind)
-        let p2 = Query::select()
-            .column(Col::ItemId)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                Expr::case(
-                    Expr::col(Col::ItemKind).eq("tag"),
-                    Expr::col(Col::Type),
-                )
-                .finally(Expr::col(Col::ItemKind))
-                .cast_as(crate::db::SqlType::VARCHAR),
-                Col::LabelStr,
-            )
-            .from(Tbl::IdItem)
-            .to_owned();
-
-        // 型付きタグのラベル部分
-        let p3 = Query::select()
-            .column(Col::ItemId)
-            .expr_as(Expr::val("label"), Col::Type)
-            .expr_as(
-                Expr::col(Col::Label).cast_as(crate::db::SqlType::VARCHAR),
-                Col::LabelStr,
-            )
-            .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("tag"))
-            .to_owned();
-
-        let ordered_sql = Self::build_ordered_system_tags_sql(
-            &p1.to_string(PostgresQueryBuilder),
-            &p2.to_string(PostgresQueryBuilder),
-            &p3.to_string(PostgresQueryBuilder),
-        );
-
-        self.store.conn.execute(
-            &format!(
-                "COPY ({}) TO '{}' (FORMAT PARQUET)",
-                ordered_sql,
-                tmp_stags.to_string_lossy()
-            ),
-            [],
-        )?;
-
-        self.finalize_updates(
-            &items_path,
-            &system_tags_path,
-            &tmp_items,
-            &tmp_stags,
-        )
-    }
-
-    // --- Shared Helpers ---
-
-    /// テーブルのレコード数を取得します（共有ロジック）。
-    pub(crate) fn count_table(
-        &self,
-        table: impl sea_query::Iden + Clone + 'static,
-    ) -> Result<i64> {
-        let sql = Query::select()
-            .expr(Expr::cust("COUNT(*)"))
-            .from(table)
-            .to_string(PostgresQueryBuilder);
-        self.store
-            .conn
-            .query_row(&sql, [], |r| r.get(0))
-            .map_err(Into::into)
-    }
-
-    fn finalize_updates(
-        &self,
-        items_path: &Path,
-        stags_path: &Path,
-        tmp_items: &Path,
-        tmp_stags: &Path,
-    ) -> Result<()> {
-        std::fs::rename(tmp_items, items_path)?;
-        std::fs::rename(tmp_stags, stags_path)?;
-        Tbl::Item.drop_table(&self.store.conn)?;
-        Tbl::IdItem.drop_table(&self.store.conn)?;
-        Ok(())
-    }
-
-    /// システムタグ更新用のソート済みUNIONクエリを構築します。
-    fn build_ordered_system_tags_sql(
-        p1_sql: &str,
-        p2_sql: &str,
-        p3_sql: &str,
-    ) -> String {
-        let union_sql = format!(
-            "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
-            p1_sql, p2_sql, p3_sql
-        );
-        format!(
-            "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
-            union_sql
-        )
-    }
+    //     /// システム定義アイテム（拡張子、タグ型など）をデータベースに登録・更新します。
+    //     pub fn update_system_items(
+    //         &self,
+    //         data_candidates: Option<sea_query::SelectStatement>,
+    //     ) -> Result<()> {
+    //         let items_path =
+    //             self.store.path_for_target(TargetTable::ItemReferences);
+    //         let system_tags_path =
+    //             self.store.path_for_target(TargetTable::SystemTags);
+    //         let items_str = items_path.to_string_lossy();
+    //
+    //         let mut all_candidates =
+    //             MergeQueryParts::registry_variants(self.registry);
+    //         if let Some(data) = data_candidates {
+    //             all_candidates.union(sea_query::UnionType::Distinct, data);
+    //         }
+    //
+    //         MergeQueryParts::filter_new(all_candidates, &items_str)
+    //             .create_temp_table_as(&self.store.conn, Tbl::Item)?;
+    //
+    //         if self.count_table(Tbl::Item)? == 0 {
+    //             Tbl::Item.drop_table(&self.store.conn)?;
+    //             return Ok(());
+    //         }
+    //
+    //         let start_id = identifier::next(&self.store, Origin::Builtin, 1)?[0];
+    //         let tmp_items = items_path.with_extension("parquet.tmp");
+    //         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
+    //
+    //         MergeQueryParts::assign_ids(start_id)
+    //             .create_temp_table_as(&self.store.conn, Tbl::IdItem)?;
+    //
+    //         // query_union.union(sea_query::UnionType::All, ...);
+    //
+    //         let mut lhs = Query::select();
+    //         lhs.columns(Col::item_references_columns()).from_function(
+    //             Func::cust(DuckDbFunc::ReadParquet)
+    //                 .arg(Expr::val(items_str.to_string())),
+    //             Diff,
+    //         );
+    //
+    //         let mut query_union = lhs;
+    //         query_union.union(
+    //             sea_query::UnionType::All,
+    //             Query::select()
+    //                 .columns(Col::item_references_columns())
+    //                 .from(Tbl::IdItem)
+    //                 .to_owned(),
+    //         );
+    //         query_union.order_by(Col::ItemId, sea_query::Order::Asc);
+    //         query_union.save_parquet(&self.store.conn, &tmp_items)?;
+    //         // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
+    //         let p1 = Query::select()
+    //             .column(sea_query::Asterisk)
+    //             .from_subquery(
+    //                 crate::util::parquet_query(&system_tags_path.to_string_lossy()),
+    //                 Tbl::SystemTags,
+    //             )
+    //             .to_owned();
+    //
+    //         // 共通のメタデータタグ (kind)
+    //         let p2 = Query::select()
+    //             .column(Col::ItemId)
+    //             .expr_as(Expr::val("type"), Col::Type)
+    //             .expr_as(
+    //                 Expr::case(
+    //                     Expr::col(Col::ItemKind).eq("tag"),
+    //                     Expr::col(Col::Type),
+    //                 )
+    //                 .finally(Expr::col(Col::ItemKind))
+    //                 .cast_as(crate::db::SqlType::VARCHAR),
+    //                 Col::LabelStr,
+    //             )
+    //             .from(Tbl::IdItem)
+    //             .to_owned();
+    //
+    //         // 型付きタグのラベル部分
+    //         let p3 = Query::select()
+    //             .column(Col::ItemId)
+    //             .expr_as(Expr::val("label"), Col::Type)
+    //             .expr_as(
+    //                 Expr::col(Col::Label).cast_as(crate::db::SqlType::VARCHAR),
+    //                 Col::LabelStr,
+    //             )
+    //             .from(Tbl::IdItem)
+    //             .and_where(Expr::col(Col::ItemKind).eq("tag"))
+    //             .to_owned();
+    //
+    //         let ordered_sql = Self::build_ordered_system_tags_sql(
+    //             &p1.to_string(PostgresQueryBuilder),
+    //             &p2.to_string(PostgresQueryBuilder),
+    //             &p3.to_string(PostgresQueryBuilder),
+    //         );
+    //
+    //         self.store.conn.execute(
+    //             &format!(
+    //                 "COPY ({}) TO '{}' (FORMAT PARQUET)",
+    //                 ordered_sql,
+    //                 tmp_stags.to_string_lossy()
+    //             ),
+    //             [],
+    //         )?;
+    //
+    //         self.finalize_updates(
+    //             &items_path,
+    //             &system_tags_path,
+    //             &tmp_items,
+    //             &tmp_stags,
+    //         )
+    //     }
+    //
+    //     // --- Shared Helpers ---
+    //
+    //     /// テーブルのレコード数を取得します（共有ロジック）。
+    //     pub(crate) fn count_table(
+    //         &self,
+    //         table: impl sea_query::Iden + Clone + 'static,
+    //     ) -> Result<i64> {
+    //         let sql = Query::select()
+    //             .expr(Expr::cust("COUNT(*)"))
+    //             .from(table)
+    //             .to_string(PostgresQueryBuilder);
+    //         self.store
+    //             .conn
+    //             .query_row(&sql, [], |r| r.get(0))
+    //             .map_err(Into::into)
+    //     }
+    //
+    //     fn finalize_updates(
+    //         &self,
+    //         items_path: &Path,
+    //         stags_path: &Path,
+    //         tmp_items: &Path,
+    //         tmp_stags: &Path,
+    //     ) -> Result<()> {
+    //         std::fs::rename(tmp_items, items_path)?;
+    //         std::fs::rename(tmp_stags, stags_path)?;
+    //         Tbl::Item.drop_table(&self.store.conn)?;
+    //         Tbl::IdItem.drop_table(&self.store.conn)?;
+    //         Ok(())
+    //     }
+    //
+    //     /// システムタグ更新用のソート済みUNIONクエリを構築します。
+    //     fn build_ordered_system_tags_sql(
+    //         p1_sql: &str,
+    //         p2_sql: &str,
+    //         p3_sql: &str,
+    //     ) -> String {
+    //         let union_sql = format!(
+    //             "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
+    //             p1_sql, p2_sql, p3_sql
+    //         );
+    //         format!(
+    //             "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
+    //             union_sql
+    //         )
+    //     }
 }
 
 /// スキャン時の高速フィルタリングに使用するメタデータハッシュ。
@@ -625,24 +629,24 @@ mod tests {
         assert!(db_dir.join("file_references.parquet").exists());
     }
 
-    #[test]
-    fn test_build_ordered_system_tags_sql() {
-        let sql = Indexer::build_ordered_system_tags_sql(
-            "SELECT * FROM system_tags",
-            "SELECT * FROM p2",
-            "SELECT * FROM p3",
-        );
-        assert!(
-            sql.contains("UNION ALL BY NAME"),
-            "Should contain UNION ALL BY NAME"
-        );
-        assert!(
-            sql.contains(
-                "ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"
-            ),
-            "Should contain correct ORDER BY clause"
-        );
-        assert!(sql.starts_with("SELECT * FROM ("));
-        assert!(sql.ends_with("ASC"));
-    }
+    // #[test]
+    // fn test_build_ordered_system_tags_sql() {
+    //     let sql = Indexer::build_ordered_system_tags_sql(
+    //         "SELECT * FROM system_tags",
+    //         "SELECT * FROM p2",
+    //         "SELECT * FROM p3",
+    //     );
+    //     assert!(
+    //         sql.contains("UNION ALL BY NAME"),
+    //         "Should contain UNION ALL BY NAME"
+    //     );
+    //     assert!(
+    //         sql.contains(
+    //             "ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"
+    //         ),
+    //         "Should contain correct ORDER BY clause"
+    //     );
+    //     assert!(sql.starts_with("SELECT * FROM ("));
+    //     assert!(sql.ends_with("ASC"));
+    // }
 }

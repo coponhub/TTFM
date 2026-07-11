@@ -79,8 +79,8 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     assert_eq!(results.results.len(), 1);
     let item = &results.results[0];
     assert!(
-        item.id.is_volatile(),
-        "tag def should be Volatile before registration"
+        !item.id.is_stored(),
+        "tag def should not be Stored before registration"
     );
     assert_eq!(
         item.representative.first().map(|l| l.tag_type()),
@@ -165,7 +165,7 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
         SearchOptions::default(),
     )?;
     let item = &results.results[0];
-    assert!(item.id.is_volatile());
+    assert!(!item.id.is_stored());
 
     // None → 登録 Add のみ生成
     let actions = modify(item, None, QueryType::Tag, &registry)?;
@@ -214,8 +214,8 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
     )?;
     assert_eq!(r.results.len(), 1);
     assert!(
-        r.results[0].id.is_volatile(),
-        "unregistered tag def must be Volatile"
+        !r.results[0].id.is_stored(),
+        "unregistered tag def must not be Stored"
     );
     assert_eq!(
         r.results[0].representative.first().map(|l| l.tag_type()),
@@ -294,8 +294,8 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
         SearchOptions::default(),
     )?;
     assert!(
-        r.results[0].id.is_volatile(),
-        "tag def is Volatile before §5.7 registration"
+        !r.results[0].id.is_stored(),
+        "tag def is not Stored before §5.7 registration"
     );
 
     // EditQuery なし（None）で登録のみ
@@ -348,8 +348,8 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
     )?;
     let item = &r.results[0];
     assert!(
-        item.id.is_volatile(),
-        "tag def must be Volatile before registration"
+        !item.id.is_stored(),
+        "tag def must not be Stored before registration"
     );
     let actions = modify(item, Some("rank:77"), QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;

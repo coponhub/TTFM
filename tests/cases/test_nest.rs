@@ -1253,20 +1253,11 @@ define_cases! {
             std::fs::write(dir2.join("c.rs"), "abcde")?; // size: 5
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            let file_path = dir.join("dir1").join("a.rs");
-            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "width:10")?;
-            tagging::tag_item(store, registry, &file_path.to_string_lossy(), "height:20")?;
-
-            let file_path2 = dir.join("dir2").join("b.rs");
-            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "width:15")?;
-            tagging::tag_item(store, registry, &file_path2.to_string_lossy(), "height:30")?;
-
-            let file_path3 = dir.join("dir2").join("c.rs");
-            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "width:5")?;
-            tagging::tag_item(store, registry, &file_path3.to_string_lossy(), "height:6")?;
-            Ok(())
-        }),
+        tags: &[
+            ("dir1/a.rs", "width:10 height:20"),
+            ("dir2/b.rs", "width:15 height:30"),
+            ("dir2/c.rs", "width:5 height:6"),
+        ],
         format_query: default_scope,
         query: "parentdir: &: (width: * height:)",
         assert: |res, _dir| {
@@ -1298,13 +1289,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:three")?;
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:one"),
+            ("b.txt", "cat:two"),
+            ("c.txt", "flavor:three"),
+        ],
         format_query: default_scope,
         query: "cat: & flavor:",
         assert: |res, _dir| {
@@ -1343,13 +1332,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagX:alpha")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagY:beta")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagX:alpha")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagY:beta")?;
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagX:alpha"),
+            ("b.txt", "tagY:beta"),
+            ("c.txt", "tagX:alpha tagY:beta"),
+        ],
         format_query: default_scope,
         query: "tagX: | tagY:",
         assert: |res, _dir| {
@@ -1384,13 +1371,12 @@ define_cases! {
             std::fs::write(dir.join("also_apple.txt"), "d")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("apple.txt").to_string_lossy(), "fruit:apple")?;
-            tagging::tag_item(store, registry, &dir.join("banana.txt").to_string_lossy(), "fruit:banana")?;
-            tagging::tag_item(store, registry, &dir.join("cherry.txt").to_string_lossy(), "fruit:cherry")?;
-            tagging::tag_item(store, registry, &dir.join("also_apple.txt").to_string_lossy(), "veggie:apple")?;
-            Ok(())
-        }),
+        tags: &[
+            ("apple.txt", "fruit:apple"),
+            ("banana.txt", "fruit:banana"),
+            ("cherry.txt", "fruit:cherry"),
+            ("also_apple.txt", "veggie:apple"),
+        ],
         format_query: default_scope,
         query: "fruit: -: veggie:",
         assert: |res, _dir| {
@@ -1423,12 +1409,10 @@ define_cases! {
             std::fs::write(dir_b.join("file2.txt"), "content")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("dir_a").join("file1.txt").to_string_lossy(), "tagB:y")?;
-            tagging::tag_item(store, registry, &dir.join("dir_b").join("file2.txt").to_string_lossy(), "tagA:p")?;
-            Ok(())
-        }),
+        tags: &[
+            ("dir_a/file1.txt", "tagA:x tagB:y"),
+            ("dir_b/file2.txt", "tagA:p"),
+        ],
         format_query: default_scope,
         query: "parentdir: &: (tagA: | tagB:)",
         assert: |res, dir| {
@@ -1498,12 +1482,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:one")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:one"),
+            ("b.txt", "cat:two"),
+        ],
         format_query: default_scope,
         query: "cat: & flavor:",
         assert: |res, _dir| {
@@ -1608,16 +1590,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:one")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:one")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:two")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "grade:A")?;
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:one tagB:one grade:A"),
+            ("b.txt", "tagA:one tagB:one"),
+            ("c.txt", "tagA:two grade:A"),
+        ],
         format_query: default_scope,
         query: "(tagA: & tagB:) & grade:A",
         assert: |res, _dir| {
@@ -1685,16 +1662,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "grade:A")?;
-            // a.txt: grade:A あり → Nest 結果に残る
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
-            // b.txt: grade:A なし → 除外される
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:sweet grade:A"), // grade:A あり → Nest 結果に残る
+            ("b.txt", "cat:two flavor:bitter"),        // grade:A なし → 除外される
+        ],
         format_query: default_scope,
         query: "(cat: &: flavor:) & grade:A",
         assert: |res, _dir| {
@@ -1724,15 +1695,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            // a.txt: cat/flavor のみ
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
-            // b.txt: grade:A のみ
+        tags: &[
+            ("a.txt", "cat:one flavor:sweet"), // cat/flavor のみ
+            ("b.txt", "grade:A"),              // grade:A のみ
             // c.txt: タグなし → どちらにも属さない
-            Ok(())
-        }),
+        ],
         format_query: default_scope,
         query: "(cat: &: flavor:) | grade:A",
         assert: |res, _dir| {
@@ -1763,19 +1730,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            // a.txt: grade:A なし → 除外されない
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:sour")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
-            // b.txt: grade:A あり → 除外される
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
-            // c.txt: grade:A なし → 除外されない
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:sweet"),         // grade:A なし → 除外されない
+            ("b.txt", "cat:one flavor:sour grade:A"),  // grade:A あり → 除外される
+            ("c.txt", "cat:two flavor:bitter"),        // grade:A なし → 除外されない
+        ],
         format_query: default_scope,
         query: "(cat: &: flavor:) - grade:A",
         assert: |res, _dir| {
@@ -1810,14 +1769,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            // a.txt: tagA: & Nest 両方に属す
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
-            // b.txt: tagA: のみ（tagB: なし）→ Nest に非存在 → 除外
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1"), // tagA: & Nest 両方に属す
+            ("b.txt", "tagA:y"),        // tagA: のみ（tagB: なし）→ Nest に非存在 → 除外
+        ],
         format_query: default_scope,
         query: "tagA: & (tagA: &: tagB:)",
         assert: |res, _dir| {
@@ -1844,19 +1799,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            // a.txt: 両 Nest に存在 → 積集合に残る
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            // b.txt: tagC なし → 第2 Nest に非存在 → 除外
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
-            // c.txt: tagB なし → 第1 Nest に非存在 → 除外
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1 tagC:red"), // 両 Nest に存在 → 積集合に残る
+            ("b.txt", "tagA:x tagB:2"),          // tagC なし → 第2 Nest に非存在 → 除外
+            ("c.txt", "tagA:y tagC:blue"),       // tagB なし → 第1 Nest に非存在 → 除外
+        ],
         format_query: default_scope,
         query: "(tagA: &: tagB:) & (tagA: &: tagC:)",
         assert: |res, _dir| {
@@ -1893,21 +1840,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
-            // a.txt: 両 Nest に存在 → 積集合に残る
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            // b.txt: tagC/tagD なし → 第2 Nest に非存在 → 除外
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
-            // c.txt: tagB なし → 第1 Nest に非存在 → 除外
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1 tagC:red tagD:alpha"), // 両 Nest に存在 → 積集合に残る
+            ("b.txt", "tagA:x tagB:2"),                     // tagC/tagD なし → 第2 Nest に非存在 → 除外
+            ("c.txt", "tagA:y tagC:blue tagD:beta"),        // tagB なし → 第1 Nest に非存在 → 除外
+        ],
         format_query: default_scope,
         query: "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
         assert: |res, _dir| {
@@ -1996,14 +1933,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            // a.txt: tagA のみ（tagB なし）→ tagA: に存在するが Nest には非存在
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:1")?;
-            // b.txt: tagA + tagB → 両方に存在
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x"),        // tagA のみ（tagB なし）→ tagA: に存在するが Nest には非存在
+            ("b.txt", "tagA:y tagB:1"), // tagA + tagB → 両方に存在
+        ],
         format_query: default_scope,
         query: "tagA: | (tagA: &: tagB:)",
         assert: |res, _dir| {
@@ -2034,20 +1967,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            // a.txt: 第1 Nest のみ
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "shape:round")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "color:red")?;
-            // b.txt: 第2 Nest のみ
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "cat:two")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "flavor:bitter")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "shape:square")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "color:blue")?;
-            // c.txt: 両 Nest に存在
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:sweet"),                        // 第1 Nest のみ
+            ("b.txt", "shape:round color:red"),                       // 第2 Nest のみ
+            ("c.txt", "cat:two flavor:bitter shape:square color:blue"), // 両 Nest に存在
+        ],
         format_query: default_scope,
         query: "(cat: &: flavor:) | (shape: &: color:)",
         assert: |res, _dir| {
@@ -2083,14 +2007,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            // a.txt: Nest に存在 → tagA: 結果から除外
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:y")?;
-            // b.txt: tagB なし → Nest に非存在 → tagA: 結果に残る
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1"), // Nest に存在 → tagA: 結果から除外
+            ("b.txt", "tagA:y"),        // tagB なし → Nest に非存在 → tagA: 結果に残る
+        ],
         format_query: default_scope,
         query: "tagA: -: (tagA: &: tagB:)",
         assert: |res, _dir| {
@@ -2129,16 +2049,10 @@ define_cases! {
             std::fs::write(dir.join("b.txt"), "b")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "cat:one")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "flavor:sweet")?;
-            // a.txt: grade: なし → Nest に残る
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "cat:two")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "flavor:bitter")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
-            // b.txt: grade: あり → grade: Proj に存在 → Nest から除外
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "cat:one flavor:sweet"),         // grade: なし → Nest に残る
+            ("b.txt", "cat:two flavor:bitter grade:A"), // grade: あり → grade: Proj に存在 → Nest から除外
+        ],
         format_query: default_scope,
         query: "(cat: &: flavor:) -: grade:",
         assert: |res, _dir| {
@@ -2178,19 +2092,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            // a.txt: 両 Nest に存在 → 第1 Nest から除外
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            // b.txt: tagC なし → 第2 Nest に非存在 → 第1 Nest に残る
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:blue")?;
-            // c.txt: tagB なし → 第1 Nest に非存在 → 結果に影響なし
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1 tagC:red"), // 両 Nest に存在 → 第1 Nest から除外
+            ("b.txt", "tagA:x tagB:2"),          // tagC なし → 第2 Nest に非存在 → 第1 Nest に残る
+            ("c.txt", "tagA:y tagC:blue"),       // tagB なし → 第1 Nest に非存在 → 結果に影響なし
+        ],
         format_query: default_scope,
         query: "(tagA: &: tagB:) -: (tagA: &: tagC:)",
         assert: |res, _dir| {
@@ -2226,22 +2132,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            // a.txt: grade: なし → 残る
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "grade:A")?;
-            // b.txt: grade: あり → 除外
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagC:green")?;
-            // c.txt: grade: なし → 残る
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1 tagC:red"),          // grade: なし → 残る
+            ("b.txt", "tagA:x tagB:2 tagC:blue grade:A"), // grade: あり → 除外
+            ("c.txt", "tagA:y tagB:3 tagC:green"),        // grade: なし → 残る
+        ],
         format_query: default_scope,
         query: "(tagA: &: tagB: &: tagC:) -: grade:",
         assert: |res, _dir| {
@@ -2276,22 +2171,11 @@ define_cases! {
             std::fs::write(dir.join("c.txt"), "c")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagB:1")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagC:red")?;
-            tagging::tag_item(store, registry, &dir.join("a.txt").to_string_lossy(), "tagD:alpha")?;
-            // a.txt: 両 Nest に存在 → 除外
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagA:x")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagB:2")?;
-            tagging::tag_item(store, registry, &dir.join("b.txt").to_string_lossy(), "tagC:blue")?;
-            // b.txt: tagD なし → 第2 Nest に非存在 → 残る
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagA:y")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagB:3")?;
-            tagging::tag_item(store, registry, &dir.join("c.txt").to_string_lossy(), "tagD:beta")?;
-            // c.txt: tagC なし → 第1 Nest に非存在 → 結果に影響なし
-            Ok(())
-        }),
+        tags: &[
+            ("a.txt", "tagA:x tagB:1 tagC:red tagD:alpha"), // 両 Nest に存在 → 除外
+            ("b.txt", "tagA:x tagB:2 tagC:blue"),           // tagD なし → 第2 Nest に非存在 → 残る
+            ("c.txt", "tagA:y tagB:3 tagD:beta"),           // tagC なし → 第1 Nest に非存在 → 結果に影響なし
+        ],
         format_query: default_scope,
         query: "(tagA: &: tagB: &: tagC:) -: (tagA: &: tagB: &: tagD:)",
         assert: |res, _dir| {

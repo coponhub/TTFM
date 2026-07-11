@@ -20,7 +20,7 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 **`SearchQuery` が編集対象アイテムを解決**し、**`EditQuery` が適用するラベル (新しい値) を解決**する。
 
 ### 1.1 対象アイテムの解決
-- `<SearchQuery>` の解決は検索系の `search()` を再利用する (`ttfm rank` と同様のパイプライン)。
+- `<SearchQuery>` の解決は検索系の `search()` を再利用する。
   ttfm tagは、クエリ → 結果アイテムの `item_id` リスト → 編集の一括適用、という流れ。
 
 ### 1.2 EditQuery
@@ -41,8 +41,10 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 ディスパッチは `TagRegistry::get(type)` への一本道とする
 
 - その type が registry に登録され**編集可能**なら、宣言された戦略
-  (Append / Replace / Relocate / SetFileAttr) で実行する。
-- 登録されているが**編集不可**なら **Forbidden** (即エラー)。
+  (Append / Replace / RemoveOnly / Relocate / SetFileAttr) で実行する。
+- 登録されているが**編集不可**なら **Forbidden** (即エラー)。**Forbidden は untag (`untag`/`TagQuery`)
+  にも適用される** — `edit()` が `None` の type は付与も削除もできない。判定は「`edit()` が
+  `Some` か否か」の一本の規則で行う (戦略の値そのものは untag 側では見ない)。
 - 未登録のユーザー定義型なら、デフォルトで **Append** (重複可で追記)。
 
 `type` / `tag` の定義アイテムをSearchQueryに記載すると、`type:` / `tag:` の定義アイテムにタグを付与できる
@@ -74,9 +76,11 @@ pub enum EditStrategy {
     Append,      // 重複可で追記 (一般ユーザータグ相当)
     Replace,     // 単一値・置換。物理的な格納先が user_tags 行か rank 等のカラムかは
                  // Lens が吸収するため、両者を区別しない (旧 ReplaceCol を統合)
+    RemoveOnly,  // 付与不可・削除可。Tag 方向は常にエラー、Untag 方向のみ許可
+                 // (item_id → item 削除 §5.1 のための例外的な戦略)
 
     // --- ホスト内部専用 (組み込み TagFunction のみ) ---
-    Relocate,        // path/filename/parentdir/extension → FS rename + 再 index
+    Relocate,        // path/filename/parentdir/extension/stem → FS rename + 再 index
     SetFileAttr,     // mtime → 実ファイルの OS ネイティブ属性 (タイムスタンプ等) を設定
     ModifyInjection, // item_kind/content → ユーザーは EditQuery に書けないが、modify が
                      // Volatile item 登録時に inject() で内部注入する
@@ -95,21 +99,24 @@ pub enum EditStrategy {
   よって `type` / `tag` のための専用戦略は存在しない。
 
 ### 3.2 プラグイン向けの戦略公開
-- プラグインが選択できる戦略は **`Append` / `Replace` / Forbidden (未実装)** の3つ。
-- WIT の `edit` インターフェースは `enum edit-strategy { append, replace }` とする
+- プラグインが選択できる戦略は **`Append` / `Replace` / `RemoveOnly` / Forbidden (未実装)** の4つ。
+- WIT の `edit` インターフェースは `enum edit-strategy { append, replace, remove-only }` とする
   (`Relocate` / `SetFileAttr` / `ModifyInjection` などのホスト内部戦略はプラグインに公開しない)。
 - Wasm プラグインは `target!(edit)` で edit インターフェースを有効化し、
-  `strategy()` で `append` / `replace` を返すだけで opt-in できる。
+  `strategy()` で `append` / `replace` / `remove-only` を返すだけで opt-in できる。
+  `edit()` を実装しないプラグインタグは他の組み込み型同様 Forbidden になる
+  (デフォルト編集不可、§3.1)。
 
 ### 3.3 組み込みタグの戦略割当
 | タグ | 戦略 |
 |---|---|
-| `path` / `filename` / `parentdir` / `extension` | `Relocate` |
+| `path` / `filename` / `parentdir` / `extension` / `stem` | `Relocate` |
 | `mtime` | `SetFileAttr` (Windows/Unix 両対応) |
 | `rank` | `Replace` (カラム書き込みは Lens が吸収) |
 | `name` | `Replace` (単一値) |
 | `item_kind` / `content` | `ModifyInjection` (ユーザー不可。Volatile 登録時に `inject()` で内部注入) |
-| `size` / `hash` / `file_id` / `origin` | Forbidden |
+| `item_id` | `RemoveOnly` (付与不可。`untag <Q> item_id:` による item 削除 §5.1 のみ許可) |
+| `size` / `hash` / `file_id` / `origin` / `is_dir` | Forbidden |
 | `directory:` 等の Composite (複合タグ) | Forbidden |
 | `type` / `tag` (定義アイテムのメタ編集) | EditQuery の型に従う (リネーム/再分類は §6 の合成) |
 
@@ -192,6 +199,7 @@ in-memory フィルタして Delete 対象を絞る。`TagCondition` はエン�
 |---|---|---|
 | `Tag` | `Append` | `[Add{item, tags:[Append(tag)]}]` |
 | `Tag` | `Replace` | `[Delete{item, tags:[type:]}, Add{item, tags:[Replace(type:new)]}]` (単一値化。Delete は **type 指定**で対象を指し、旧 label を知る必要はない。`Add` の `Replace` マーカーで confirm が多値競合を検出する) |
+| `Tag` | `RemoveOnly` | エラー (付与不可。Untag 方向のみ許可) |
 | `*` | Forbidden (`edit() == None`) | エラー |
 | `*` | `Relocate` / `SetFileAttr` | エラー (`plan` の契約違反) |
 | `Untag` | `*` | `[Delete{item, tags:[Tag(label)]}]` (具体指定) または `[Delete{item, tags:[Type(tag_type)]}]` (Projection 指定)。条件付きは in-memory フィルタ後に具体 Delete を生成 |
@@ -252,7 +260,7 @@ Lens を通じて適用する。
   抽象ではなく **SQL 構成側の最適化**で吸収する。
 
 ### 5.6 ItemId 採番
-Stored / Volatile の定義は TTFM.md §2.2 を参照。
+Stored / Volatile の定義は ITEM.md §3 を参照。
 
 - `write` が新しいアイテム行を追加するか否かは Stored / Volatile で分岐する (Stored は既存 `item_id` を再利用、
   Volatile は新規追加)。アイテムを追加する局面では item_id の採番が行われ、採番は `write` が所有する。
@@ -260,7 +268,7 @@ Stored / Volatile の定義は TTFM.md §2.2 を参照。
   定義アイテムを eager に登録しない。これらは tag 行から導出可能な Volatile として projection に現れる。
   **Volatile な定義が `Add` の対象になったとき** (例: `ttfm tag tag:"project:ttfm" rank:100` で
   定義へ rank を付与) に限り、write が採番して登録する。付与されるタグ自身が登録の契機となる。
-  (`label` 単独は登録対象としない。TTFM.md §2.2 参照。)
+  (`label` 単独は登録対象としない。ITEM.md §2 参照。)
 
 ### 5.7 SearchQuery 結果の登録
 `ttfm tag <SearchQuery>` を **EditQuery 無し**で実行すると、結果を加工せずそのまま登録する

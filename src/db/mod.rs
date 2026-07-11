@@ -252,6 +252,9 @@ pub enum Pronoun {
     Val,
     Kind,
     Key,
+    Stored,
+    Volatile,
+    OrdSrc,
 }
 
 /// Volatile Column
@@ -308,9 +311,10 @@ impl SqlType {
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum Val {
-    System,
+    Builtin,
     User,
     File,
+    Plugin,
     Note,
     ItemKind,
     Rank,

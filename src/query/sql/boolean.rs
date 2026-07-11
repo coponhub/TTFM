@@ -37,7 +37,7 @@ fn bool_to_volatile_row(bool_expr: SimpleExpr) -> SimpleExpr {
         Expr::val("system").into(),
     );
     let type_sp = CustomFunc::struct_pack_tag(
-        Expr::val("type").into(),
+        Expr::val("bitical_type").into(),
         CustomFunc::union_value(SqlType::VARCHAR, Expr::val("boolean")),
         Expr::val("system").into(),
     );
@@ -57,7 +57,8 @@ fn build_boolean_comparison_sql(
     let bin_op = to_bin_op(op);
     let bool_expr = Expr::expr(left).binary(bin_op, right).into();
     let mut q = Query::select();
-    q.expr_as(Expr::val(0i64), Col::ItemId)
+    // 揮発 id は SQL 側では NULL とし、fetch 後に Rust 側で採番する。
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId)
         .expr_as(Expr::val(0i64), Col::Rank)
         .expr_as(Expr::val("volatile"), Col::ItemKind)
         .expr_as(
@@ -73,7 +74,7 @@ pub(super) fn build_boolean_existence_sql(
     let bool_expr =
         CustomFunc::any_value(Expr::col((Pk, Col::ItemId))).is_not_null();
     let mut q = Query::select();
-    q.expr_as(Expr::val(0i64), Col::ItemId)
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId)
         .expr_as(Expr::val(0i64), Col::Rank)
         .expr_as(Expr::val("volatile"), Col::ItemKind)
         .expr_as(

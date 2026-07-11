@@ -893,10 +893,11 @@ fn make_tag_struct_pack(
     sql_type: SqlType,
     value_expr: impl Into<SimpleExpr>,
 ) -> SimpleExpr {
+    // 常にクエリ時にエンジンが合成する信号タグであり、Builtin (TTFM エンジン自身) が origin となる。
     CustomFunc::struct_pack_tag(
         Expr::val(type_str).into(),
         CustomFunc::union_value(sql_type, value_expr),
-        Expr::val("system").into(),
+        Expr::val(crate::types::Origin::Builtin.as_str()).into(),
     )
 }
 
@@ -1103,6 +1104,9 @@ pub(super) fn nest(
                             .to_owned(),
                     ),
                 );
+            let deduped_q = crate::query::lens_builder::complement_type_groups(
+                deduped_q, col_iden,
+            );
             let deduped_cte = CommonTableExpression::new()
                 .query(deduped_q)
                 .table_name(Deduped)
@@ -1250,17 +1254,6 @@ pub(super) fn nest(
         }
     };
 
-    let partition_order = if proj_operands.len() > 1 {
-        (0..proj_operands.len())
-            .map(|i| format!("{}.key{}", Iden::to_string(&TopItems), i))
-            .collect::<Vec<_>>()
-            .join(", ")
-    } else {
-        format!("{}.{}", Iden::to_string(&TopItems), label_col_name)
-    };
-    let volatile_id_expr =
-        format!("row_number() OVER (ORDER BY {})", partition_order);
-
     let mut name_select = Query::select();
     name_select
         .column(Col::LabelStr)
@@ -1362,7 +1355,8 @@ pub(super) fn nest(
 
     let mut q = Query::select();
     q.with_cte(with_clause);
-    q.expr_as(Expr::cust(volatile_id_expr), Col::ItemId);
+    // 揮発 id は SQL 側では NULL とし、fetch 後に Rust 側で採番する。
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId);
     q.expr_as(
         Expr::cust(format!(
             "ANY_VALUE({}.{})",
@@ -1577,10 +1571,6 @@ fn label_set_op_sql(
 
     let repr_expr =
         Expr::cust(format!("list_value({}.label)", Iden::to_string(&TopItems)));
-    let volatile_id_expr = format!(
-        "row_number() OVER (ORDER BY {}.label)",
-        Iden::to_string(&TopItems)
-    );
 
     let mut name_select = Query::select();
     name_select
@@ -1635,7 +1625,8 @@ fn label_set_op_sql(
 
     let mut q = Query::select();
     q.with_cte(with_clause);
-    q.expr_as(Expr::cust(volatile_id_expr), Col::ItemId);
+    // 揮発 id は SQL 側では NULL とし、fetch 後に Rust 側で採番する。
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId);
     q.expr_as(Expr::val(0i64), Col::Rank);
     q.expr_as(Expr::val("volatile"), Col::ItemKind);
     q.expr_as(tags_expr, crate::db::QueryResultCol::Tags);

@@ -48,7 +48,8 @@ impl StorageMapping {
         };
         match self {
             StorageMapping::Fixed(col) => {
-                Some(build_lens_select_column(src, *col, ids_sql))
+                let base = build_lens_select_column(src, *col, ids_sql);
+                Some(crate::query::lens_builder::complement_type(base, *col))
             }
             StorageMapping::Basic { column, tag_type } => {
                 Some(build_lens_select_tag(src, *column, tag_type, ids_sql))
@@ -272,6 +273,7 @@ pub struct TagDescriptor {
     pub storage: StorageMapping,
     pub logical_type: LogicalType,
     pub logical_function: Option<Arc<dyn TagFunction>>,
+    pub sys_id: Option<i64>,
 }
 
 impl TagDescriptor {
@@ -307,15 +309,14 @@ impl LogicalSchema for Lens {
     fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
-                if let Some(q) = func.query() {
-                    // normalize_label を適用してから expand する
-                    let normalized = q.normalize_label(label);
-                    let tag = crate::types::TypedTag::new(
-                        tag_type.clone(),
-                        normalized.clone(),
-                    );
-                    return q.expand(tag_type, &normalized, &tag);
-                }
+                let q = func.query();
+                // normalize_label を適用してから expand する
+                let normalized = q.normalize_label(label);
+                let tag = crate::types::TypedTag::new(
+                    tag_type.clone(),
+                    normalized.clone(),
+                );
+                return q.expand(tag_type, &normalized, &tag, self);
             }
         }
         QueryNode::TypedTag(crate::types::TypedTag::new(
@@ -327,9 +328,7 @@ impl LogicalSchema for Lens {
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
-                if let Some(q) = func.query() {
-                    return q.expand_projection(tag_type);
-                }
+                return func.query().expand_projection(tag_type);
             }
         }
         QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
@@ -342,11 +341,9 @@ impl LogicalSchema for Lens {
         // TagRegistry と同様に登録の逆順で走査する
         for desc in self.registry.values().rev() {
             if let Some(func) = &desc.logical_function {
-                if let Some(q) = func.query() {
-                    let normalized = q.normalize_label(label);
-                    if normalized != *label {
-                        return normalized;
-                    }
+                let normalized = func.query().normalize_label(label);
+                if normalized != *label {
+                    return normalized;
                 }
             }
         }
@@ -364,10 +361,25 @@ impl LogicalSchema for Lens {
         let Some(func) = &desc.logical_function else {
             return QueryNode::Comparison(node);
         };
-        let Some(q) = func.query() else {
-            return QueryNode::Comparison(node);
-        };
-        q.expand_comparison(node)
+        func.query().expand_comparison(node)
+    }
+
+    fn iter_all_for_rank(
+        &self,
+    ) -> Vec<(TagType, crate::types::Rank, crate::types::ItemId)> {
+        use crate::types::{ItemId, Origin};
+        self.registry
+            .values()
+            .filter_map(|desc| {
+                desc.logical_function.as_ref().map(|f| {
+                    let id = match desc.sys_id {
+                        Some(sys_id) => ItemId::Stored(sys_id),
+                        None => ItemId::Settling(Origin::Plugin, 0),
+                    };
+                    (desc.tag_type.clone(), f.default_rank(), id)
+                })
+            })
+            .collect()
     }
 }
 
@@ -426,15 +438,19 @@ impl Lens {
         }
         // Composite / Basic / Fixed タグ: TagRegistry から自動生成
         for func in registry.iter_arcs() {
-            let Some(q) = func.query() else { continue };
+            let q = func.query();
             let tag_type = TagType::from(func.name());
             let key = q.storage_key().unwrap_or(func.name()).to_string();
+            let sys_id = registry.builtin_offset(func.name()).map(|offset| {
+                crate::types::Origin::Builtin.block_lo() + offset as i64
+            });
             let desc = match q.logical_role() {
                 LogicalRole::Composite => TagDescriptor {
                     tag_type,
                     storage: StorageMapping::Composite,
                     logical_type: q.logical_type(),
                     logical_function: Some(func.clone()),
+                    sys_id,
                 },
                 LogicalRole::Basic => {
                     let col = logical_type_to_col(q.logical_type());
@@ -446,6 +462,7 @@ impl Lens {
                         },
                         logical_type: q.logical_type(),
                         logical_function: Some(func.clone()),
+                        sys_id,
                     }
                 }
                 LogicalRole::Fixed => TagDescriptor {
@@ -455,6 +472,7 @@ impl Lens {
                     storage: StorageMapping::Composite,
                     logical_type: q.logical_type(),
                     logical_function: Some(func.clone()),
+                    sys_id,
                 },
             };
             lens.register(desc);
@@ -473,9 +491,10 @@ impl Lens {
                 existing.storage = descriptor.storage;
                 existing.logical_type = descriptor.logical_type;
             }
-            // 論理関数が提供されていれば上書き
+            // 論理関数が提供されていれば上書き（sys_id も併せて）
             if descriptor.logical_function.is_some() {
                 existing.logical_function = descriptor.logical_function;
+                existing.sys_id = descriptor.sys_id;
             }
         } else {
             self.registry
@@ -509,6 +528,7 @@ impl Lens {
             },
             logical_type: LogicalType::Any, // 未知のタグは Any として扱う
             logical_function: None,
+            sys_id: None,
         }
     }
 
@@ -623,7 +643,7 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
     }
 }
 
-fn logical_type_to_col(lt: LogicalType) -> Col {
+pub(crate) fn logical_type_to_col(lt: LogicalType) -> Col {
     use crate::db::SqlType;
     match TagDescriptor::logical_to_sql(lt) {
         SqlType::BIGINT => Col::LabelInt,
@@ -635,29 +655,86 @@ fn logical_type_to_col(lt: LogicalType) -> Col {
 
 // --- 純粋関数 (初期化用データ定義) ---
 
-fn base_column_descriptors() -> Vec<TagDescriptor> {
-    let cols = vec![
-        (SType::ItemId, Col::ItemId),
-        (SType::Rank, Col::Rank),
-        (SType::Origin, Col::Origin),
-        (SType::ItemKind, Col::ItemKind),
-        (SType::Type, Col::Type),
-        (SType::TypedTag, Col::TypedTag),
-        (SType::Label, Col::LabelStr),
-        (SType::ScanHash, Col::ScanHash),
-    ];
+/// Fixed カラムの役割。Attribute はアイテムに実際に付与されている値として
+/// `type:` プロジェクションへ合成される対象。Axis はタグ空間の座標軸
+/// （type/tag/label 自体）であり、アイテムに付与されたタグではないため合成対象外。
+#[derive(Clone, Copy)]
+pub(crate) enum FixedRole {
+    Attribute,
+    Axis,
+}
 
-    cols.into_iter()
-        .map(|(stype, col)| TagDescriptor {
-            tag_type: TagType::Base(stype),
-            storage: StorageMapping::Fixed(col),
-            logical_type: sql_to_logical(col.sql_type()),
+pub(crate) struct FixedColumn {
+    pub stype: SType,
+    pub col: Col,
+    pub role: FixedRole,
+}
+
+/// Fixed カラムの唯一の情報源。属性か座標軸かの区別はここ一箇所にのみ持つ
+/// （`base_column_descriptors` と `fixed_attributes` はどちらもここから導出する）。
+const FIXED_COLUMNS: &[FixedColumn] = &[
+    FixedColumn {
+        stype: SType::ItemKind,
+        col: Col::ItemKind,
+        role: FixedRole::Attribute,
+    },
+    FixedColumn {
+        stype: SType::Rank,
+        col: Col::Rank,
+        role: FixedRole::Attribute,
+    },
+    FixedColumn {
+        stype: SType::ItemId,
+        col: Col::ItemId,
+        role: FixedRole::Attribute,
+    },
+    FixedColumn {
+        stype: SType::Origin,
+        col: Col::Origin,
+        role: FixedRole::Attribute,
+    },
+    FixedColumn {
+        stype: SType::Type,
+        col: Col::Type,
+        role: FixedRole::Axis,
+    },
+    FixedColumn {
+        stype: SType::TypedTag,
+        col: Col::TypedTag,
+        role: FixedRole::Axis,
+    },
+    FixedColumn {
+        stype: SType::Label,
+        col: Col::LabelStr,
+        role: FixedRole::Axis,
+    },
+];
+
+fn base_column_descriptors() -> Vec<TagDescriptor> {
+    FIXED_COLUMNS
+        .iter()
+        .map(|fc| TagDescriptor {
+            tag_type: TagType::Base(fc.stype),
+            storage: StorageMapping::Fixed(fc.col),
+            logical_type: sql_to_logical(fc.col.sql_type()),
             logical_function: None,
+            sys_id: None,
         })
         .collect()
 }
 
-fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
+/// `type:` プロジェクションへの合成対象となる Fixed 属性の一覧（(SType, Col)）。
+pub(crate) fn fixed_attributes() -> Vec<(SType, Col)> {
+    FIXED_COLUMNS
+        .iter()
+        .filter_map(|fc| match fc.role {
+            FixedRole::Attribute => Some((fc.stype, fc.col)),
+            FixedRole::Axis => None,
+        })
+        .collect()
+}
+
+pub(crate) fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
     match st {
         crate::db::SqlType::BIGINT => LogicalType::Integer,
         crate::db::SqlType::DOUBLE => LogicalType::Float,
@@ -753,7 +830,6 @@ mod tests {
             SType::Content,
             SType::Directory,
             SType::Name,
-            SType::ScanHash,
         ];
 
         for stype in standard_types {
@@ -785,6 +861,61 @@ mod tests {
             TagDescriptor::logical_to_sql(LogicalType::Boolean),
             crate::db::SqlType::BOOLEAN
         );
+    }
+
+    #[test]
+    fn test_lens_iter_all_for_rank_matches_registry_default_rank_for_extension()
+    {
+        let registry = crate::tag::TagRegistry::with_standard();
+        let lens = Lens::from_registry(&registry);
+        let expected_rank = registry.get("extension").unwrap().default_rank();
+        let all = lens.iter_all_for_rank();
+        let found = all
+            .iter()
+            .find(|(t, _, _)| *t == TagType::Base(SType::Extension));
+        assert_eq!(found.map(|(_, r, _)| *r), Some(expected_rank));
+    }
+
+    // Plan: 定義アイテムの id 区画 — Step 3
+    // 組み込み型（hash）は iter_all_for_rank の3要素目が Stored(固定 Sys id)。
+    #[test]
+    fn test_lens_iter_all_for_rank_bakes_fixed_sys_id_for_builtin() {
+        use crate::types::{ItemId, Origin};
+        let registry = crate::tag::TagRegistry::with_standard();
+        let expected_sys_id = Origin::Builtin.block_lo()
+            + registry.builtin_offset("hash").unwrap() as i64;
+        let lens = Lens::from_registry(&registry);
+        let all = lens.iter_all_for_rank();
+        let found = all
+            .iter()
+            .find(|(t, _, _)| *t == TagType::Base(SType::Hash));
+        assert_eq!(
+            found.map(|(_, _, id)| *id),
+            Some(ItemId::Stored(expected_sys_id))
+        );
+    }
+
+    // プラグイン登録型は固定 Sys id を持たず、Settling(Plugin, _) になる。
+    #[test]
+    fn test_lens_iter_all_for_rank_plugin_has_no_sys_id() {
+        use crate::types::{ItemId, Origin};
+        struct MockPluginTag;
+        impl crate::tag::TagFunction for MockPluginTag {
+            fn name(&self) -> &str {
+                "mock_plugin_tag"
+            }
+        }
+        let mut registry = crate::tag::TagRegistry::with_standard();
+        registry.register_plugin(MockPluginTag);
+        let lens = Lens::from_registry(&registry);
+        let all = lens.iter_all_for_rank();
+        let found = all
+            .iter()
+            .find(|(t, _, _)| *t == TagType::from("mock_plugin_tag"));
+        assert!(matches!(
+            found.map(|(_, _, id)| *id),
+            Some(ItemId::Settling(Origin::Plugin, _))
+        ));
     }
 
     #[test]

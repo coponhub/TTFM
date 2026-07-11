@@ -142,8 +142,6 @@ impl WasmPlugin {
         let has_indexing = ct
             .get_export(&self.engine, "ttfm:plugin/indexing")
             .is_some();
-        let has_query =
-            ct.get_export(&self.engine, "ttfm:plugin/query").is_some();
         let has_display =
             ct.get_export(&self.engine, "ttfm:plugin/display").is_some();
 
@@ -197,7 +195,6 @@ impl WasmPlugin {
             name,
             sql_type,
             has_indexing,
-            has_query,
             has_display,
         })
     }
@@ -230,7 +227,6 @@ pub struct WasmPluginAdapter {
     pub name: String,
     sql_type: SqlType,
     has_indexing: bool,
-    has_query: bool,
     has_display: bool,
 }
 
@@ -247,12 +243,8 @@ impl TagFunction for WasmPluginAdapter {
         }
     }
 
-    fn query(&self) -> Option<&dyn Query> {
-        if self.has_query {
-            Some(self)
-        } else {
-            None
-        }
+    fn query(&self) -> &dyn Query {
+        self
     }
 
     fn display(&self) -> Option<&dyn TagDisplay> {
@@ -357,6 +349,10 @@ impl Index for WasmPluginAdapter {
 // --- Query 実装 ---
 
 impl Query for WasmPluginAdapter {
+    fn logical_type(&self) -> crate::query::logical_schema::LogicalType {
+        crate::query::lens_schema::sql_to_logical(self.sql_type)
+    }
+
     fn normalize_label(&self, label: &Label) -> Label {
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
@@ -391,6 +387,7 @@ impl Query for WasmPluginAdapter {
         tagtype: &TagType,
         label: &Label,
         tag: &crate::types::TypedTag,
+        _schema: &dyn crate::query::logical_schema::LogicalSchema,
     ) -> QueryNode {
         let tag_type_str = tagtype.as_str().to_string();
         let label_str = label.as_str().to_string();
@@ -550,5 +547,40 @@ fn convert_wasm_val(v: WasmTagValue) -> Option<LabelValue> {
         WasmTagValue::Boolean(b) => Some(LabelValue::Boolean(b)),
         WasmTagValue::Double(f) => Some(LabelValue::Double(f.to_bits())),
         WasmTagValue::Empty => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::logical_schema::LogicalType;
+
+    /// mimetype fixture から得た WasmPluginAdapter の sql_type だけを差し替える。
+    /// wasm 呼び出しを伴わない logical_type() の導出ロジックのみを検証するため。
+    fn adapter_with_sql_type(sql_type: SqlType) -> WasmPluginAdapter {
+        let plugin = crate::plugins::WasmPlugin::new(Path::new(
+            "plugins/mimetype_plugin.component.wasm",
+        ))
+        .expect("Failed to load fixture plugin");
+        let base = plugin.into_adapter().expect("Failed to create adapter");
+        WasmPluginAdapter { sql_type, ..base }
+    }
+
+    #[test]
+    fn test_logical_type_derives_integer_from_bigint_sql_type() {
+        let adapter = adapter_with_sql_type(SqlType::BIGINT);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Integer);
+    }
+
+    #[test]
+    fn test_logical_type_derives_float_from_double_sql_type() {
+        let adapter = adapter_with_sql_type(SqlType::DOUBLE);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Float);
+    }
+
+    #[test]
+    fn test_logical_type_derives_boolean_from_boolean_sql_type() {
+        let adapter = adapter_with_sql_type(SqlType::BOOLEAN);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Boolean);
     }
 }

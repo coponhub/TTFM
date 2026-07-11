@@ -38,21 +38,16 @@ fn test_metadata_error_recovery_integration() {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()
         .unwrap();
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     // 3. エラー値がセットされたアイテムを検索して検証
     // 数値型のエラー値 (-1) で検索
-    let results = search::search(
-        &store,
-        &registry,
-        "size:-1",
-        Default::default(),
-    )
-    .expect("Search for size:-1 should succeed");
+    let results =
+        search::search(&store, &registry, "size:-1", Default::default())
+            .expect("Search for size:-1 should succeed");
 
     // 検証: loop_link がエラー値で登録されてヒットするはず
     assert_eq!(

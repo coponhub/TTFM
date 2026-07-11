@@ -31,8 +31,7 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,
@@ -42,12 +41,8 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     // This implies "Projection(size:) > Scalar(100)" which is invalid logic but valid loose grammar.
     // In strict grammar, this is a Parse Error.
     // Our post-processor should catch it.
-    let res = search::search(
-        &store,
-        &registry,
-        "size: > 100",
-        Default::default(),
-    );
+    let res =
+        search::search(&store, &registry, "size: > 100", Default::default());
 
     if res.is_ok() {
         // Fail the test if it unexpectedly succeeds (Loose grammar state)
@@ -89,11 +84,9 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let res =
-        search::search(&store, &registry, "1 >1", Default::default());
+    let res = search::search(&store, &registry, "1 >1", Default::default());
 
     if res.is_ok() {
         panic!("Expected error for '1 >1', but it succeeded. Grammar is too loose.");
@@ -126,15 +119,10 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let res = search::search(
-        &store,
-        &registry,
-        "size:^=100",
-        Default::default(),
-    );
+    let res =
+        search::search(&store, &registry, "size:^=100", Default::default());
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     println!("Actual error: {}", err_msg);
@@ -160,8 +148,7 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
-    let (store, registry) =
-        (db_dir_store, db_dir_registry);
+    let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry).run(
         root,
         None::<&fn(usize)>,

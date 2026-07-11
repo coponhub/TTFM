@@ -28,10 +28,9 @@ pub type Rank = i64;
 /// 実際のDBアイテム (Stored) または揮発性アイテム (Volatile) を表現。
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub enum ItemId {
-    /// データベースに存在する実アイテム（永続化済み）
     Stored(i64),
-    /// 集約結果など、DBに存在しない揮発性アイテム
     Volatile(u64),
+    Settling(Origin, u64),
 }
 
 // 揮発性ID生成用のカウンター
@@ -48,6 +47,7 @@ impl ItemId {
         match self {
             Self::Stored(id) => *id,
             Self::Volatile(id) => *id as i64,
+            Self::Settling(_, id) => *id as i64,
         }
     }
 
@@ -60,6 +60,20 @@ impl ItemId {
     pub fn is_volatile(&self) -> bool {
         matches!(self, ItemId::Volatile(_))
     }
+
+    /// Settling かどうか
+    pub fn is_settling(&self) -> bool {
+        matches!(self, ItemId::Settling(_, _))
+    }
+
+    /// Volatile を、区画（Origin）だけ確定した Settling に変換します。
+    /// counter は使い回し、新規採番はしません。
+    pub fn settle(self, origin: Origin) -> Self {
+        match self {
+            Self::Volatile(c) => Self::Settling(origin, c),
+            other => other,
+        }
+    }
 }
 
 impl From<i64> for ItemId {
@@ -71,8 +85,12 @@ impl From<i64> for ItemId {
 impl std::fmt::Display for ItemId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ItemId::Stored(i) => write!(f, "{}", i),
-            ItemId::Volatile(v) => write!(f, "{}", v),
+            ItemId::Stored(i) => {
+                let o = Origin::within(*i);
+                write!(f, "{}({})", o.short(), i - o.block_lo())
+            }
+            ItemId::Volatile(v) => write!(f, "~({})", v),
+            ItemId::Settling(o, v) => write!(f, "~{}({})", o.short(), v),
         }
     }
 }
@@ -161,6 +179,32 @@ impl From<ItemKind> for Label {
     }
 }
 
+/// 検索結果の並び順のキー1つ分。任意の型（TagType）をキーにでき、
+/// 複数キーの組み合わせは `Vec<Order>` で表す（空 = 指定なし）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Order {
+    /// ソートに使う型（rank / item_id / name / size / ユーザー定義型 など）
+    pub key: TagType,
+    /// 降順かどうか
+    pub desc: bool,
+}
+
+impl Order {
+    pub fn asc(key: impl Into<TagType>) -> Self {
+        Self {
+            key: key.into(),
+            desc: false,
+        }
+    }
+
+    pub fn desc(key: impl Into<TagType>) -> Self {
+        Self {
+            key: key.into(),
+            desc: true,
+        }
+    }
+}
+
 /// アイテムの表示名を表す型エイリアス。
 pub type ItemName = String;
 
@@ -172,6 +216,8 @@ pub type TagNumber = usize;
     Debug,
     PartialEq,
     Eq,
+    PartialOrd,
+    Ord,
     Hash,
     Clone,
     Copy,
@@ -182,50 +228,75 @@ pub type TagNumber = usize;
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum Origin {
-    /// システム定義アイテム（type/tag 定義）— item_references、負側区画
-    System,
-    /// ユーザー作成アイテム（note 等）— item_references、正側区画 0
+    Builtin,
     User,
-    /// ファイル — file_references、正側区画 8
     File,
+    Plugin,
 }
 
 impl Origin {
     /// 区画幅 B = 2^58（i64 空間を 64 分割した 1 区画のサイズ）。
-    pub const SPACE_SIZE: i64 = 1 << 58;
+    pub const BLOCK_SIZE: i64 = 1 << 58;
 
     /// origin の区画 index。負値は負側区画。Origin 追加時はここだけ変える。
-    pub fn space_index(self) -> i64 {
+    pub fn block_index(self) -> i64 {
         match self {
-            Origin::System => -1,
+            Origin::Builtin => -1,
             Origin::User => 0,
             Origin::File => 8,
+            Origin::Plugin => 16,
         }
     }
 
-    /// 区画下端 lo = index * SPACE_SIZE。
-    pub fn space_lo(self) -> i64 {
-        self.space_index() * Self::SPACE_SIZE
+    /// 区画下端 lo = index * BLOCK_SIZE。
+    pub fn block_lo(self) -> i64 {
+        self.block_index() * Self::BLOCK_SIZE
     }
 
     /// 区画上端 hi（排他）。直上 origin の lo、最上位は i64::MAX。
-    pub fn space_hi(self) -> i64 {
+    pub fn block_hi(self) -> i64 {
         use strum::IntoEnumIterator;
-        let lo = self.space_lo();
+        let lo = self.block_lo();
         Origin::iter()
-            .map(|o| o.space_lo())
+            .map(|o| o.block_lo())
             .filter(|&l| l > lo)
             .min()
             .unwrap_or(i64::MAX)
     }
 
-    /// origin の短縮ラベル。System→"Sys"、User→"User"、File→"File"。
+    /// origin の短縮ラベル。Builtin→"Sys"、User→"User"、File→"File"。
     pub fn short(self) -> &'static str {
         match self {
-            Origin::System => "Sys",
+            Origin::Builtin => "Sys",
             Origin::User => "User",
             Origin::File => "File",
+            Origin::Plugin => "Plg",
         }
+    }
+
+    /// origin の snake_case 文字列（"builtin" / "user" / "file" / "plugin"）。
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+
+    /// 大分類 (User/System) への収束。Builtin/File/Plugin は全て LargeOrigin::System。
+    pub fn large(self) -> LargeOrigin {
+        match self {
+            Origin::User => LargeOrigin::User,
+            Origin::Builtin | Origin::File | Origin::Plugin => {
+                LargeOrigin::System
+            }
+        }
+    }
+
+    /// `large() == LargeOrigin::User` の糖衣。
+    pub fn is_user(self) -> bool {
+        self.large() == LargeOrigin::User
+    }
+
+    /// `large() == LargeOrigin::System` の糖衣。
+    pub fn is_system(self) -> bool {
+        self.large() == LargeOrigin::System
     }
 
     /// id → Origin 逆引き（全域関数）。
@@ -234,13 +305,41 @@ impl Origin {
     pub fn within(id: i64) -> Self {
         use strum::IntoEnumIterator;
         Origin::iter()
-            .filter(|&o| o.space_lo() <= id)
-            .max_by_key(|&o| o.space_lo())
+            .filter(|&o| o.block_lo() <= id)
+            .max_by_key(|&o| o.block_lo())
             .unwrap_or_else(|| {
                 Origin::iter()
-                    .min_by_key(|&o| o.space_lo())
+                    .min_by_key(|&o| o.block_lo())
                     .expect("Origin must have at least one variant")
             })
+    }
+}
+
+/// Origin の大分類 (ITEM.md §由来)。System 側は Builtin/File/Plugin を区別せず収束する。
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Clone,
+    Copy,
+    Display,
+    EnumString,
+    IntoStaticStr,
+    EnumIter,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum LargeOrigin {
+    System,
+    User,
+}
+
+impl LargeOrigin {
+    /// 大分類の snake_case 文字列（"system" / "user"）。
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -633,7 +732,7 @@ impl Label {
             Label::Rank(i) | Label::Size(i) | Label::Mtime(i) => i.to_string(),
             Label::ItemId(i) => {
                 let o = Origin::within(*i);
-                format!("{}({})", o.short(), i - o.space_lo())
+                format!("{}({})", o.short(), i - o.block_lo())
             }
             Label::FileId(u) => u.to_string(),
             Label::IsDir(b) => LabelValue::Boolean(*b).as_display_name(),
@@ -1210,12 +1309,73 @@ mod tests_types {
     }
 
     #[test]
-    fn test_item_id_display() {
-        let sid = ItemId::Stored(123);
-        assert_eq!(sid.to_string(), "123");
+    fn test_item_id_settling_as_i64_casts_counter() {
+        let id = ItemId::Volatile(456).settle(Origin::Plugin);
+        assert_eq!(id.as_i64(), 456);
+    }
 
+    #[test]
+    fn test_item_id_settle_reuses_counter() {
         let vid = ItemId::Volatile(456);
-        assert_eq!(vid.to_string(), "456");
+        let sid = vid.settle(Origin::Plugin);
+        assert_eq!(sid, ItemId::Settling(Origin::Plugin, 456));
+        assert!(sid.is_settling());
+        assert!(!sid.is_volatile());
+    }
+
+    #[test]
+    fn test_origin_large() {
+        // 大分類 (User/System)。System 側 (Builtin/File/Plugin) は LargeOrigin::System に収束する。
+        assert_eq!(Origin::User.large(), LargeOrigin::User);
+        assert_eq!(Origin::Builtin.large(), LargeOrigin::System);
+        assert_eq!(Origin::File.large(), LargeOrigin::System);
+        assert_eq!(Origin::Plugin.large(), LargeOrigin::System);
+    }
+
+    #[test]
+    fn test_origin_is_user_is_system() {
+        assert!(Origin::User.is_user());
+        assert!(!Origin::User.is_system());
+
+        assert!(!Origin::Builtin.is_user());
+        assert!(Origin::Builtin.is_system());
+        assert!(!Origin::File.is_user());
+        assert!(Origin::File.is_system());
+        assert!(!Origin::Plugin.is_user());
+        assert!(Origin::Plugin.is_system());
+    }
+
+    #[test]
+    fn test_large_origin_display() {
+        assert_eq!(LargeOrigin::System.to_string(), "system");
+        assert_eq!(LargeOrigin::User.to_string(), "user");
+    }
+
+    #[test]
+    fn test_item_id_display() {
+        // Stored は Origin 区画のローカル形式
+        assert_eq!(ItemId::Stored(123).to_string(), "User(123)");
+        assert_eq!(
+            ItemId::Stored(Origin::Builtin.block_lo() + 10).to_string(),
+            "Sys(10)"
+        );
+        assert_eq!(
+            ItemId::Stored(Origin::File.block_lo() + 1).to_string(),
+            "File(1)"
+        );
+
+        // Volatile は区画によらず ~(n)
+        assert_eq!(ItemId::Volatile(456).to_string(), "~(456)");
+
+        // Settling は ~{origin.short()}(n)
+        assert_eq!(
+            ItemId::Volatile(3).settle(Origin::Plugin).to_string(),
+            "~Plg(3)"
+        );
+        assert_eq!(
+            ItemId::Volatile(5).settle(Origin::User).to_string(),
+            "~User(5)"
+        );
     }
 
     #[test]

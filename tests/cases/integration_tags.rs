@@ -24,14 +24,7 @@ define_cases! {
             File::create(dir.join("doc.txt"))?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            let query = format!("extension:txt & path:{}/*", dir.to_string_lossy());
-            let res = search::search(store, registry, &query, Default::default())?;
-            anyhow::ensure!(!res.results.is_empty(), "No txt file found in case dir");
-            let item = res.results[0].primary_value().unwrap_or_default();
-            tagging::tag_item(store, registry, &item, "status:reviewed")?;
-            Ok(())
-        }),
+        tags: &[("doc.txt", "status:reviewed")],
         format_query: super::default_scope,
         query: "status:reviewed",
         assert: |res, dir| {
@@ -48,8 +41,16 @@ define_cases! {
     integration_note_tagging: {
         setup: |_dir| Ok(()),
         modify: Some(|store, registry, _dir| {
-            let note_id = tagging::add_item(store, registry, "note", "Meeting Memo")?;
-            tagging::tag_item(store, registry, &note_id.to_string(), "category:meeting")?;
+            tagging::add_item(store, registry, "note", "Meeting Memo")?;
+            ttfm::edit::edit(
+                store,
+                registry,
+                "item_kind:note",
+                Some("category:meeting"),
+                ttfm::edit::QueryType::Tag,
+                None,
+                ttfm::edit::WriteOptions { yes: true },
+            )?;
             Ok(())
         }),
         format_query: |q, _| q.to_string(),
@@ -82,13 +83,9 @@ fn test_integration_tag_tagging() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
-    let registered_paths = search::search(
-        &store,
-        &registry,
-        "extension:txt",
-        Default::default(),
-    )
-    .unwrap();
+    let registered_paths =
+        search::search(&store, &registry, "extension:txt", Default::default())
+            .unwrap();
     let item = registered_paths.results[0].primary_value().unwrap();
 
     tagging::tag_item(&store, &registry, &item, "project:mars").unwrap();
@@ -110,13 +107,9 @@ fn test_integration_tag_tagging() {
     assert_eq!(results.results[0].id, ItemId::from(tag_id));
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
-    let file_results = search::search(
-        &store,
-        &registry,
-        "project:mars",
-        Default::default(),
-    )
-    .unwrap();
+    let file_results =
+        search::search(&store, &registry, "project:mars", Default::default())
+            .unwrap();
     assert!(file_results
         .results
         .iter()
@@ -140,13 +133,9 @@ fn test_system_item_metadata_integration() {
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let ext_list = search::search(
-        &store,
-        &registry,
-        "type:extension",
-        Default::default(),
-    )
-    .unwrap();
+    let ext_list =
+        search::search(&store, &registry, "type:extension", Default::default())
+            .unwrap();
     assert!(
         !ext_list
             .results
@@ -167,13 +156,9 @@ fn test_system_item_metadata_integration() {
         "Physical tag item should NOT be created automatically"
     );
 
-    let results_proj = search::search(
-        &store,
-        &registry,
-        "extension:",
-        Default::default(),
-    )
-    .unwrap();
+    let results_proj =
+        search::search(&store, &registry, "extension:", Default::default())
+            .unwrap();
     assert!(
         !results_proj.results.is_empty(),
         "Should find label items via projection"

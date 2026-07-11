@@ -13,7 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::types::{ItemKind, Label, SType, TagType, TypedTag};
+use crate::types::{
+    ItemId, ItemKind, Label, Origin, Rank, SType, TagType, TypedTag,
+};
 use std::collections::HashSet;
 
 // ========== Type Aliases ==========
@@ -117,6 +119,25 @@ pub struct NestNode {
     pub right: Box<QueryNode>,
 }
 
+/// 定義アイテムの候補（レジストリ登録済み型/タグ名 1件分）。
+#[derive(Debug, PartialEq, Clone)]
+pub struct Candidate {
+    pub name: String,
+    pub rank: Rank,
+    pub id: ItemId,
+}
+
+/// 定義アイテム参照 (`tag:"X"` / `type:"X"`) のペイロード。
+#[derive(Debug, PartialEq, Clone)]
+pub struct DefinitionRef {
+    pub kind: ItemKind,
+    pub value: Label,
+    pub candidates: Vec<Candidate>,
+    pub origins: Vec<Origin>,
+    pub reserved: Vec<String>,
+    pub recorded: bool,
+}
+
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
@@ -140,9 +161,7 @@ pub enum QueryNode {
     /// ネスト演算 (`Projection &: Projection` 等)
     Nest(NestNode),
     /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
-    /// item_references の定義行（item_kind=kind, content=value）を参照し、
-    /// 未登録なら value を representative とする Volatile を合成する。
-    DefinitionRef { kind: ItemKind, value: Label },
+    DefinitionRef(DefinitionRef),
 }
 
 impl QueryNode {
@@ -199,8 +218,8 @@ impl QueryNode {
                 nest.left.collect_types(types);
                 nest.right.collect_types(types);
             }
-            QueryNode::DefinitionRef { value, .. } => {
-                types.insert(value.tag_type().as_str().to_string());
+            QueryNode::DefinitionRef(def) => {
+                types.insert(def.value.tag_type().as_str().to_string());
             }
         }
     }

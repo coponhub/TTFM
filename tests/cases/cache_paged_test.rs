@@ -53,8 +53,7 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         ..Default::default()
     };
     // Query must match all files
-    let res =
-        search::search(&store, &registry, "extension:txt", options)?;
+    let res = search::search(&store, &registry, "extension:txt", options)?;
 
     assert_eq!(res.results.len(), 10);
     assert!(res.has_more, "Should have more results");
@@ -91,12 +90,8 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
         cid: Some(cid.clone()),
         ..Default::default()
     };
-    let res_page2 = search::search(
-        &store,
-        &registry,
-        "extension:txt",
-        options_page2,
-    )?;
+    let res_page2 =
+        search::search(&store, &registry, "extension:txt", options_page2)?;
 
     assert_eq!(
         res_page2.results.len(),

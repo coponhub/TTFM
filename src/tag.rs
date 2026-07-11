@@ -15,12 +15,14 @@
 
 use crate::db::{SqlType, TargetTable};
 use crate::query::ast::{
-    BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
+    BasicOp, Candidate, ComparisonNode, ComparisonOp, DefinitionRef, Operand,
+    QueryNode,
 };
 use crate::response::Item;
 use crate::taggers::TagValue;
 use crate::types::{
-    DBType, ItemKind, Label, LabelValue, Origin, Rank, SType, TagType, TypedTag,
+    DBType, ItemId, ItemKind, Label, LabelValue, LargeOrigin, Origin, Rank,
+    SType, TagType, TypedTag,
 };
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
@@ -224,14 +226,23 @@ pub trait Query: Send + Sync {
         tagtype: &TagType,
         label: &Label,
         tag: &TypedTag,
+        schema: &dyn LogicalSchema,
     ) -> QueryNode {
         if let Some(kind) = self.item_kind() {
             // 定義アイテム参照: tag:/type: などは item_references の定義行を参照する。
             // value は自身の型を付与した representative（未登録時の Volatile 用）。
-            QueryNode::DefinitionRef {
+            QueryNode::DefinitionRef(DefinitionRef {
                 kind,
                 value: Label::resolve(tagtype.clone(), label.value()),
-            }
+                candidates: Vec::new(),
+                origins: Vec::new(),
+                reserved: schema
+                    .iter_all_for_rank()
+                    .into_iter()
+                    .map(|(t, _, _)| t.as_str().to_string())
+                    .collect(),
+                recorded: true,
+            })
         } else {
             QueryNode::TypedTag(tag.clone())
         }
@@ -261,7 +272,7 @@ pub trait Query: Send + Sync {
 
     /// Label の論理型。
     fn logical_type(&self) -> LogicalType {
-        LogicalType::Any
+        LogicalType::String
     }
 
     /// DB の `type` カラムに格納されるキー。None = タグ名をそのまま使用。
@@ -295,6 +306,12 @@ pub trait Display: Send + Sync {
         DisplayFormats::default()
     }
 
+    /// この型のアイテムを表示するときの優先 Order（複数キー可）。
+    /// 既定は空 = 優先なし（検索側の既定の並びに従う）。
+    fn preferred_order(&self) -> Vec<crate::types::Order> {
+        Vec::new()
+    }
+
     fn show(&self, value: &LabelValue, format: DisplayFormat) -> String;
 }
 
@@ -305,6 +322,7 @@ pub trait Display: Send + Sync {
 pub enum EditStrategy {
     Append,
     Replace,
+    RemoveOnly,
     ModifyInjection,
     Relocate,
     SetFileAttr,
@@ -332,8 +350,12 @@ pub trait TagFunction: Send + Sync {
         None
     }
 
-    fn query(&self) -> Option<&dyn Query> {
-        None
+    /// クエリ展開・正規化のロジック。宣言しない場合は Query の全デフォルト実装が使われる。
+    fn query(&self) -> &dyn Query {
+        struct DefaultQuery;
+        impl Query for DefaultQuery {}
+        static DEFAULT: DefaultQuery = DefaultQuery;
+        &DEFAULT
     }
 
     fn display(&self) -> Option<&dyn Display> {
@@ -357,6 +379,10 @@ pub trait TagFunction: Send + Sync {
 pub struct TagRegistry {
     /// 登録順序を保持しつつ名前でのルックアップも O(1) で行える IndexMap
     functions: IndexMap<String, Arc<dyn TagFunction>>,
+    /// `register()` 呼び出し順に採番される固定オフセット（Sys id の基）。
+    /// `register_plugin()` では採番しない（プラグインは Sys 区画対象外）。
+    builtin_offsets: std::collections::HashMap<String, u32>,
+    next_builtin_offset: u32,
 }
 
 impl Default for TagRegistry {
@@ -369,12 +395,34 @@ impl TagRegistry {
     pub fn new() -> Self {
         Self {
             functions: IndexMap::new(),
+            builtin_offsets: std::collections::HashMap::new(),
+            next_builtin_offset: 0,
         }
     }
 
     pub fn register(&mut self, func: impl TagFunction + 'static) {
         let arc = Arc::new(func);
-        self.functions.insert(arc.name().to_string(), arc);
+        let name = arc.name().to_string();
+        if !self.functions.contains_key(&name) {
+            self.builtin_offsets
+                .insert(name.clone(), self.next_builtin_offset);
+            self.next_builtin_offset += 1;
+        }
+        self.functions.insert(name, arc);
+    }
+
+    /// `register()` で登録された組み込み関数の列挙順オフセット。
+    /// `register_plugin()` 経由の登録には存在しない（Sys 区画対象外）。
+    pub fn builtin_offset(&self, name: &str) -> Option<u32> {
+        self.builtin_offsets.get(name).copied()
+    }
+
+    /// 固定 Sys id のオフセットから組み込み型名を逆引きする（builtin_offset の逆写像）。
+    pub fn builtin_name_for_offset(&self, offset: u32) -> Option<&str> {
+        self.builtin_offsets
+            .iter()
+            .find(|(_, &v)| v == offset)
+            .map(|(k, _)| k.as_str())
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn TagFunction> {
@@ -431,9 +479,7 @@ impl TagRegistry {
             return label.clone();
         }
         if let Some(f) = self.get(tag_name) {
-            if let Some(q) = f.query() {
-                return q.normalize_label(label);
-            }
+            return f.query().normalize_label(label);
         }
         label.clone()
     }
@@ -446,11 +492,9 @@ impl TagRegistry {
             return label.clone();
         }
         for f in self.functions.values().rev() {
-            if let Some(q) = f.query() {
-                let normalized = q.normalize_label(label);
-                if normalized != *label {
-                    return normalized;
-                }
+            let normalized = f.query().normalize_label(label);
+            if normalized != *label {
+                return normalized;
             }
         }
         label.clone()
@@ -488,14 +532,12 @@ impl TagRegistry {
         let Some(func) = self.get(&name) else {
             return QueryNode::Comparison(node);
         };
-        let Some(q) = func.query() else {
-            return QueryNode::Comparison(node);
-        };
-        q.expand_comparison(node)
+        func.query().expand_comparison(node)
     }
 
     pub fn register_plugin(&mut self, func: impl TagFunction + 'static) {
-        self.register(func);
+        let arc = Arc::new(func);
+        self.functions.insert(arc.name().to_string(), arc);
     }
 
     /// タグ名とDB生値から、デフォルトDisplayフォーマットで表示用文字列を返す。
@@ -664,8 +706,8 @@ impl TagFunction for DirectoryFn {
     fn name(&self) -> &str {
         SType::Directory.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Query for DirectoryFn {
@@ -680,6 +722,7 @@ impl Query for DirectoryFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
@@ -705,8 +748,8 @@ impl TagFunction for FilenameFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -751,6 +794,7 @@ impl Query for FilenameFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
@@ -776,8 +820,8 @@ impl TagFunction for ExtensionFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -816,6 +860,7 @@ impl Query for ExtensionFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let label = self.normalize_label(label);
         QueryNode::And(vec![
@@ -840,8 +885,8 @@ impl TagFunction for PathFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -885,6 +930,7 @@ impl Query for PathFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let normalized = normalize_path_str(&label.as_str());
         let lv = match label.value() {
@@ -904,8 +950,8 @@ impl TagFunction for ParentDirFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -944,6 +990,7 @@ impl Query for ParentDirFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let normalized = normalize_path_str(&label.as_str());
         let lv = match label.value() {
@@ -963,8 +1010,16 @@ impl TagFunction for StemFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
+    fn query(&self) -> &dyn Query {
+        self
+    }
+    fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
+    }
+}
+impl Edit for StemFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::Relocate
     }
 }
 impl Index for StemFn {
@@ -994,8 +1049,8 @@ impl TagFunction for IsDirFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Index for IsDirFn {
@@ -1022,8 +1077,8 @@ impl TagFunction for HashFn {
     fn name(&self) -> &str {
         SType::Hash.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Query for HashFn {
@@ -1038,8 +1093,8 @@ impl TagFunction for ContentFn {
     fn name(&self) -> &str {
         SType::Content.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -1071,8 +1126,8 @@ impl TagFunction for FileIdFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Scan for FileIdFn {
@@ -1120,8 +1175,8 @@ impl TagFunction for NameFn {
     fn name(&self) -> &str {
         SType::Name.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -1150,6 +1205,7 @@ impl Query for NameFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(SType::Name, label.clone()))
     }
@@ -1164,8 +1220,8 @@ impl TagFunction for SizeFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
@@ -1212,6 +1268,7 @@ impl Query for SizeFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let label = self.normalize_label(label);
         QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
@@ -1325,8 +1382,8 @@ impl TagFunction for MtimeFn {
     fn index(&self) -> Option<&dyn Index> {
         Some(self)
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn display(&self) -> Option<&dyn Display> {
         Some(self)
@@ -1443,38 +1500,6 @@ fn mtime_range_op(
         })],
     }
 }
-impl Display for MtimeFn {
-    fn formats(&self) -> DisplayFormats {
-        DisplayFormats {
-            default: DisplayFormat::new("human", "Human Readable"),
-            options: vec![
-                DisplayFormat::new("human", "Human Readable"),
-                DisplayFormat::new("relative", "Relative"),
-                DisplayFormat::new("iso", "ISO 8601"),
-                DisplayFormat::new("raw", "Raw"),
-            ],
-        }
-    }
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
-        let secs = match value {
-            LabelValue::Integer(i) => *i,
-            _ => return value.as_display_name(),
-        };
-        match format.id.as_str() {
-            "raw" => secs.to_string(),
-            "iso" => chrono::DateTime::from_timestamp(secs, 0)
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-                .unwrap_or_else(|| secs.to_string()),
-            "relative" => format_mtime_relative(secs),
-            _ => chrono::Local
-                .timestamp_opt(secs, 0)
-                .single()
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| secs.to_string()),
-        }
-    }
-}
-
 fn format_mtime_relative(secs: i64) -> String {
     let diff = chrono::Local::now().timestamp() - secs;
     let abs = diff.unsigned_abs();
@@ -1549,6 +1574,7 @@ impl Query for MtimeFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         if let LabelValue::Date(dt) = label.value() {
             let first = Operand::TypeRef(SType::Mtime.into());
@@ -1649,6 +1675,37 @@ impl Query for MtimeFn {
         }
     }
 }
+impl Display for MtimeFn {
+    fn formats(&self) -> DisplayFormats {
+        DisplayFormats {
+            default: DisplayFormat::new("human", "Human Readable"),
+            options: vec![
+                DisplayFormat::new("human", "Human Readable"),
+                DisplayFormat::new("relative", "Relative"),
+                DisplayFormat::new("iso", "ISO 8601"),
+                DisplayFormat::new("raw", "Raw"),
+            ],
+        }
+    }
+    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+        let secs = match value {
+            LabelValue::Integer(i) => *i,
+            _ => return value.as_display_name(),
+        };
+        match format.id.as_str() {
+            "raw" => secs.to_string(),
+            "iso" => chrono::DateTime::from_timestamp(secs, 0)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| secs.to_string()),
+            "relative" => format_mtime_relative(secs),
+            _ => chrono::Local
+                .timestamp_opt(secs, 0)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| secs.to_string()),
+        }
+    }
+}
 
 // --- ItemIdFn ---
 pub(crate) struct ItemIdFn;
@@ -1656,8 +1713,16 @@ impl TagFunction for ItemIdFn {
     fn name(&self) -> &str {
         SType::ItemId.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
+    fn query(&self) -> &dyn Query {
+        self
+    }
+    fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
+    }
+}
+impl Edit for ItemIdFn {
+    fn strategy(&self) -> EditStrategy {
+        EditStrategy::RemoveOnly
     }
 }
 impl Query for ItemIdFn {
@@ -1684,6 +1749,7 @@ impl Query for ItemIdFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::ColumnMatch {
             tag: SType::ItemId,
@@ -1701,8 +1767,8 @@ impl TagFunction for ItemKindFn {
     fn name(&self) -> &str {
         SType::ItemKind.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -1738,6 +1804,7 @@ impl Query for ItemKindFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::ColumnMatch {
             tag: SType::ItemKind,
@@ -1752,8 +1819,8 @@ impl TagFunction for RankFn {
     fn name(&self) -> &str {
         SType::Rank.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
     fn edit(&self) -> Option<&dyn Edit> {
         Some(self)
@@ -1776,6 +1843,7 @@ impl Query for RankFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::TypedTag(TypedTag::new(SType::Rank, label.clone()))
     }
@@ -1787,8 +1855,8 @@ impl TagFunction for OriginFn {
     fn name(&self) -> &str {
         SType::Origin.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Query for OriginFn {
@@ -1803,10 +1871,78 @@ impl Query for OriginFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        schema: &dyn LogicalSchema,
     ) -> QueryNode {
-        QueryNode::ColumnMatch {
+        // "system" は大分類のエイリアス。実値である小分類 (Builtin/File/Plugin)
+        // への Or として展開する (ITEM.md の Origin 大分類)。
+        if label.as_str() == LargeOrigin::System.as_str() {
+            use strum::IntoEnumIterator;
+            return QueryNode::Or(
+                Origin::iter()
+                    .filter(|o| o.is_system())
+                    .map(|o| {
+                        let sub_label = Label::resolve(
+                            TagType::Base(SType::Origin),
+                            LabelValue::String(o.as_str().to_string()),
+                        );
+                        self.expand(_tt, &sub_label, _tag, schema)
+                    })
+                    .collect(),
+            );
+        }
+
+        let origin_str = label.as_str();
+        let mut sub_queries = vec![QueryNode::ColumnMatch {
             tag: SType::Origin,
             label: label.clone(),
+        }];
+
+        use strum::IntoEnumIterator;
+        let matched_origins: Vec<Origin> = Origin::iter()
+            .filter(|o| crate::util::glob_match(&origin_str, o.as_str()))
+            .collect();
+
+        let all_entries = schema.iter_all_for_rank();
+        let reserved: Vec<String> = all_entries
+            .iter()
+            .map(|(t, _, _)| t.as_str().to_string())
+            .collect();
+
+        for target_org in matched_origins {
+            let candidates: Vec<Candidate> = all_entries
+                .iter()
+                .filter(|(_, _, id)| match id {
+                    ItemId::Stored(val) => Origin::within(*val) == target_org,
+                    ItemId::Settling(org, _) => *org == target_org,
+                    ItemId::Volatile(_) => target_org == Origin::User,
+                })
+                .map(|(t, r, id)| Candidate {
+                    name: t.as_str().to_string(),
+                    rank: *r,
+                    id: *id,
+                })
+                .collect();
+
+            if !candidates.is_empty() {
+                let val = Label::resolve(
+                    TagType::Base(SType::Type),
+                    LabelValue::String("*".to_string()),
+                );
+                sub_queries.push(QueryNode::DefinitionRef(DefinitionRef {
+                    kind: ItemKind::Type,
+                    value: val,
+                    candidates,
+                    origins: vec![target_org],
+                    reserved: reserved.clone(),
+                    recorded: false,
+                }));
+            }
+        }
+
+        if sub_queries.len() == 1 {
+            sub_queries.remove(0)
+        } else {
+            QueryNode::Or(sub_queries)
         }
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
@@ -1820,7 +1956,10 @@ impl TagFunction for TypeFn {
     fn name(&self) -> &str {
         SType::Type.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
+    fn query(&self) -> &dyn Query {
+        self
+    }
+    fn display(&self) -> Option<&dyn Display> {
         Some(self)
     }
 }
@@ -1834,8 +1973,50 @@ impl Query for TypeFn {
     fn item_kind(&self) -> Option<ItemKind> {
         Some(ItemKind::Type)
     }
+    fn expand(
+        &self,
+        tagtype: &TagType,
+        label: &Label,
+        _tag: &TypedTag,
+        schema: &dyn LogicalSchema,
+    ) -> QueryNode {
+        // Literal（quoted）= 完全一致検索、String（unquoted/glob）= glob検索。
+        // どちらも registry の登録型名＋default_rank＋出所（ItemId）を
+        // candidates にする。完全一致検索でも
+        // Stored（組み込み）/Settling（プラグイン）の区別を保つため、
+        // 検索経路によらず常に同じ candidates を渡す。GLOB によるパターン
+        // 絞り込み自体は SQL 側の定義アイテム列挙サブクエリに委ねる。
+        let candidates: Vec<Candidate> = schema
+            .iter_all_for_rank()
+            .into_iter()
+            .map(|(t, r, id)| Candidate {
+                name: t.as_str().to_string(),
+                rank: r,
+                id,
+            })
+            .collect();
+        let reserved =
+            candidates.iter().map(|c| c.name.clone()).collect();
+        QueryNode::DefinitionRef(DefinitionRef {
+            kind: ItemKind::Type,
+            value: Label::resolve(tagtype.clone(), label.value()),
+            candidates,
+            origins: Vec::new(),
+            reserved,
+            recorded: true,
+        })
+    }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
+    }
+}
+impl Display for TypeFn {
+    // 型定義アイテムは item_id 降順（区画をまたぐ生 id 順）で表示する
+    fn preferred_order(&self) -> Vec<crate::types::Order> {
+        vec![crate::types::Order::desc(SType::ItemId)]
+    }
+    fn show(&self, value: &LabelValue, _format: DisplayFormat) -> String {
+        value.as_display_name()
     }
 }
 
@@ -1845,8 +2026,8 @@ impl TagFunction for LabelFn {
     fn name(&self) -> &str {
         SType::Label.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Query for LabelFn {
@@ -1861,6 +2042,7 @@ impl Query for LabelFn {
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::ColumnMatch {
             tag: SType::Label,
@@ -1878,8 +2060,8 @@ impl TagFunction for TypedTagFn {
     fn name(&self) -> &str {
         SType::TypedTag.into()
     }
-    fn query(&self) -> Option<&dyn Query> {
-        Some(self)
+    fn query(&self) -> &dyn Query {
+        self
     }
 }
 impl Query for TypedTagFn {
@@ -1936,8 +2118,8 @@ mod tests {
         fn name(&self) -> &str {
             "qtest"
         }
-        fn query(&self) -> Option<&dyn Query> {
-            Some(self)
+        fn query(&self) -> &dyn Query {
+            self
         }
     }
     impl Query for QueryTag {
@@ -1967,6 +2149,47 @@ mod tests {
         assert!(reg.get("simple").is_some());
     }
 
+    // Plan: 定義アイテムの id 区画 — Step 3
+    // register() は呼び出し順に builtin_offset を採番する（宣言不要・列挙順固定）。
+    #[test]
+    fn test_register_assigns_sequential_builtin_offset() {
+        let mut reg = TagRegistry::new();
+        reg.register(SimpleTag);
+        reg.register(IndexedTag);
+        assert_eq!(reg.builtin_offset("simple"), Some(0));
+        assert_eq!(reg.builtin_offset("indexed"), Some(1));
+    }
+
+    // register_plugin() は builtin_offset を採番しない（Sys 区画対象外）。
+    #[test]
+    fn test_register_plugin_has_no_builtin_offset() {
+        let mut reg = TagRegistry::new();
+        reg.register_plugin(SimpleTag);
+        assert!(reg.get("simple").is_some());
+        assert_eq!(reg.builtin_offset("simple"), None);
+    }
+
+    // Plan: 定義アイテムの id 区画 — Step 6
+    // builtin_name_for_offset は builtin_offset の逆写像（Sys id 実体化時の名前解決に使う）。
+    #[test]
+    fn test_builtin_name_for_offset_reverses_builtin_offset() {
+        let mut reg = TagRegistry::new();
+        reg.register(SimpleTag);
+        reg.register(IndexedTag);
+        assert_eq!(reg.builtin_name_for_offset(0), Some("simple"));
+        assert_eq!(reg.builtin_name_for_offset(1), Some("indexed"));
+        assert_eq!(reg.builtin_name_for_offset(99), None);
+    }
+
+    // with_standard() の登録順がそのまま builtin_offset になる（先頭は file_id）。
+    #[test]
+    fn test_with_standard_builtin_offsets_follow_declaration_order() {
+        let reg = TagRegistry::with_standard();
+        assert_eq!(reg.builtin_offset("file_id"), Some(0));
+        assert_eq!(reg.builtin_offset("path"), Some(1));
+        assert_eq!(reg.builtin_offset("hash"), Some(10));
+    }
+
     #[test]
     fn test_registry_get_arc() {
         let mut reg = TagRegistry::new();
@@ -1988,8 +2211,11 @@ mod tests {
     #[test]
     fn test_tag_function_defaults() {
         assert!(SimpleTag.index().is_none());
-        assert!(SimpleTag.query().is_none());
         assert!(SimpleTag.display().is_none());
+        // query は常に存在し、宣言しなければ Query の全デフォルト実装が使われる
+        let label = Label::from("x");
+        assert_eq!(SimpleTag.query().normalize_label(&label), label);
+        assert_eq!(SimpleTag.query().logical_type(), LogicalType::String);
     }
 
     // --- Index ---
@@ -2018,7 +2244,7 @@ mod tests {
     #[test]
     fn test_query_normalize_label() {
         let q = QueryTag;
-        let qry = q.query().unwrap();
+        let qry = q.query();
         let label = Label::Other(
             TagType::from("qtest"),
             LabelValue::String("hello".to_string()),
@@ -2036,7 +2262,7 @@ mod tests {
             TagType::from("size"),
             LabelValue::String("1MB".to_string()),
         );
-        let normalized = q.query().unwrap().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label);
         assert_eq!(normalized, Label::Size(1_048_576));
     }
 
@@ -2059,7 +2285,7 @@ mod tests {
             TagType::from("mtime"),
             LabelValue::String("2026-02-01".to_string()),
         );
-        let normalized = q.query().unwrap().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label);
         match normalized {
             Label::Date(crate::types::DateTime::Date(d)) => {
                 assert_eq!(
@@ -2079,7 +2305,7 @@ mod tests {
             TagType::from("mtime"),
             LabelValue::String("2026".to_string()),
         );
-        let normalized = q.query().unwrap().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label);
         assert_eq!(
             normalized, label,
             "bare YYYY should be unchanged by normalize_label"
@@ -2093,7 +2319,7 @@ mod tests {
             TagType::from("mtime"),
             LabelValue::String("not-a-date".to_string()),
         );
-        let normalized = q.query().unwrap().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label);
         assert_eq!(normalized, label);
     }
 
@@ -2152,6 +2378,24 @@ mod tests {
         let fmts = DisplayFormats::default();
         assert_eq!(fmts.default.id, "raw");
         assert!(fmts.options.is_empty());
+    }
+
+    // --- Display: 優先 Order ---
+
+    // TypeFn は Display で優先 Order（item_id 降順）を宣言する
+    #[test]
+    fn typefn_display_declares_item_id_order() {
+        use crate::types::{Order, SType};
+        let display =
+            TypeFn.display().expect("TypeFn should declare a Display");
+        assert_eq!(display.preferred_order(), vec![Order::desc(SType::ItemId)]);
+    }
+
+    // 優先 Order の既定は空（SizeFn は Display を持つが宣言しない）
+    #[test]
+    fn display_preferred_order_defaults_to_empty() {
+        let display = SizeFn.display().expect("SizeFn declares a Display");
+        assert!(display.preferred_order().is_empty());
     }
 
     // --- ttql_parse / ttql! ---
@@ -2239,10 +2483,12 @@ mod tests {
         let label = Label::Date(DateTime::Date(date));
         let tag_type = TagType::from(SType::Mtime);
         let typed_tag = TypedTag::new(SType::Mtime, label.clone());
-        let result = MtimeFn
-            .query()
-            .unwrap()
-            .expand(&tag_type, &label, &typed_tag);
+        let result = MtimeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        );
         // Date Eq → And([Ge(floor), Le(ceil)])
         let QueryNode::And(nodes) = result else {
             panic!("expected And, got {:?}", result)
@@ -2280,7 +2526,7 @@ mod tests {
                 Operand::Literal(Label::Date(dt.clone())),
             )],
         };
-        let result = MtimeFn.query().unwrap().expand_comparison(node);
+        let result = MtimeFn.query().expand_comparison(node);
         // Gt → ceil_ts で単一条件
         let QueryNode::Comparison(c) = result else {
             panic!("expected Comparison, got {:?}", result)
@@ -2312,12 +2558,244 @@ mod tests {
                 Operand::Literal(Label::Date(dt)),
             )],
         };
-        let result = MtimeFn.query().unwrap().expand_comparison(node);
+        let result = MtimeFn.query().expand_comparison(node);
         // Eq → And([Ge, Le])
         assert!(
             matches!(result, QueryNode::And(_)),
             "expected And for Eq, got {:?}",
             result
         );
+    }
+
+    // --- TypeFn::expand: Literal=完全一致検索 / String=glob検索 の振り分け ---
+
+    fn expand_type_tag(value: LabelValue) -> QueryNode {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Type);
+        let label = Label::resolve(tag_type.clone(), value);
+        let tag = TypedTag::new(SType::Type, label.clone());
+        let registry = TagRegistry::with_standard();
+        let lens = Lens::from_registry(&registry);
+        TypeFn.query().expand(&tag_type, &label, &tag, &lens)
+    }
+
+    #[test]
+    fn test_type_expand_string_pattern_bakes_registered_candidates() {
+        use crate::types::{ItemId, LabelValue};
+        // `type:*`（unquoted String パターン）は glob検索。
+        // schema の登録型名＋default_rank＋固定 Sys id が candidates になる。
+        let result = expand_type_tag(LabelValue::String("*".to_string()));
+        let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
+        else {
+            panic!("expected DefinitionRef, got {:?}", result)
+        };
+        let registry = TagRegistry::with_standard();
+        let hash_rank = registry.get("hash").unwrap().default_rank();
+        let filename_rank = registry.get("filename").unwrap().default_rank();
+        let hash_sys_id = Origin::Builtin.block_lo()
+            + registry.builtin_offset("hash").unwrap() as i64;
+        let filename_sys_id = Origin::Builtin.block_lo()
+            + registry.builtin_offset("filename").unwrap() as i64;
+        assert!(
+            candidates.contains(&Candidate {
+                name: "hash".to_string(),
+                rank: hash_rank,
+                id: ItemId::Stored(hash_sys_id)
+            }),
+            "candidates should include unused registered type 'hash' with its fixed Sys id, got {:?}",
+            candidates
+        );
+        assert!(
+            candidates.contains(&Candidate {
+                name: "filename".to_string(),
+                rank: filename_rank,
+                id: ItemId::Stored(filename_sys_id)
+            }),
+            "candidates should include registered type 'filename' with its fixed Sys id, got {:?}",
+            candidates
+        );
+    }
+
+    // プラグイン登録型（register_plugin）は candidates に載るが固定 Sys id は持たない。
+    #[test]
+    fn test_type_expand_string_pattern_plugin_candidate_has_no_sys_id() {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{ItemId, LabelValue, SType, TagType, TypedTag};
+        let mut registry = TagRegistry::with_standard();
+        registry.register_plugin(QueryTag);
+        let lens = Lens::from_registry(&registry);
+        let tag_type = TagType::from(SType::Type);
+        let label = Label::resolve(
+            tag_type.clone(),
+            LabelValue::String("*".to_string()),
+        );
+        let tag = TypedTag::new(SType::Type, label.clone());
+        let result = TypeFn.query().expand(&tag_type, &label, &tag, &lens);
+        let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
+        else {
+            panic!("expected DefinitionRef, got {:?}", result)
+        };
+        let qtest_rank = registry.get("qtest").unwrap().default_rank();
+        assert!(
+            candidates.iter().any(|c| {
+                c.name == "qtest"
+                    && c.rank == qtest_rank
+                    && matches!(c.id, ItemId::Settling(Origin::Plugin, _))
+            }),
+            "plugin-registered candidate should have no fixed Sys id, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_type_expand_literal_is_exact_match_lookup_with_registry_candidates()
+    {
+        use crate::types::{ItemId, LabelValue};
+        // `type:"filename"`（quoted Literal）は完全一致検索だが、Stored/Volatile
+        // の区別（固定 Sys id を持つ組み込みかどうか）のため、registry 由来の
+        // candidates は glob検索と同様に含める。
+        let result =
+            expand_type_tag(LabelValue::Literal("filename".to_string()));
+        let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
+        else {
+            panic!("expected DefinitionRef, got {:?}", result)
+        };
+        let registry = TagRegistry::with_standard();
+        let filename_rank = registry.get("filename").unwrap().default_rank();
+        let filename_sys_id = Origin::Builtin.block_lo()
+            + registry.builtin_offset("filename").unwrap() as i64;
+        assert!(
+            candidates.contains(&Candidate {
+                name: "filename".to_string(),
+                rank: filename_rank,
+                id: ItemId::Stored(filename_sys_id)
+            }),
+            "exact-match lookup should still recognize a registered built-in's fixed Sys id, got {:?}",
+            candidates
+        );
+    }
+
+    #[test]
+    fn test_typed_tag_expand_string_pattern_has_no_registry_candidates() {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        // `tag:*` のソースは Stored 定義行と使用中ペアのみ。
+        // registry は型のソースなので tag: の candidates にはならない。
+        let tag_type = TagType::from(SType::TypedTag);
+        let label = Label::resolve(
+            tag_type.clone(),
+            LabelValue::String("*".to_string()),
+        );
+        let tag = TypedTag::new(SType::TypedTag, label.clone());
+        let registry = TagRegistry::with_standard();
+        let lens = Lens::from_registry(&registry);
+        let result = TypedTagFn.query().expand(&tag_type, &label, &tag, &lens);
+        let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
+        else {
+            panic!("expected DefinitionRef, got {:?}", result)
+        };
+        assert!(
+            candidates.is_empty(),
+            "tag: has no registry source, got {:?}",
+            candidates
+        );
+    }
+
+    // --- OriginFn::expand ---
+
+    #[test]
+    fn test_origin_expand_system_alias_becomes_or_of_small_classification() {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Origin);
+        let label = Label::resolve(
+            tag_type.clone(),
+            LabelValue::String("system".to_string()),
+        );
+        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let result = OriginFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &Lens::base_standard(),
+        );
+        let QueryNode::Or(nodes) = result else {
+            panic!("expected Or, got {:?}", result)
+        };
+        let mut labels = Vec::new();
+        for node in &nodes {
+            match node {
+                QueryNode::ColumnMatch { label, .. } => {
+                    labels.push(label.as_str().to_string());
+                }
+                QueryNode::Or(sub_nodes) => {
+                    for sub in sub_nodes {
+                        if let QueryNode::ColumnMatch { label, .. } = sub {
+                            labels.push(label.as_str().to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(labels.len(), 3);
+        assert!(labels.contains(&"builtin".to_string()));
+        assert!(labels.contains(&"file".to_string()));
+        assert!(labels.contains(&"plugin".to_string()));
+    }
+
+    #[test]
+    fn test_origin_expand_non_alias_label_is_direct_column_match() {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Origin);
+        let label = Label::resolve(
+            tag_type.clone(),
+            LabelValue::String("user".to_string()),
+        );
+        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let result = OriginFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &Lens::base_standard(),
+        );
+        let QueryNode::ColumnMatch { tag, label: l } = result else {
+            panic!("expected ColumnMatch, got {:?}", result)
+        };
+        assert_eq!(tag, SType::Origin);
+        assert_eq!(l.as_str(), "user");
+    }
+
+    #[test]
+    fn test_origin_expand_glob_generates_definition_ref_and_column_match() {
+        use crate::query::lens_schema::Lens;
+        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Origin);
+        let label = Label::resolve(
+            tag_type.clone(),
+            LabelValue::String("b*".to_string()),
+        );
+        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let result = OriginFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &Lens::base_standard(),
+        );
+        let QueryNode::Or(nodes) = result else {
+            panic!("expected Or, got {:?}", result)
+        };
+        assert_eq!(nodes.len(), 2);
+
+        let has_column_match = nodes
+            .iter()
+            .any(|n| matches!(n, QueryNode::ColumnMatch { .. }));
+        let has_definition_ref = nodes
+            .iter()
+            .any(|n| matches!(n, QueryNode::DefinitionRef(_)));
+        assert!(has_column_match, "should contain ColumnMatch");
+        assert!(has_definition_ref, "should contain DefinitionRef");
     }
 }

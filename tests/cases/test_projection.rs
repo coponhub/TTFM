@@ -42,12 +42,8 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
-        &store,
-        &registry,
-        "extension:",
-        Default::default(),
-    )?;
+    let res =
+        search::search(&store, &registry, "extension:", Default::default())?;
 
     assert!(
         res.results.iter().any(|r| r.raw_repr() == "txt"),
@@ -236,13 +232,9 @@ fn test_projection_queries() {
 
     // 1. extension: (投影 - 転置: Label → Items)
     // 投影結果はラベル値（rs, txt）のリストとして返される
-    let results = search::search(
-        &store,
-        &registry,
-        "extension:",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "extension:", Default::default())
+            .unwrap();
     println!(
         "Matches for 'extension:': {:?}",
         results
@@ -267,13 +259,9 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
-    let results = search::search(
-        &store,
-        &registry,
-        "directory:",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "directory:", Default::default())
+            .unwrap();
     println!(
         "Matches for 'directory:': {:?}",
         results
@@ -292,13 +280,9 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
-    let results = search::search(
-        &store,
-        &registry,
-        "filename:",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "filename:", Default::default())
+            .unwrap();
     println!(
         "Matches for 'filename:': {:?}",
         results
@@ -324,13 +308,9 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results = search::search(
-        &store,
-        &registry,
-        "origin:system",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "origin:system", Default::default())
+            .unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
@@ -349,8 +329,7 @@ fn test_projection_queries() {
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results =
-        search::search(&store, &registry, "type:", Default::default())
-            .unwrap();
+        search::search(&store, &registry, "type:", Default::default()).unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
 
@@ -362,8 +341,10 @@ fn test_projection_queries() {
     }
 
     // 主要なSTypeが含まれているか確認
-    // 環境によっては全てのタグが出揃わない可能性があるため、最低限 item_kind と name があれば良しとする。
-    let expected_types = vec!["item_kind", "name"];
+    // アイテムに実際に付与されている属性（item_kind/rank/origin/name）は
+    // type: プロジェクションに載るべき（lens_schema::complement_type_groups
+    // によるクエリ側での Fixed 属性合成）。
+    let expected_types = vec!["item_kind", "name", "rank", "origin"];
     for t in expected_types {
         assert!(
             found_types.contains(t),
@@ -375,8 +356,7 @@ fn test_projection_queries() {
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
     let results =
-        search::search(&store, &registry, "tag:", Default::default())
-            .unwrap();
+        search::search(&store, &registry, "tag:", Default::default()).unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
     assert!(has_item_tags(&results.results));
@@ -389,13 +369,9 @@ fn test_projection_queries() {
     assert!(has_tag, "Items should have 'tag' tag values in Item");
 
     // 追加検証: extension: 結果の中身
-    let ext_results = search::search(
-        &store,
-        &registry,
-        "extension:",
-        Default::default(),
-    )
-    .unwrap();
+    let ext_results =
+        search::search(&store, &registry, "extension:", Default::default())
+            .unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.raw_repr() == "test.rs" {
@@ -409,8 +385,7 @@ fn test_projection_queries() {
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
     let results =
-        search::search(&store, &registry, "rank:", Default::default())
-            .unwrap();
+        search::search(&store, &registry, "rank:", Default::default()).unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
     println!("Matches for 'rank:': {} items", results.results.len());
@@ -439,13 +414,9 @@ fn test_projection_queries() {
     )
     .unwrap();
 
-    let results = search::search(
-        &store,
-        &registry,
-        "category:",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "category:", Default::default())
+            .unwrap();
     assert!(
         results.results.len() >= 1,
         "category: should match items with category tag"
@@ -491,13 +462,9 @@ fn test_projection_returns_label_volatile_items() {
         .unwrap();
 
     // extension: で投影
-    let results = search::search(
-        &store,
-        &registry,
-        "extension:",
-        Default::default(),
-    )
-    .unwrap();
+    let results =
+        search::search(&store, &registry, "extension:", Default::default())
+            .unwrap();
 
     // 検証1: type_for_projection が設定されている
     assert!(has_item_tags(&results.results));
@@ -601,4 +568,123 @@ fn test_projection_returns_label_volatile_items() {
             "rs label should contain references to test.rs or another.rs"
         );
     }
+}
+
+// `scan_hash:` は内部専用カラムの lens descriptor 削除後、未登録タグとして
+// 扱われるべき（Binder Error にならない）。
+#[test]
+fn test_scan_hash_is_treated_as_unregistered_tag() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    File::create(root.join("a.txt"))?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let results =
+        search::search(&store, &registry, "scan_hash:", Default::default())?;
+    assert!(
+        results.results.is_empty(),
+        "scan_hash: should be an unregistered tag with no matches, not a Binder Error"
+    );
+
+    Ok(())
+}
+
+// LabelSetOp（`type: | extension:` 等）で合成される type 側ラベルにも
+// item_kind/rank/origin のような Fixed 属性が含まれるべき（`type:` 単体と同じ集合）。
+#[test]
+fn test_label_set_op_includes_fixed_attributes() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    File::create(root.join("test.rs"))?;
+    File::create(root.join("test.txt"))?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let results = search::search(
+        &store,
+        &registry,
+        "type: | extension:",
+        Default::default(),
+    )?;
+    let found: std::collections::HashSet<String> = results
+        .results
+        .iter()
+        .map(|r| r.raw_repr().clone())
+        .collect();
+
+    for t in ["item_kind", "rank", "origin"] {
+        assert!(
+            found.contains(t),
+            "type: | extension: should contain label '{}'. Found: {:?}",
+            t,
+            found
+        );
+    }
+
+    Ok(())
+}
+
+// `count(type:)` は bare `type:` プロジェクションが返すラベル数と一致すべき
+// （Fixed 属性合成が集約経路にも反映されていること）。
+#[test]
+fn test_count_type_matches_bare_type_projection() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    File::create(root.join("test.rs"))?;
+    File::create(root.join("test.txt"))?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir)?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let bare_results =
+        search::search(&store, &registry, "type:", Default::default())?;
+    let bare_count = bare_results.results.len();
+
+    let count_results =
+        search::search(&store, &registry, "count(type:)", Default::default())?;
+    let counted: f64 = count_results.results[0].raw_repr().parse()?;
+
+    assert_eq!(
+        counted as usize, bare_count,
+        "count(type:) ({}) should equal bare 'type:' label count ({})",
+        counted, bare_count
+    );
+    // test.rs/test.txt のみのセットアップでは、item_kind/rank/origin を含む
+    // Fixed 属性合成後、少なくとも 13 種類の type ラベルが存在するはず
+    // （size/file_id/mtime/parentdir/stem/filename/is_dir/path/name/extension
+    // の既存10種 + item_kind/rank/origin の3種）。
+    assert!(
+        bare_count >= 13,
+        "Expected at least 13 types after Fixed attribute synthesis, got {}",
+        bare_count
+    );
+
+    Ok(())
 }
