@@ -17,8 +17,7 @@ use crate::db::{Col, Store, TargetTable, Tbl};
 // use crate::db::BiticalType;
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::tag::TagRegistry;
-use crate::taggers::TagValue;
-use crate::types::ItemId;
+use crate::types::{Bitical, ItemId};
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
@@ -187,7 +186,7 @@ impl<'a> LocationMerger<'a> {
         for row in moved {
             let mut lr = vec![&row.id as &dyn ToSql];
             lr.extend(row.values.iter().map(|v| v as &dyn ToSql));
-            lr.push(&TagValue::Null as &dyn ToSql);
+            lr.push(&None::<Bitical> as &dyn ToSql);
             app.append_row(lr.as_slice())?;
         }
         Ok(self)

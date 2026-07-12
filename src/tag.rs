@@ -19,10 +19,9 @@ use crate::query::ast::{
     QueryNode,
 };
 use crate::response::Item;
-use crate::taggers::TagValue;
 use crate::types::{
-    BiticalAssociate, ItemId, ItemKind, Label, LabelValue, LargeOrigin, Origin, Rank,
-    SType, TagType, TypedTag,
+    Bitical, BiticalAssociate, Biticals, ItemId, ItemKind, Label, LargeOrigin,
+    Origin, Rank, SType, TagType, TypedTag,
 };
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
 use anyhow::Result;
@@ -153,10 +152,10 @@ pub trait Index: Send + Sync {
         ScanRole::Other
     }
 
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>>;
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>>;
 
     /// パスのみから値を生成できる場合に返す（移動検知など）。
-    fn extract_from_path(&self, _path: &Path) -> Option<LabelValue> {
+    fn extract_from_path(&self, _path: &Path) -> Option<Bitical> {
         None
     }
 
@@ -168,23 +167,6 @@ pub trait Index: Send + Sync {
     /// 書き込み先テーブル。
     fn target_table(&self) -> TargetTable {
         TargetTable::Locations
-    }
-
-    /// インデックス保存用の TagValue を返す。UUID 等の特殊型はここをオーバーライド。
-    fn extract_tag_value(&self, path: &Path) -> Result<TagValue> {
-        match self.extract(path)? {
-            None => Ok(TagValue::Null),
-            Some(LabelValue::String(s)) | Some(LabelValue::Literal(s)) => {
-                Ok(TagValue::Text(s))
-            }
-            Some(LabelValue::Integer(i)) => Ok(TagValue::BigInt(i)),
-            Some(LabelValue::Boolean(b)) => Ok(TagValue::Boolean(b)),
-            Some(LabelValue::Double(bits)) => {
-                Ok(TagValue::Double(f64::from_bits(bits)))
-            }
-            Some(LabelValue::Null) => Ok(TagValue::Null),
-            Some(LabelValue::Date(_)) => Ok(TagValue::Null),
-        }
     }
 }
 
@@ -233,7 +215,7 @@ pub trait Query: Send + Sync {
             // value は自身の型を付与した representative（未登録時の Volatile 用）。
             QueryNode::DefinitionRef(DefinitionRef {
                 kind,
-                value: Label::resolve(tagtype.clone(), label.value()),
+                value: label.rekey(tagtype.clone(), label.value()),
                 candidates: Vec::new(),
                 origins: Vec::new(),
                 reserved: schema
@@ -312,7 +294,7 @@ pub trait Display: Send + Sync {
         Vec::new()
     }
 
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String;
+    fn show(&self, value: &Bitical, format: DisplayFormat) -> String;
 }
 
 // ============================================================
@@ -473,9 +455,9 @@ impl TagRegistry {
     }
 
     /// 指定タグ名の `TagFunction::normalize_label` を呼び出す。
-    /// `LabelValue::Literal` はどの関数にも委譲せずそのまま返す。
+    /// `Label::Literal` はどの関数にも委譲せずそのまま返す。
     pub fn normalize_label(&self, tag_name: &str, label: &Label) -> Label {
-        if matches!(label.value(), LabelValue::Literal(_)) {
+        if matches!(label, Label::Literal(..)) {
             return label.clone();
         }
         if let Some(f) = self.get(tag_name) {
@@ -486,9 +468,9 @@ impl TagRegistry {
 
     /// 全 TagFunction の `normalize_label` を登録の降順に試し、最初に変換された結果を返す。
     /// タグ文脈によらず全リテラルに適用される変換（サイズ単位・日付文字列等）に使用。
-    /// `LabelValue::Literal` はどの関数にも委譲せずそのまま返す。
+    /// `Label::Literal` はどの関数にも委譲せずそのまま返す。
     pub fn normalize_label_any(&self, label: &Label) -> Label {
-        if matches!(label.value(), LabelValue::Literal(_)) {
+        if matches!(label, Label::Literal(..)) {
             return label.clone();
         }
         for f in self.functions.values().rev() {
@@ -500,11 +482,11 @@ impl TagRegistry {
         label.clone()
     }
 
-    pub fn get_all_columns(&self) -> Vec<crate::taggers::ColumnDef> {
+    pub fn get_all_columns(&self) -> Vec<crate::db::ColumnDef> {
         self.functions
             .values()
             .filter_map(|f| {
-                f.index().map(|idx| crate::taggers::ColumnDef {
+                f.index().map(|idx| crate::db::ColumnDef {
                     name: f.name().to_string(),
                     bitical_type: idx.sql_type(),
                     target_table: idx.target_table(),
@@ -513,14 +495,11 @@ impl TagRegistry {
             .collect()
     }
 
-    pub fn process_file(
-        &self,
-        path: &Path,
-    ) -> Result<Vec<crate::taggers::TagValue>> {
+    pub fn process_file(&self, path: &Path) -> Result<Biticals> {
         self.functions
             .values()
             .filter_map(|f| f.index())
-            .map(|idx| idx.extract_tag_value(path))
+            .map(|idx| idx.extract(path))
             .collect()
     }
 
@@ -551,8 +530,8 @@ impl TagRegistry {
         };
         let lv = raw
             .parse::<i64>()
-            .map(LabelValue::Integer)
-            .unwrap_or_else(|_| LabelValue::String(raw.to_string()));
+            .map(Bitical::Integer)
+            .unwrap_or_else(|_| Bitical::String(raw.to_string()));
         disp.show(&lv, disp.formats().default)
     }
 
@@ -725,7 +704,7 @@ impl Query for DirectoryFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
+            QueryNode::TypedTag(TypedTag::retag(SType::Filename, label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, true)),
         ])
     }
@@ -767,17 +746,17 @@ impl Index for FilenameFn {
     fn role(&self) -> ScanRole {
         ScanRole::Location
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         get_safe_meta(path)?;
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        Ok(Some(LabelValue::String(name)))
+        Ok(Some(Bitical::String(name)))
     }
-    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
-        Some(LabelValue::String(
+    fn extract_from_path(&self, path: &Path) -> Option<Bitical> {
+        Some(Bitical::String(
             path.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -797,7 +776,7 @@ impl Query for FilenameFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(SType::Filename, label.clone())),
+            QueryNode::TypedTag(TypedTag::retag(SType::Filename, label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
         ])
     }
@@ -836,14 +815,14 @@ impl Index for ExtensionFn {
     fn role(&self) -> ScanRole {
         ScanRole::Location
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         Ok(path
             .extension()
-            .map(|e| LabelValue::String(e.to_string_lossy().to_lowercase())))
+            .map(|e| Bitical::String(e.to_string_lossy().to_lowercase())))
     }
-    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+    fn extract_from_path(&self, path: &Path) -> Option<Bitical> {
         path.extension()
-            .map(|e| LabelValue::String(e.to_string_lossy().to_lowercase()))
+            .map(|e| Bitical::String(e.to_string_lossy().to_lowercase()))
     }
 }
 impl Query for ExtensionFn {
@@ -864,7 +843,7 @@ impl Query for ExtensionFn {
     ) -> QueryNode {
         let label = self.normalize_label(label);
         QueryNode::And(vec![
-            QueryNode::TypedTag(TypedTag::new(SType::Extension, label)),
+            QueryNode::TypedTag(TypedTag::retag(SType::Extension, &label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
         ])
     }
@@ -914,11 +893,11 @@ impl Index for PathFn {
     fn role(&self) -> ScanRole {
         ScanRole::Location
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
-        Ok(Some(LabelValue::String(path.to_slash_lossy().to_string())))
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
+        Ok(Some(Bitical::String(path.to_slash_lossy().to_string())))
     }
-    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
-        Some(LabelValue::String(path.to_slash_lossy().to_string()))
+    fn extract_from_path(&self, path: &Path) -> Option<Bitical> {
+        Some(Bitical::String(path.to_slash_lossy().to_string()))
     }
 }
 impl Query for PathFn {
@@ -933,11 +912,11 @@ impl Query for PathFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let normalized = normalize_path_str(&label.as_str());
-        let lv = match label.value() {
-            LabelValue::Literal(_) => LabelValue::Literal(normalized),
-            _ => LabelValue::String(normalized),
-        };
-        QueryNode::TypedTag(TypedTag::new(SType::Path, lv))
+        let new_label = label.rekey(
+            TagType::Base(SType::Path),
+            Bitical::String(normalized),
+        );
+        QueryNode::TypedTag(TypedTag { label: new_label })
     }
 }
 
@@ -969,16 +948,16 @@ impl Index for ParentDirFn {
     fn role(&self) -> ScanRole {
         ScanRole::Location
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let parent = path
             .parent()
             .map(|p| p.to_slash_lossy().to_string())
             .unwrap_or_default();
-        Ok(Some(LabelValue::String(parent)))
+        Ok(Some(Bitical::String(parent)))
     }
-    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+    fn extract_from_path(&self, path: &Path) -> Option<Bitical> {
         path.parent()
-            .map(|p| LabelValue::String(p.to_slash_lossy().to_string()))
+            .map(|p| Bitical::String(p.to_slash_lossy().to_string()))
     }
 }
 impl Query for ParentDirFn {
@@ -993,11 +972,11 @@ impl Query for ParentDirFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let normalized = normalize_path_str(&label.as_str());
-        let lv = match label.value() {
-            LabelValue::Literal(_) => LabelValue::Literal(normalized),
-            _ => LabelValue::String(normalized),
-        };
-        QueryNode::TypedTag(TypedTag::new(SType::Parentdir, lv))
+        let new_label = label.rekey(
+            TagType::Base(SType::Parentdir),
+            Bitical::String(normalized),
+        );
+        QueryNode::TypedTag(TypedTag { label: new_label })
     }
 }
 
@@ -1023,12 +1002,12 @@ impl Edit for StemFn {
     }
 }
 impl Index for StemFn {
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        Ok(Some(LabelValue::String(stem)))
+        Ok(Some(Bitical::String(stem)))
     }
     fn target_table(&self) -> TargetTable {
         TargetTable::BaseTags
@@ -1054,9 +1033,9 @@ impl TagFunction for IsDirFn {
     }
 }
 impl Index for IsDirFn {
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let m = get_safe_meta(path)?;
-        Ok(Some(LabelValue::Boolean(m.is_dir())))
+        Ok(Some(Bitical::Boolean(m.is_dir())))
     }
     fn sql_type(&self) -> BiticalType {
         BiticalType::Boolean
@@ -1144,23 +1123,19 @@ impl Index for FileIdFn {
     fn role(&self) -> ScanRole {
         ScanRole::ScanId
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
-        let r = crate::get_file_ref(path)?;
-        Ok(Some(LabelValue::String(r.to_string())))
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
+        Ok(Some(Bitical::Uuid(crate::get_file_ref(path)?)))
     }
-    fn extract_from_path(&self, path: &Path) -> Option<LabelValue> {
+    fn extract_from_path(&self, path: &Path) -> Option<Bitical> {
         crate::get_file_ref(path)
             .ok()
-            .map(|r| LabelValue::String(r.to_string()))
+            .map(|r| Bitical::String(r.to_string()))
     }
     fn sql_type(&self) -> BiticalType {
         BiticalType::Uuid
     }
     fn target_table(&self) -> TargetTable {
         TargetTable::FileReferences
-    }
-    fn extract_tag_value(&self, path: &Path) -> Result<TagValue> {
-        Ok(TagValue::Uuid(crate::get_file_ref(path)?))
     }
 }
 impl Query for FileIdFn {
@@ -1207,7 +1182,7 @@ impl Query for NameFn {
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new(SType::Name, label.clone()))
+        QueryNode::TypedTag(TypedTag::retag(SType::Name, label))
     }
 }
 
@@ -1244,9 +1219,9 @@ impl Index for SizeFn {
     fn role(&self) -> ScanRole {
         ScanRole::Integrity
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let m = get_safe_meta(path)?;
-        Ok(Some(LabelValue::Integer(m.len())))
+        Ok(Some(Bitical::Integer(m.len())))
     }
     fn sql_type(&self) -> BiticalType {
         BiticalType::Integer
@@ -1271,7 +1246,7 @@ impl Query for SizeFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let label = self.normalize_label(label);
-        QueryNode::TypedTag(TypedTag::new(TagType::from(SType::Size), label))
+        QueryNode::TypedTag(TypedTag::retag(TagType::from(SType::Size), &label))
     }
 }
 impl Display for SizeFn {
@@ -1284,9 +1259,9 @@ impl Display for SizeFn {
             ],
         }
     }
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+    fn show(&self, value: &Bitical, format: DisplayFormat) -> String {
         let bytes = match value {
-            LabelValue::Integer(i) => *i,
+            Bitical::Integer(i) => *i,
             _ => return value.as_display_name(),
         };
         match format.id.as_str() {
@@ -1417,9 +1392,9 @@ impl Index for MtimeFn {
     fn role(&self) -> ScanRole {
         ScanRole::Integrity
     }
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let m = get_safe_meta(path)?;
-        Ok(Some(LabelValue::Integer(m.modified())))
+        Ok(Some(Bitical::Integer(m.modified())))
     }
     fn sql_type(&self) -> BiticalType {
         BiticalType::Integer
@@ -1562,7 +1537,7 @@ impl Query for MtimeFn {
         LogicalType::Integer
     }
     fn normalize_label(&self, label: &Label) -> Label {
-        if let LabelValue::String(s) = label.value() {
+        if let Bitical::String(s) = label.value() {
             if let Some(dt) = parse_date_literal(&s) {
                 return Label::Date(dt);
             }
@@ -1576,7 +1551,7 @@ impl Query for MtimeFn {
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
-        if let LabelValue::Date(dt) = label.value() {
+        if let Label::Date(dt) = label {
             let first = Operand::TypeRef(SType::Mtime.into());
             let nodes: Vec<_> = dt
                 .to_range(BasicOp::Eq)
@@ -1618,7 +1593,7 @@ impl Query for MtimeFn {
                 ])
             }
         } else {
-            QueryNode::TypedTag(TypedTag::new(SType::Mtime, label.clone()))
+            QueryNode::TypedTag(TypedTag::retag(SType::Mtime, label))
         }
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
@@ -1644,7 +1619,7 @@ impl Query for MtimeFn {
                     ComparisonOp::Label(_) => ComparisonOp::Label(b),
                     ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
                 };
-                if let LabelValue::Date(dt) = label.value() {
+                if let Label::Date(dt) = label {
                     let nodes =
                         dt.to_range(basic_op).into_iter().map(|(b, ts)| {
                             QueryNode::Comparison(ComparisonNode {
@@ -1687,9 +1662,9 @@ impl Display for MtimeFn {
             ],
         }
     }
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+    fn show(&self, value: &Bitical, format: DisplayFormat) -> String {
         let secs = match value {
-            LabelValue::Integer(i) => *i,
+            Bitical::Integer(i) => *i,
             _ => return value.as_display_name(),
         };
         match format.id.as_str() {
@@ -1736,7 +1711,7 @@ impl Query for ItemIdFn {
     /// 生整数文字列や Literal 以外はそのまま返す。
     fn normalize_label(&self, label: &Label) -> Label {
         let s = match label.value() {
-            LabelValue::String(s) | LabelValue::Literal(s) => s,
+            Bitical::String(s) => s,
             _ => return label.clone(),
         };
         match crate::db::identifier::parse(&s) {
@@ -1845,7 +1820,7 @@ impl Query for RankFn {
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::new(SType::Rank, label.clone()))
+        QueryNode::TypedTag(TypedTag::retag(SType::Rank, label))
     }
 }
 
@@ -1883,7 +1858,7 @@ impl Query for OriginFn {
                     .map(|o| {
                         let sub_label = Label::resolve(
                             TagType::Base(SType::Origin),
-                            LabelValue::String(o.as_str().to_string()),
+                            Bitical::String(o.as_str().to_string()),
                         );
                         self.expand(_tt, &sub_label, _tag, schema)
                     })
@@ -1926,7 +1901,7 @@ impl Query for OriginFn {
             if !candidates.is_empty() {
                 let val = Label::resolve(
                     TagType::Base(SType::Type),
-                    LabelValue::String("*".to_string()),
+                    Bitical::String("*".to_string()),
                 );
                 sub_queries.push(QueryNode::DefinitionRef(DefinitionRef {
                     kind: ItemKind::Type,
@@ -1999,7 +1974,7 @@ impl Query for TypeFn {
             candidates.iter().map(|c| c.name.clone()).collect();
         QueryNode::DefinitionRef(DefinitionRef {
             kind: ItemKind::Type,
-            value: Label::resolve(tagtype.clone(), label.value()),
+            value: label.rekey(tagtype.clone(), label.value()),
             candidates,
             origins: Vec::new(),
             reserved,
@@ -2015,7 +1990,7 @@ impl Display for TypeFn {
     fn preferred_order(&self) -> Vec<crate::types::Order> {
         vec![crate::types::Order::desc(SType::ItemId)]
     }
-    fn show(&self, value: &LabelValue, _format: DisplayFormat) -> String {
+    fn show(&self, value: &Bitical, _format: DisplayFormat) -> String {
         value.as_display_name()
     }
 }
@@ -2105,8 +2080,8 @@ mod tests {
         }
     }
     impl Index for IndexedTag {
-        fn extract(&self, _path: &Path) -> Result<Option<LabelValue>> {
-            Ok(Some(LabelValue::String("value".to_string())))
+        fn extract(&self, _path: &Path) -> Result<Option<Bitical>> {
+            Ok(Some(Bitical::String("value".to_string())))
         }
         fn role(&self) -> ScanRole {
             ScanRole::Location
@@ -2126,7 +2101,7 @@ mod tests {
         fn normalize_label(&self, label: &Label) -> Label {
             Label::Other(
                 TagType::from("qtest"),
-                LabelValue::String(label.as_str().to_uppercase()),
+                Bitical::String(label.as_str().to_uppercase()),
             )
         }
     }
@@ -2230,7 +2205,7 @@ mod tests {
     #[test]
     fn test_index_extract() {
         let result = IndexedTag.extract(Path::new("/dummy")).unwrap();
-        assert_eq!(result, Some(LabelValue::String("value".to_string())));
+        assert_eq!(result, Some(Bitical::String("value".to_string())));
     }
 
     #[test]
@@ -2247,7 +2222,7 @@ mod tests {
         let qry = q.query();
         let label = Label::Other(
             TagType::from("qtest"),
-            LabelValue::String("hello".to_string()),
+            Bitical::String("hello".to_string()),
         );
         let normalized = qry.normalize_label(&label);
         assert_eq!(normalized.as_str(), "HELLO");
@@ -2260,7 +2235,7 @@ mod tests {
         let q = SizeFn;
         let label = Label::Other(
             TagType::from("size"),
-            LabelValue::String("1MB".to_string()),
+            Bitical::String("1MB".to_string()),
         );
         let normalized = q.query().normalize_label(&label);
         assert_eq!(normalized, Label::Size(1_048_576));
@@ -2270,10 +2245,7 @@ mod tests {
     fn test_registry_normalize_label_literal_skipped() {
         // Literal ("quoted") must bypass normalize_label entirely at registry level
         let reg = TagRegistry::with_standard();
-        let label = Label::Other(
-            TagType::from("size"),
-            LabelValue::Literal("1MB".to_string()),
-        );
+        let label = Label::Literal(TagType::from("size"), "1MB".to_string());
         let normalized = reg.normalize_label("size", &label);
         assert_eq!(normalized, label);
     }
@@ -2283,7 +2255,7 @@ mod tests {
         let q = MtimeFn;
         let label = Label::Other(
             TagType::from("mtime"),
-            LabelValue::String("2026-02-01".to_string()),
+            Bitical::String("2026-02-01".to_string()),
         );
         let normalized = q.query().normalize_label(&label);
         match normalized {
@@ -2303,7 +2275,7 @@ mod tests {
         let q = MtimeFn;
         let label = Label::Other(
             TagType::from("mtime"),
-            LabelValue::String("2026".to_string()),
+            Bitical::String("2026".to_string()),
         );
         let normalized = q.query().normalize_label(&label);
         assert_eq!(
@@ -2317,7 +2289,7 @@ mod tests {
         let q = MtimeFn;
         let label = Label::Other(
             TagType::from("mtime"),
-            LabelValue::String("not-a-date".to_string()),
+            Bitical::String("not-a-date".to_string()),
         );
         let normalized = q.query().normalize_label(&label);
         assert_eq!(normalized, label);
@@ -2328,7 +2300,7 @@ mod tests {
         let reg = TagRegistry::with_standard();
         let label = Label::Other(
             TagType::from("size"),
-            LabelValue::String("2MB".to_string()),
+            Bitical::String("2MB".to_string()),
         );
         let normalized = reg.normalize_label("size", &label);
         assert_eq!(normalized, Label::Size(2_097_152));
@@ -2339,7 +2311,7 @@ mod tests {
         let reg = TagRegistry::with_standard();
         let label = Label::Other(
             TagType::from("mtime"),
-            LabelValue::String("2026-01-01".to_string()),
+            Bitical::String("2026-01-01".to_string()),
         );
         let normalized = reg.normalize_label("mtime", &label);
         match normalized {
@@ -2358,7 +2330,7 @@ mod tests {
         let reg = TagRegistry::with_standard();
         let label = Label::Other(
             TagType::from("custom"),
-            LabelValue::String("hello".to_string()),
+            Bitical::String("hello".to_string()),
         );
         let normalized = reg.normalize_label("custom", &label);
         assert_eq!(normalized, label);
@@ -2482,7 +2454,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let label = Label::Date(DateTime::Date(date));
         let tag_type = TagType::from(SType::Mtime);
-        let typed_tag = TypedTag::new(SType::Mtime, label.clone());
+        let typed_tag = TypedTag::retag(SType::Mtime, &label);
         let result = MtimeFn.query().expand(
             &tag_type,
             &label,
@@ -2515,7 +2487,7 @@ mod tests {
         use crate::query::ast::{
             BasicOp, ComparisonNode, ComparisonOp, Operand,
         };
-        use crate::types::{DateTime, Label, LabelValue, SType, TagType};
+        use crate::types::{DateTime, Label, Bitical, SType, TagType};
         use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = DateTime::Date(date);
@@ -2537,7 +2509,7 @@ mod tests {
             panic!()
         };
         assert!(
-            matches!(label.value(), LabelValue::Integer(_)),
+            matches!(label.value(), Bitical::Integer(_)),
             "should be Mtime(i64)"
         );
     }
@@ -2569,12 +2541,11 @@ mod tests {
 
     // --- TypeFn::expand: Literal=完全一致検索 / String=glob検索 の振り分け ---
 
-    fn expand_type_tag(value: LabelValue) -> QueryNode {
+    fn expand_type_tag(label: Label) -> QueryNode {
         use crate::query::lens_schema::Lens;
         use crate::types::{SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Type);
-        let label = Label::resolve(tag_type.clone(), value);
-        let tag = TypedTag::new(SType::Type, label.clone());
+        let tag = TypedTag { label: label.clone() };
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
         TypeFn.query().expand(&tag_type, &label, &tag, &lens)
@@ -2582,10 +2553,10 @@ mod tests {
 
     #[test]
     fn test_type_expand_string_pattern_bakes_registered_candidates() {
-        use crate::types::{ItemId, LabelValue};
+        use crate::types::ItemId;
         // `type:*`（unquoted String パターン）は glob検索。
         // schema の登録型名＋default_rank＋固定 Sys id が candidates になる。
-        let result = expand_type_tag(LabelValue::String("*".to_string()));
+        let result = expand_type_tag(Label::from("*"));
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
         else {
             panic!("expected DefinitionRef, got {:?}", result)
@@ -2621,16 +2592,16 @@ mod tests {
     #[test]
     fn test_type_expand_string_pattern_plugin_candidate_has_no_sys_id() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{ItemId, LabelValue, SType, TagType, TypedTag};
+        use crate::types::{ItemId, Bitical, SType, TagType, TypedTag};
         let mut registry = TagRegistry::with_standard();
         registry.register_plugin(QueryTag);
         let lens = Lens::from_registry(&registry);
         let tag_type = TagType::from(SType::Type);
         let label = Label::resolve(
             tag_type.clone(),
-            LabelValue::String("*".to_string()),
+            Bitical::String("*".to_string()),
         );
-        let tag = TypedTag::new(SType::Type, label.clone());
+        let tag = TypedTag::retag(SType::Type, &label);
         let result = TypeFn.query().expand(&tag_type, &label, &tag, &lens);
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
         else {
@@ -2651,12 +2622,14 @@ mod tests {
     #[test]
     fn test_type_expand_literal_is_exact_match_lookup_with_registry_candidates()
     {
-        use crate::types::{ItemId, LabelValue};
+        use crate::types::{ItemId, SType, TagType};
         // `type:"filename"`（quoted Literal）は完全一致検索だが、Stored/Volatile
         // の区別（固定 Sys id を持つ組み込みかどうか）のため、registry 由来の
         // candidates は glob検索と同様に含める。
-        let result =
-            expand_type_tag(LabelValue::Literal("filename".to_string()));
+        let result = expand_type_tag(Label::Literal(
+            TagType::from(SType::Type),
+            "filename".to_string(),
+        ));
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
         else {
             panic!("expected DefinitionRef, got {:?}", result)
@@ -2679,15 +2652,15 @@ mod tests {
     #[test]
     fn test_typed_tag_expand_string_pattern_has_no_registry_candidates() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        use crate::types::{Bitical, SType, TagType, TypedTag};
         // `tag:*` のソースは Stored 定義行と使用中ペアのみ。
         // registry は型のソースなので tag: の candidates にはならない。
         let tag_type = TagType::from(SType::TypedTag);
         let label = Label::resolve(
             tag_type.clone(),
-            LabelValue::String("*".to_string()),
+            Bitical::String("*".to_string()),
         );
-        let tag = TypedTag::new(SType::TypedTag, label.clone());
+        let tag = TypedTag::retag(SType::TypedTag, &label);
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
         let result = TypedTagFn.query().expand(&tag_type, &label, &tag, &lens);
@@ -2707,13 +2680,13 @@ mod tests {
     #[test]
     fn test_origin_expand_system_alias_becomes_or_of_small_classification() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        use crate::types::{Bitical, SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Origin);
         let label = Label::resolve(
             tag_type.clone(),
-            LabelValue::String("system".to_string()),
+            Bitical::String("system".to_string()),
         );
-        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let typed_tag = TypedTag::retag(SType::Origin, &label);
         let result = OriginFn.query().expand(
             &tag_type,
             &label,
@@ -2748,13 +2721,13 @@ mod tests {
     #[test]
     fn test_origin_expand_non_alias_label_is_direct_column_match() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        use crate::types::{Bitical, SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Origin);
         let label = Label::resolve(
             tag_type.clone(),
-            LabelValue::String("user".to_string()),
+            Bitical::String("user".to_string()),
         );
-        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let typed_tag = TypedTag::retag(SType::Origin, &label);
         let result = OriginFn.query().expand(
             &tag_type,
             &label,
@@ -2771,13 +2744,13 @@ mod tests {
     #[test]
     fn test_origin_expand_glob_generates_definition_ref_and_column_match() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{LabelValue, SType, TagType, TypedTag};
+        use crate::types::{Bitical, SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Origin);
         let label = Label::resolve(
             tag_type.clone(),
-            LabelValue::String("b*".to_string()),
+            Bitical::String("b*".to_string()),
         );
-        let typed_tag = TypedTag::new(SType::Origin, label.clone());
+        let typed_tag = TypedTag::retag(SType::Origin, &label);
         let result = OriginFn.query().expand(
             &tag_type,
             &label,

@@ -15,10 +15,10 @@
 
 use crate::db::{Col, Store, TargetTable, Tbl};
 // use crate::db::{identifier, DuckDbFunc, Pronoun::*};
+use crate::db::ColumnDef;
 use crate::indexing::ScanEntry;
 use crate::tag::TagRegistry;
-use crate::taggers::{ColumnDef, TagValue};
-use crate::types::ItemId;
+use crate::types::{Biticals, ItemId};
 // use crate::types::Origin;
 use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
 // use crate::util::ParquetExt;
@@ -48,7 +48,7 @@ pub struct TaggingResult {
 
 pub struct DynamicRow {
     pub id: i64,
-    pub values: Vec<TagValue>,
+    pub values: Biticals,
 }
 
 #[derive(Debug, PartialEq)]

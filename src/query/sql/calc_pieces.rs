@@ -89,29 +89,12 @@ pub(super) fn fold_simple_operand(
                         .into()
                 } else {
                     match lab.value() {
-                        crate::types::LabelValue::Integer(i) => {
+                        crate::types::Bitical::Integer(i) => {
                             sea_query::Expr::val(i)
                                 .cast_as(crate::db::BiticalType::Double)
                                 .into()
                         }
-                        crate::types::LabelValue::String(s)
-                        | crate::types::LabelValue::Literal(s) => {
-                            sea_query::Expr::val(s.clone()).into()
-                        }
-                        crate::types::LabelValue::Boolean(b) => {
-                            sea_query::Expr::val(b).into()
-                        }
-                        crate::types::LabelValue::Double(bits) => {
-                            sea_query::Expr::val(f64::from_bits(bits)).into()
-                        }
-                        crate::types::LabelValue::Null => {
-                            sea_query::Expr::val(None::<i32>).into()
-                        }
-                        crate::types::LabelValue::Date(dt) => {
-                            sea_query::Expr::val(dt.to_timestamp())
-                                .cast_as(crate::db::BiticalType::Double)
-                                .into()
-                        }
+                        other => other.to_simple_expr(),
                     }
                 };
             Some(expr)

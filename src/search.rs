@@ -139,7 +139,7 @@ fn search_core(
     let mut results = fetcher.fetch(n, offset)?;
 
     if let Some(tt) = resolver.get_scalar_result_label_type() {
-        use crate::types::{Label, LabelValue, Origin};
+        use crate::types::{Bitical, Label, Origin};
         for result in &mut results {
             let raw = result
                 .tags
@@ -147,10 +147,8 @@ fn search_core(
                 .iter()
                 .find(|e| e.label.tag_type().as_str() == "value")
                 .and_then(|e| match e.label.value() {
-                    LabelValue::Integer(i) => Some(i.to_string()),
-                    LabelValue::Double(bits) => {
-                        Some((f64::from_bits(bits) as i64).to_string())
-                    }
+                    Bitical::Integer(i) => Some(i.to_string()),
+                    Bitical::Double(d) => Some((d as i64).to_string()),
                     _ => None,
                 });
             if let Some(raw) = raw {

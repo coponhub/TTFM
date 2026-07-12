@@ -124,7 +124,7 @@ fn prefer_match_expr(lens: &Lens, tt: &TypedTag) -> Option<SimpleExpr> {
         StorageMapping::Basic { column, .. } => column,
         StorageMapping::Composite => return None,
     };
-    let (_, pval) = Col::for_label_value(&plabel.value())?;
+    let (_, pval) = plabel.value().to_col_expr();
     Some(Expr::col(pcol).eq(pval))
 }
 

@@ -21,7 +21,7 @@ use ttfm::query::ast::{Operand, QueryNode};
 use ttfm::query::logical_schema::LogicalSchema;
 use ttfm::search;
 use ttfm::tag::{Index, TagFunction};
-use ttfm::types::{Label, LabelValue, TagType};
+use ttfm::types::{Bitical, Label, TagType};
 use ttfm::SearchOptions;
 
 /// プラグインが display を実装している場合、
@@ -52,10 +52,10 @@ fn test_plugin_display_show_applied_in_format_display() {
                 options: vec![],
             }
         }
-        fn show(&self, value: &LabelValue, _format: DisplayFormat) -> String {
+        fn show(&self, value: &Bitical, _format: DisplayFormat) -> String {
             let s = match value {
-                LabelValue::String(s) => s.clone(),
-                LabelValue::Integer(n) => n.to_string(),
+                Bitical::String(s) => s.clone(),
+                Bitical::Integer(n) => n.to_string(),
                 _ => String::new(),
             };
             format!("● {s}")
@@ -98,9 +98,9 @@ fn test_plugin_normalize_label_applied_in_search() {
         fn extract(
             &self,
             _path: &StdPath,
-        ) -> anyhow::Result<Option<LabelValue>> {
+        ) -> anyhow::Result<Option<Bitical>> {
             // 全ファイルに "modified" タグを付与
-            Ok(Some(LabelValue::String("modified".to_string())))
+            Ok(Some(Bitical::String("modified".to_string())))
         }
     }
     impl ttfm::tag::Query for ShortLabelTag {

@@ -252,7 +252,7 @@ pub(crate) fn build_definition_fetch_sql(
 ) -> SelectStatement {
     let kind = resolved.kind;
     let candidates = &resolved.candidates;
-    let arms = Col::typed_label_columns().map(|c| (c, c.bitical_type()));
+    let arms = BiticalType::to_columns().map(|c| (c, BiticalType::from_col(c)));
     let union_val = CustomFunc::eav_union_value(&arms);
     let struct_expr = CustomFunc::struct_pack_tag(
         Expr::col(Col::Type).into(),

@@ -13,13 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{identifier, Store, TargetTable};
+use crate::db::{identifier, ColumnDef, Store, TargetTable};
 use crate::indexing::indexer::{
     DynamicRow, ScanHash, TagRow, TaggingResult, TempScanEntry,
 };
 use crate::tag::TagRegistry;
-use crate::taggers::{ColumnDef, TagValue};
-use crate::types::{ItemId, Origin};
+use crate::types::{Bitical, Biticals, ItemId, Origin};
 use crate::util::DotOk;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -73,7 +72,7 @@ impl<'a> ItemTriager<'a> {
     pub(crate) fn extract_all(
         &self,
         entries: Vec<(Option<ItemId>, TempScanEntry)>,
-    ) -> Result<Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
+    ) -> Result<Vec<(Option<ItemId>, Biticals, ScanHash)>> {
         entries
             .into_par_iter()
             .map(|(id, e)| self.extract_with_hash(id, e))
@@ -89,7 +88,7 @@ impl<'a> ItemTriager<'a> {
         &self,
         existing_id: Option<ItemId>,
         entry: TempScanEntry,
-    ) -> Result<Option<(Option<ItemId>, Vec<TagValue>, ScanHash)>> {
+    ) -> Result<Option<(Option<ItemId>, Biticals, ScanHash)>> {
         let path = &entry.entry.path.value;
         let hash = entry.hash;
 
@@ -103,7 +102,7 @@ impl<'a> ItemTriager<'a> {
     fn extract_single_file(
         &self,
         path_str: &str,
-    ) -> Result<Option<Vec<TagValue>>> {
+    ) -> Result<Option<Biticals>> {
         let res = self.registry.process_file(Path::new(path_str));
 
         if let Ok(values) = res {
@@ -120,7 +119,7 @@ impl<'a> ItemTriager<'a> {
 
     pub(crate) fn assemble_records(
         &self,
-        all_values: Vec<(Option<ItemId>, Vec<TagValue>, ScanHash)>,
+        all_values: Vec<(Option<ItemId>, Biticals, ScanHash)>,
         new_ids: Vec<i64>,
     ) -> Result<Vec<TaggingResult>> {
         let columns = self.registry.get_all_columns();
@@ -146,7 +145,7 @@ impl<'a> ItemTriager<'a> {
     fn triage_item(
         &self,
         id: ItemId,
-        values: Vec<TagValue>,
+        values: Biticals,
         hash: ScanHash,
         cols: &[ColumnDef],
     ) -> TaggingResult {
@@ -162,7 +161,12 @@ impl<'a> ItemTriager<'a> {
         res
     }
 
-    fn classify(&self, id: i64, val: TagValue, col: &ColumnDef) -> TriagePiece {
+    fn classify(
+        &self,
+        id: i64,
+        val: Option<Bitical>,
+        col: &ColumnDef,
+    ) -> TriagePiece {
         match col.target_table {
             TargetTable::FileReferences => TriagePiece::Entity(val),
             TargetTable::Locations => TriagePiece::Location(val),
@@ -174,18 +178,10 @@ impl<'a> ItemTriager<'a> {
     fn triage_base_tag(
         &self,
         id: i64,
-        val: TagValue,
+        val: Option<Bitical>,
         name: &str,
     ) -> TriagePiece {
-        let (l_str, l_int, l_dbl, l_bool) = match val {
-            TagValue::Text(s) => (Some(s), None, None, None),
-            TagValue::BigInt(i) => (None, Some(i), None, None),
-            TagValue::Double(d) => (None, None, Some(d), None),
-            TagValue::Boolean(b) => (None, None, None, Some(b)),
-            TagValue::Uuid(u) => (Some(u.to_string()), None, None, None),
-            TagValue::Null => (None, None, None, None),
-            _ => (None, None, None, None),
-        };
+        let (l_str, l_int, l_dbl, l_bool) = Bitical::to_eav_columns(val);
 
         // 何らかの値があれば TagPiece を生成 (Null以外なら何かあるはず)
         if l_str.is_none()
@@ -212,16 +208,16 @@ impl<'a> ItemTriager<'a> {
 // ========================================================
 
 pub(crate) enum TriagePiece {
-    Entity(TagValue),
-    Location(TagValue),
+    Entity(Option<Bitical>),
+    Location(Option<Bitical>),
     Tag(TagRow),
     None,
 }
 
 pub(crate) struct TriageAccumulator {
     id: i64,
-    entities: Vec<TagValue>,
-    locations: Vec<TagValue>,
+    entities: Biticals,
+    locations: Biticals,
     tags: Vec<TagRow>,
 }
 
@@ -229,7 +225,7 @@ impl TriageAccumulator {
     pub(crate) fn new(id: i64) -> Self {
         Self {
             id,
-            entities: vec![TagValue::BigInt(0)],
+            entities: vec![Some(Bitical::Integer(0))],
             locations: Vec::new(),
             tags: Vec::new(),
         }
@@ -276,9 +272,10 @@ mod tests {
     #[test]
     fn test_triage_accumulator_logic() {
         let mut acc = TriageAccumulator::new(123);
-        acc = acc.collect(TriagePiece::Entity(TagValue::BigInt(100)));
-        acc =
-            acc.collect(TriagePiece::Location(TagValue::Text("/path".into())));
+        acc = acc.collect(TriagePiece::Entity(Some(Bitical::Integer(100))));
+        acc = acc.collect(TriagePiece::Location(Some(Bitical::String(
+            "/path".into(),
+        ))));
         acc = acc.collect(TriagePiece::Tag(TagRow {
             item_id: 123,
             tag_type: "ext".into(),
@@ -289,8 +286,11 @@ mod tests {
         }));
         let res = acc.finish();
         assert_eq!(res.entity_row.id, 123);
-        assert_eq!(res.entity_row.values[1], TagValue::BigInt(100));
-        assert_eq!(res.location_row.values[0], TagValue::Text("/path".into()));
+        assert_eq!(res.entity_row.values[1], Some(Bitical::Integer(100)));
+        assert_eq!(
+            res.location_row.values[0],
+            Some(Bitical::String("/path".into()))
+        );
         assert_eq!(res.tags[0].tag_type, "ext");
     }
 
@@ -304,8 +304,12 @@ mod tests {
             bitical_type: BiticalType::Integer,
             target_table: TargetTable::FileReferences,
         };
-        let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
-        assert!(matches!(p_ent, TriagePiece::Entity(TagValue::BigInt(1024))));
+        let p_ent =
+            triager.classify(1, Some(Bitical::Integer(1024)), &col_ent);
+        assert!(matches!(
+            p_ent,
+            TriagePiece::Entity(Some(Bitical::Integer(1024)))
+        ));
     }
 
     #[test]
@@ -330,10 +334,10 @@ mod tests {
                 target_table: TargetTable::BaseTags,
             },
         ];
-        let vals = vec![
-            TagValue::BigInt(500),
-            TagValue::Text("/foo.rs".into()),
-            TagValue::Text("rs".into()),
+        let vals: Biticals = vec![
+            Some(Bitical::Integer(500)),
+            Some(Bitical::String("/foo.rs".into())),
+            Some(Bitical::String("rs".into())),
         ];
 
         let res =
@@ -341,10 +345,10 @@ mod tests {
 
         assert_eq!(res.entity_row.id, 7);
         assert_eq!(res.scan_hash, ScanHash(123));
-        assert_eq!(res.entity_row.values[1], TagValue::BigInt(500));
+        assert_eq!(res.entity_row.values[1], Some(Bitical::Integer(500)));
         assert_eq!(
             res.location_row.values[0],
-            TagValue::Text("/foo.rs".into())
+            Some(Bitical::String("/foo.rs".into()))
         );
     }
 

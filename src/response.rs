@@ -14,7 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::types::{
-    Intrinsic, ItemId, ItemKind, Label, LabelValue, Origin, Rank, SType,
+    Bitical, Intrinsic, ItemId, ItemKind, Label, Origin, Rank, SType,
     TagType, Tags,
 };
 
@@ -293,7 +293,7 @@ impl SearchResponse {
     /// `value` タグを持つ Volatile item に `query:` ラベルを注入する。
     /// 計算値の由来保持（EDIT.md §5.7(B)）。
     pub fn query_into_tags(&mut self) {
-        use crate::types::{Label, LabelValue, Origin, SType, TagType};
+        use crate::types::{Bitical, Label, Origin, SType, TagType};
         let query_str = self.query.clone();
         let query_tag_type = TagType::Base(SType::Query);
         let value_tag_type = TagType::Base(SType::Value);
@@ -310,7 +310,7 @@ impl SearchResponse {
                 item.tags.push(
                     Label::Other(
                         query_tag_type.clone(),
-                        LabelValue::String(query_str.clone()),
+                        Bitical::String(query_str.clone()),
                     ),
                     Origin::Builtin,
                 );
@@ -388,13 +388,16 @@ impl Item {
     /// 生のタグ行データをアイテムに適用します (DEPRECATED: 互換性のために維持)。
     #[deprecated(note = "Use apply_tag instead with resolved Label and Origin")]
     pub fn apply_raw_tag(&mut self, row: RawTagRow) {
-        use crate::types::{Label, LabelValue, Origin, TagType};
+        use crate::types::{Bitical, Label, Origin, TagType};
 
         // oneview の origin 列は常に小分類 (builtin/user/file/plugin) の妥当な文字列。
         // 想定外の値は安全側 (非User) の Builtin にフォールバックする。
         let origin = row.origin.parse::<Origin>().unwrap_or(Origin::Builtin);
-        let label_val = LabelValue::from(row.value);
-        let label = Label::resolve(TagType::from(row.tag_type), label_val);
+        // DB の実 NULL でも「値のない値タグ」としてそのまま記録する
+        // （集約結果が空の場合の value: NULL 等）。表示は "NULL" に揃える。
+        let value = Bitical::from_db_value(row.value)
+            .unwrap_or_else(|| Bitical::String("NULL".to_string()));
+        let label = Label::resolve(TagType::from(row.tag_type), value);
         self.apply_tag(label, origin);
     }
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
@@ -507,7 +510,7 @@ impl Item {
             TagType::Base(SType::Origin) => {
                 return vec![Label::resolve(
                     TagType::Base(SType::Origin),
-                    LabelValue::String(self.origin().to_string()),
+                    Bitical::String(self.origin().to_string()),
                 )];
             }
             // 仮想ラベル: type: (タグの型一覧)
@@ -531,28 +534,28 @@ impl Item {
                 for entry in &self.tags.entries {
                     lab_vals.push(Label::resolve(
                         TagType::Base(SType::Type),
-                        LabelValue::String(entry.label.tag_type().to_string()),
+                        Bitical::String(entry.label.tag_type().to_string()),
                     ));
                 }
                 if self.intrinsic.size.is_some() {
                     lab_vals.push(Label::resolve(
                         TagType::Base(SType::Type),
-                        LabelValue::String("size".to_string()),
+                        Bitical::String("size".to_string()),
                     ));
                 }
                 if self.intrinsic.mtime.is_some() {
                     lab_vals.push(Label::resolve(
                         TagType::Base(SType::Type),
-                        LabelValue::String("mtime".to_string()),
+                        Bitical::String("mtime".to_string()),
                     ));
                 }
                 // ItemKind 自体も型として含める
                 lab_vals.push(Label::resolve(
                     TagType::Base(SType::Type),
-                    LabelValue::String(self.item_kind.as_str().to_string()),
+                    Bitical::String(self.item_kind.as_str().to_string()),
                 ));
 
-                lab_vals.sort_by_key(|l| l.to_string());
+                lab_vals.sort_by_cached_key(|l| l.to_string());
                 lab_vals.dedup();
                 return lab_vals;
             }
@@ -576,13 +579,13 @@ impl Item {
                 if let Some(s) = &self.intrinsic.size {
                     labels.push(Label::resolve(
                         TagType::Base(SType::Size),
-                        LabelValue::Integer(s.0),
+                        Bitical::Integer(s.0),
                     ));
                 }
                 if let Some(t) = &self.intrinsic.mtime {
                     labels.push(Label::resolve(
                         TagType::Base(SType::Mtime),
-                        LabelValue::Integer(t.0),
+                        Bitical::Integer(t.0),
                     ));
                 }
 
@@ -718,14 +721,14 @@ mod tests {
     // value タグを持つ Volatile item にのみ query: が注入される。
     #[test]
     fn query_into_tags_adds_query_only_to_value_items() {
-        use crate::types::{ItemKind, LabelValue, Origin, SType, TagType};
+        use crate::types::{Bitical, ItemKind, Origin, SType, TagType};
 
         let query_str = "count(extension:rs)".to_string();
 
         let mut item_with_value =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_with_value.tags.push(
-            Label::Other(TagType::Base(SType::Value), LabelValue::Integer(42)),
+            Label::Other(TagType::Base(SType::Value), Bitical::Integer(42)),
             Origin::Builtin,
         );
 
@@ -757,14 +760,14 @@ mod tests {
     // ユーザー命名の item: タグ（User origin）を誤って本物と判定しないことを確認する。
     #[test]
     fn has_projection_results_detects_genuine_projection_via_builtin_origin() {
-        use crate::types::{ItemKind, LabelValue, Origin, TagType};
+        use crate::types::{Bitical, ItemKind, Origin, TagType};
 
         let item_tag = |origin| {
             let mut it = Item::new_empty(ItemId::Stored(1), ItemKind::Note);
             it.tags.push(
                 Label::Other(
                     TagType::from("item"),
-                    LabelValue::String("foo.txt#User(1)".into()),
+                    Bitical::String("foo.txt#User(1)".into()),
                 ),
                 origin,
             );
@@ -792,14 +795,14 @@ mod tests {
 
     #[test]
     fn test_item_get_all_labels_origin() {
-        use crate::types::{LabelValue, Origin, SType, TagType};
+        use crate::types::{Bitical, Origin, SType, TagType};
 
         // 1. tags の中に origin タグがある場合
         let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
         item.tags.push(
             Label::Other(
                 TagType::Base(SType::Origin),
-                LabelValue::String("plugin".to_string()),
+                Bitical::String("plugin".to_string()),
             ),
             Origin::Plugin,
         );
@@ -833,14 +836,14 @@ mod tests {
 
     #[test]
     fn test_item_origin() {
-        use crate::types::{LabelValue, Origin, SType, TagType};
+        use crate::types::{Bitical, Origin, SType, TagType};
 
         // 1. tags の中に origin タグがある場合
         let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
         item.tags.push(
             Label::Other(
                 TagType::Base(SType::Origin),
-                LabelValue::String("plugin".to_string()),
+                Bitical::String("plugin".to_string()),
             ),
             Origin::Plugin,
         );

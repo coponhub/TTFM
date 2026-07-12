@@ -54,58 +54,32 @@ pub(super) fn wrap_in_subquery_star(q: SelectStatement) -> SelectStatement {
 
 /// `Label` の値を単純な SQL 式に変換します。
 pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
-    match label.value() {
-        LabelValue::Integer(i) => Expr::val(i).into(),
-        LabelValue::Boolean(b) => Expr::val(b).into(),
-        LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-        LabelValue::Null => Expr::val(Option::<i32>::None).into(),
-        LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s).into(),
-        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
-    }
+    label.value().to_simple_expr()
 }
 
 /// `Label` の値をサイズ単位を考慮した SQL 式に変換します（例: "1MB" → 1048576）。
 pub(super) fn label_to_unit_aware_expr(label: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
-    match label.value() {
-        LabelValue::Integer(i) => Expr::val(i).into(),
-        LabelValue::String(s) | LabelValue::Literal(s) => {
-            if let Some(bytes) = crate::util::parse_size(&s) {
-                Expr::val(bytes).into()
-            } else {
-                Expr::val(s.clone()).into()
-            }
+    use crate::types::Bitical;
+    let value = label.value();
+    if let Bitical::String(s) = &value {
+        if let Some(bytes) = crate::util::parse_size(s) {
+            return Expr::val(bytes).into();
         }
-        LabelValue::Boolean(b) => Expr::val(b).into(),
-        LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-        LabelValue::Null => Expr::val(None::<i32>).into(),
-        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
     }
+    value.to_simple_expr()
 }
 
 /// リテラルラベルを SQL 式に変換します。サイズ単位のパース（"1MB" → 1048576）および
 /// 数値リテラルの DOUBLE キャストを行います。
 pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
+    use crate::types::Bitical;
     let s = lab.as_str();
     if let Some(bytes) = crate::util::parse_size(&s) {
-        Expr::val(bytes).cast_as(BiticalType::Double).into()
-    } else {
-        match lab.value() {
-            LabelValue::Integer(i) => {
-                Expr::val(i).cast_as(BiticalType::Double).into()
-            }
-            LabelValue::String(s) | LabelValue::Literal(s) => {
-                Expr::val(s.clone()).into()
-            }
-            LabelValue::Boolean(b) => Expr::val(b).into(),
-            LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-            LabelValue::Null => Expr::val(None::<i32>).into(),
-            LabelValue::Date(dt) => {
-                Expr::val(dt.to_timestamp()).cast_as(BiticalType::Double).into()
-            }
-        }
+        return Expr::val(bytes).cast_as(BiticalType::Double).into();
+    }
+    match lab.value() {
+        Bitical::Integer(i) => Expr::val(i).cast_as(BiticalType::Double).into(),
+        other => other.to_simple_expr(),
     }
 }
 

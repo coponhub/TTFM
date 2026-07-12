@@ -660,7 +660,7 @@ mod tests {
         // 1. Boolean Literal -> CAST(... AS BIGINT)
         let lit_bool = ResolvedOperand::Literal(crate::types::Label::resolve(
             TagType::from("is_dir"),
-            crate::types::LabelValue::Boolean(true),
+            crate::types::Bitical::Boolean(true),
         ));
         let expr_lit = build_resolved_operand_expr_for_arithmetic(
             &lit_bool,

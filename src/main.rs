@@ -693,7 +693,7 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use ttfm::types::{ItemId, ItemKind, Label, LabelValue, Origin, TagType};
+    use ttfm::types::{Bitical, ItemId, ItemKind, Label, Origin, TagType};
     use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
@@ -717,7 +717,7 @@ mod tests {
         res_with_nvalue.representative =
             vec![Label::Name("test_label".to_string())];
         res_with_nvalue.apply_tag(
-            Label::resolve(TagType::from("nvalue"), LabelValue::Integer(9986)),
+            Label::resolve(TagType::from("nvalue"), Bitical::Integer(9986)),
             Origin::Builtin,
         );
 

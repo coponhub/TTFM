@@ -27,7 +27,7 @@ use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
-use sea_query::{BinOper, Expr, Query, SelectStatement, SimpleExpr};
+use sea_query::{Expr, Query, SelectStatement, SimpleExpr};
 
 pub(super) fn build_resolved_match_sql(
     src: &Src,
@@ -53,57 +53,19 @@ pub(super) fn build_column_match_sql(
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
         .from(src);
-    match label.value() {
-        crate::types::LabelValue::Integer(i) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelInt.into()
-            } else {
-                tag
-            };
-            q.and_where(Expr::col(t).eq(i));
-        }
-        crate::types::LabelValue::String(s) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelStr.into()
-            } else {
-                tag
-            };
-            let val_str = if s.starts_with('^') {
-                format!("{}*", &s[1..])
-            } else {
-                s.clone()
-            };
-            q.and_where(
-                Expr::col(t)
-                    .binary(BinOper::Custom("GLOB"), Expr::val(val_str)),
-            );
-        }
-        crate::types::LabelValue::Literal(s) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelStr.into()
-            } else {
-                tag
-            };
-            q.and_where(Expr::col(t).eq(s.as_str()));
-        }
-        crate::types::LabelValue::Boolean(b) => {
-            q.and_where(Expr::col(Col::LabelBool).eq(b));
-        }
-        crate::types::LabelValue::Double(bits) => {
-            q.and_where(Expr::col(Col::LabelDouble).eq(f64::from_bits(bits)));
-        }
-        crate::types::LabelValue::Null => {
-            q.and_where(Expr::col(Col::LabelStr).is_null());
-        }
-        crate::types::LabelValue::Date(dt) => {
-            let t = if matches!(tag, SType::Label) {
-                Col::LabelInt.into()
-            } else {
-                tag
-            };
-            q.and_where(Expr::col(t).eq(dt.to_timestamp()));
-        }
+    // `Label::Literal`（quoted）は完全一致検索、それ以外の String は GLOB検索。
+    // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
+    // まず `label` 自体で判定する。
+    if let Label::Literal(_, s) = label {
+        let t = if matches!(tag, SType::Label) {
+            Col::LabelStr.into()
+        } else {
+            tag
+        };
+        q.and_where(Expr::col(t).eq(s.as_str()));
+        return q;
     }
+    q.and_where(label.value().to_column_match_expr(tag));
     q
 }
 

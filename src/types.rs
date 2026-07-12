@@ -174,7 +174,7 @@ impl From<ItemKind> for Label {
     fn from(kind: ItemKind) -> Self {
         Label::resolve(
             TagType::from(crate::types::SType::ItemKind),
-            LabelValue::String(kind.to_string()),
+            Bitical::String(kind.to_string()),
         )
     }
 }
@@ -421,6 +421,9 @@ pub enum Bitical {
     Uuid(Uuid),
 }
 
+/// インデックス抽出結果など、カラム毎の値（欠損は `None`）の並び。
+pub type Biticals = Vec<Option<Bitical>>;
+
 // 等価性は「同じ値が保存されるか」= ビット同一性で定義する。
 // IEEE 比較と異なり NaN == NaN、0.0 != -0.0 となるため、Eq を合法に実装できる。
 impl PartialEq for Bitical {
@@ -439,6 +442,37 @@ impl PartialEq for Bitical {
 }
 impl Eq for Bitical {}
 
+// 変種間の順序は語彙上の登場順（String/Integer/Double/Boolean/Uuid）で固定する。
+// Double は `f64::total_cmp` を用いる。NaN のビットパターン差・+0.0/-0.0 の区別を
+// 全順序として扱う点が `to_bits()` 比較の PartialEq と整合する。
+impl PartialOrd for Bitical {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Bitical {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        fn variant_rank(b: &Bitical) -> u8 {
+            match b {
+                Bitical::String(_) => 0,
+                Bitical::Integer(_) => 1,
+                Bitical::Double(_) => 2,
+                Bitical::Boolean(_) => 3,
+                Bitical::Uuid(_) => 4,
+            }
+        }
+        match (self, other) {
+            (Bitical::String(a), Bitical::String(b)) => a.cmp(b),
+            (Bitical::Integer(a), Bitical::Integer(b)) => a.cmp(b),
+            (Bitical::Double(a), Bitical::Double(b)) => a.total_cmp(b),
+            (Bitical::Boolean(a), Bitical::Boolean(b)) => a.cmp(b),
+            (Bitical::Uuid(a), Bitical::Uuid(b)) => a.cmp(b),
+            _ => variant_rank(self).cmp(&variant_rank(other)),
+        }
+    }
+}
+
 impl BiticalType {
     /// 保存先の EAV カラム（label_str/label_int/label_double/label_bool）を返す。
     pub fn to_column(&self) -> SType {
@@ -448,6 +482,18 @@ impl BiticalType {
             BiticalType::Double => SType::LabelDouble,
             BiticalType::Boolean => SType::LabelBool,
         }
+    }
+
+    /// EAV の型付きラベルカラム（label_str/label_int/label_double/label_bool）を
+    /// 重複なく列挙する。`Uuid` は `String` と同じ `LabelStr` に収束するため含まない。
+    pub fn to_columns() -> [SType; 4] {
+        [
+            BiticalType::String,
+            BiticalType::Integer,
+            BiticalType::Double,
+            BiticalType::Boolean,
+        ]
+        .map(|t| t.to_column())
     }
 }
 
@@ -460,6 +506,32 @@ impl Bitical {
             Bitical::Boolean(_) => BiticalType::Boolean,
             Bitical::Uuid(_) => BiticalType::Uuid,
         }
+    }
+
+    /// 検索結果の名前などに使用する、人間が読みやすい文字列表現。
+    pub fn as_display_name(&self) -> String {
+        match self {
+            Bitical::String(s) => s.clone(),
+            Bitical::Integer(i) => i.to_string(),
+            Bitical::Boolean(true) => "TRUE".to_string(),
+            Bitical::Boolean(false) => "FALSE".to_string(),
+            Bitical::Double(d) => d.to_string(),
+            Bitical::Uuid(u) => u.to_string(),
+        }
+    }
+}
+
+impl duckdb::ToSql for Bitical {
+    fn to_sql(&self) -> duckdb::Result<duckdb::types::ToSqlOutput<'_>> {
+        use duckdb::types::Value;
+        let val = match self {
+            Bitical::String(s) => Value::Text(s.clone()),
+            Bitical::Integer(i) => Value::BigInt(*i),
+            Bitical::Double(d) => Value::Double(*d),
+            Bitical::Boolean(b) => Value::Boolean(*b),
+            Bitical::Uuid(u) => Value::from(*u),
+        };
+        Ok(duckdb::types::ToSqlOutput::Owned(val))
     }
 }
 
@@ -616,7 +688,7 @@ impl From<&str> for TagType {
 
 /// タグの「値」部分（例: "rs", "1024"）。
 /// 物理的な型だけでなく、ドメイン上の意味（SType）を宿しています。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum Label {
     // --- ドメイン特化型 (Standard Types) ---
     Name(String),
@@ -633,11 +705,13 @@ pub enum Label {
     IsDir(bool),
     /// 日付リテラル（normalize_label で生成される中間表現）
     Date(DateTime),
+    /// 引用符付き文字列リテラル（完全一致・Glob無効）。
+    Literal(TagType, String),
 
     // --- 汎用・未解決型 ---
     /// 標準外のタグ、または明示的にドメインを特定しない汎用値。
     /// タグの型（TagType）を自律的に保持します。
-    Other(TagType, LabelValue),
+    Other(TagType, Bitical),
 }
 
 /// 日付リテラルの精度を保持する中間型。
@@ -799,71 +873,6 @@ fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
     Some((first_of_next - chrono::Duration::days(1)).day())
 }
 
-/// Label が保持する生の値の種類。
-#[derive(
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Clone,
-    strum::Display,
-    strum::IntoStaticStr,
-)]
-#[strum(serialize_all = "snake_case")]
-pub enum LabelValue {
-    String(String),
-    Integer(i64),  // -> "integer"
-    Boolean(bool), // -> "boolean"
-    Double(u64),   // -> "double" (f64::to_bits() で保持)
-    Null,          // -> "null"
-    Literal(String),
-    Date(DateTime), // -> "date"
-}
-
-impl LabelValue {
-    /// 検索結果の名前 (SearchResult.name) などに使用する、人間が読みやすい文字列表現。
-    pub fn as_display_name(&self) -> String {
-        match self {
-            LabelValue::String(s) | LabelValue::Literal(s) => s.clone(),
-            LabelValue::Integer(i) => i.to_string(),
-            LabelValue::Boolean(true) => "TRUE".to_string(),
-            LabelValue::Boolean(false) => "FALSE".to_string(),
-            LabelValue::Double(bits) => f64::from_bits(*bits).to_string(),
-            LabelValue::Null => "NULL".to_string(),
-            LabelValue::Date(dt) => dt.as_display_str(),
-        }
-    }
-}
-
-impl From<duckdb::types::Value> for LabelValue {
-    fn from(v: duckdb::types::Value) -> Self {
-        use duckdb::types::Value;
-        match v {
-            Value::Union(inner) => LabelValue::from(*inner),
-            Value::Boolean(b) => LabelValue::Boolean(b),
-            Value::Int(i) => LabelValue::Integer(i as i64),
-            Value::BigInt(i) => LabelValue::Integer(i),
-            Value::HugeInt(i) => LabelValue::Integer(i as i64),
-            Value::Float(f) => LabelValue::Double((f as f64).to_bits()),
-            Value::Double(d) => LabelValue::Double(d.to_bits()),
-            Value::Text(s) => LabelValue::String(s),
-            Value::Null => LabelValue::Null,
-            Value::List(l) => {
-                // LabelValue はスカラーなので、リストが来たら最初の要素を取り出す（保険的措置）
-                // 本来的には Fetcher 側で分解されるべき。
-                if let Some(first) = l.into_iter().next() {
-                    LabelValue::from(first)
-                } else {
-                    LabelValue::Null
-                }
-            }
-            _ => LabelValue::String(format!("{:?}", v)),
-        }
-    }
-}
-
 impl std::fmt::Display for Label {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
@@ -886,8 +895,9 @@ impl Label {
                 format!("{}({})", o.short(), i - o.block_lo())
             }
             Label::FileId(u) => u.to_string(),
-            Label::IsDir(b) => LabelValue::Boolean(*b).as_display_name(),
+            Label::IsDir(b) => Bitical::Boolean(*b).as_display_name(),
             Label::Date(dt) => dt.as_display_str(),
+            Label::Literal(_, s) => s.clone(),
             Label::Other(_, val) => val.as_display_name(),
         }
     }
@@ -899,11 +909,8 @@ impl Label {
             | Label::Size(i)
             | Label::Mtime(i)
             | Label::ItemId(i) => *i,
-            Label::Other(_, LabelValue::Integer(i)) => *i,
-            Label::Other(_, LabelValue::Double(bits)) => {
-                f64::from_bits(*bits) as i64
-            }
-            Label::Other(_, LabelValue::Null) => 0,
+            Label::Other(_, Bitical::Integer(i)) => *i,
+            Label::Other(_, Bitical::Double(d)) => *d as i64,
             Label::Date(_) => 0,
             _ => self.as_str().parse::<i64>().unwrap_or_default(),
         }
@@ -925,6 +932,7 @@ impl Label {
             Label::FileId(_) => TagType::Base(SType::FileId),
             Label::IsDir(_) => TagType::Base(SType::IsDir),
             Label::Date(_) => TagType::Base(SType::Mtime),
+            Label::Literal(tt, _) => tt.clone(),
             Label::Other(tt, _) => tt.clone(),
         }
     }
@@ -932,69 +940,83 @@ impl Label {
     /// データベースの行から指定されたオフセットのカラム（LabelStr, LabelInt 等）を Label として物理デコードし、
     /// その後ドメインへの格上げ（Promotion）を試みます。
     pub fn from_raw_row(tag: TagType, r: &duckdb::Row, offset: usize) -> Self {
-        let label_val = if let Ok(i) = r.get::<_, i64>(offset + 1) {
-            LabelValue::Integer(i)
+        let value = if let Ok(i) = r.get::<_, i64>(offset + 1) {
+            Bitical::Integer(i)
         } else if let Ok(s) = r.get::<_, String>(offset) {
-            LabelValue::String(s)
+            Bitical::String(s)
         } else if let Ok(b) = r.get::<_, bool>(offset + 3) {
-            LabelValue::Boolean(b)
+            Bitical::Boolean(b)
         } else if let Ok(d) = r.get::<_, f64>(offset + 2) {
-            LabelValue::Double(d.to_bits())
+            Bitical::Double(d)
         } else {
-            LabelValue::String(String::new())
+            Bitical::String(String::new())
         };
-        Self::resolve(tag, label_val)
+        Self::resolve(tag, value)
     }
 
-    /// Label が保持している物理的な値（LabelValue）を返します。
-    pub fn value(&self) -> LabelValue {
+    /// Label が保持している物理的な値（Bitical）を返します。
+    /// `Literal` は Glob 無効・完全一致の意味論を運ぶ専用 variant のため、
+    /// この呼び出しを経由すると通常の `String` と区別できなくなる点に注意
+    /// （区別が必要な呼び出し元は `.value()` を経由せず `Label::Literal` に直接 match すること）。
+    pub fn value(&self) -> Bitical {
         match self {
             Label::Name(s)
             | Label::Hash(s)
             | Label::ItemKind(s)
             | Label::Content(s)
             | Label::Extension(s)
-            | Label::Path(s) => LabelValue::String(s.clone()),
+            | Label::Path(s) => Bitical::String(s.clone()),
             Label::Rank(i)
             | Label::Size(i)
             | Label::Mtime(i)
-            | Label::ItemId(i) => LabelValue::Integer(*i),
-            Label::FileId(u) => LabelValue::String(u.to_string()),
-            Label::IsDir(b) => LabelValue::Boolean(*b),
-            Label::Date(dt) => LabelValue::Date(dt.clone()),
+            | Label::ItemId(i) => Bitical::Integer(*i),
+            Label::FileId(u) => Bitical::String(u.to_string()),
+            Label::IsDir(b) => Bitical::Boolean(*b),
+            Label::Date(dt) => Bitical::Integer(dt.to_timestamp()),
+            Label::Literal(_, s) => Bitical::String(s.clone()),
             Label::Other(_, val) => val.clone(),
         }
     }
 
     /// 物理的な型とタグの種類から、適切なドメイン指向 Label を構築（Promote）します。
-    pub fn resolve(tag: TagType, value: LabelValue) -> Self {
+    pub fn resolve(tag: TagType, value: Bitical) -> Self {
         let TagType::Base(stype) = &tag else {
             return Label::Other(tag, value);
         };
 
         match (stype, &value) {
-            (SType::Name, LabelValue::String(s)) => Label::Name(s.clone()),
-            (SType::Rank, LabelValue::Integer(i)) => Label::Rank(*i),
-            (SType::Size, LabelValue::Integer(i)) => Label::Size(*i),
-            (SType::Mtime, LabelValue::Integer(i)) => Label::Mtime(*i),
-            (SType::Hash, LabelValue::String(s)) => Label::Hash(s.clone()),
-            (SType::ItemKind, LabelValue::String(s)) => {
+            (SType::Name, Bitical::String(s)) => Label::Name(s.clone()),
+            (SType::Rank, Bitical::Integer(i)) => Label::Rank(*i),
+            (SType::Size, Bitical::Integer(i)) => Label::Size(*i),
+            (SType::Mtime, Bitical::Integer(i)) => Label::Mtime(*i),
+            (SType::Hash, Bitical::String(s)) => Label::Hash(s.clone()),
+            (SType::ItemKind, Bitical::String(s)) => {
                 Label::ItemKind(s.clone())
             }
-            (SType::Extension, LabelValue::String(s)) => {
+            (SType::Extension, Bitical::String(s)) => {
                 Label::Extension(s.clone())
             }
-            (SType::Path, LabelValue::String(s)) => Label::Path(s.clone()),
-            (SType::ItemId, LabelValue::Integer(i)) => Label::ItemId(*i),
-            (SType::IsDir, LabelValue::Boolean(b)) => Label::IsDir(*b),
+            (SType::Path, Bitical::String(s)) => Label::Path(s.clone()),
+            (SType::ItemId, Bitical::Integer(i)) => Label::ItemId(*i),
+            (SType::IsDir, Bitical::Boolean(b)) => Label::IsDir(*b),
             _ => Label::Other(tag, value),
+        }
+    }
+
+    /// TagType と値を変えつつ、元が `Literal` なら `Literal` のまま Label を作り直します。
+    /// `resolve` を経由すると Literal 性（Glob 無効・完全一致）が失われるため、
+    /// タグ再解決（正規化・DefinitionRef 化など）で値を保ったまま TagType だけ変える箇所で使います。
+    pub fn rekey(&self, tag: TagType, value: Bitical) -> Self {
+        match (self, value) {
+            (Label::Literal(..), Bitical::String(s)) => Label::Literal(tag, s),
+            (_, value) => Label::resolve(tag, value),
         }
     }
 }
 
 impl From<String> for Label {
     fn from(s: String) -> Self {
-        Label::Other(TagType::Custom(String::new()), LabelValue::String(s))
+        Label::Other(TagType::Custom(String::new()), Bitical::String(s))
     }
 }
 
@@ -1002,20 +1024,20 @@ impl From<&str> for Label {
     fn from(s: &str) -> Self {
         Label::Other(
             TagType::Custom(String::new()),
-            LabelValue::String(s.to_string()),
+            Bitical::String(s.to_string()),
         )
     }
 }
 
 impl From<bool> for Label {
     fn from(b: bool) -> Self {
-        Label::Other(TagType::Custom(String::new()), LabelValue::Boolean(b))
+        Label::Other(TagType::Custom(String::new()), Bitical::Boolean(b))
     }
 }
 
 impl From<i64> for Label {
     fn from(i: i64) -> Self {
-        Label::Other(TagType::Custom(String::new()), LabelValue::Integer(i))
+        Label::Other(TagType::Custom(String::new()), Bitical::Integer(i))
     }
 }
 
@@ -1041,61 +1063,38 @@ impl TypedTag {
     /// 新しい `TypedTag` を作成します。
     pub fn new(
         tagtype: impl Into<TagType>,
-        label_val: impl Into<LabelValue>,
+        value: impl Into<Bitical>,
     ) -> Self {
         Self {
-            label: Label::resolve(tagtype.into(), label_val.into()),
+            label: Label::resolve(tagtype.into(), value.into()),
+        }
+    }
+
+    /// 既存の `Label` の値を保ったまま TagType だけ変えて `TypedTag` を作ります。
+    /// `label` が `Literal` の場合、`Literal` 性（Glob 無効・完全一致）を保ちます
+    /// （`new` は `impl Into<Bitical>` 経由のため Literal 性を失います。`Label::rekey` 参照）。
+    pub fn retag(tagtype: impl Into<TagType>, label: &Label) -> Self {
+        Self {
+            label: label.rekey(tagtype.into(), label.value()),
         }
     }
 }
 
-impl From<String> for LabelValue {
-    fn from(s: String) -> Self {
-        Self::String(s)
-    }
-}
-impl From<&str> for LabelValue {
+impl From<&str> for Bitical {
     fn from(s: &str) -> Self {
-        Self::String(s.to_string())
-    }
-}
-impl From<i64> for LabelValue {
-    fn from(i: i64) -> Self {
-        Self::Integer(i)
-    }
-}
-impl From<bool> for LabelValue {
-    fn from(b: bool) -> Self {
-        Self::Boolean(b)
+        Bitical::String(s.to_string())
     }
 }
 
-impl From<Label> for LabelValue {
+impl From<Label> for Bitical {
     fn from(l: Label) -> Self {
         l.value()
     }
 }
 
-impl From<&Label> for LabelValue {
+impl From<&Label> for Bitical {
     fn from(l: &Label) -> Self {
         l.value()
-    }
-}
-
-impl duckdb::ToSql for LabelValue {
-    fn to_sql(&self) -> duckdb::Result<duckdb::types::ToSqlOutput<'_>> {
-        use duckdb::types::Value;
-        let val = match self {
-            LabelValue::Integer(i) => Value::BigInt(*i),
-            LabelValue::Boolean(b) => Value::Boolean(*b),
-            LabelValue::Double(bits) => Value::Double(f64::from_bits(*bits)),
-            LabelValue::Null => Value::Null,
-            LabelValue::String(s) | LabelValue::Literal(s) => {
-                Value::Text(s.clone())
-            }
-            LabelValue::Date(dt) => Value::BigInt(dt.to_timestamp()),
-        };
-        Ok(duckdb::types::ToSqlOutput::Owned(val))
     }
 }
 
@@ -1423,12 +1422,89 @@ mod tests_types {
     }
 
     #[test]
+    fn test_bitical_ord_within_variant() {
+        assert!(Bitical::Integer(1) < Bitical::Integer(2));
+        assert!(
+            Bitical::String("a".to_string()) < Bitical::String("b".to_string())
+        );
+        assert!(Bitical::Boolean(false) < Bitical::Boolean(true));
+        assert!(Bitical::Double(1.0) < Bitical::Double(2.0));
+        // total_cmp: -0.0 < +0.0（PartialEq のビット非等価性と整合）
+        assert!(Bitical::Double(-0.0) < Bitical::Double(0.0));
+    }
+
+    #[test]
+    fn test_bitical_ord_is_consistent_with_bitwise_eq() {
+        // 同じビットパターンなら cmp は Equal を返す
+        assert_eq!(
+            Bitical::Double(f64::NAN).cmp(&Bitical::Double(f64::NAN)),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            Bitical::Double(0.0).cmp(&Bitical::Double(0.0)),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_bitical_ord_across_variants_is_stable() {
+        // 変種間の順序は固定（String < Integer < Double < Boolean < Uuid）。
+        // 具体的な並びより、推移律・反対称律を満たす全順序であることを確認する。
+        let mut values = vec![
+            Bitical::Uuid(Uuid::new_v4()),
+            Bitical::Boolean(true),
+            Bitical::Double(1.0),
+            Bitical::Integer(1),
+            Bitical::String("a".to_string()),
+        ];
+        values.sort();
+        assert!(matches!(values[0], Bitical::String(_)));
+        assert!(matches!(values[1], Bitical::Integer(_)));
+        assert!(matches!(values[2], Bitical::Double(_)));
+        assert!(matches!(values[3], Bitical::Boolean(_)));
+        assert!(matches!(values[4], Bitical::Uuid(_)));
+    }
+
+    #[test]
+    fn test_label_derives_ord_from_bitical() {
+        // Label::Other(_, Bitical) の Ord は Bitical::cmp に委譲される
+        let tt = TagType::Custom("x".to_string());
+        assert!(
+            Label::Other(tt.clone(), Bitical::Integer(1))
+                < Label::Other(tt, Bitical::Integer(2))
+        );
+    }
+
+    #[test]
     fn test_bitical_type_to_column() {
         assert_eq!(BiticalType::String.to_column(), SType::LabelStr);
         assert_eq!(BiticalType::Uuid.to_column(), SType::LabelStr);
         assert_eq!(BiticalType::Integer.to_column(), SType::LabelInt);
         assert_eq!(BiticalType::Double.to_column(), SType::LabelDouble);
         assert_eq!(BiticalType::Boolean.to_column(), SType::LabelBool);
+    }
+
+    #[test]
+    fn test_bitical_to_sql_binds_all_variants() {
+        use duckdb::types::{ToSqlOutput, Value};
+        use duckdb::ToSql;
+
+        fn bind(b: Bitical) -> Value {
+            match b.to_sql().unwrap() {
+                ToSqlOutput::Owned(v) => v,
+                other => panic!("expected owned value, got {:?}", other),
+            }
+        }
+
+        assert_eq!(
+            bind(Bitical::String("a".to_string())),
+            Value::Text("a".to_string())
+        );
+        assert_eq!(bind(Bitical::Integer(42)), Value::BigInt(42));
+        assert_eq!(bind(Bitical::Double(1.5)), Value::Double(1.5));
+        assert_eq!(bind(Bitical::Boolean(true)), Value::Boolean(true));
+        let id = Uuid::new_v4();
+        assert_eq!(bind(Bitical::Uuid(id)), Value::Text(id.to_string()));
     }
 
     #[test]
@@ -1487,6 +1563,18 @@ mod tests_types {
             FileTimestamp::BITICAL,
             Bitical::from(FileTimestamp(1)).name()
         );
+    }
+
+    #[test]
+    fn test_label_literal_variant() {
+        let tt = TagType::Custom("mytype".to_string());
+        let label = Label::Literal(tt.clone(), "hello".to_string());
+        assert_eq!(label.as_str(), "hello");
+        assert_eq!(label.tag_type(), tt);
+        assert_eq!(label.value(), Bitical::String("hello".to_string()));
+
+        let numeric = Label::Literal(TagType::Custom(String::new()), "42".to_string());
+        assert_eq!(numeric.as_i64(), 42);
     }
 
     #[test]
@@ -1703,7 +1791,7 @@ mod tests_types {
         assert!(result.is_err());
     }
 
-    // --- Phase 1: DateTime / LabelValue::Date / Label::Date ---
+    // --- DateTime / Label::Date ---
 
     #[test]
     fn test_datetime_year_variant() {
@@ -1746,31 +1834,33 @@ mod tests_types {
     fn test_label_value_date_as_display_name() {
         use chrono::NaiveDate;
         let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let lv = LabelValue::Date(DateTime::Date(d));
-        assert_eq!(lv.as_display_name(), "2026-02-01");
+        assert_eq!(DateTime::Date(d).as_display_str(), "2026-02-01");
     }
 
     #[test]
     fn test_label_value_date_year_as_display_name() {
-        let lv = LabelValue::Date(DateTime::Year(2026));
-        assert_eq!(lv.as_display_name(), "2026");
+        assert_eq!(DateTime::Year(2026).as_display_str(), "2026");
     }
 
     #[test]
     fn test_label_value_date_year_month_as_display_name() {
-        let lv = LabelValue::Date(DateTime::YearMonth {
-            year: 2026,
-            month: 2,
-        });
-        assert_eq!(lv.as_display_name(), "2026-02");
+        assert_eq!(
+            DateTime::YearMonth {
+                year: 2026,
+                month: 2,
+            }
+            .as_display_str(),
+            "2026-02"
+        );
     }
 
     #[test]
-    fn test_label_date_value_returns_date_variant() {
+    fn test_label_date_value_returns_integer_timestamp() {
         use chrono::NaiveDate;
         let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let label = Label::Date(DateTime::Date(d));
-        assert!(matches!(label.value(), LabelValue::Date(DateTime::Date(_))));
+        let dt = DateTime::Date(d);
+        let label = Label::Date(dt.clone());
+        assert_eq!(label.value(), Bitical::Integer(dt.to_timestamp()));
     }
 
     #[test]

@@ -79,23 +79,9 @@ pub(crate) fn type_filter(op: BinOper, tag_type: &str) -> SimpleExpr {
     Expr::col(Col::Type).binary(op, tag_type)
 }
 
-/// カラムの NULL 判定式を生成。
-pub(crate) fn col_is_null(col: Col) -> SimpleExpr {
-    Expr::col(col).is_null()
-}
-
 /// 浮動小数点値条件の `Condition` を生成。
-pub(crate) fn build_double_condition(op: BinOper, bits: u64) -> Condition {
-    Condition::any().add(col_cmp_f64(
-        Col::LabelDouble,
-        op,
-        f64::from_bits(bits),
-    ))
-}
-
-/// NULL 条件の `Condition` を生成。
-pub(crate) fn build_null_condition() -> Condition {
-    Condition::any().add(col_is_null(Col::LabelStr))
+pub(crate) fn build_double_condition(op: BinOper, val: f64) -> Condition {
+    Condition::any().add(col_cmp_f64(Col::LabelDouble, op, val))
 }
 
 #[cfg(test)]

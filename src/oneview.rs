@@ -13,9 +13,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, BiticalType, TargetTable, Tbl};
+use crate::db::{Col, BiticalType, ColumnDef, TargetTable, Tbl};
 use crate::query::lens_reader::Reader;
-use crate::taggers::ColumnDef;
 use crate::types::ItemKind;
 use duckdb::{Connection, Result};
 use sea_query::{CaseStatement, Expr, Func, PostgresQueryBuilder, Query};
@@ -303,7 +302,7 @@ fn apply_label_columns(
 
 /// Physical Table (FileReferences, Locations) のカラムからクエリを生成
 fn build_physical_column_query(
-    cd: &crate::taggers::ColumnDef,
+    cd: &ColumnDef,
     tbl_alias: Tbl,
     parquet_path: &str,
     file_ref_path: Option<&str>,

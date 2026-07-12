@@ -28,7 +28,7 @@ use crate::tag::{
     Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query,
     ScanRole, TagFunction,
 };
-use crate::types::{Label, LabelValue, Rank, TagType};
+use crate::types::{Bitical, Label, Rank, TagType};
 
 // --- インターフェース用の手動型定義 ---
 
@@ -312,7 +312,7 @@ impl Index for WasmPluginAdapter {
         TargetTable::BaseTags
     }
 
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let path_str = std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .to_string_lossy()
@@ -341,7 +341,7 @@ impl Index for WasmPluginAdapter {
                 format!("Wasm execution error for file: {path_str}")
             })?;
 
-            Ok(results.into_iter().find_map(convert_wasm_val))
+            Ok(results.into_iter().find_map(Bitical::from_wasm_value))
         })
     }
 }
@@ -512,7 +512,7 @@ impl TagDisplay for WasmPluginAdapter {
         }
     }
 
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+    fn show(&self, value: &Bitical, format: DisplayFormat) -> String {
         let value_str = value.as_display_name();
         let format_id = format.id.clone();
         let result = INSTANCE_CACHE.with(|cache| -> Result<String> {
@@ -540,13 +540,15 @@ impl TagDisplay for WasmPluginAdapter {
     }
 }
 
-fn convert_wasm_val(v: WasmTagValue) -> Option<LabelValue> {
-    match v {
-        WasmTagValue::Text(s) => Some(LabelValue::String(s)),
-        WasmTagValue::BigInt(i) => Some(LabelValue::Integer(i)),
-        WasmTagValue::Boolean(b) => Some(LabelValue::Boolean(b)),
-        WasmTagValue::Double(f) => Some(LabelValue::Double(f.to_bits())),
-        WasmTagValue::Empty => None,
+impl Bitical {
+    fn from_wasm_value(v: WasmTagValue) -> Option<Bitical> {
+        match v {
+            WasmTagValue::Text(s) => Some(Bitical::String(s)),
+            WasmTagValue::BigInt(i) => Some(Bitical::Integer(i)),
+            WasmTagValue::Boolean(b) => Some(Bitical::Boolean(b)),
+            WasmTagValue::Double(f) => Some(Bitical::Double(f)),
+            WasmTagValue::Empty => None,
+        }
     }
 }
 

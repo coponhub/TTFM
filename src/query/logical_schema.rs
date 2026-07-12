@@ -24,7 +24,7 @@
 //! - テスト用モックなど任意の実装も可能。
 
 use crate::query::ast::{ComparisonNode, QueryNode};
-use crate::types::{ItemId, Label, Rank, TagType};
+use crate::types::{Bitical, ItemId, Label, Rank, TagType};
 
 /// クエリエンジンの論理レイヤーで扱う型。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -39,6 +39,26 @@ pub enum LogicalType {
 impl LogicalType {
     pub fn is_numeric(&self) -> bool {
         matches!(self, Self::Integer | Self::Float | Self::Boolean)
+    }
+}
+
+impl Bitical {
+    /// この値が推定される LogicalType（サイズ単位付き文字列は Integer 扱い）。
+    pub(crate) fn infer_logical_type(&self) -> LogicalType {
+        match self {
+            Bitical::Integer(_) => LogicalType::Integer,
+            Bitical::Boolean(_) => LogicalType::Boolean,
+            Bitical::Double(_) => LogicalType::Float,
+            Bitical::Uuid(_) => LogicalType::String,
+            Bitical::String(s) => {
+                // "1MB" などのサイズ単位付きリテラルは数値として扱う
+                if crate::util::parse_size(s).is_some() {
+                    LogicalType::Integer
+                } else {
+                    LogicalType::String
+                }
+            }
+        }
     }
 }
 

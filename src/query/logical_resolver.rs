@@ -36,7 +36,7 @@ use crate::query::ast::{
     ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::types::{Label, LabelValue, TagType};
+use crate::types::{Bitical, Label, TagType};
 use anyhow::{bail, Result};
 
 // ========== Logical Representation ==========
@@ -497,13 +497,11 @@ fn fold_literal_arithmetic(
     op: ArithmeticOp,
     right: &crate::types::Label,
 ) -> Option<crate::types::Label> {
-    use crate::types::LabelValue;
-
     let lv = left.value();
     let rv = right.value();
 
     match (lv, rv) {
-        (LabelValue::Integer(l), LabelValue::Integer(r)) => {
+        (Bitical::Integer(l), Bitical::Integer(r)) => {
             let result = match op {
                 ArithmeticOp::Add => l.checked_add(r)?,
                 ArithmeticOp::Sub => l.checked_sub(r)?,
@@ -523,9 +521,7 @@ fn fold_literal_arithmetic(
             };
             Some(crate::types::Label::from(result))
         }
-        (LabelValue::Double(l_bits), LabelValue::Double(r_bits)) => {
-            let l = f64::from_bits(l_bits);
-            let r = f64::from_bits(r_bits);
+        (Bitical::Double(l), Bitical::Double(r)) => {
             let result = match op {
                 ArithmeticOp::Add => l + r,
                 ArithmeticOp::Sub => l - r,
@@ -535,8 +531,7 @@ fn fold_literal_arithmetic(
             };
             Some(double_label(result))
         }
-        (LabelValue::Integer(l), LabelValue::Double(r_bits)) => {
-            let r = f64::from_bits(r_bits);
+        (Bitical::Integer(l), Bitical::Double(r)) => {
             let result = match op {
                 ArithmeticOp::Add => (l as f64) + r,
                 ArithmeticOp::Sub => (l as f64) - r,
@@ -546,8 +541,7 @@ fn fold_literal_arithmetic(
             };
             Some(double_label(result))
         }
-        (LabelValue::Double(l_bits), LabelValue::Integer(r)) => {
-            let l = f64::from_bits(l_bits);
+        (Bitical::Double(l), Bitical::Integer(r)) => {
             let result = match op {
                 ArithmeticOp::Add => l + (r as f64),
                 ArithmeticOp::Sub => l - (r as f64),
@@ -557,7 +551,7 @@ fn fold_literal_arithmetic(
             };
             Some(double_label(result))
         }
-        (LabelValue::Boolean(l), LabelValue::Boolean(r)) => {
+        (Bitical::Boolean(l), Bitical::Boolean(r)) => {
             // Boolean は FALSE=0, TRUE=1 として計算、結果は Integer
             let li = if l { 1i64 } else { 0 };
             let ri = if r { 1i64 } else { 0 };
@@ -580,10 +574,7 @@ fn fold_literal_arithmetic(
             };
             Some(crate::types::Label::from(result))
         }
-        (LabelValue::String(l), LabelValue::String(r))
-        | (LabelValue::Literal(l), LabelValue::Literal(r))
-        | (LabelValue::String(l), LabelValue::Literal(r))
-        | (LabelValue::Literal(l), LabelValue::String(r)) => match op {
+        (Bitical::String(l), Bitical::String(r)) => match op {
             ArithmeticOp::Add => {
                 Some(crate::types::Label::from(format!("{}, {}", l, r)))
             }
@@ -598,10 +589,7 @@ fn fold_literal_arithmetic(
 
 /// f64 値を Label に変換するヘルパー
 fn double_label(v: f64) -> crate::types::Label {
-    Label::Other(
-        TagType::Custom(String::new()),
-        LabelValue::Double(v.to_bits()),
-    )
+    Label::Other(TagType::Custom(String::new()), Bitical::Double(v))
 }
 
 /// And ノードから投影ノードとそれ以外のフィルタを分離します。
@@ -1086,7 +1074,7 @@ fn infer_type(
     schema: &impl LogicalSchema,
 ) -> Result<LogicalType> {
     match operand {
-        Operand::Literal(label) => Ok(infer_logical_type_from_label(label)),
+        Operand::Literal(label) => Ok(label.value().infer_logical_type()),
         Operand::TypeRef(tag_type) => Ok(schema.get_logical_type(tag_type)),
         Operand::Calculation(calc) => {
             validate_calculation(calc, schema)?;
@@ -1146,24 +1134,6 @@ fn infer_type(
     }
 }
 
-fn infer_logical_type_from_label(label: &crate::types::Label) -> LogicalType {
-    match label.value() {
-        LabelValue::Integer(_) => LogicalType::Integer,
-        LabelValue::Boolean(_) => LogicalType::Boolean,
-        LabelValue::Double(_) => LogicalType::Float,
-        LabelValue::Null => LogicalType::Any,
-        LabelValue::String(s) | LabelValue::Literal(s) => {
-            // "1MB" などのサイズ単位付きリテラルは数値として扱う
-            if crate::util::parse_size(&s).is_some() {
-                LogicalType::Integer
-            } else {
-                LogicalType::String
-            }
-        }
-        LabelValue::Date(_) => LogicalType::Integer,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,7 +1142,7 @@ mod tests {
         ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
     };
     use crate::query::lens_schema::Lens;
-    use crate::types::{LabelValue, TagType, TypedTag};
+    use crate::types::{Bitical, TagType, TypedTag};
 
     #[test]
     fn test_expand_simple_and() {
@@ -1834,7 +1804,7 @@ mod tests {
                         AggregationNode::Count(Box::new(QueryNode::TypedTag(
                             TypedTag::new(
                                 "extension",
-                                LabelValue::String("rs".to_string()),
+                                Bitical::String("rs".to_string()),
                             ),
                         ))),
                     )),
@@ -2267,11 +2237,11 @@ mod tests {
 
     #[test]
     fn test_expand_operand_quoted_literal_unchanged() {
-        // Quoted ("literal") should NOT be normalized — stays as LabelValue::Literal
+        // Quoted ("literal") should NOT be normalized — stays as Label::Literal
         let lens = Lens::base_standard();
-        let label = crate::types::Label::Other(
+        let label = crate::types::Label::Literal(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("1MB".to_string()),
+            "1MB".to_string(),
         );
         let op = Operand::Literal(label.clone());
         let expanded = expand_operand(&lens, op).unwrap();

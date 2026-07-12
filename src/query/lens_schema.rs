@@ -18,7 +18,7 @@ use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
-use crate::types::{Label, LabelValue, SType, TagType};
+use crate::types::{Bitical, Label, SType, TagType};
 use duckdb::types::Value;
 use indexmap::IndexMap;
 use sea_query::{BinOper, Condition, SimpleExpr};
@@ -91,6 +91,40 @@ pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
     schema_pieces::type_filter(tag_op, tag_type)
 }
 
+impl Bitical {
+    /// 値の物理型に応じた列一致条件を返す。GLOB/汎用値パース等の型別ルールは
+    /// `build_int_condition`/`build_str_condition` に委譲する。
+    pub(crate) fn to_condition(
+        &self,
+        col: Col,
+        op: BinOper,
+        bitical_type: crate::db::BiticalType,
+        is_eav_col: bool,
+    ) -> Condition {
+        match self {
+            Bitical::Integer(i) => build_int_condition(col, op, *i, is_eav_col),
+            Bitical::Boolean(b) => build_str_condition(
+                col,
+                op,
+                &b.to_string(),
+                bitical_type,
+                is_eav_col,
+            ),
+            Bitical::Double(d) => schema_pieces::build_double_condition(op, *d),
+            Bitical::String(s) => {
+                build_str_condition(col, op, s, bitical_type, is_eav_col)
+            }
+            Bitical::Uuid(u) => build_str_condition(
+                col,
+                op,
+                &u.to_string(),
+                bitical_type,
+                is_eav_col,
+            ),
+        }
+    }
+}
+
 fn build_column_condition(
     col: Col,
     op: ComparisonOp,
@@ -106,31 +140,14 @@ fn build_column_condition(
         || col == Col::LabelDouble
         || col == Col::LabelBool;
 
-    match label.value() {
-        LabelValue::Integer(i) => {
-            build_int_condition(col, bin_op, i, is_eav_col)
-        }
-        LabelValue::Boolean(b) => build_str_condition(
-            col,
-            bin_op,
-            &b.to_string(),
-            bitical_type,
-            is_eav_col,
-        ),
-        LabelValue::Double(bits) => {
-            schema_pieces::build_double_condition(bin_op, bits)
-        }
-        LabelValue::Null => schema_pieces::build_null_condition(),
-        LabelValue::String(s) => {
-            build_str_condition(col, bin_op, &s, bitical_type, is_eav_col)
-        }
-        LabelValue::Literal(s) => {
-            build_literal_condition(col, bin_op, &s, is_eav_col)
-        }
-        LabelValue::Date(dt) => {
-            build_int_condition(col, bin_op, dt.to_timestamp(), is_eav_col)
-        }
+    // `Label::Literal`（quoted）は完全一致検索、それ以外の String は通常検索。
+    // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
+    // まず `label` 自体で判定する。
+    if let Label::Literal(_, s) = label {
+        return build_literal_condition(col, bin_op, s, is_eav_col);
     }
+
+    label.value().to_condition(col, bin_op, bitical_type, is_eav_col)
 }
 
 pub(crate) fn build_int_condition(
@@ -312,16 +329,16 @@ impl LogicalSchema for Lens {
                 let q = func.query();
                 // normalize_label を適用してから expand する
                 let normalized = q.normalize_label(label);
-                let tag = crate::types::TypedTag::new(
+                let tag = crate::types::TypedTag::retag(
                     tag_type.clone(),
-                    normalized.clone(),
+                    &normalized,
                 );
                 return q.expand(tag_type, &normalized, &tag, self);
             }
         }
-        QueryNode::TypedTag(crate::types::TypedTag::new(
+        QueryNode::TypedTag(crate::types::TypedTag::retag(
             tag_type.clone(),
-            label.clone(),
+            label,
         ))
     }
 
@@ -335,7 +352,7 @@ impl LogicalSchema for Lens {
     }
 
     fn normalize_label_any(&self, label: &Label) -> Label {
-        if matches!(label.value(), LabelValue::Literal(_)) {
+        if matches!(label, Label::Literal(..)) {
             return label.clone();
         }
         // TagRegistry と同様に登録の逆順で走査する
@@ -559,13 +576,14 @@ impl Lens {
         map: &duckdb::types::OrderedMap<String, Value>,
     ) -> Option<Label> {
         let from_storage = |desc: &TagDescriptor| match &desc.storage {
-            StorageMapping::Fixed(col) => {
-                map.get(&col.name()).and_then(val_to_label_value)
-            }
+            StorageMapping::Fixed(col) => map
+                .get(&col.name())
+                .and_then(Bitical::from_scalar_db_value),
             StorageMapping::Basic { column, tag_type } => {
                 let type_val = map.get(&SType::Type.name())?;
                 if type_val.as_str() == Some(tag_type) {
-                    map.get(&column.name()).and_then(val_to_label_value)
+                    map.get(&column.name())
+                        .and_then(Bitical::from_scalar_db_value)
                 } else {
                     None
                 }
@@ -582,34 +600,23 @@ impl Lens {
                 SType::LabelDouble,
             ]
             .iter()
-            .find_map(|s| map.get(&s.name()).and_then(val_to_label_value))
+            .find_map(|s| {
+                map.get(&s.name()).and_then(Bitical::from_scalar_db_value)
+            })
         };
 
-        let label_val = self
+        let value = self
             .look_up(tag_type)
             .and_then(from_storage)
             .or_else(from_fallback)?;
 
-        Some(Label::resolve(tag_type.clone(), label_val))
+        Some(Label::resolve(tag_type.clone(), value))
     }
 
     pub fn resolve_label(&self, tag_type: &TagType, value: &Value) -> Label {
-        let label_val = val_to_label_value(value)
-            .unwrap_or(LabelValue::String(String::new()));
-        Label::resolve(tag_type.clone(), label_val)
-    }
-}
-
-fn val_to_label_value(val: &Value) -> Option<LabelValue> {
-    match val {
-        Value::Text(s) => Some(LabelValue::String(s.clone())),
-        Value::BigInt(i) => Some(LabelValue::Integer(*i)),
-        Value::Int(i) => Some(LabelValue::Integer(*i as i64)),
-        Value::Float(f) => Some(LabelValue::Double((*f as f64).to_bits())),
-        Value::Double(d) => Some(LabelValue::Double(d.to_bits())),
-        Value::Boolean(b) => Some(LabelValue::Boolean(*b)),
-        Value::Null => Some(LabelValue::Null),
-        _ => None,
+        let value = Bitical::from_scalar_db_value(value)
+            .unwrap_or_else(|| Bitical::String(String::new()));
+        Label::resolve(tag_type.clone(), value)
     }
 }
 
@@ -716,7 +723,7 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
         .map(|fc| TagDescriptor {
             tag_type: TagType::Base(fc.stype),
             storage: StorageMapping::Fixed(fc.col),
-            logical_type: sql_to_logical(fc.col.bitical_type()),
+            logical_type: sql_to_logical(crate::db::BiticalType::from_col(fc.col)),
             logical_function: None,
             sys_id: None,
         })

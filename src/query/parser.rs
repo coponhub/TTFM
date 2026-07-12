@@ -255,7 +255,7 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
         return Ok(QueryNode::Projection(Operand::from(tagtype)));
     }
 
-    Ok(QueryNode::TypedTag(TypedTag::new(tagtype, label)))
+    Ok(QueryNode::TypedTag(TypedTag::retag(tagtype, &label)))
 }
 
 fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
@@ -659,10 +659,7 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             // Remove outer quotes before unescaping
             let content = &inner.as_str()[1..inner.as_str().len() - 1];
             let s = unescape_string(content)?;
-            Ok(Label::Other(
-                TagType::Custom(String::new()),
-                crate::types::LabelValue::Literal(s),
-            ))
+            Ok(Label::Literal(TagType::Custom(String::new()), s))
         }
         Rule::number => {
             let i = inner.as_str().parse::<i64>()?;
@@ -822,6 +819,20 @@ fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
 mod tests {
     use super::*;
     use crate::query::ast::{ComparisonOp, QueryNode};
+
+    #[test]
+    fn test_quoted_string_parses_to_label_literal() {
+        let node = parse("\"hello\"").expect("quoted string should parse");
+        match node {
+            QueryNode::Projection(Operand::Literal(Label::Literal(tt, s))) => {
+                assert_eq!(s, "hello");
+                assert_eq!(tt, TagType::Custom(String::new()));
+            }
+            other => {
+                panic!("Expected Literal(Label::Literal), got {:?}", other)
+            }
+        }
+    }
 
     #[test]
     fn test_unescape_string_basic() {

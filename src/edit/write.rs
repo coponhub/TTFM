@@ -431,7 +431,7 @@ fn update_rank_column(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{LabelValue, SType, TagType};
+    use crate::types::{Bitical, SType, TagType};
 
     #[test]
     fn write_action_variants_are_constructible() {
@@ -440,7 +440,7 @@ mod tests {
             tags: vec![
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 )),
                 TagOp::Append(Label::ItemKind("tag".to_string())),
                 TagOp::Append(Label::Content("project:A".to_string())),
@@ -454,7 +454,7 @@ mod tests {
                 DeleteTarget::Type(TagType::from("project")),
                 DeleteTarget::Tag(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 )),
             ],
         };

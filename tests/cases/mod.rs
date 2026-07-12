@@ -170,8 +170,8 @@ pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
         .iter()
         .find(|e| e.label.tag_type().as_str() == "nvalue")
         .map(|e| match e.label.value() {
-            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
-            ttfm::types::LabelValue::Integer(i) => i as f64,
+            ttfm::types::Bitical::Double(d) => d,
+            ttfm::types::Bitical::Integer(i) => i as f64,
             _ => panic!("Unexpected nvalue type"),
         })
 }

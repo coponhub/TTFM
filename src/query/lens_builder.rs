@@ -21,7 +21,7 @@
 
 use crate::db::Col;
 use crate::query::lens_schema::fixed_attributes;
-use crate::types::LabelValue;
+use crate::types::{Bitical, Label};
 
 /// Fixed 属性名の定数リストに、元の物理行を表す NULL マーカー行を先頭に加えた
 /// 1列（name）のサブクエリを返す。base との CROSS JOIN で「元の行＋属性ごとの
@@ -139,30 +139,49 @@ pub(crate) fn count_types(
 /// 候補（Stored/Settling(Plugin, _)）があればそれをそのまま使う
 /// （Stored/Volatile の区別を保つため）。無ければ、未登録・未使用の名前でも
 /// Volatile 1 行が合成されるよう、User 区画のプレースホルダを合成する。
+/// 完全一致検索用の (pattern, exact=true, candidates) を組み立てる。
+/// candidates に無ければ、未登録・未使用の名前でも合成できるよう
+/// User 区画の Volatile プレースホルダを合成する。
+fn exact_match_candidate(
+    pattern: String,
+    def: &crate::query::ast::DefinitionRef,
+    default_rank: crate::types::Rank,
+) -> (String, bool, Vec<crate::query::ast::Candidate>) {
+    use crate::query::ast::Candidate;
+    use crate::types::{ItemId, Origin};
+
+    let entry = def
+        .candidates
+        .iter()
+        .find(|c| c.name == pattern)
+        .cloned()
+        .unwrap_or_else(|| Candidate {
+            name: pattern.clone(),
+            rank: default_rank,
+            id: ItemId::Settling(Origin::User, 0),
+        });
+    (pattern, true, vec![entry])
+}
+
 fn resolve_definition_name_filter(
     def: &crate::query::ast::DefinitionRef,
     default_rank: crate::types::Rank,
 ) -> crate::query::sql::definition::ResolvedDefinition {
-    use crate::query::ast::Candidate;
     use crate::query::sql::definition::ResolvedDefinition;
-    use crate::types::{ItemId, Origin};
 
+    // `Label::Literal`（quoted）は完全一致検索、それ以外の String は glob検索。
+    // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
+    // まず `def.value` 自体で判定する。
     let (pattern, exact, candidates) =
-        if let LabelValue::String(pattern) = def.value.value() {
-            (pattern, false, def.candidates.clone())
+        if let Bitical::String(pattern) = def.value.value() {
+            if matches!(def.value, Label::Literal(..)) {
+                exact_match_candidate(pattern, def, default_rank)
+            } else {
+                (pattern, false, def.candidates.clone())
+            }
         } else {
             let v = def.value.value().as_display_name();
-            let entry = def
-                .candidates
-                .iter()
-                .find(|c| c.name == v)
-                .cloned()
-                .unwrap_or_else(|| Candidate {
-                    name: v.clone(),
-                    rank: default_rank,
-                    id: ItemId::Settling(Origin::User, 0),
-                });
-            (v, true, vec![entry])
+            exact_match_candidate(v, def, default_rank)
         };
     ResolvedDefinition {
         kind: def.kind,

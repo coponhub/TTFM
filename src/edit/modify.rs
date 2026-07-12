@@ -4,7 +4,7 @@ use super::{
 };
 use crate::response::Item;
 use crate::tag::TagRegistry;
-use crate::types::{ItemId, Label, LabelValue, SType, TagType};
+use crate::types::{Bitical, ItemId, Label, SType, TagType};
 use crate::util::DotOk;
 use anyhow::{bail, Result};
 
@@ -76,7 +76,7 @@ impl QueryType {
     fn to_directive(
         &self,
         tag_type: TagType,
-        value: Option<LabelValue>,
+        value: Option<Bitical>,
         registry: &TagRegistry,
     ) -> Result<Directive> {
         match (self, value) {
@@ -105,15 +105,15 @@ impl QueryType {
 // ヘルパー
 // ──────────────────────────────────────────────
 
-fn parse_value(s: &str) -> LabelValue {
+fn parse_value(s: &str) -> Bitical {
     if let Ok(i) = s.parse::<i64>() {
-        LabelValue::Integer(i)
+        Bitical::Integer(i)
     } else {
-        LabelValue::String(s.to_string())
+        Bitical::String(s.to_string())
     }
 }
 
-fn tokenize(query: &str) -> Result<Vec<(TagType, Option<LabelValue>)>> {
+fn tokenize(query: &str) -> Result<Vec<(TagType, Option<Bitical>)>> {
     let raw: Vec<&str> = query
         .split(|c: char| c == '|' || c.is_whitespace())
         .map(str::trim)
@@ -323,7 +323,7 @@ mod tests {
     use crate::response::Item;
     use crate::tag::TagRegistry;
     use crate::types::{
-        ItemId, ItemKind, Label, LabelValue, SType, TagType, Tags,
+        Bitical, ItemId, ItemKind, Label, SType, TagType, Tags,
     };
 
     fn make_item(item_id: i64, labels: Vec<Label>) -> Item {
@@ -348,10 +348,10 @@ mod tests {
     }
 
     fn make_volatile_item(stype: SType, repr_value: &str) -> Item {
-        use crate::types::{Intrinsic, LabelValue, Rank};
+        use crate::types::{Bitical, Intrinsic, Rank};
         let repr_label = Label::resolve(
             TagType::Base(stype),
-            LabelValue::String(repr_value.to_string()),
+            Bitical::String(repr_value.to_string()),
         );
         Item {
             id: ItemId::Volatile(0),
@@ -379,7 +379,7 @@ mod tests {
         let tokens = tokenize("rank:5").unwrap();
         assert_eq!(
             tokens,
-            vec![(TagType::from("rank"), Some(LabelValue::Integer(5)))]
+            vec![(TagType::from("rank"), Some(Bitical::Integer(5)))]
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
             tokens,
             vec![(
                 TagType::from("project"),
-                Some(LabelValue::String("A".into()))
+                Some(Bitical::String("A".into()))
             )]
         );
     }
@@ -558,7 +558,7 @@ mod tests {
     fn modify_untag_existing_label() {
         let label = Label::Other(
             TagType::from("project"),
-            LabelValue::String("A".into()),
+            Bitical::String("A".into()),
         );
         let item = make_item(1, vec![label.clone()]);
         let actions =
@@ -596,11 +596,11 @@ mod tests {
         let labels = vec![
             Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".into()),
+                Bitical::String("A".into()),
             ),
             Label::Other(
                 TagType::from("status"),
-                LabelValue::String("done".into()),
+                Bitical::String("done".into()),
             ),
         ];
         let item = make_item(1, labels);
@@ -830,15 +830,15 @@ mod tests {
     // 複合 representative（複数要素）の Volatile item: item_kind=note, content=全要素連結。
     #[test]
     fn modify_volatile_multi_repr_is_note_with_joined_content() {
-        use crate::types::{Intrinsic, LabelValue, Rank};
+        use crate::types::{Bitical, Intrinsic, Rank};
         let repr = vec![
             Label::resolve(
                 TagType::Base(SType::TypedTag),
-                LabelValue::String("project:A".to_string()),
+                Bitical::String("project:A".to_string()),
             ),
             Label::resolve(
                 TagType::Base(SType::TypedTag),
-                LabelValue::String("status:done".to_string()),
+                Bitical::String("status:done".to_string()),
             ),
         ];
         let item = Item {
@@ -870,7 +870,7 @@ mod tests {
         item.tags.push(
             Label::Other(
                 TagType::Base(SType::Type),
-                LabelValue::String("integer".to_string()),
+                Bitical::String("integer".to_string()),
             ),
             Origin::Builtin,
         );
@@ -880,7 +880,7 @@ mod tests {
             has_append(tags, |l| l.tag_type() == TagType::Base(SType::Type)
                 && matches!(
                     l.value(),
-                    LabelValue::String(s) if s == "integer"
+                    Bitical::String(s) if s == "integer"
                 )),
             "type: tag must pass through unchanged"
         );

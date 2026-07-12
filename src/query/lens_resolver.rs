@@ -38,7 +38,7 @@ use crate::query::ast::{
     ComparisonNode, ComparisonOp, DefinitionRef, Operand, QueryNode,
 };
 use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{Label, LabelValue, Rank, SType, TagType};
+use crate::types::{Bitical, Label, Rank, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
@@ -324,10 +324,9 @@ impl ResolvedOperand {
     /// 文字列型かどうかを判定します。
     pub fn is_string_type(&self) -> bool {
         match self {
-            ResolvedOperand::Literal(label) => matches!(
-                label.value(),
-                LabelValue::String(_) | LabelValue::Literal(_)
-            ),
+            ResolvedOperand::Literal(label) => {
+                matches!(label.value(), Bitical::String(_))
+            }
             ResolvedOperand::TagRef {
                 tag_type, bitical_type, ..
             } => {
@@ -1184,17 +1183,7 @@ fn cond_projection(storage: &StorageMapping) -> Condition {
 fn cond_column_match(tag: SType, label: &Label) -> Condition {
     // 直接の物理カラム指定
     let col = tag;
-    let val = match label.value() {
-        crate::types::LabelValue::Integer(i) => Expr::val(i),
-        crate::types::LabelValue::Boolean(b) => Expr::val(b),
-        crate::types::LabelValue::Double(bits) => {
-            Expr::val(f64::from_bits(bits))
-        }
-        crate::types::LabelValue::Null => Expr::val(None::<i32>),
-        crate::types::LabelValue::String(s)
-        | crate::types::LabelValue::Literal(s) => Expr::val(s),
-        crate::types::LabelValue::Date(dt) => Expr::val(dt.to_timestamp()),
-    };
+    let val = label.value().to_simple_expr();
     // ColumnMatch の場合は型固有のルールは適用せず、単純にマッピング
     Condition::all().add(Expr::col(col).eq(val))
 }
@@ -3246,11 +3235,11 @@ mod tests {
 
         let left = ResolvedOperand::Literal(Label::Other(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+            crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::Other(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("b".into()),
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3269,7 +3258,7 @@ mod tests {
 
         let left = ResolvedOperand::Literal(Label::Other(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+            crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::from(1i64));
 
@@ -3289,11 +3278,11 @@ mod tests {
 
         let left = ResolvedOperand::Literal(Label::Other(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+            crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::Other(
             crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("b".into()),
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3847,7 +3836,7 @@ mod tests_integration {
         use crate::query::lens_schema::StorageMapping;
         let value = crate::types::Label::resolve(
             crate::types::TagType::from(value_type),
-            crate::types::LabelValue::String(value_str.to_string()),
+            crate::types::Bitical::String(value_str.to_string()),
         );
         let tag_type = value.tag_type();
         ResolvedNode::DefinitionRef {
@@ -3910,7 +3899,7 @@ mod tests_integration {
             ),
             label: crate::types::Label::resolve(
                 crate::types::TagType::from("path"),
-                crate::types::LabelValue::String("/foo/*".to_string()),
+                crate::types::Bitical::String("/foo/*".to_string()),
             ),
         };
 
@@ -4149,14 +4138,14 @@ mod tests_walk_fold {
     use super::*;
     use crate::query::ast::ArithmeticOp;
     use crate::tag::TagRegistry;
-    use crate::types::{Label, LabelValue, SType, TagType};
+    use crate::types::{Label, Bitical, SType, TagType};
 
     fn leaf(name: &str) -> ResolvedNode {
         ResolvedNode::ColumnMatch {
             tag: SType::Name,
             label: Label::resolve(
                 TagType::from(name),
-                LabelValue::String(name.to_string()),
+                Bitical::String(name.to_string()),
             ),
         }
     }

@@ -3,7 +3,7 @@ use ttfm::db::{Store, TargetTable};
 use ttfm::edit::write::{write, DeleteTarget, TagOp, WriteAction};
 use ttfm::indexing::Indexer;
 use ttfm::tag::TagRegistry;
-use ttfm::types::{ItemId, Label, LabelValue, SType, TagType};
+use ttfm::types::{Bitical, ItemId, Label, SType, TagType};
 
 fn setup() -> (Store, TagRegistry, tempfile::TempDir) {
     let dir = tempdir().unwrap();
@@ -68,7 +68,7 @@ fn write_add_volatile_creates_item_ref_and_user_tag() {
                 TagOp::Append(Label::Content("project:A".to_string())),
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 )),
             ],
         }],
@@ -121,11 +121,11 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
             tags: vec![
                 TagOp::Append(Label::Other(
                     TagType::from("flag"),
-                    LabelValue::Boolean(true),
+                    Bitical::Boolean(true),
                 )),
                 TagOp::Append(Label::Other(
                     TagType::from("flag"),
-                    LabelValue::Boolean(false),
+                    Bitical::Boolean(false),
                 )),
             ],
         }],
@@ -141,7 +141,7 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Tag(Label::Other(
                 TagType::from("flag"),
-                LabelValue::Boolean(true),
+                Bitical::Boolean(true),
             ))],
         }],
     )
@@ -169,11 +169,11 @@ fn write_delete_by_type_removes_user_tags() {
             tags: vec![
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 )),
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("B".to_string()),
+                    Bitical::String("B".to_string()),
                 )),
             ],
         }],
@@ -212,11 +212,11 @@ fn write_delete_by_label_removes_specific_tag() {
             tags: vec![
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 )),
                 TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("B".to_string()),
+                    Bitical::String("B".to_string()),
                 )),
             ],
         }],
@@ -231,7 +231,7 @@ fn write_delete_by_label_removes_specific_tag() {
             item: ItemId::Stored(id),
             tags: vec![DeleteTarget::Tag(Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".to_string()),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -348,7 +348,7 @@ fn write_cascade_delete_also_removes_user_tags() {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".to_string()),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -451,7 +451,7 @@ fn write_add_stored_appends_user_tag() {
             item: ItemId::Stored(existing_id),
             tags: vec![TagOp::Append(Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".to_string()),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -484,7 +484,7 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".to_string()),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -502,7 +502,7 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
                 item: ItemId::Stored(id),
                 tags: vec![TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("B".to_string()),
+                    Bitical::String("B".to_string()),
                 ))],
             },
         ],
@@ -530,7 +530,7 @@ fn write_replace_delete_not_counted_in_deleted() {
             item: ItemId::Stored(id),
             tags: vec![TagOp::Append(Label::Other(
                 TagType::from("project"),
-                LabelValue::String("A".to_string()),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -548,7 +548,7 @@ fn write_replace_delete_not_counted_in_deleted() {
                 item: ItemId::Stored(id),
                 tags: vec![TagOp::Replace(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("B".to_string()),
+                    Bitical::String("B".to_string()),
                 ))],
             },
         ],
@@ -580,14 +580,14 @@ fn write_multiple_items_in_one_batch() {
                 item: ItemId::Stored(id1),
                 tags: vec![TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 ))],
             },
             WriteAction::Add {
                 item: ItemId::Stored(id2),
                 tags: vec![TagOp::Append(Label::Other(
                     TagType::from("project"),
-                    LabelValue::String("A".to_string()),
+                    Bitical::String("A".to_string()),
                 ))],
             },
         ],
@@ -644,8 +644,8 @@ fn write_delete_by_double_label_removes_only_matching_value() {
     let (store, registry, _dir) = setup();
     let id = ttfm::tagging::add_item(&store, &registry, "note", "n").unwrap();
 
-    let v1 = LabelValue::Double(1.0f64.to_bits());
-    let v2 = LabelValue::Double(2.0f64.to_bits());
+    let v1 = Bitical::Double(1.0f64);
+    let v2 = Bitical::Double(2.0f64);
 
     write(
         &store,

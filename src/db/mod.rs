@@ -13,13 +13,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::taggers::ColumnDef;
+use crate::types::Bitical;
 pub use crate::types::BiticalType;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use sea_query::{
-    Alias, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden, IntoTableRef,
-    SimpleExpr, Table, TableCreateStatement, TableRef,
+    Alias, BinOper, ColumnDef as SeaColumnDef, Expr, Func, Iden, IntoIden,
+    IntoTableRef, SimpleExpr, Table, TableCreateStatement, TableRef,
 };
 use std::path::{Path, PathBuf};
 use strum::{Display, EnumIter};
@@ -40,6 +40,17 @@ pub enum TargetTable {
     SystemTags,
     UserTags,
     DataTypes,
+}
+
+/// データベースのカラム定義。
+#[derive(Debug, Clone)]
+pub struct ColumnDef {
+    /// カラム名（例: "filename"）
+    pub name: String,
+    /// SQLのデータ型
+    pub bitical_type: BiticalType,
+    /// 所属テーブル
+    pub target_table: TargetTable,
 }
 
 /// DB接続とParquetファイルのパスを管理する構造体（設計書4.4 IndexStore）。
@@ -291,6 +302,113 @@ impl BiticalType {
             BiticalType::Uuid => def.custom(BiticalType::Uuid),
         }
     }
+
+    /// カラムが保持する物理型を返す。
+    pub fn from_col(col: Col) -> Self {
+        match col {
+            Col::LabelStr => BiticalType::String,
+            Col::LabelInt | Col::ItemId | Col::Rank | Col::ScanHash => {
+                BiticalType::Integer
+            }
+            Col::LabelDouble => BiticalType::Double,
+            Col::LabelBool => BiticalType::Boolean,
+            _ => BiticalType::String,
+        }
+    }
+}
+
+impl Bitical {
+    /// duckdb から読み込んだ生の値を Bitical に変換します（読込境界）。
+    /// Union は再帰的に解き、List は先頭要素を採用する保険的措置、
+    /// それ以外の未対応 variant は debug 文字列にフォールバックします。
+    /// SQL NULL は None として表現します。
+    pub fn from_db_value(v: duckdb::types::Value) -> Option<Bitical> {
+        use duckdb::types::Value;
+        match v {
+            Value::Union(inner) => Bitical::from_db_value(*inner),
+            Value::Boolean(b) => Some(Bitical::Boolean(b)),
+            Value::Int(i) => Some(Bitical::Integer(i as i64)),
+            Value::BigInt(i) => Some(Bitical::Integer(i)),
+            Value::HugeInt(i) => Some(Bitical::Integer(i as i64)),
+            Value::Float(f) => Some(Bitical::Double(f as f64)),
+            Value::Double(d) => Some(Bitical::Double(d)),
+            Value::Text(s) => Some(Bitical::String(s)),
+            Value::Null => None,
+            Value::List(l) => l.into_iter().next().and_then(Bitical::from_db_value),
+            other => Some(Bitical::String(format!("{:?}", other))),
+        }
+    }
+
+    /// `from_db_value` のスカラー限定版。Union 再帰・List の先頭要素採用・
+    /// debug文字列フォールバックは行わず、対応外の型は素直に `None` を返す。
+    pub fn from_scalar_db_value(v: &duckdb::types::Value) -> Option<Bitical> {
+        use duckdb::types::Value;
+        match v {
+            Value::Text(_)
+            | Value::BigInt(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Double(_)
+            | Value::Boolean(_) => Bitical::from_db_value(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// 値そのものを表す SQL 式に変換する。
+    pub fn to_simple_expr(&self) -> SimpleExpr {
+        match self {
+            Bitical::String(s) => Expr::val(s.clone()).into(),
+            Bitical::Integer(i) => Expr::val(*i).into(),
+            Bitical::Double(d) => Expr::val(*d).into(),
+            Bitical::Boolean(b) => Expr::val(*b).into(),
+            Bitical::Uuid(u) => Expr::val(u.to_string()).into(),
+        }
+    }
+
+    /// 書込先カラムと、そのカラムへ束縛する SQL 式のペアを返す。
+    pub fn to_col_expr(&self) -> (Col, SimpleExpr) {
+        (self.name().to_column(), self.to_simple_expr())
+    }
+
+    /// 列一致条件（GLOB/等価）を表す SQL 式を返す。`tag` が `SType::Label`
+    /// （仮想ラベル列）の場合は、値の物理型に応じたカラム（LabelStr/LabelInt 等）
+    /// へ読み替える（Boolean/Double は元々 tag に関わらず固定カラム、という
+    /// 既存挙動を踏襲）。
+    pub fn to_column_match_expr(&self, tag: Col) -> SimpleExpr {
+        match self {
+            Bitical::Integer(i) => {
+                let t = if matches!(tag, Col::Label) {
+                    Col::LabelInt
+                } else {
+                    tag
+                };
+                Expr::col(t).eq(*i)
+            }
+            Bitical::String(s) => {
+                let t = if matches!(tag, Col::Label) {
+                    Col::LabelStr
+                } else {
+                    tag
+                };
+                let val_str = if s.starts_with('^') {
+                    format!("{}*", &s[1..])
+                } else {
+                    s.clone()
+                };
+                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(val_str))
+            }
+            Bitical::Boolean(b) => Expr::col(Col::LabelBool).eq(*b),
+            Bitical::Double(d) => Expr::col(Col::LabelDouble).eq(*d),
+            Bitical::Uuid(u) => {
+                let t = if matches!(tag, Col::Label) {
+                    Col::LabelStr
+                } else {
+                    tag
+                };
+                Expr::col(t).eq(u.to_string())
+            }
+        }
+    }
 }
 
 /// 値として使用される定数文字列の識別子。
@@ -378,18 +496,9 @@ impl Col {
         ItemRefRow::all_columns()
     }
 
-    pub fn typed_label_columns() -> [Self; 4] {
-        [
-            Self::LabelStr,
-            Self::LabelInt,
-            Self::LabelDouble,
-            Self::LabelBool,
-        ]
-    }
-
     pub fn tag_value_columns() -> Vec<Self> {
         std::iter::once(Self::Types)
-            .chain(Self::typed_label_columns())
+            .chain(BiticalType::to_columns())
             .chain(std::iter::once(Self::Origin))
             .chain(std::iter::once(Self::TypedTag))
             .collect()
@@ -406,47 +515,6 @@ impl Col {
             Self::LabelBool,
             Self::Origin,
         ]
-    }
-
-    pub fn for_label_value(
-        v: &crate::types::LabelValue,
-    ) -> Option<(Self, SimpleExpr)> {
-        use crate::types::LabelValue;
-        let col = v.sql_type().map(|bt| bt.to_column())?;
-        let expr: SimpleExpr = match v {
-            LabelValue::String(s) | LabelValue::Literal(s) => {
-                Expr::val(s.clone()).into()
-            }
-            LabelValue::Integer(i) => Expr::val(*i).into(),
-            LabelValue::Double(bits) => Expr::val(f64::from_bits(*bits)).into(),
-            LabelValue::Boolean(b) => Expr::val(*b).into(),
-            _ => unreachable!(),
-        };
-        Some((col, expr))
-    }
-
-    pub fn bitical_type(&self) -> BiticalType {
-        match self {
-            Self::LabelStr => BiticalType::String,
-            Self::LabelInt | Self::ItemId | Self::Rank | Self::ScanHash => {
-                BiticalType::Integer
-            }
-            Self::LabelDouble => BiticalType::Double,
-            Self::LabelBool => BiticalType::Boolean,
-            _ => BiticalType::String,
-        }
-    }
-}
-
-impl crate::types::LabelValue {
-    pub fn sql_type(&self) -> Option<BiticalType> {
-        match self {
-            Self::String(_) | Self::Literal(_) => Some(BiticalType::String),
-            Self::Integer(_) => Some(BiticalType::Integer),
-            Self::Double(_) => Some(BiticalType::Double),
-            Self::Boolean(_) => Some(BiticalType::Boolean),
-            Self::Null | Self::Date(_) => None,
-        }
     }
 }
 
@@ -520,23 +588,23 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Type).string());
-                for l_col in Col::typed_label_columns() {
+                for l_col in BiticalType::to_columns() {
                     let mut def = SeaColumnDef::new(l_col);
-                    l_col.bitical_type().prepare_column(&mut def);
+                    BiticalType::from_col(l_col).prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
             TargetTable::ItemReferences => {
                 for col in Col::item_references_columns() {
                     let mut def = SeaColumnDef::new(col);
-                    col.bitical_type().prepare_column(&mut def);
+                    BiticalType::from_col(col).prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
             TargetTable::SystemTags | TargetTable::UserTags => {
                 for col in UserTagsRow::all_columns() {
                     let mut def = SeaColumnDef::new(col);
-                    col.bitical_type().prepare_column(&mut def);
+                    BiticalType::from_col(col).prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
@@ -599,6 +667,67 @@ mod tests {
                 "{sql} should contain {expected_kw}"
             );
         }
+    }
+
+    #[test]
+    fn test_bitical_from_db_value_scalars() {
+        use duckdb::types::Value;
+        assert_eq!(
+            Bitical::from_db_value(Value::Boolean(true)),
+            Some(Bitical::Boolean(true))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::Int(1)),
+            Some(Bitical::Integer(1))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::BigInt(2)),
+            Some(Bitical::Integer(2))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::HugeInt(3)),
+            Some(Bitical::Integer(3))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::Float(1.5)),
+            Some(Bitical::Double(1.5))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::Double(2.5)),
+            Some(Bitical::Double(2.5))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::Text("a".to_string())),
+            Some(Bitical::String("a".to_string()))
+        );
+        assert_eq!(Bitical::from_db_value(Value::Null), None);
+    }
+
+    #[test]
+    fn test_bitical_from_db_value_union_and_list() {
+        use duckdb::types::Value;
+        assert_eq!(
+            Bitical::from_db_value(Value::Union(Box::new(Value::BigInt(7)))),
+            Some(Bitical::Integer(7))
+        );
+        assert_eq!(
+            Bitical::from_db_value(Value::List(vec![
+                Value::Text("x".to_string()),
+                Value::Text("y".to_string()),
+            ])),
+            Some(Bitical::String("x".to_string()))
+        );
+        assert_eq!(Bitical::from_db_value(Value::List(vec![])), None);
+    }
+
+    #[test]
+    fn test_bitical_from_db_value_fallback_debug_string() {
+        use duckdb::types::Value;
+        let v = Value::Blob(vec![1, 2, 3]);
+        assert_eq!(
+            Bitical::from_db_value(v.clone()),
+            Some(Bitical::String(format!("{:?}", v)))
+        );
     }
 
     #[test]

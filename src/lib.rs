@@ -32,14 +32,12 @@ pub mod query;
 pub mod rank;
 pub mod response;
 pub mod tag;
-mod taggers;
 pub mod types;
 pub mod util;
 
-pub use db::{Store, TargetTable};
+pub use db::{ColumnDef, Store, TargetTable};
 pub use query::{parse, QueryNode};
 pub use response::{Item, SearchResponse};
-pub use taggers::{ColumnDef, TagValue, Tagger};
 pub use types::{
     FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag,
 };

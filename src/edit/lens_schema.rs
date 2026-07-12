@@ -1,7 +1,23 @@
-use crate::types::LabelValue;
+use crate::types::Bitical;
 use sea_query::Expr;
 
 pub(crate) use crate::db::{ItemRefRow, UserTagsRow};
+
+impl Bitical {
+    /// 書込境界: 保存先の EAV 4 カラムへ分解します。`None` は全カラム `None`。
+    pub fn to_eav_columns(
+        v: Option<Bitical>,
+    ) -> (Option<String>, Option<i64>, Option<f64>, Option<bool>) {
+        match v {
+            None => (None, None, None, None),
+            Some(Bitical::String(s)) => (Some(s), None, None, None),
+            Some(Bitical::Integer(i)) => (None, Some(i), None, None),
+            Some(Bitical::Double(d)) => (None, None, Some(d), None),
+            Some(Bitical::Boolean(b)) => (None, None, None, Some(b)),
+            Some(Bitical::Uuid(u)) => (Some(u.to_string()), None, None, None),
+        }
+    }
+}
 
 pub(crate) fn item_ref_row(
     item_id: i64,
@@ -19,9 +35,9 @@ pub(crate) fn item_ref_row(
 pub(crate) fn user_tags_row(
     item_id: i64,
     tag_type: String,
-    value: LabelValue,
+    value: Bitical,
 ) -> UserTagsRow {
-    let (ls, li, ld, lb) = label_value_to_eav_columns(value);
+    let (ls, li, ld, lb) = Bitical::to_eav_columns(Some(value));
     UserTagsRow {
         item_id: Expr::val(item_id).into(),
         tag_type: Expr::val(tag_type).into(),
@@ -32,18 +48,33 @@ pub(crate) fn user_tags_row(
     }
 }
 
-pub fn label_value_to_eav_columns(
-    v: LabelValue,
-) -> (Option<String>, Option<i64>, Option<f64>, Option<bool>) {
-    match v {
-        LabelValue::String(s) | LabelValue::Literal(s) => {
-            (Some(s), None, None, None)
-        }
-        LabelValue::Integer(i) => (None, Some(i), None, None),
-        LabelValue::Double(bits) => {
-            (None, None, Some(f64::from_bits(bits)), None)
-        }
-        LabelValue::Boolean(b) => (None, None, None, Some(b)),
-        LabelValue::Null | LabelValue::Date(_) => (None, None, None, None),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bitical_to_eav_columns() {
+        assert_eq!(
+            Bitical::to_eav_columns(Some(Bitical::String("a".to_string()))),
+            (Some("a".to_string()), None, None, None)
+        );
+        assert_eq!(
+            Bitical::to_eav_columns(Some(Bitical::Integer(1))),
+            (None, Some(1), None, None)
+        );
+        assert_eq!(
+            Bitical::to_eav_columns(Some(Bitical::Double(1.5))),
+            (None, None, Some(1.5), None)
+        );
+        assert_eq!(
+            Bitical::to_eav_columns(Some(Bitical::Boolean(true))),
+            (None, None, None, Some(true))
+        );
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            Bitical::to_eav_columns(Some(Bitical::Uuid(id))),
+            (Some(id.to_string()), None, None, None)
+        );
+        assert_eq!(Bitical::to_eav_columns(None), (None, None, None, None));
     }
 }

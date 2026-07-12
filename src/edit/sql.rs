@@ -1,6 +1,6 @@
 use super::lens_schema;
 use crate::db::{Col, Tbl};
-use crate::types::{Label, LabelValue};
+use crate::types::{Bitical, Label};
 use crate::util::parquet_query;
 use sea_query::{
     CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
@@ -10,7 +10,7 @@ use sea_query::{
 pub(crate) struct UserTagDelete {
     pub(crate) item_id: i64,
     pub(crate) tag_type: String,
-    pub(crate) value: Option<LabelValue>,
+    pub(crate) value: Option<Bitical>,
 }
 
 pub(crate) fn item_references_write(
@@ -49,9 +49,8 @@ pub(crate) fn user_tags_write(
             .eq(d.item_id)
             .and(Expr::col(Col::Type).eq(d.tag_type.clone()));
         if let Some(ref v) = d.value {
-            if let Some((col, val_expr)) = Col::for_label_value(v) {
-                row_match = row_match.and(Expr::col(col).eq(val_expr));
-            }
+            let (col, val_expr) = v.to_col_expr();
+            row_match = row_match.and(Expr::col(col).eq(val_expr));
         }
         q.and_where(row_match.not());
     }

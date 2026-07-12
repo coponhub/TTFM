@@ -128,13 +128,12 @@ impl<'a> Fetcher<'a> {
 
     /// DuckDB の Row から Item を構築します（通常アイテム用）。
     fn decode_item_from_row(&self, row: &duckdb::Row) -> duckdb::Result<Item> {
-        use crate::types::{Label, LabelValue};
+        use crate::types::{Bitical, Label};
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
             if tag_row.tag_type == "name" {
-                let lv = LabelValue::from(tag_row.value);
-                if !matches!(lv, LabelValue::Null) {
-                    let s = lv.as_display_name();
+                if let Some(bitical) = Bitical::from_db_value(tag_row.value) {
+                    let s = bitical.as_display_name();
                     let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
                     res.representative = vec![Label::Name(s)];
@@ -154,7 +153,7 @@ impl<'a> Fetcher<'a> {
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<Item> {
-        use crate::types::{Label, LabelValue, TagType};
+        use crate::types::{Bitical, Label, TagType};
         use duckdb::types::Value;
 
         let (mut res, raw_tags) = read_base_from_row(row)?;
@@ -169,8 +168,10 @@ impl<'a> Fetcher<'a> {
 
             let mut representative = Vec::new();
             for (i, v) in values.into_iter().enumerate() {
-                // LabelValue::from は内部で Value::Union を再帰的に解く
-                let lv = LabelValue::from(v);
+                // Bitical::from_db_value は内部で Value::Union を再帰的に解く。
+                // NULL は「値なし」= Name("") 相当に丸める。
+                let lv = Bitical::from_db_value(v)
+                    .unwrap_or_else(|| Bitical::String(String::new()));
 
                 if let Some(ops) = operands {
                     if let Some(op) = ops.get(i) {
@@ -199,8 +200,8 @@ impl<'a> Fetcher<'a> {
             if let Some(origin) = raw_tags
                 .iter()
                 .find(|t| t.tag_type == "origin")
-                .and_then(|t| match LabelValue::from(t.value.clone()) {
-                    LabelValue::String(s) => {
+                .and_then(|t| match Bitical::from_db_value(t.value.clone()) {
+                    Some(Bitical::String(s)) => {
                         s.parse::<crate::types::Origin>().ok()
                     }
                     _ => None,
@@ -215,20 +216,21 @@ impl<'a> Fetcher<'a> {
                 // settle() 済みで役目を終えた内部信号。res.tags には出さない。
                 "origin" => {}
                 "item_count" => {
-                    let lv = LabelValue::from(tag_row.value);
-                    if !matches!(lv, LabelValue::Null) {
+                    if let Some(bitical) = Bitical::from_db_value(tag_row.value)
+                    {
                         res.item_count = Some(Label::resolve(
                             TagType::from("item_count"),
-                            lv,
+                            bitical,
                         ));
                     }
                 }
                 "name" => {
                     // Lv.1 互換: representative が空の場合のみセット
                     if res.representative.is_empty() {
-                        let lv = LabelValue::from(tag_row.value.clone());
-                        if !matches!(lv, LabelValue::Null) {
-                            let s = lv.as_display_name();
+                        if let Some(bitical) =
+                            Bitical::from_db_value(tag_row.value.clone())
+                        {
+                            let s = bitical.as_display_name();
                             let s = s
                                 .parse::<f64>()
                                 .map(|f| f.to_string())

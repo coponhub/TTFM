@@ -343,7 +343,7 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
         match op {
             ResolvedOperand::Literal(lab) => {
                 let expr = build_resolved_literal_expr(lab);
-                if matches!(lab.value(), crate::types::LabelValue::Boolean(_)) {
+                if matches!(lab.value(), crate::types::Bitical::Boolean(_)) {
                     expr.cast_as(crate::db::BiticalType::Integer).into()
                 } else {
                     expr
