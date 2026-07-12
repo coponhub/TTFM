@@ -14,6 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::taggers::ColumnDef;
+pub use crate::types::BiticalType;
 use anyhow::{Context, Result};
 use duckdb::Connection;
 use sea_query::{
@@ -265,41 +266,29 @@ pub enum VCol {
     Total,
 }
 
-/// SQL型名（CAST用）。データベース上のデータ型ID（`data_types` テーブルと連携）。
-#[allow(non_camel_case_types)]
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum SqlType {
-    VARCHAR = 1,
-    BIGINT = 2,
-    DOUBLE = 3,
-    BOOLEAN = 4,
-    UUID = 5,
-}
-
-impl Iden for SqlType {
+impl Iden for BiticalType {
     fn unquoted(&self, s: &mut dyn std::fmt::Write) {
         match self {
-            SqlType::VARCHAR => write!(s, "VARCHAR").unwrap(),
-            SqlType::BIGINT => write!(s, "BIGINT").unwrap(),
-            SqlType::DOUBLE => write!(s, "DOUBLE").unwrap(),
-            SqlType::BOOLEAN => write!(s, "BOOLEAN").unwrap(),
-            SqlType::UUID => write!(s, "UUID").unwrap(),
+            BiticalType::String => write!(s, "VARCHAR").unwrap(),
+            BiticalType::Integer => write!(s, "BIGINT").unwrap(),
+            BiticalType::Double => write!(s, "DOUBLE").unwrap(),
+            BiticalType::Boolean => write!(s, "BOOLEAN").unwrap(),
+            BiticalType::Uuid => write!(s, "UUID").unwrap(),
         }
     }
 }
 
-impl SqlType {
+impl BiticalType {
     pub fn prepare_column<'a>(
         &self,
         def: &'a mut SeaColumnDef,
     ) -> &'a mut SeaColumnDef {
         match self {
-            SqlType::VARCHAR => def.string(),
-            SqlType::BIGINT => def.big_integer(),
-            SqlType::DOUBLE => def.double(),
-            SqlType::BOOLEAN => def.boolean(),
-            SqlType::UUID => def.custom(SqlType::UUID),
+            BiticalType::String => def.string(),
+            BiticalType::Integer => def.big_integer(),
+            BiticalType::Double => def.double(),
+            BiticalType::Boolean => def.boolean(),
+            BiticalType::Uuid => def.custom(BiticalType::Uuid),
         }
     }
 }
@@ -419,20 +408,11 @@ impl Col {
         ]
     }
 
-    pub fn from_sql_type(st: SqlType) -> Self {
-        match st {
-            SqlType::VARCHAR | SqlType::UUID => Self::LabelStr,
-            SqlType::BIGINT => Self::LabelInt,
-            SqlType::DOUBLE => Self::LabelDouble,
-            SqlType::BOOLEAN => Self::LabelBool,
-        }
-    }
-
     pub fn for_label_value(
         v: &crate::types::LabelValue,
     ) -> Option<(Self, SimpleExpr)> {
         use crate::types::LabelValue;
-        let col = v.sql_type().map(Self::from_sql_type)?;
+        let col = v.sql_type().map(|bt| bt.to_column())?;
         let expr: SimpleExpr = match v {
             LabelValue::String(s) | LabelValue::Literal(s) => {
                 Expr::val(s.clone()).into()
@@ -445,26 +425,26 @@ impl Col {
         Some((col, expr))
     }
 
-    pub fn sql_type(&self) -> SqlType {
+    pub fn bitical_type(&self) -> BiticalType {
         match self {
-            Self::LabelStr => SqlType::VARCHAR,
+            Self::LabelStr => BiticalType::String,
             Self::LabelInt | Self::ItemId | Self::Rank | Self::ScanHash => {
-                SqlType::BIGINT
+                BiticalType::Integer
             }
-            Self::LabelDouble => SqlType::DOUBLE,
-            Self::LabelBool => SqlType::BOOLEAN,
-            _ => SqlType::VARCHAR,
+            Self::LabelDouble => BiticalType::Double,
+            Self::LabelBool => BiticalType::Boolean,
+            _ => BiticalType::String,
         }
     }
 }
 
 impl crate::types::LabelValue {
-    pub fn sql_type(&self) -> Option<SqlType> {
+    pub fn sql_type(&self) -> Option<BiticalType> {
         match self {
-            Self::String(_) | Self::Literal(_) => Some(SqlType::VARCHAR),
-            Self::Integer(_) => Some(SqlType::BIGINT),
-            Self::Double(_) => Some(SqlType::DOUBLE),
-            Self::Boolean(_) => Some(SqlType::BOOLEAN),
+            Self::String(_) | Self::Literal(_) => Some(BiticalType::String),
+            Self::Integer(_) => Some(BiticalType::Integer),
+            Self::Double(_) => Some(BiticalType::Double),
+            Self::Boolean(_) => Some(BiticalType::Boolean),
             Self::Null | Self::Date(_) => None,
         }
     }
@@ -517,7 +497,7 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    c.sql_type.prepare_column(&mut def);
+                    c.bitical_type.prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
@@ -531,7 +511,7 @@ impl Schema {
                         .map(|c| c.into_iden())
                         .unwrap_or_else(|| crate::util::alias_from(&c.name));
                     let mut def = SeaColumnDef::new(iden);
-                    c.sql_type.prepare_column(&mut def);
+                    c.bitical_type.prepare_column(&mut def);
                     create.col(&mut def);
                 }
                 create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
@@ -542,21 +522,21 @@ impl Schema {
                     .col(SeaColumnDef::new(Col::Type).string());
                 for l_col in Col::typed_label_columns() {
                     let mut def = SeaColumnDef::new(l_col);
-                    l_col.sql_type().prepare_column(&mut def);
+                    l_col.bitical_type().prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
             TargetTable::ItemReferences => {
                 for col in Col::item_references_columns() {
                     let mut def = SeaColumnDef::new(col);
-                    col.sql_type().prepare_column(&mut def);
+                    col.bitical_type().prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
             TargetTable::SystemTags | TargetTable::UserTags => {
                 for col in UserTagsRow::all_columns() {
                     let mut def = SeaColumnDef::new(col);
-                    col.sql_type().prepare_column(&mut def);
+                    col.bitical_type().prepare_column(&mut def);
                     create.col(&mut def);
                 }
             }
@@ -576,9 +556,55 @@ mod tests {
     use sea_query::{Expr, PostgresQueryBuilder, Query};
 
     #[test]
+    fn test_bitical_type_repr_values() {
+        assert_eq!(BiticalType::String as i32, 1);
+        assert_eq!(BiticalType::Integer as i32, 2);
+        assert_eq!(BiticalType::Double as i32, 3);
+        assert_eq!(BiticalType::Boolean as i32, 4);
+        assert_eq!(BiticalType::Uuid as i32, 5);
+    }
+
+    #[test]
+    fn test_bitical_type_iden_spelling() {
+        fn spell(t: BiticalType) -> String {
+            let mut s = String::new();
+            t.unquoted(&mut s);
+            s
+        }
+        assert_eq!(spell(BiticalType::String), "VARCHAR");
+        assert_eq!(spell(BiticalType::Integer), "BIGINT");
+        assert_eq!(spell(BiticalType::Double), "DOUBLE");
+        assert_eq!(spell(BiticalType::Boolean), "BOOLEAN");
+        assert_eq!(spell(BiticalType::Uuid), "UUID");
+    }
+
+    #[test]
+    fn test_bitical_type_prepare_column_ddl() {
+        let cases = [
+            (BiticalType::String, "varchar"),
+            (BiticalType::Integer, "bigint"),
+            (BiticalType::Double, "double"),
+            (BiticalType::Boolean, "bool"),
+            (BiticalType::Uuid, "uuid"),
+        ];
+        for (bt, expected_kw) in cases {
+            let mut def = SeaColumnDef::new(Alias::new("c"));
+            bt.prepare_column(&mut def);
+            let sql = Table::create()
+                .col(&mut def)
+                .to_string(PostgresQueryBuilder)
+                .to_lowercase();
+            assert!(
+                sql.contains(expected_kw),
+                "{sql} should contain {expected_kw}"
+            );
+        }
+    }
+
+    #[test]
     fn test_union_value_varchar() {
         let expr =
-            CustomFunc::union_value(SqlType::VARCHAR, Expr::val("hello"));
+            CustomFunc::union_value(BiticalType::String, Expr::val("hello"));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(s :="),
@@ -590,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_union_value_boolean() {
-        let expr = CustomFunc::union_value(SqlType::BOOLEAN, Expr::val(true));
+        let expr = CustomFunc::union_value(BiticalType::Boolean, Expr::val(true));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(b :="),
@@ -601,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_union_value_bigint() {
-        let expr = CustomFunc::union_value(SqlType::BIGINT, Expr::val(42i64));
+        let expr = CustomFunc::union_value(BiticalType::Integer, Expr::val(42i64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(i :="),
@@ -613,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_union_value_double() {
-        let expr = CustomFunc::union_value(SqlType::DOUBLE, Expr::val(3.14f64));
+        let expr = CustomFunc::union_value(BiticalType::Double, Expr::val(3.14f64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(d :="),
@@ -626,7 +652,7 @@ mod tests {
     fn test_struct_pack_tag_generates_three_fields() {
         let expr = CustomFunc::struct_pack_tag(
             Expr::val("name").into(),
-            CustomFunc::union_value(SqlType::VARCHAR, Expr::val("foo")),
+            CustomFunc::union_value(BiticalType::String, Expr::val("foo")),
             Expr::val("system").into(),
         );
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
@@ -655,10 +681,10 @@ mod tests {
     #[test]
     fn test_eav_union_value_generates_case_when() {
         let expr = CustomFunc::eav_union_value(&[
-            (Col::LabelInt, SqlType::BIGINT),
-            (Col::LabelStr, SqlType::VARCHAR),
-            (Col::LabelBool, SqlType::BOOLEAN),
-            (Col::LabelDouble, SqlType::DOUBLE),
+            (Col::LabelInt, BiticalType::Integer),
+            (Col::LabelStr, BiticalType::String),
+            (Col::LabelBool, BiticalType::Boolean),
+            (Col::LabelDouble, BiticalType::Double),
         ]);
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(sql.contains("CASE"), "should have CASE: {}", sql);

@@ -22,7 +22,7 @@ use super::{
     build_pick, label_to_simple_expr, label_to_unit_aware_expr,
     wrap_to_item_ids, AggregationContext, BuildPick, NestContext, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType, Src, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun::*, BiticalType, Src, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
     LabelSetOpKind, NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
@@ -417,10 +417,10 @@ fn build_merged_nvalue_agg_expr(
             let [left_expr, right_expr]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
             let left_val = Expr::expr(left_expr)
-                .cast_as(crate::db::SqlType::DOUBLE)
+                .cast_as(crate::db::BiticalType::Double)
                 .into();
             let right_val = Expr::expr(right_expr)
-                .cast_as(crate::db::SqlType::DOUBLE)
+                .cast_as(crate::db::BiticalType::Double)
                 .into();
             apply_arithmetic_op(&calc.op, left_val, right_val, false)
         }
@@ -890,13 +890,13 @@ pub(super) fn build_fetch_nest_sql(
 
 fn make_tag_struct_pack(
     type_str: &str,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     value_expr: impl Into<SimpleExpr>,
 ) -> SimpleExpr {
     // 常にクエリ時にエンジンが合成する信号タグであり、Builtin (TTFM エンジン自身) が origin となる。
     CustomFunc::struct_pack_tag(
         Expr::val(type_str).into(),
-        CustomFunc::union_value(sql_type, value_expr),
+        CustomFunc::union_value(bitical_type, value_expr),
         Expr::val(crate::types::Origin::Builtin.as_str()).into(),
     )
 }
@@ -1280,7 +1280,7 @@ pub(super) fn nest(
         Expr::cust(crate::db::CustomFunc::item_id_display(&item_id_col)),
     ]);
     let item_sp =
-        make_tag_struct_pack("item", SqlType::VARCHAR, item_label_expr);
+        make_tag_struct_pack("item", BiticalType::String, item_label_expr);
     let item_list_expr = Expr::cust_with_exprs(
         &format!(
             "list($1 ORDER BY {}.{} DESC, {}.{} DESC)",
@@ -1294,7 +1294,7 @@ pub(super) fn nest(
 
     let proj_label_sp = make_tag_struct_pack(
         "item_count",
-        SqlType::BIGINT,
+        BiticalType::Integer,
         Expr::cust(format!(
             "ANY_VALUE({}.{})::BIGINT",
             Iden::to_string(&TopItems),
@@ -1344,7 +1344,7 @@ pub(super) fn nest(
         };
         let nvalue_sp = make_tag_struct_pack(
             "nvalue",
-            SqlType::DOUBLE,
+            BiticalType::Double,
             Expr::cust_with_exprs("CAST(($1) AS DOUBLE)", [nvalue_subq_expr]),
         );
         tags_expr = Expr::cust_with_exprs(
@@ -1598,7 +1598,7 @@ fn label_set_op_sql(
         Expr::cust(crate::db::CustomFunc::item_id_display(&item_id_col)),
     ]);
     let item_sp =
-        make_tag_struct_pack("item", SqlType::VARCHAR, item_label_expr);
+        make_tag_struct_pack("item", BiticalType::String, item_label_expr);
     let item_list_expr = Expr::cust_with_exprs(
         &format!(
             "list($1 ORDER BY {}.{} DESC)",
@@ -1610,7 +1610,7 @@ fn label_set_op_sql(
 
     let proj_label_sp = make_tag_struct_pack(
         "item_count",
-        SqlType::BIGINT,
+        BiticalType::Integer,
         Expr::cust(format!(
             "ANY_VALUE({}.{})::BIGINT",
             Iden::to_string(&TopItems),
@@ -1985,7 +1985,7 @@ mod tests {
                 column: crate::db::Col::LabelStr,
                 tag_type: name.to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
         };
 
         let nest_two_keys = ResolvedNode::Nest {
@@ -2018,7 +2018,7 @@ mod tests {
                     column: crate::db::Col::LabelStr,
                     tag_type: "tagA".to_string(),
                 },
-                sql_type: crate::db::SqlType::VARCHAR,
+                bitical_type: crate::db::BiticalType::String,
             }],
             nvalue: None,
             context: None,
@@ -2049,7 +2049,7 @@ mod tests {
                     column: crate::db::Col::LabelStr,
                     tag_type: tag.to_string(),
                 },
-                sql_type: crate::db::SqlType::VARCHAR,
+                bitical_type: crate::db::BiticalType::String,
             }],
             nvalue: None,
             context: None,

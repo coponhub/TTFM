@@ -184,8 +184,8 @@ pub(super) fn build_agg_operand_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_storage_column_expr(storage, *sql_type),
+            storage, bitical_type, ..
+        } => build_storage_column_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -216,8 +216,8 @@ pub(super) fn build_agg_operand_eav_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_tag_value_agg_expr(storage, *sql_type),
+            storage, bitical_type, ..
+        } => build_tag_value_agg_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -344,17 +344,17 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
             ResolvedOperand::Literal(lab) => {
                 let expr = build_resolved_literal_expr(lab);
                 if matches!(lab.value(), crate::types::LabelValue::Boolean(_)) {
-                    expr.cast_as(crate::db::SqlType::BIGINT).into()
+                    expr.cast_as(crate::db::BiticalType::Integer).into()
                 } else {
                     expr
                 }
             }
             ResolvedOperand::TagRef {
-                storage, sql_type, ..
+                storage, bitical_type, ..
             } => {
-                if *sql_type == crate::db::SqlType::BOOLEAN {
-                    return build_storage_column_expr(storage, *sql_type)
-                        .cast_as(crate::db::SqlType::BIGINT)
+                if *bitical_type == crate::db::BiticalType::Boolean {
+                    return build_storage_column_expr(storage, *bitical_type)
+                        .cast_as(crate::db::BiticalType::Integer)
                         .into();
                 }
                 match storage {

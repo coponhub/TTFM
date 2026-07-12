@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType};
+use crate::db::{Col, CustomFunc, Pronoun::*, BiticalType};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
@@ -90,11 +90,11 @@ pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
     use crate::types::LabelValue;
     let s = lab.as_str();
     if let Some(bytes) = crate::util::parse_size(&s) {
-        Expr::val(bytes).cast_as(SqlType::DOUBLE).into()
+        Expr::val(bytes).cast_as(BiticalType::Double).into()
     } else {
         match lab.value() {
             LabelValue::Integer(i) => {
-                Expr::val(i).cast_as(SqlType::DOUBLE).into()
+                Expr::val(i).cast_as(BiticalType::Double).into()
             }
             LabelValue::String(s) | LabelValue::Literal(s) => {
                 Expr::val(s.clone()).into()
@@ -103,7 +103,7 @@ pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
             LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
             LabelValue::Null => Expr::val(None::<i32>).into(),
             LabelValue::Date(dt) => {
-                Expr::val(dt.to_timestamp()).cast_as(SqlType::DOUBLE).into()
+                Expr::val(dt.to_timestamp()).cast_as(BiticalType::Double).into()
             }
         }
     }
@@ -135,14 +135,14 @@ pub(super) fn apply_arithmetic_agg(
 /// 数値演算が必要な `LabelStr` には `TRY_CAST` を適用します。
 pub(super) fn build_storage_column_expr(
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Fixed(col) => Expr::col(*col).into(),
         StorageMapping::Basic { column, .. } => {
             let col_expr = Expr::col(*column);
             if *column == Col::LabelStr
-                && matches!(sql_type, SqlType::BIGINT | SqlType::DOUBLE)
+                && matches!(bitical_type, BiticalType::Integer | BiticalType::Double)
             {
                 CustomFunc::try_cast_double(col_expr)
             } else {
@@ -213,7 +213,7 @@ impl NestContext {
 /// StorageMapping から集計式を生成します（EAV 構造用の MAX CASE WHEN 形式）。
 pub(super) fn build_tag_value_agg_expr(
     storage: &StorageMapping,
-    _sql_type: SqlType,
+    _sql_type: BiticalType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Fixed(col) => {

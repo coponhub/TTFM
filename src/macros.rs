@@ -15,7 +15,7 @@
 
 use crate::db::Col;
 use crate::tag::{Scan, ScanColumn, ScanField};
-use crate::types::DBType;
+use crate::types::BiticalAssociate;
 use crate::util::alias_from;
 use anyhow::Result;
 use duckdb::types::FromSql;
@@ -33,7 +33,7 @@ pub fn name_to_iden(name: &str) -> sea_query::DynIden {
 pub fn get_column_def<F: Scan>() -> ScanColumn {
     ScanColumn {
         name: F::name(),
-        sql_type: <<F as Scan>::Value as DBType>::db_type(),
+        bitical_type: <<F as Scan>::Value as BiticalAssociate>::BITICAL,
         role: F::SCAN_ROLE,
     }
 }
@@ -110,7 +110,7 @@ macro_rules! define_scan_entry {
                 Self::schema().into_iter().map(|cd| {
                     (
                         Self::name_to_iden(&cd.name),
-                        cd.sql_type.into_iden(),
+                        cd.bitical_type.into_iden(),
                     )
                 }).collect()
             }

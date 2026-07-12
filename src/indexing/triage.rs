@@ -268,7 +268,7 @@ impl TriageAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::SqlType;
+    use crate::db::BiticalType;
     use crate::indexing::indexer::calc_scanhash;
     use crate::indexing::ScanEntry;
     use crate::util::SafeMetadata;
@@ -301,7 +301,7 @@ mod tests {
 
         let col_ent = ColumnDef {
             name: "size".to_string(),
-            sql_type: SqlType::BIGINT,
+            bitical_type: BiticalType::Integer,
             target_table: TargetTable::FileReferences,
         };
         let p_ent = triager.classify(1, TagValue::BigInt(1024), &col_ent);
@@ -316,17 +316,17 @@ mod tests {
         let cols = vec![
             ColumnDef {
                 name: "size".into(),
-                sql_type: SqlType::BIGINT,
+                bitical_type: BiticalType::Integer,
                 target_table: TargetTable::FileReferences,
             },
             ColumnDef {
                 name: "path".into(),
-                sql_type: SqlType::VARCHAR,
+                bitical_type: BiticalType::String,
                 target_table: TargetTable::Locations,
             },
             ColumnDef {
                 name: "ext".into(),
-                sql_type: SqlType::VARCHAR,
+                bitical_type: BiticalType::String,
                 target_table: TargetTable::BaseTags,
             },
         ];

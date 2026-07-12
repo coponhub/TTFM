@@ -63,15 +63,15 @@ impl StorageMapping {
         &self,
         op: ComparisonOp,
         label: &Label,
-        sql_type: crate::db::SqlType,
+        bitical_type: crate::db::BiticalType,
     ) -> Condition {
         match self {
             StorageMapping::Fixed(col) => {
-                build_column_condition(*col, op, label, sql_type, false)
+                build_column_condition(*col, op, label, bitical_type, false)
             }
             StorageMapping::Basic { column, tag_type } => {
                 Condition::all().add(check_tag_match(tag_type)).add(
-                    build_column_condition(*column, op, label, sql_type, true),
+                    build_column_condition(*column, op, label, bitical_type, true),
                 )
             }
             StorageMapping::Composite => Condition::any(),
@@ -95,7 +95,7 @@ fn build_column_condition(
     col: Col,
     op: ComparisonOp,
     label: &Label,
-    sql_type: crate::db::SqlType,
+    bitical_type: crate::db::BiticalType,
     _is_generic_context: bool,
 ) -> Condition {
     let bin_op = to_bin_op(op);
@@ -114,7 +114,7 @@ fn build_column_condition(
             col,
             bin_op,
             &b.to_string(),
-            sql_type,
+            bitical_type,
             is_eav_col,
         ),
         LabelValue::Double(bits) => {
@@ -122,7 +122,7 @@ fn build_column_condition(
         }
         LabelValue::Null => schema_pieces::build_null_condition(),
         LabelValue::String(s) => {
-            build_str_condition(col, bin_op, &s, sql_type, is_eav_col)
+            build_str_condition(col, bin_op, &s, bitical_type, is_eav_col)
         }
         LabelValue::Literal(s) => {
             build_literal_condition(col, bin_op, &s, is_eav_col)
@@ -160,10 +160,10 @@ pub(crate) fn build_str_condition(
     col: Col,
     op: BinOper,
     val: &str,
-    sql_type: crate::db::SqlType,
+    bitical_type: crate::db::BiticalType,
     is_generic: bool,
 ) -> Condition {
-    let string_cond = check_string_match(col, op, val, sql_type)
+    let string_cond = check_string_match(col, op, val, bitical_type)
         .map(|expr| Condition::any().add(expr));
     let generic_conds = if is_generic {
         try_parse_generic_value_as_cond(col, op, val)
@@ -181,11 +181,11 @@ pub(crate) fn check_string_match(
     col: Col,
     op: BinOper,
     val: &str,
-    sql_type: crate::db::SqlType,
+    bitical_type: crate::db::BiticalType,
 ) -> Option<SimpleExpr> {
     let is_numeric_field = matches!(
-        sql_type,
-        crate::db::SqlType::BIGINT | crate::db::SqlType::DOUBLE
+        bitical_type,
+        crate::db::BiticalType::Integer | crate::db::BiticalType::Double
     );
 
     if is_numeric_field {
@@ -277,20 +277,20 @@ pub struct TagDescriptor {
 }
 
 impl TagDescriptor {
-    /// 論理型から物理型（SqlType）への一方向マッピングを提供します。
-    pub fn logical_to_sql(lt: LogicalType) -> crate::db::SqlType {
-        use crate::db::SqlType;
+    /// 論理型から物理型（BiticalType）への一方向マッピングを提供します。
+    pub fn logical_to_sql(lt: LogicalType) -> crate::db::BiticalType {
+        use crate::db::BiticalType;
         match lt {
-            LogicalType::Integer => SqlType::BIGINT,
-            LogicalType::Float => SqlType::DOUBLE,
-            LogicalType::String => SqlType::VARCHAR,
-            LogicalType::Boolean => SqlType::BOOLEAN,
-            LogicalType::Any => SqlType::VARCHAR,
+            LogicalType::Integer => BiticalType::Integer,
+            LogicalType::Float => BiticalType::Double,
+            LogicalType::String => BiticalType::String,
+            LogicalType::Boolean => BiticalType::Boolean,
+            LogicalType::Any => BiticalType::String,
         }
     }
 
-    /// このタグの物理型（SqlType）を返します。
-    pub fn sql_type(&self) -> crate::db::SqlType {
+    /// このタグの物理型（BiticalType）を返します。
+    pub fn sql_type(&self) -> crate::db::BiticalType {
         Self::logical_to_sql(self.logical_type)
     }
 }
@@ -644,11 +644,11 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
 }
 
 pub(crate) fn logical_type_to_col(lt: LogicalType) -> Col {
-    use crate::db::SqlType;
+    use crate::db::BiticalType;
     match TagDescriptor::logical_to_sql(lt) {
-        SqlType::BIGINT => Col::LabelInt,
-        SqlType::DOUBLE => Col::LabelDouble,
-        SqlType::BOOLEAN => Col::LabelBool,
+        BiticalType::Integer => Col::LabelInt,
+        BiticalType::Double => Col::LabelDouble,
+        BiticalType::Boolean => Col::LabelBool,
         _ => Col::LabelStr,
     }
 }
@@ -716,7 +716,7 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
         .map(|fc| TagDescriptor {
             tag_type: TagType::Base(fc.stype),
             storage: StorageMapping::Fixed(fc.col),
-            logical_type: sql_to_logical(fc.col.sql_type()),
+            logical_type: sql_to_logical(fc.col.bitical_type()),
             logical_function: None,
             sys_id: None,
         })
@@ -734,12 +734,12 @@ pub(crate) fn fixed_attributes() -> Vec<(SType, Col)> {
         .collect()
 }
 
-pub(crate) fn sql_to_logical(st: crate::db::SqlType) -> LogicalType {
+pub(crate) fn sql_to_logical(st: crate::db::BiticalType) -> LogicalType {
     match st {
-        crate::db::SqlType::BIGINT => LogicalType::Integer,
-        crate::db::SqlType::DOUBLE => LogicalType::Float,
-        crate::db::SqlType::VARCHAR => LogicalType::String,
-        crate::db::SqlType::BOOLEAN => LogicalType::Boolean,
+        crate::db::BiticalType::Integer => LogicalType::Integer,
+        crate::db::BiticalType::Double => LogicalType::Float,
+        crate::db::BiticalType::String => LogicalType::String,
+        crate::db::BiticalType::Boolean => LogicalType::Boolean,
         _ => LogicalType::Any,
     }
 }
@@ -847,19 +847,19 @@ mod tests {
     fn test_logical_to_sql_mapping() {
         assert_eq!(
             TagDescriptor::logical_to_sql(LogicalType::Integer),
-            crate::db::SqlType::BIGINT
+            crate::db::BiticalType::Integer
         );
         assert_eq!(
             TagDescriptor::logical_to_sql(LogicalType::Float),
-            crate::db::SqlType::DOUBLE
+            crate::db::BiticalType::Double
         );
         assert_eq!(
             TagDescriptor::logical_to_sql(LogicalType::String),
-            crate::db::SqlType::VARCHAR
+            crate::db::BiticalType::String
         );
         assert_eq!(
             TagDescriptor::logical_to_sql(LogicalType::Boolean),
-            crate::db::SqlType::BOOLEAN
+            crate::db::BiticalType::Boolean
         );
     }
 

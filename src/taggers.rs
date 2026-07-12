@@ -17,7 +17,7 @@ use anyhow::Result;
 use duckdb::types::{Null, ToSql, ToSqlOutput};
 use std::path::Path;
 
-use crate::db::{SqlType, TargetTable};
+use crate::db::{BiticalType, TargetTable};
 
 /// データベースのカラム定義。
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ pub struct ColumnDef {
     /// カラム名（例: "filename"）
     pub name: String,
     /// SQLのデータ型
-    pub sql_type: SqlType,
+    pub bitical_type: BiticalType,
     /// 所属テーブル
     pub target_table: TargetTable,
 }

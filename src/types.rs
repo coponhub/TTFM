@@ -343,40 +343,29 @@ impl LargeOrigin {
     }
 }
 
-/// データベース上の型名を取得するためのトレイト。
-pub trait DBType {
-    /// 対応する SQL の型を返します。
-    fn db_type() -> crate::db::SqlType;
+/// 対応する `BiticalType` を静的に持つことを示すトレイト。
+pub trait BiticalAssociate {
+    const BITICAL: BiticalType;
 }
 
-impl DBType for String {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::VARCHAR
-    }
+impl BiticalAssociate for String {
+    const BITICAL: BiticalType = BiticalType::String;
 }
-impl DBType for i64 {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::BIGINT
-    }
+impl BiticalAssociate for i64 {
+    const BITICAL: BiticalType = BiticalType::Integer;
 }
-impl DBType for Uuid {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::UUID
-    }
+impl BiticalAssociate for Uuid {
+    const BITICAL: BiticalType = BiticalType::Uuid;
 }
-impl DBType for bool {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::BOOLEAN
-    }
+impl BiticalAssociate for bool {
+    const BITICAL: BiticalType = BiticalType::Boolean;
 }
 
 /// ファイルサイズ（バイト単位）を表す型。
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct FileSize(pub i64);
-impl DBType for FileSize {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::BIGINT
-    }
+impl BiticalAssociate for FileSize {
+    const BITICAL: BiticalType = BiticalType::Integer;
 }
 
 impl FromSql for FileSize {
@@ -394,10 +383,8 @@ impl ToSql for FileSize {
 /// UNIXタイムスタンプ（秒単位）を表す型。
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct FileTimestamp(pub i64);
-impl DBType for FileTimestamp {
-    fn db_type() -> crate::db::SqlType {
-        crate::db::SqlType::BIGINT
-    }
+impl BiticalAssociate for FileTimestamp {
+    const BITICAL: BiticalType = BiticalType::Integer;
 }
 
 impl FromSql for FileTimestamp {
@@ -409,6 +396,170 @@ impl FromSql for FileTimestamp {
 impl ToSql for FileTimestamp {
     fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
         self.0.to_sql()
+    }
+}
+
+// BiticalはInt, Float, String, Boolean等の、
+// ハードウェア・プロセッサレベルのプリミティブな型を指す。
+// アイテムの持つ値はこれらに収束する。
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum::Display)]
+#[strum(serialize_all = "snake_case")]
+#[repr(i32)]
+pub enum BiticalType {
+    String = 1,
+    Integer = 2,
+    Double = 3,
+    Boolean = 4,
+    Uuid = 5,
+}
+#[derive(Debug, Clone)]
+pub enum Bitical {
+    String(String),
+    Integer(i64),
+    Double(f64),
+    Boolean(bool),
+    Uuid(Uuid),
+}
+
+// 等価性は「同じ値が保存されるか」= ビット同一性で定義する。
+// IEEE 比較と異なり NaN == NaN、0.0 != -0.0 となるため、Eq を合法に実装できる。
+impl PartialEq for Bitical {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Bitical::String(a), Bitical::String(b)) => a == b,
+            (Bitical::Integer(a), Bitical::Integer(b)) => a == b,
+            (Bitical::Double(a), Bitical::Double(b)) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Bitical::Boolean(a), Bitical::Boolean(b)) => a == b,
+            (Bitical::Uuid(a), Bitical::Uuid(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for Bitical {}
+
+impl BiticalType {
+    /// 保存先の EAV カラム（label_str/label_int/label_double/label_bool）を返す。
+    pub fn to_column(&self) -> SType {
+        match self {
+            BiticalType::String | BiticalType::Uuid => SType::LabelStr,
+            BiticalType::Integer => SType::LabelInt,
+            BiticalType::Double => SType::LabelDouble,
+            BiticalType::Boolean => SType::LabelBool,
+        }
+    }
+}
+
+impl Bitical {
+    pub fn name(&self) -> BiticalType {
+        match self {
+            Bitical::String(_) => BiticalType::String,
+            Bitical::Integer(_) => BiticalType::Integer,
+            Bitical::Double(_) => BiticalType::Double,
+            Bitical::Boolean(_) => BiticalType::Boolean,
+            Bitical::Uuid(_) => BiticalType::Uuid,
+        }
+    }
+}
+
+impl From<String> for Bitical {
+    fn from(v: String) -> Self {
+        Bitical::String(v)
+    }
+}
+impl From<i64> for Bitical {
+    fn from(v: i64) -> Self {
+        Bitical::Integer(v)
+    }
+}
+impl From<f64> for Bitical {
+    fn from(v: f64) -> Self {
+        Bitical::Double(v)
+    }
+}
+impl From<bool> for Bitical {
+    fn from(v: bool) -> Self {
+        Bitical::Boolean(v)
+    }
+}
+impl From<Uuid> for Bitical {
+    fn from(v: Uuid) -> Self {
+        Bitical::Uuid(v)
+    }
+}
+impl From<FileSize> for Bitical {
+    fn from(v: FileSize) -> Self {
+        Bitical::Integer(v.0)
+    }
+}
+impl From<FileTimestamp> for Bitical {
+    fn from(v: FileTimestamp) -> Self {
+        Bitical::Integer(v.0)
+    }
+}
+
+impl TryFrom<Bitical> for String {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::String(s) => Ok(s),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for i64 {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Integer(i) => Ok(i),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for f64 {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Double(d) => Ok(d),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for bool {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Boolean(b) => Ok(b),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for Uuid {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Uuid(u) => Ok(u),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for FileSize {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Integer(i) => Ok(FileSize(i)),
+            other => Err(other),
+        }
+    }
+}
+impl TryFrom<Bitical> for FileTimestamp {
+    type Error = Bitical;
+    fn try_from(v: Bitical) -> Result<Self, Self::Error> {
+        match v {
+            Bitical::Integer(i) => Ok(FileTimestamp(i)),
+            other => Err(other),
+        }
     }
 }
 
@@ -1243,6 +1394,100 @@ impl std::str::FromStr for SType {
 #[cfg(test)]
 mod tests_types {
     use super::*;
+
+    #[test]
+    fn test_bitical_equality_is_bitwise() {
+        // 保存値の同一性 = ビット同一性
+        fn requires_eq<T: Eq>(_: &T) {}
+        requires_eq(&Bitical::Integer(1));
+
+        assert_eq!(Bitical::Double(1.5), Bitical::Double(1.5));
+        assert_ne!(Bitical::Double(1.5), Bitical::Double(2.5));
+        // NaN は自分自身と等しい（IEEE 比較とは異なる）
+        assert_eq!(Bitical::Double(f64::NAN), Bitical::Double(f64::NAN));
+        // 0.0 と -0.0 はビットが異なるため等しくない
+        assert_ne!(Bitical::Double(0.0), Bitical::Double(-0.0));
+
+        assert_eq!(Bitical::Integer(1), Bitical::Integer(1));
+        assert_eq!(
+            Bitical::String("a".to_string()),
+            Bitical::String("a".to_string())
+        );
+        assert_eq!(Bitical::Boolean(true), Bitical::Boolean(true));
+        assert_ne!(Bitical::String("1".to_string()), Bitical::Integer(1));
+
+        let id = Uuid::new_v4();
+        assert_eq!(Bitical::Uuid(id), Bitical::Uuid(id));
+        assert_ne!(Bitical::Uuid(id), Bitical::Uuid(Uuid::new_v4()));
+        assert_eq!(Bitical::Uuid(id).name(), BiticalType::Uuid);
+    }
+
+    #[test]
+    fn test_bitical_type_to_column() {
+        assert_eq!(BiticalType::String.to_column(), SType::LabelStr);
+        assert_eq!(BiticalType::Uuid.to_column(), SType::LabelStr);
+        assert_eq!(BiticalType::Integer.to_column(), SType::LabelInt);
+        assert_eq!(BiticalType::Double.to_column(), SType::LabelDouble);
+        assert_eq!(BiticalType::Boolean.to_column(), SType::LabelBool);
+    }
+
+    #[test]
+    fn test_bitical_associate_const() {
+        assert_eq!(String::BITICAL, BiticalType::String);
+        assert_eq!(i64::BITICAL, BiticalType::Integer);
+        assert_eq!(Uuid::BITICAL, BiticalType::Uuid);
+        assert_eq!(bool::BITICAL, BiticalType::Boolean);
+        assert_eq!(FileSize::BITICAL, BiticalType::Integer);
+        assert_eq!(FileTimestamp::BITICAL, BiticalType::Integer);
+    }
+
+    #[test]
+    fn test_bitical_from_conversions() {
+        assert_eq!(Bitical::from("a".to_string()), Bitical::String("a".to_string()));
+        assert_eq!(Bitical::from(1i64), Bitical::Integer(1));
+        assert_eq!(Bitical::from(1.5f64), Bitical::Double(1.5));
+        assert_eq!(Bitical::from(true), Bitical::Boolean(true));
+        let id = Uuid::new_v4();
+        assert_eq!(Bitical::from(id), Bitical::Uuid(id));
+        assert_eq!(Bitical::from(FileSize(42)), Bitical::Integer(42));
+        assert_eq!(Bitical::from(FileTimestamp(99)), Bitical::Integer(99));
+    }
+
+    #[test]
+    fn test_bitical_try_from_round_trip() {
+        assert_eq!(
+            String::try_from(Bitical::String("a".to_string())),
+            Ok("a".to_string())
+        );
+        assert_eq!(i64::try_from(Bitical::Integer(1)), Ok(1));
+        assert_eq!(f64::try_from(Bitical::Double(1.5)), Ok(1.5));
+        assert_eq!(bool::try_from(Bitical::Boolean(true)), Ok(true));
+        let id = Uuid::new_v4();
+        assert_eq!(Uuid::try_from(Bitical::Uuid(id)), Ok(id));
+        assert_eq!(FileSize::try_from(Bitical::Integer(42)), Ok(FileSize(42)));
+        assert_eq!(
+            FileTimestamp::try_from(Bitical::Integer(99)),
+            Ok(FileTimestamp(99))
+        );
+
+        assert_eq!(
+            i64::try_from(Bitical::String("x".to_string())),
+            Err(Bitical::String("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_bitical_from_matches_bitical_associate() {
+        assert_eq!(String::BITICAL, Bitical::from("a".to_string()).name());
+        assert_eq!(i64::BITICAL, Bitical::from(1i64).name());
+        assert_eq!(Uuid::BITICAL, Bitical::from(Uuid::new_v4()).name());
+        assert_eq!(bool::BITICAL, Bitical::from(true).name());
+        assert_eq!(FileSize::BITICAL, Bitical::from(FileSize(1)).name());
+        assert_eq!(
+            FileTimestamp::BITICAL,
+            Bitical::from(FileTimestamp(1)).name()
+        );
+    }
 
     #[test]
     fn test_typed_tag_display() {

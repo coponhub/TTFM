@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, Pronoun::*, SqlType, Tbl, VCol};
+use crate::db::{Col, Pronoun::*, BiticalType, Tbl, VCol};
 use crate::query::lens_schema::StorageMapping;
 use crate::types::{Label, LabelValue, TagType};
 use sea_query::{Expr, Query, SelectStatement};
@@ -30,20 +30,20 @@ pub fn build_label_counts(
     let mut q = Query::select();
 
     let (col_str, col_int, col_double, col_bool) = match storage {
-        StorageMapping::Fixed(col) => match col.sql_type() {
-            SqlType::BIGINT => (
+        StorageMapping::Fixed(col) => match col.bitical_type() {
+            BiticalType::Integer => (
                 Expr::val(Option::<String>::None),
                 Expr::col(*col),
                 Expr::val(Option::<f64>::None),
                 Expr::val(Option::<bool>::None),
             ),
-            SqlType::BOOLEAN => (
+            BiticalType::Boolean => (
                 Expr::val(Option::<String>::None),
                 Expr::val(Option::<i64>::None),
                 Expr::val(Option::<f64>::None),
                 Expr::col(*col),
             ),
-            SqlType::DOUBLE => (
+            BiticalType::Double => (
                 Expr::val(Option::<String>::None),
                 Expr::val(Option::<i64>::None),
                 Expr::col(*col),

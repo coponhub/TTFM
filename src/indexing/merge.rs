@@ -14,7 +14,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::db::{Col, Store, TargetTable, Tbl};
-// use crate::db::SqlType;
+// use crate::db::BiticalType;
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::tag::TagRegistry;
 use crate::taggers::TagValue;
@@ -311,7 +311,7 @@ impl<'a> BaseTagMerger<'a> {
 //             name: content.clone(),
 //             rank: Expr::val(rank).into(),
 //             type_: content,
-//             label: util::null_as(SqlType::VARCHAR),
+//             label: util::null_as(BiticalType::String),
 //         }
 //     }
 // }

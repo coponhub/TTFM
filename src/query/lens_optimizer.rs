@@ -100,13 +100,13 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             op,
             tag_type,
             storage,
-            sql_type,
+            bitical_type,
         } => ResolvedNode::AggregationTagMatch {
             agg: flatten_aggregation(agg),
             op,
             tag_type,
             storage,
-            sql_type,
+            bitical_type,
         },
         ResolvedNode::NestMatch {
             keys,

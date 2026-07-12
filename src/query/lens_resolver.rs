@@ -33,7 +33,7 @@
 //! SQL文（OneViewに対するクエリ）
 //! ```
 
-use crate::db::{Col, SqlType};
+use crate::db::{Col, BiticalType};
 use crate::query::ast::{
     ComparisonNode, ComparisonOp, DefinitionRef, Operand, QueryNode,
 };
@@ -80,7 +80,7 @@ pub enum ResolvedNode {
     Match {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
         op: ComparisonOp,
         label: Label,
     },
@@ -101,7 +101,7 @@ pub enum ResolvedNode {
     TagCalculationMatch {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
         op: ComparisonOp,
         calc: ResolvedCalculationNode,
     },
@@ -122,15 +122,15 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
     },
     /// タグ同士の比較 (例: width: > height:)
     TagTagMatch {
         left_storage: StorageMapping,
-        left_sql_type: SqlType,
+        left_sql_type: BiticalType,
         op: ComparisonOp,
         right_storage: StorageMapping,
-        right_sql_type: SqlType,
+        right_sql_type: BiticalType,
     },
     /// 算術演算同士の比較 (例: (size: - 100) :> (size: * 0.1))
     CalculationCalculationMatch {
@@ -255,7 +255,7 @@ pub enum ResolvedOperand {
     TagRef {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
     },
     /// ネストした算術演算
     Calculation(Box<ResolvedCalculationNode>),
@@ -329,12 +329,12 @@ impl ResolvedOperand {
                 LabelValue::String(_) | LabelValue::Literal(_)
             ),
             ResolvedOperand::TagRef {
-                tag_type, sql_type, ..
+                tag_type, bitical_type, ..
             } => {
                 // 標準タグ (Base) の VARCHAR は確実に文字列として扱う。
                 // カスタムタグ (Custom) は、暗黙の数値演算を許容するため、ここでの文字列判定からは除外する。
                 !matches!(tag_type, TagType::Custom(_))
-                    && matches!(sql_type, SqlType::VARCHAR)
+                    && matches!(bitical_type, BiticalType::String)
             }
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_string_type() && calc.right.is_string_type()
@@ -592,11 +592,11 @@ impl ResolvedNode {
             }
             ResolvedNode::Match {
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 label,
                 ..
-            } => storage.to_condition(*op, label, *sql_type),
+            } => storage.to_condition(*op, label, *bitical_type),
             ResolvedNode::Aggregation(_)
             | ResolvedNode::AggregationMatch { .. } => {
                 // 集約は基本的に SELECT 句または HAVING 句で扱われる
@@ -1241,25 +1241,25 @@ fn resolve_type_ref_operand(
     lens: &Lens,
     tt: &TagType,
 ) -> Result<ResolvedOperand> {
-    let (storage, sql_type) = match lens.look_up(tt) {
+    let (storage, bitical_type) = match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
-            SqlType::VARCHAR,
+            BiticalType::String,
         ),
     };
     let res = Ok(ResolvedOperand::TagRef {
         tag_type: tt.clone(),
         storage,
-        sql_type,
+        bitical_type,
     });
     if std::env::var("TTFM_DEBUG").is_ok() {
         println!(
-            "DEBUG: resolve_type_ref_operand: tag={:?}, sql_type={:?}",
-            tt, sql_type
+            "DEBUG: resolve_type_ref_operand: tag={:?}, bitical_type={:?}",
+            tt, bitical_type
         );
     }
     res
@@ -1340,20 +1340,20 @@ pub(crate) fn resolve_query_node(
     match node {
         QueryNode::TypedTag(tt) => {
             let tag_type = tt.label.tag_type();
-            let (storage, sql_type) = match lens.look_up(&tag_type) {
+            let (storage, bitical_type) = match lens.look_up(&tag_type) {
                 Some(desc) => (desc.storage.clone(), desc.sql_type()),
                 None => (
                     StorageMapping::Basic {
                         column: Col::LabelStr,
                         tag_type: tag_type.as_str().to_string(),
                     },
-                    SqlType::VARCHAR,
+                    BiticalType::String,
                 ),
             };
             Ok(ResolvedNode::Match {
                 tag_type,
                 storage,
-                sql_type,
+                bitical_type,
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label: tt.label,
             })
@@ -1366,7 +1366,7 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Match {
                 tag_type,
                 storage: desc.storage.clone(),
-                sql_type: desc.sql_type(),
+                bitical_type: desc.sql_type(),
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
             })
@@ -2160,11 +2160,11 @@ fn resolve_operand_for_calc(
     match operand {
         Operand::Literal(lab) => Ok(ResolvedOperand::Literal(lab)),
         Operand::TypeRef(tt) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedOperand::TagRef {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
             })
         }
         Operand::Calculation(calc) => {
@@ -2216,21 +2216,21 @@ fn resolve_single_match(
 ) -> Result<ResolvedNode> {
     match (left, right) {
         (Operand::TypeRef(tt), Operand::Literal(lab)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedNode::Match {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 label: lab,
             })
         }
         (Operand::Literal(lab), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedNode::Match {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op: flip_op(op),
                 label: lab,
             })
@@ -2320,12 +2320,12 @@ fn resolve_single_match(
         }
         // size: > (1000 + 500)
         (Operand::TypeRef(tt), Operand::Calculation(calc)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::TagCalculationMatch {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 calc: res_calc,
             })
@@ -2334,12 +2334,12 @@ fn resolve_single_match(
         // 意味: size: が (1+2) より大きい → size: > (1+2)
         // 解決後の TagCalculationMatch は (tag op calc) の順なので、演算子を反転させる必要がある
         (Operand::Calculation(calc), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::TagCalculationMatch {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op: flip_op(op),
                 calc: res_calc,
             })
@@ -2376,26 +2376,26 @@ fn resolve_single_match(
         }
         // max(size:) == size:
         (Operand::Aggregation(agg), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_agg = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedNode::AggregationTagMatch {
                 agg: res_agg,
                 op,
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
             })
         }
         // size: == max(size:)
         (Operand::TypeRef(tt), Operand::Aggregation(agg)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_agg = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedNode::AggregationTagMatch {
                 agg: res_agg,
                 op: flip_op(op),
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
             })
         }
         // 100 :< (nest_calc) → Nest 算術演算子の NestMatch に変換（flip）
@@ -2605,7 +2605,7 @@ fn resolve_single_match(
 fn get_storage_and_type(
     lens: &Lens,
     tt: &TagType,
-) -> (StorageMapping, SqlType) {
+) -> (StorageMapping, BiticalType) {
     match lens.look_up(tt) {
         Some(desc) => (desc.storage.clone(), desc.sql_type()),
         None => (
@@ -2613,7 +2613,7 @@ fn get_storage_and_type(
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
-            SqlType::VARCHAR,
+            BiticalType::String,
         ),
     }
 }
@@ -2851,7 +2851,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::SqlType;
+    use crate::db::BiticalType;
     use crate::query::ast::ArithmeticOp;
     use crate::query::lens_schema::StorageMapping;
     use crate::query::lens_schema::{build_int_condition, build_str_condition};
@@ -2868,7 +2868,7 @@ mod tests {
         let tag = ResolvedOperand::TagRef {
             tag_type: TagType::Base(SType::Size),
             storage: StorageMapping::Fixed(crate::db::Col::LabelInt),
-            sql_type: SqlType::BIGINT,
+            bitical_type: BiticalType::Integer,
         };
         assert!(!tag.is_pure_scalar());
 
@@ -2923,7 +2923,7 @@ mod tests {
             Col::LabelStr,
             BinOper::Equal,
             "test_val",
-            SqlType::VARCHAR,
+            BiticalType::String,
             true,
         );
         let debug_str = format!("{:?}", cond);
@@ -2942,7 +2942,7 @@ mod tests {
             keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::Base(SType::Size),
                 storage: StorageMapping::Fixed(Col::Size),
-                sql_type: SqlType::BIGINT,
+                bitical_type: BiticalType::Integer,
             }],
             nvalue: None,
             context: None,
@@ -3740,7 +3740,7 @@ mod tests_integration {
                 column: crate::db::Col::LabelStr,
                 tag_type: t.to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
         };
         let keys = (0..key_count)
             .map(|i| {
@@ -3865,7 +3865,7 @@ mod tests_integration {
                     column: crate::db::Col::LabelStr,
                     tag_type: value_type.to_string(),
                 },
-                sql_type: crate::db::SqlType::VARCHAR,
+                bitical_type: crate::db::BiticalType::String,
             },
             default_rank: 0,
         }
@@ -3904,7 +3904,7 @@ mod tests_integration {
                 column: crate::db::Col::LabelStr,
                 tag_type: "path".to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: crate::query::ast::ComparisonOp::Label(
                 crate::query::ast::BasicOp::Eq,
             ),

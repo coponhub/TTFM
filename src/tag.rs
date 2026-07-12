@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{SqlType, TargetTable};
+use crate::db::{BiticalType, TargetTable};
 use crate::query::ast::{
     BasicOp, Candidate, ComparisonNode, ComparisonOp, DefinitionRef, Operand,
     QueryNode,
@@ -21,7 +21,7 @@ use crate::query::ast::{
 use crate::response::Item;
 use crate::taggers::TagValue;
 use crate::types::{
-    DBType, ItemId, ItemKind, Label, LabelValue, LargeOrigin, Origin, Rank,
+    BiticalAssociate, ItemId, ItemKind, Label, LabelValue, LargeOrigin, Origin, Rank,
     SType, TagType, TypedTag,
 };
 use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
@@ -53,7 +53,7 @@ pub enum ScanRole {
 
 pub struct ScanColumn {
     pub name: &'static str,
-    pub sql_type: SqlType,
+    pub bitical_type: BiticalType,
     pub role: ScanRole,
 }
 
@@ -95,7 +95,7 @@ where
 /// associated type を持つため object-safe ではなく、`define_scan_entry!` マクロ経由でのみ使用する。
 pub trait Scan {
     fn name() -> &'static str;
-    type Value: DBType + Debug + PartialEq + Clone;
+    type Value: BiticalAssociate + Debug + PartialEq + Clone;
     const SCAN_ROLE: ScanRole;
     fn scan(path: &Path, metadata: &SafeMetadata) -> Result<Self::Value>;
 }
@@ -161,8 +161,8 @@ pub trait Index: Send + Sync {
     }
 
     /// DB カラムの SQL 型。
-    fn sql_type(&self) -> SqlType {
-        SqlType::VARCHAR
+    fn sql_type(&self) -> BiticalType {
+        BiticalType::String
     }
 
     /// 書き込み先テーブル。
@@ -506,7 +506,7 @@ impl TagRegistry {
             .filter_map(|f| {
                 f.index().map(|idx| crate::taggers::ColumnDef {
                     name: f.name().to_string(),
-                    sql_type: idx.sql_type(),
+                    bitical_type: idx.sql_type(),
                     target_table: idx.target_table(),
                 })
             })
@@ -1058,8 +1058,8 @@ impl Index for IsDirFn {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Boolean(m.is_dir())))
     }
-    fn sql_type(&self) -> SqlType {
-        SqlType::BOOLEAN
+    fn sql_type(&self) -> BiticalType {
+        BiticalType::Boolean
     }
     fn target_table(&self) -> TargetTable {
         TargetTable::BaseTags
@@ -1153,8 +1153,8 @@ impl Index for FileIdFn {
             .ok()
             .map(|r| LabelValue::String(r.to_string()))
     }
-    fn sql_type(&self) -> SqlType {
-        SqlType::UUID
+    fn sql_type(&self) -> BiticalType {
+        BiticalType::Uuid
     }
     fn target_table(&self) -> TargetTable {
         TargetTable::FileReferences
@@ -1248,8 +1248,8 @@ impl Index for SizeFn {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Integer(m.len())))
     }
-    fn sql_type(&self) -> SqlType {
-        SqlType::BIGINT
+    fn sql_type(&self) -> BiticalType {
+        BiticalType::Integer
     }
 }
 impl Query for SizeFn {
@@ -1421,8 +1421,8 @@ impl Index for MtimeFn {
         let m = get_safe_meta(path)?;
         Ok(Some(LabelValue::Integer(m.modified())))
     }
-    fn sql_type(&self) -> SqlType {
-        SqlType::BIGINT
+    fn sql_type(&self) -> BiticalType {
+        BiticalType::Integer
     }
 }
 fn mtime_range_op(

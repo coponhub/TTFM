@@ -241,11 +241,11 @@ pub fn read_cache_metadata(
     }
     let path_str = path.to_string_lossy();
 
-    use crate::db::{DuckDbFunc, SqlType, Val};
+    use crate::db::{DuckDbFunc, BiticalType, Val};
     let mut meta_query = Query::select();
     meta_query
-        .expr(Expr::col(Val::Key).cast_as(SqlType::VARCHAR))
-        .expr(Expr::col(Val::Value).cast_as(SqlType::VARCHAR))
+        .expr(Expr::col(Val::Key).cast_as(BiticalType::String))
+        .expr(Expr::col(Val::Value).cast_as(BiticalType::String))
         .from_function(
             sea_query::Func::cust(DuckDbFunc::ParquetKvMetadata)
                 .arg(Expr::val(path_str)),

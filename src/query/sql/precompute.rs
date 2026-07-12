@@ -333,7 +333,7 @@ fn build_filter_node_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
         }
         ResolvedNode::TagCalculationMatch {
             storage,
-            sql_type,
+            bitical_type,
             op,
             calc,
             ..
@@ -342,7 +342,7 @@ fn build_filter_node_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
             stmt.column(Col::ItemId)
                 .from(src)
                 .group_by_col(Col::ItemId);
-            let tag_expr = build_tag_value_agg_expr(storage, *sql_type);
+            let tag_expr = build_tag_value_agg_expr(storage, *bitical_type);
             let calc_expr = build_filter_calc_expr(src, calc, &agg_ctx);
             stmt.and_having(
                 Expr::expr(tag_expr).binary(to_bin_op(*op), calc_expr),
@@ -393,8 +393,8 @@ fn build_filter_operand_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_tag_value_agg_expr(storage, *sql_type),
+            storage, bitical_type, ..
+        } => build_tag_value_agg_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();

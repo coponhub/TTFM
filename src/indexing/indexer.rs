@@ -223,19 +223,19 @@ impl<'a> Indexer<'a> {
         }
 
         // デフォルトのデータ型定義を挿入
-        use crate::db::SqlType;
+        use crate::db::BiticalType;
         let defaults = vec![
-            ("size", SqlType::BIGINT),
-            ("mtime", SqlType::BIGINT),
-            ("rank", SqlType::BIGINT),
-            ("name", SqlType::VARCHAR),
-            ("kind", SqlType::VARCHAR),
-            ("content", SqlType::VARCHAR),
+            ("size", BiticalType::Integer),
+            ("mtime", BiticalType::Integer),
+            ("rank", BiticalType::Integer),
+            ("name", BiticalType::String),
+            ("kind", BiticalType::String),
+            ("content", BiticalType::String),
             // 将来的にはここで標準タグも追加
-            ("filename", SqlType::VARCHAR),
-            ("extension", SqlType::VARCHAR),
-            ("path", SqlType::VARCHAR),
-            ("parent_dir", SqlType::VARCHAR),
+            ("filename", BiticalType::String),
+            ("extension", BiticalType::String),
+            ("path", BiticalType::String),
+            ("parent_dir", BiticalType::String),
         ];
 
         let mut insert = Query::insert();
@@ -351,7 +351,7 @@ impl<'a> Indexer<'a> {
     //                     Expr::col(Col::Type),
     //                 )
     //                 .finally(Expr::col(Col::ItemKind))
-    //                 .cast_as(crate::db::SqlType::VARCHAR),
+    //                 .cast_as(crate::db::BiticalType::String),
     //                 Col::LabelStr,
     //             )
     //             .from(Tbl::IdItem)
@@ -362,7 +362,7 @@ impl<'a> Indexer<'a> {
     //             .column(Col::ItemId)
     //             .expr_as(Expr::val("label"), Col::Type)
     //             .expr_as(
-    //                 Expr::col(Col::Label).cast_as(crate::db::SqlType::VARCHAR),
+    //                 Expr::col(Col::Label).cast_as(crate::db::BiticalType::String),
     //                 Col::LabelStr,
     //             )
     //             .from(Tbl::IdItem)
@@ -483,11 +483,11 @@ impl TempScanEntry {
     /// Tbl::Scan テーブル作成用のカラム構成リストを取得します。
     pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)>
     {
-        use crate::db::{Col, SqlType};
+        use crate::db::{Col, BiticalType};
         use sea_query::IntoIden;
 
         let mut cols = ScanEntry::columns_with_type();
-        cols.push((Col::ScanHash.into_iden(), SqlType::BIGINT.into_iden()));
+        cols.push((Col::ScanHash.into_iden(), BiticalType::Integer.into_iden()));
         cols
     }
 

@@ -22,7 +22,7 @@ use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
-use crate::db::{SqlType, TargetTable};
+use crate::db::{BiticalType, TargetTable};
 use crate::query::ast::{Operand, QueryNode};
 use crate::tag::{
     Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query,
@@ -166,7 +166,7 @@ impl WasmPlugin {
             .context("Failed to call name")?;
 
         // indexing がある場合は get-value-type を呼び出して SQL 型を決定
-        let sql_type = if has_indexing {
+        let bitical_type = if has_indexing {
             let idx_export = instance
                 .get_export(&mut store, None, "ttfm:plugin/indexing")
                 .context(
@@ -181,19 +181,19 @@ impl WasmPlugin {
             let (vt,) =
                 wasm_call::<(), (WasmValueType,)>(&func, &mut store, ())?;
             match vt {
-                WasmValueType::Text => SqlType::VARCHAR,
-                WasmValueType::BigInt => SqlType::BIGINT,
-                WasmValueType::Boolean => SqlType::BOOLEAN,
-                WasmValueType::Double => SqlType::DOUBLE,
+                WasmValueType::Text => BiticalType::String,
+                WasmValueType::BigInt => BiticalType::Integer,
+                WasmValueType::Boolean => BiticalType::Boolean,
+                WasmValueType::Double => BiticalType::Double,
             }
         } else {
-            SqlType::VARCHAR
+            BiticalType::String
         };
 
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),
             name,
-            sql_type,
+            bitical_type,
             has_indexing,
             has_display,
         })
@@ -225,7 +225,7 @@ impl WasmPlugin {
 pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
     pub name: String,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     has_indexing: bool,
     has_display: bool,
 }
@@ -304,8 +304,8 @@ impl Index for WasmPluginAdapter {
         ScanRole::Other
     }
 
-    fn sql_type(&self) -> SqlType {
-        self.sql_type
+    fn sql_type(&self) -> BiticalType {
+        self.bitical_type
     }
 
     fn target_table(&self) -> TargetTable {
@@ -350,7 +350,7 @@ impl Index for WasmPluginAdapter {
 
 impl Query for WasmPluginAdapter {
     fn logical_type(&self) -> crate::query::logical_schema::LogicalType {
-        crate::query::lens_schema::sql_to_logical(self.sql_type)
+        crate::query::lens_schema::sql_to_logical(self.bitical_type)
     }
 
     fn normalize_label(&self, label: &Label) -> Label {
@@ -555,32 +555,32 @@ mod tests {
     use super::*;
     use crate::query::logical_schema::LogicalType;
 
-    /// mimetype fixture から得た WasmPluginAdapter の sql_type だけを差し替える。
+    /// mimetype fixture から得た WasmPluginAdapter の bitical_type だけを差し替える。
     /// wasm 呼び出しを伴わない logical_type() の導出ロジックのみを検証するため。
-    fn adapter_with_sql_type(sql_type: SqlType) -> WasmPluginAdapter {
+    fn adapter_with_sql_type(bitical_type: BiticalType) -> WasmPluginAdapter {
         let plugin = crate::plugins::WasmPlugin::new(Path::new(
             "plugins/mimetype_plugin.component.wasm",
         ))
         .expect("Failed to load fixture plugin");
         let base = plugin.into_adapter().expect("Failed to create adapter");
-        WasmPluginAdapter { sql_type, ..base }
+        WasmPluginAdapter { bitical_type, ..base }
     }
 
     #[test]
     fn test_logical_type_derives_integer_from_bigint_sql_type() {
-        let adapter = adapter_with_sql_type(SqlType::BIGINT);
+        let adapter = adapter_with_sql_type(BiticalType::Integer);
         assert_eq!(adapter.query().logical_type(), LogicalType::Integer);
     }
 
     #[test]
     fn test_logical_type_derives_float_from_double_sql_type() {
-        let adapter = adapter_with_sql_type(SqlType::DOUBLE);
+        let adapter = adapter_with_sql_type(BiticalType::Double);
         assert_eq!(adapter.query().logical_type(), LogicalType::Float);
     }
 
     #[test]
     fn test_logical_type_derives_boolean_from_boolean_sql_type() {
-        let adapter = adapter_with_sql_type(SqlType::BOOLEAN);
+        let adapter = adapter_with_sql_type(BiticalType::Boolean);
         assert_eq!(adapter.query().logical_type(), LogicalType::Boolean);
     }
 }

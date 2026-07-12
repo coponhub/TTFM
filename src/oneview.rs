@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, SqlType, TargetTable, Tbl};
+use crate::db::{Col, BiticalType, TargetTable, Tbl};
 use crate::query::lens_reader::Reader;
 use crate::taggers::ColumnDef;
 use crate::types::ItemKind;
@@ -79,10 +79,10 @@ fn build_label_str_expr(tbl: Tbl) -> sea_query::SimpleExpr {
         .args([
             Expr::col((tbl, Col::LabelStr)).into(),
             Expr::col((tbl, Col::LabelInt))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into(),
             Expr::col((tbl, Col::LabelDouble))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into(),
             CaseStatement::new()
                 .case(Expr::col((tbl, Col::LabelBool)).eq(true), "true")
@@ -138,12 +138,12 @@ fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
     match source {
         OneViewSource::Tag(s) if s.table == Tbl::UserTags => {
             Expr::val(Origin::User.as_str())
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into()
         }
         OneViewSource::Tag(s) if s.table == Tbl::SystemTags => {
             Expr::val(Origin::Builtin.as_str())
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into()
         }
         OneViewSource::ItemRef(_) => {
@@ -157,7 +157,7 @@ fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
             // base_tags (スキャン抽出タグ) と Physical (FileReferences/Locations)
             // はいずれも File 由来。
             Expr::val(Origin::File.as_str())
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into()
         }
     }
@@ -193,19 +193,19 @@ fn spec_item_kind(source: &OneViewSource) -> sea_query::SimpleExpr {
     match source {
         // Tag系は両方の JOIN があるため共通ロジックが使える
         OneViewSource::Tag(_) => {
-            build_item_kind_expr().cast_as(SqlType::VARCHAR).into()
+            build_item_kind_expr().cast_as(BiticalType::String).into()
         }
 
         // Physical系は常に File 確定
         OneViewSource::Physical { .. } => {
             Expr::val(Into::<&'static str>::into(ItemKind::File))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into()
         }
 
         // ItemRef は自身のカラムを直接使う
         OneViewSource::ItemRef(_) => {
-            Expr::col(Col::ItemKind).cast_as(SqlType::VARCHAR).into()
+            Expr::col(Col::ItemKind).cast_as(BiticalType::String).into()
         }
     }
 }
@@ -218,7 +218,7 @@ fn spec_type(source: &OneViewSource) -> sea_query::SimpleExpr {
             Expr::val(Into::<&'static str>::into(*col))
         }
     };
-    expr.cast_as(SqlType::VARCHAR).into()
+    expr.cast_as(BiticalType::String).into()
 }
 
 fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
@@ -237,7 +237,7 @@ fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
         .args([
             type_expr.into(),
             Expr::val(":").into(),
-            val_expr.cast_as(SqlType::VARCHAR).into(),
+            val_expr.cast_as(BiticalType::String).into(),
         ])
         .into()
 }
@@ -275,21 +275,21 @@ fn apply_label_columns(
     q: &mut sea_query::SelectStatement,
     tbl: Tbl,
     iden: &sea_query::DynIden,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
 ) {
-    let label_col = Col::from_sql_type(sql_type);
+    let label_col = bitical_type.to_column();
 
     // LabelStr は常に設定（値をVARCHARにキャスト）
     q.expr_as(
-        Expr::col((tbl, iden.clone())).cast_as(SqlType::VARCHAR),
+        Expr::col((tbl, iden.clone())).cast_as(BiticalType::String),
         Col::LabelStr,
     );
 
     // 型付きカラムは該当する型のみ値を設定、他はNULL
     let label_columns = [
-        (Col::LabelInt, SqlType::BIGINT),
-        (Col::LabelDouble, SqlType::DOUBLE),
-        (Col::LabelBool, SqlType::BOOLEAN),
+        (Col::LabelInt, BiticalType::Integer),
+        (Col::LabelDouble, BiticalType::Double),
+        (Col::LabelBool, BiticalType::Boolean),
     ];
 
     for (col, null_type) in label_columns {
@@ -314,7 +314,7 @@ fn build_physical_column_query(
     q.column((tbl_alias, Col::ItemId));
 
     // ラベルカラムの設定（型に応じて分岐）
-    apply_label_columns(&mut q, tbl_alias, &iden, cd.sql_type);
+    apply_label_columns(&mut q, tbl_alias, &iden, cd.bitical_type);
 
     // 【仕様の完全集約】全共通カラムをエンジンに委託
     apply_oneview_schema(
@@ -339,7 +339,7 @@ fn build_physical_column_query(
 
 /// ItemReferences のカラムからクエリを生成
 fn build_item_ref_query(col: Col, items_path: &str) -> String {
-    let label_col = Col::from_sql_type(SqlType::VARCHAR);
+    let label_col = BiticalType::String.to_column();
     let mut q = Query::select();
     q.column(Col::ItemId).expr_as(Expr::col(col), label_col);
 

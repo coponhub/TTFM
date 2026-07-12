@@ -22,7 +22,7 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_unit_aware_expr, needs_nest_context,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, SqlType, Src};
+use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, BiticalType, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
@@ -32,7 +32,7 @@ use sea_query::{BinOper, Expr, Query, SelectStatement, SimpleExpr};
 pub(super) fn build_resolved_match_sql(
     src: &Src,
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     op: ComparisonOp,
     label: &Label,
 ) -> SelectStatement {
@@ -40,7 +40,7 @@ pub(super) fn build_resolved_match_sql(
     q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
         .distinct()
         .from(src);
-    q.cond_where(storage.to_condition(op, label, sql_type));
+    q.cond_where(storage.to_condition(op, label, bitical_type));
     q
 }
 
@@ -110,10 +110,10 @@ pub(super) fn build_column_match_sql(
 pub(super) fn build_resolved_tag_tag_match_sql(
     src: &Src,
     left_storage: &StorageMapping,
-    left_sql_type: SqlType,
+    left_sql_type: BiticalType,
     op: ComparisonOp,
     right_storage: &StorageMapping,
-    right_sql_type: SqlType,
+    right_sql_type: BiticalType,
 ) -> SelectStatement {
     let mut q = Query::select();
     q.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
@@ -182,15 +182,15 @@ fn typeof_eq(sv: &SimpleExpr, type_str: &str) -> SimpleExpr {
         .eq(Expr::val(type_str.to_owned()))
 }
 
-fn cast_union(sv: &SimpleExpr, sql_type: SqlType) -> SimpleExpr {
-    CustomFunc::union_value(sql_type, Expr::expr(sv.clone()).cast_as(sql_type))
+fn cast_union(sv: &SimpleExpr, bitical_type: BiticalType) -> SimpleExpr {
+    CustomFunc::union_value(bitical_type, Expr::expr(sv.clone()).cast_as(bitical_type))
 }
 
 fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
     let sv: SimpleExpr = Expr::col((Sub, Scalar)).into();
 
     let bool_name: SimpleExpr = Expr::case(
-        Expr::expr(sv.clone()).cast_as(SqlType::BOOLEAN),
+        Expr::expr(sv.clone()).cast_as(BiticalType::Boolean),
         Expr::val("TRUE"),
     )
     .finally(Expr::val("FALSE"))
@@ -198,7 +198,7 @@ fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
     let name_expr: SimpleExpr =
         Expr::case(Expr::expr(sv.clone()).is_null(), Expr::val("NULL"))
             .case(typeof_eq(&sv, "BOOLEAN"), bool_name)
-            .finally(Expr::expr(sv.clone()).cast_as(SqlType::VARCHAR))
+            .finally(Expr::expr(sv.clone()).cast_as(BiticalType::String))
             .into();
 
     // NULL → 'numeric' (value is NULL regardless of declared type)
@@ -216,23 +216,23 @@ fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
 
     let value_expr: SimpleExpr = Expr::case(
         typeof_eq(&sv, "BOOLEAN"),
-        cast_union(&sv, SqlType::BOOLEAN),
+        cast_union(&sv, BiticalType::Boolean),
     )
-    .case(typeof_eq(&sv, "DOUBLE"), cast_union(&sv, SqlType::DOUBLE))
-    .case(typeof_eq(&sv, "FLOAT"), cast_union(&sv, SqlType::DOUBLE))
-    .case(typeof_eq(&sv, "VARCHAR"), cast_union(&sv, SqlType::VARCHAR))
-    .finally(cast_union(&sv, SqlType::BIGINT))
+    .case(typeof_eq(&sv, "DOUBLE"), cast_union(&sv, BiticalType::Double))
+    .case(typeof_eq(&sv, "FLOAT"), cast_union(&sv, BiticalType::Double))
+    .case(typeof_eq(&sv, "VARCHAR"), cast_union(&sv, BiticalType::String))
+    .finally(cast_union(&sv, BiticalType::Integer))
     .into();
 
     let tags = CustomFunc::list_value([
         CustomFunc::struct_pack_tag(
             Expr::val("name").into(),
-            CustomFunc::union_value(SqlType::VARCHAR, name_expr),
+            CustomFunc::union_value(BiticalType::String, name_expr),
             Expr::val("system").into(),
         ),
         CustomFunc::struct_pack_tag(
             Expr::val("bitical_type").into(),
-            CustomFunc::union_value(SqlType::VARCHAR, type_expr),
+            CustomFunc::union_value(BiticalType::String, type_expr),
             Expr::val("system").into(),
         ),
         CustomFunc::struct_pack_tag(

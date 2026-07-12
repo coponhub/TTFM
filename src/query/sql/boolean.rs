@@ -20,7 +20,7 @@ use super::{
     build_aggregation_context, label_to_unit_aware_expr, subquery,
     wrap_in_subquery, BuildPick, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType, Src};
+use crate::db::{Col, CustomFunc, Pronoun::*, BiticalType, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
@@ -33,17 +33,17 @@ fn bool_to_volatile_row(bool_expr: SimpleExpr) -> SimpleExpr {
             .finally(Expr::val("FALSE"));
     let name_sp = CustomFunc::struct_pack_tag(
         Expr::val("name").into(),
-        CustomFunc::union_value(SqlType::VARCHAR, name_str),
+        CustomFunc::union_value(BiticalType::String, name_str),
         Expr::val("system").into(),
     );
     let type_sp = CustomFunc::struct_pack_tag(
         Expr::val("bitical_type").into(),
-        CustomFunc::union_value(SqlType::VARCHAR, Expr::val("boolean")),
+        CustomFunc::union_value(BiticalType::String, Expr::val("boolean")),
         Expr::val("system").into(),
     );
     let value_sp = CustomFunc::struct_pack_tag(
         Expr::val("value").into(),
-        CustomFunc::union_value(SqlType::BOOLEAN, bool_expr),
+        CustomFunc::union_value(BiticalType::Boolean, bool_expr),
         Expr::val("system").into(),
     );
     CustomFunc::list_value([name_sp, type_sp, value_sp])

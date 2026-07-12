@@ -136,12 +136,12 @@ fn build_fetch_items_sql_impl(
     }
 
     // 2. EAV列を UNION 型に変換して struct_pack で集約
-    use crate::db::SqlType;
+    use crate::db::BiticalType;
     let union_val = CustomFunc::eav_union_value(&[
-        (Col::LabelInt, SqlType::BIGINT),
-        (Col::LabelStr, SqlType::VARCHAR),
-        (Col::LabelBool, SqlType::BOOLEAN),
-        (Col::LabelDouble, SqlType::DOUBLE),
+        (Col::LabelInt, BiticalType::Integer),
+        (Col::LabelStr, BiticalType::String),
+        (Col::LabelBool, BiticalType::Boolean),
+        (Col::LabelDouble, BiticalType::Double),
     ]);
     let struct_expr = CustomFunc::struct_pack_tag(
         Expr::col(Col::Type).into(),
@@ -401,7 +401,7 @@ mod tests {
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
             storage: StorageMapping::Fixed(Col::Name),
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
@@ -454,7 +454,7 @@ mod tests {
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
             storage: StorageMapping::Fixed(Col::Name),
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
@@ -514,7 +514,7 @@ mod tests {
                         column: Col::LabelStr,
                         tag_type: "extension".to_string(),
                     },
-                    sql_type: crate::db::SqlType::VARCHAR,
+                    bitical_type: crate::db::BiticalType::String,
                     op: ComparisonOp::Scalar(BasicOp::Eq),
                     label: Label::from("txt"),
                 },
@@ -546,7 +546,7 @@ mod tests {
                         column: Col::LabelInt,
                         tag_type: "size".to_string(),
                     },
-                    sql_type: crate::db::SqlType::BIGINT,
+                    bitical_type: crate::db::BiticalType::Integer,
                 }],
                 nvalue: None,
                 context: None,
@@ -580,7 +580,7 @@ mod tests {
                     keys: vec![ResolvedOperand::TagRef {
                         tag_type: TagType::Base(SType::Size),
                         storage: StorageMapping::Fixed(Col::Size),
-                        sql_type: crate::db::SqlType::BIGINT,
+                        bitical_type: crate::db::BiticalType::Integer,
                     }],
                     nvalue: None,
                     context: None,
@@ -591,7 +591,7 @@ mod tests {
                         column: Col::LabelStr,
                         tag_type: "project".to_string(),
                     },
-                    sql_type: crate::db::SqlType::VARCHAR,
+                    bitical_type: crate::db::BiticalType::String,
                     op: crate::query::ast::ComparisonOp::Scalar(
                         crate::query::ast::BasicOp::Eq,
                     ),
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_build_resolved_operand_expr_for_arithmetic_boolean_cast() {
-        use crate::db::SqlType;
+        use crate::db::BiticalType;
         use crate::query::lens_resolver::ResolvedOperand;
         use crate::types::TagType;
 
@@ -686,7 +686,7 @@ mod tests {
             storage: crate::query::lens_schema::StorageMapping::Fixed(
                 crate::db::Col::LabelBool,
             ),
-            sql_type: SqlType::BOOLEAN,
+            bitical_type: BiticalType::Boolean,
         };
         let expr_tag = build_resolved_operand_expr_for_arithmetic(
             &tag_bool,

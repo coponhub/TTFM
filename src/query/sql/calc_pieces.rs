@@ -33,8 +33,8 @@ pub(super) fn build_calculation_expr(
 fn build_resolved_operand_expr(operand: &ResolvedOperand) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_storage_column_expr(storage, *sql_type)
+        ResolvedOperand::TagRef { storage, bitical_type, .. } => {
+            build_storage_column_expr(storage, *bitical_type)
         }
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
@@ -60,8 +60,8 @@ pub(super) fn build_calculation_eav_expr(
 fn build_resolved_operand_eav_expr(operand: &ResolvedOperand) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_tag_value_agg_expr(storage, *sql_type)
+        ResolvedOperand::TagRef { storage, bitical_type, .. } => {
+            build_tag_value_agg_expr(storage, *bitical_type)
         }
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
@@ -85,13 +85,13 @@ pub(super) fn fold_simple_operand(
             let expr =
                 if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
                     sea_query::Expr::val(bytes)
-                        .cast_as(crate::db::SqlType::DOUBLE)
+                        .cast_as(crate::db::BiticalType::Double)
                         .into()
                 } else {
                     match lab.value() {
                         crate::types::LabelValue::Integer(i) => {
                             sea_query::Expr::val(i)
-                                .cast_as(crate::db::SqlType::DOUBLE)
+                                .cast_as(crate::db::BiticalType::Double)
                                 .into()
                         }
                         crate::types::LabelValue::String(s)
@@ -109,7 +109,7 @@ pub(super) fn fold_simple_operand(
                         }
                         crate::types::LabelValue::Date(dt) => {
                             sea_query::Expr::val(dt.to_timestamp())
-                                .cast_as(crate::db::SqlType::DOUBLE)
+                                .cast_as(crate::db::BiticalType::Double)
                                 .into()
                         }
                     }

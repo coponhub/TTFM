@@ -354,7 +354,7 @@ mod tests {
         let resolved = &resolver.resolved_query;
 
         if let ResolvedNode::Match {
-            storage, sql_type, ..
+            storage, bitical_type, ..
         } = resolved
         {
             match storage {
@@ -364,7 +364,7 @@ mod tests {
                 _ => panic!("Expected Basic mapping for size"),
             }
             // Size は LabelInt (BIGINT)
-            assert_eq!(*sql_type, crate::db::SqlType::BIGINT);
+            assert_eq!(*bitical_type, crate::db::BiticalType::Integer);
         } else {
             panic!("Expected Match node");
         }

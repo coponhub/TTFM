@@ -20,7 +20,7 @@
 use crate::db::{
     Col, CustomFunc,
     Pronoun::{Agg, Representative, Scalar, Stored, Sub, Volatile},
-    QueryResultCol, SqlType, Src, Val,
+    QueryResultCol, BiticalType, Src, Val,
 };
 use crate::query::ast::Candidate;
 use crate::types::{ItemId, ItemKind, Origin};
@@ -252,7 +252,7 @@ pub(crate) fn build_definition_fetch_sql(
 ) -> SelectStatement {
     let kind = resolved.kind;
     let candidates = &resolved.candidates;
-    let arms = Col::typed_label_columns().map(|c| (c, c.sql_type()));
+    let arms = Col::typed_label_columns().map(|c| (c, c.bitical_type()));
     let union_val = CustomFunc::eav_union_value(&arms);
     let struct_expr = CustomFunc::struct_pack_tag(
         Expr::col(Col::Type).into(),
@@ -298,20 +298,20 @@ pub(crate) fn build_definition_fetch_sql(
     let volatile_type_tag = CustomFunc::list_value([
         CustomFunc::struct_pack_tag(
             Expr::val(Col::Type.as_str()).into(),
-            CustomFunc::union_value(SqlType::VARCHAR, Expr::val(kind.as_str())),
+            CustomFunc::union_value(BiticalType::String, Expr::val(kind.as_str())),
             Expr::val(builtin).into(),
         ),
         CustomFunc::struct_pack_tag(
             Expr::val(Col::Name.as_str()).into(),
             CustomFunc::union_value(
-                SqlType::VARCHAR,
+                BiticalType::String,
                 Expr::col((Sub, Col::Name)),
             ),
             Expr::val(builtin).into(),
         ),
         CustomFunc::struct_pack_tag(
             Expr::val(Col::Origin.as_str()).into(),
-            CustomFunc::union_value(SqlType::VARCHAR, origin_value),
+            CustomFunc::union_value(BiticalType::String, origin_value),
             Expr::val(builtin).into(),
         ),
     ]);

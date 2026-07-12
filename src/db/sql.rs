@@ -18,7 +18,7 @@
 //! 検索（query/sql）・採番（indexing）の双方から使われる SQL パーツの住所。
 //! db 土台層に置くことで indexing → query の逆流依存を避ける。
 
-use super::{Col, DuckDbFunc, SqlType};
+use super::{Col, DuckDbFunc, BiticalType};
 
 /// DuckDB 固有の複雑な構文を型安全に構築するためのヘルパー。
 pub struct CustomFunc;
@@ -237,17 +237,17 @@ impl CustomFunc {
         sea_query::Expr::cust(sql)
     }
 
-    /// union_value(arm := expr)::UNION(...) — SqlType に対応する UNION アームを生成し、
+    /// union_value(arm := expr)::UNION(...) — BiticalType に対応する UNION アームを生成し、
     /// 完全な UNION 型にキャストします。CASE 式の型統一に必要です。
     pub fn union_value<E: Into<sea_query::SimpleExpr>>(
-        sql_type: SqlType,
+        bitical_type: BiticalType,
         expr: E,
     ) -> sea_query::SimpleExpr {
-        let arm = match sql_type {
-            SqlType::BIGINT => "i",
-            SqlType::DOUBLE => "d",
-            SqlType::BOOLEAN => "b",
-            SqlType::VARCHAR | SqlType::UUID => "s",
+        let arm = match bitical_type {
+            BiticalType::Integer => "i",
+            BiticalType::Double => "d",
+            BiticalType::Boolean => "b",
+            BiticalType::String | BiticalType::Uuid => "s",
         };
         sea_query::Expr::cust_with_exprs(
             &format!(
@@ -315,8 +315,8 @@ impl CustomFunc {
             .into()
     }
 
-    /// EAV列の (Col, SqlType) ペア配列から CASE WHEN IS NOT NULL THEN union_value(...) 式を生成します。
-    pub fn eav_union_value(arms: &[(Col, SqlType)]) -> sea_query::SimpleExpr {
+    /// EAV列の (Col, BiticalType) ペア配列から CASE WHEN IS NOT NULL THEN union_value(...) 式を生成します。
+    pub fn eav_union_value(arms: &[(Col, BiticalType)]) -> sea_query::SimpleExpr {
         let Some(((first_col, first_type), rest)) = arms.split_first() else {
             return sea_query::Expr::val(Option::<String>::None).into();
         };
@@ -325,10 +325,10 @@ impl CustomFunc {
             Self::union_value(*first_type, sea_query::Expr::col(*first_col)),
         );
         rest.iter()
-            .fold(init, |cs, (col, sql_type)| {
+            .fold(init, |cs, (col, bitical_type)| {
                 cs.case(
                     sea_query::Expr::col(*col).is_not_null(),
-                    Self::union_value(*sql_type, sea_query::Expr::col(*col)),
+                    Self::union_value(*bitical_type, sea_query::Expr::col(*col)),
                 )
             })
             .finally(sea_query::Expr::val(Option::<String>::None))
