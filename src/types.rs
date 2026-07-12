@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -990,9 +992,7 @@ impl Label {
             (SType::Size, Bitical::Integer(i)) => Label::Size(*i),
             (SType::Mtime, Bitical::Integer(i)) => Label::Mtime(*i),
             (SType::Hash, Bitical::String(s)) => Label::Hash(s.clone()),
-            (SType::ItemKind, Bitical::String(s)) => {
-                Label::ItemKind(s.clone())
-            }
+            (SType::ItemKind, Bitical::String(s)) => Label::ItemKind(s.clone()),
             (SType::Extension, Bitical::String(s)) => {
                 Label::Extension(s.clone())
             }
@@ -1061,10 +1061,7 @@ impl std::fmt::Display for TypedTag {
 
 impl TypedTag {
     /// 新しい `TypedTag` を作成します。
-    pub fn new(
-        tagtype: impl Into<TagType>,
-        value: impl Into<Bitical>,
-    ) -> Self {
+    pub fn new(tagtype: impl Into<TagType>, value: impl Into<Bitical>) -> Self {
         Self {
             label: Label::resolve(tagtype.into(), value.into()),
         }
@@ -1519,7 +1516,10 @@ mod tests_types {
 
     #[test]
     fn test_bitical_from_conversions() {
-        assert_eq!(Bitical::from("a".to_string()), Bitical::String("a".to_string()));
+        assert_eq!(
+            Bitical::from("a".to_string()),
+            Bitical::String("a".to_string())
+        );
         assert_eq!(Bitical::from(1i64), Bitical::Integer(1));
         assert_eq!(Bitical::from(1.5f64), Bitical::Double(1.5));
         assert_eq!(Bitical::from(true), Bitical::Boolean(true));
@@ -1573,7 +1573,8 @@ mod tests_types {
         assert_eq!(label.tag_type(), tt);
         assert_eq!(label.value(), Bitical::String("hello".to_string()));
 
-        let numeric = Label::Literal(TagType::Custom(String::new()), "42".to_string());
+        let numeric =
+            Label::Literal(TagType::Custom(String::new()), "42".to_string());
         assert_eq!(numeric.as_i64(), 42);
     }
 

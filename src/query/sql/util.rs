@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, CustomFunc, Pronoun::*, BiticalType};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
@@ -116,7 +118,10 @@ pub(super) fn build_storage_column_expr(
         StorageMapping::Basic { column, .. } => {
             let col_expr = Expr::col(*column);
             if *column == Col::LabelStr
-                && matches!(bitical_type, BiticalType::Integer | BiticalType::Double)
+                && matches!(
+                    bitical_type,
+                    BiticalType::Integer | BiticalType::Double
+                )
             {
                 CustomFunc::try_cast_double(col_expr)
             } else {

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -95,10 +97,7 @@ fn test_plugin_normalize_label_applied_in_search() {
         }
     }
     impl ttfm::tag::Index for ShortLabelTag {
-        fn extract(
-            &self,
-            _path: &StdPath,
-        ) -> anyhow::Result<Option<Bitical>> {
+        fn extract(&self, _path: &StdPath) -> anyhow::Result<Option<Bitical>> {
             // 全ファイルに "modified" タグを付与
             Ok(Some(Bitical::String("modified".to_string())))
         }

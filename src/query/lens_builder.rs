@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -231,14 +233,15 @@ pub(crate) fn count_definitions(
     let branches = defs
         .iter()
         .map(|node| {
-            let ResolvedNode::DefinitionRef { def, default_rank, .. } = node
+            let ResolvedNode::DefinitionRef {
+                def, default_rank, ..
+            } = node
             else {
                 unreachable!(
                     "count_definitions: defs must only contain DefinitionRef"
                 );
             };
-            let resolved =
-                resolve_definition_name_filter(def, *default_rank);
+            let resolved = resolve_definition_name_filter(def, *default_rank);
             crate::query::sql::definition::build_definition_name_sql(
                 src, &resolved,
             )
@@ -263,9 +266,14 @@ pub(crate) fn add_definitions(
 
     let mut branches = Vec::with_capacity(defs.len() + 1);
     for node in defs {
-        let ResolvedNode::DefinitionRef { def, default_rank, .. } = node
+        let ResolvedNode::DefinitionRef {
+            def, default_rank, ..
+        } = node
         else {
-            anyhow::bail!("add_definitions: DefinitionRef 以外の枝: {:?}", node);
+            anyhow::bail!(
+                "add_definitions: DefinitionRef 以外の枝: {:?}",
+                node
+            );
         };
         branches.push(definition_branch_sql(src, def, *default_rank));
     }

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -184,7 +186,9 @@ pub(super) fn build_agg_operand_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, bitical_type, ..
+            storage,
+            bitical_type,
+            ..
         } => build_storage_column_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
@@ -216,7 +220,9 @@ pub(super) fn build_agg_operand_eav_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, bitical_type, ..
+            storage,
+            bitical_type,
+            ..
         } => build_tag_value_agg_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
@@ -350,7 +356,9 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                 }
             }
             ResolvedOperand::TagRef {
-                storage, bitical_type, ..
+                storage,
+                bitical_type,
+                ..
             } => {
                 if *bitical_type == crate::db::BiticalType::Boolean {
                     return build_storage_column_expr(storage, *bitical_type)

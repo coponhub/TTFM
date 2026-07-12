@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -45,13 +47,13 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::ColumnMatch { tag, label } => {
             Ok(build_column_match_sql(src, *tag, label))
         }
-        ResolvedNode::DefinitionRef { def, default_rank, .. } => {
-            Ok(crate::query::lens_builder::filter_definitions(
-                src,
-                def,
-                *default_rank,
-            ))
-        }
+        ResolvedNode::DefinitionRef {
+            def, default_rank, ..
+        } => Ok(crate::query::lens_builder::filter_definitions(
+            src,
+            def,
+            *default_rank,
+        )),
         ResolvedNode::Match {
             storage,
             bitical_type,
@@ -59,7 +61,11 @@ pub(super) fn try_dispatch_common(
             label,
             ..
         } => Ok(build_resolved_match_sql(
-            src, storage, *bitical_type, *op, label,
+            src,
+            storage,
+            *bitical_type,
+            *op,
+            label,
         )),
         ResolvedNode::TagTagMatch {
             left_storage,

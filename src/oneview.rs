@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, BiticalType, ColumnDef, TargetTable, Tbl};
+use crate::db::{BiticalType, Col, ColumnDef, TargetTable, Tbl};
 use crate::query::lens_reader::Reader;
 use crate::types::ItemKind;
 use duckdb::{Connection, Result};

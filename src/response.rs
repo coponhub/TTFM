@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,8 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::types::{
-    Bitical, Intrinsic, ItemId, ItemKind, Label, Origin, Rank, SType,
-    TagType, Tags,
+    Bitical, Intrinsic, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
+    Tags,
 };
 
 /// 検索・編集操作の共通アイテム表現。
@@ -878,8 +880,10 @@ mod tests {
         let item_user = Item::new_empty(ItemId::Stored(1), ItemKind::File); // User 区画
         assert_eq!(item_user.large_origin(), LargeOrigin::User);
 
-        let item_plugin =
-            Item::new_empty(ItemId::Settling(Origin::Plugin, 0), ItemKind::File);
+        let item_plugin = Item::new_empty(
+            ItemId::Settling(Origin::Plugin, 0),
+            ItemKind::File,
+        );
         assert_eq!(item_plugin.large_origin(), LargeOrigin::System);
     }
 }

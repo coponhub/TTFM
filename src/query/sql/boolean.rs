@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,7 +22,7 @@ use super::{
     build_aggregation_context, label_to_unit_aware_expr, subquery,
     wrap_in_subquery, BuildPick, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, BiticalType, Src};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;

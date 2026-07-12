@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -334,7 +336,9 @@ impl Bitical {
             Value::Double(d) => Some(Bitical::Double(d)),
             Value::Text(s) => Some(Bitical::String(s)),
             Value::Null => None,
-            Value::List(l) => l.into_iter().next().and_then(Bitical::from_db_value),
+            Value::List(l) => {
+                l.into_iter().next().and_then(Bitical::from_db_value)
+            }
             other => Some(Bitical::String(format!("{:?}", other))),
         }
     }
@@ -745,7 +749,8 @@ mod tests {
 
     #[test]
     fn test_union_value_boolean() {
-        let expr = CustomFunc::union_value(BiticalType::Boolean, Expr::val(true));
+        let expr =
+            CustomFunc::union_value(BiticalType::Boolean, Expr::val(true));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(b :="),
@@ -756,7 +761,8 @@ mod tests {
 
     #[test]
     fn test_union_value_bigint() {
-        let expr = CustomFunc::union_value(BiticalType::Integer, Expr::val(42i64));
+        let expr =
+            CustomFunc::union_value(BiticalType::Integer, Expr::val(42i64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(i :="),
@@ -768,7 +774,8 @@ mod tests {
 
     #[test]
     fn test_union_value_double() {
-        let expr = CustomFunc::union_value(BiticalType::Double, Expr::val(3.14f64));
+        let expr =
+            CustomFunc::union_value(BiticalType::Double, Expr::val(3.14f64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("union_value(d :="),

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -483,11 +485,14 @@ impl TempScanEntry {
     /// Tbl::Scan テーブル作成用のカラム構成リストを取得します。
     pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)>
     {
-        use crate::db::{Col, BiticalType};
+        use crate::db::{BiticalType, Col};
         use sea_query::IntoIden;
 
         let mut cols = ScanEntry::columns_with_type();
-        cols.push((Col::ScanHash.into_iden(), BiticalType::Integer.into_iden()));
+        cols.push((
+            Col::ScanHash.into_iden(),
+            BiticalType::Integer.into_iden(),
+        ));
         cols
     }
 

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,9 +20,9 @@
 //! pick / fetch パスからは lens 経由でのみ使用する。
 
 use crate::db::{
-    Col, CustomFunc,
+    BiticalType, Col, CustomFunc,
     Pronoun::{Agg, Representative, Scalar, Stored, Sub, Volatile},
-    QueryResultCol, BiticalType, Src, Val,
+    QueryResultCol, Src, Val,
 };
 use crate::query::ast::Candidate;
 use crate::types::{ItemId, ItemKind, Origin};
@@ -109,8 +111,7 @@ fn build_definition_rows(
         .chain(reserved.iter().map(|s| s.as_str()))
         .collect();
     if !excluded_names.is_empty() {
-        used_q
-            .and_where(Expr::col(used_col).is_not_in(excluded_names));
+        used_q.and_where(Expr::col(used_col).is_not_in(excluded_names));
     }
     if !origins.is_empty() {
         used_q.and_where(
@@ -298,7 +299,10 @@ pub(crate) fn build_definition_fetch_sql(
     let volatile_type_tag = CustomFunc::list_value([
         CustomFunc::struct_pack_tag(
             Expr::val(Col::Type.as_str()).into(),
-            CustomFunc::union_value(BiticalType::String, Expr::val(kind.as_str())),
+            CustomFunc::union_value(
+                BiticalType::String,
+                Expr::val(kind.as_str()),
+            ),
             Expr::val(builtin).into(),
         ),
         CustomFunc::struct_pack_tag(

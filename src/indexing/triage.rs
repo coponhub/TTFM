@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -99,10 +101,7 @@ impl<'a> ItemTriager<'a> {
     }
 
     /// 1つのファイルに対してタグ抽出を試みます。
-    fn extract_single_file(
-        &self,
-        path_str: &str,
-    ) -> Result<Option<Biticals>> {
+    fn extract_single_file(&self, path_str: &str) -> Result<Option<Biticals>> {
         let res = self.registry.process_file(Path::new(path_str));
 
         if let Ok(values) = res {
@@ -304,8 +303,7 @@ mod tests {
             bitical_type: BiticalType::Integer,
             target_table: TargetTable::FileReferences,
         };
-        let p_ent =
-            triager.classify(1, Some(Bitical::Integer(1024)), &col_ent);
+        let p_ent = triager.classify(1, Some(Bitical::Integer(1024)), &col_ent);
         assert!(matches!(
             p_ent,
             TriagePiece::Entity(Some(Bitical::Integer(1024)))

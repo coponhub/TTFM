@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -69,11 +71,15 @@ impl StorageMapping {
             StorageMapping::Fixed(col) => {
                 build_column_condition(*col, op, label, bitical_type, false)
             }
-            StorageMapping::Basic { column, tag_type } => {
-                Condition::all().add(check_tag_match(tag_type)).add(
-                    build_column_condition(*column, op, label, bitical_type, true),
-                )
-            }
+            StorageMapping::Basic { column, tag_type } => Condition::all()
+                .add(check_tag_match(tag_type))
+                .add(build_column_condition(
+                    *column,
+                    op,
+                    label,
+                    bitical_type,
+                    true,
+                )),
             StorageMapping::Composite => Condition::any(),
         }
     }
@@ -147,7 +153,9 @@ fn build_column_condition(
         return build_literal_condition(col, bin_op, s, is_eav_col);
     }
 
-    label.value().to_condition(col, bin_op, bitical_type, is_eav_col)
+    label
+        .value()
+        .to_condition(col, bin_op, bitical_type, is_eav_col)
 }
 
 pub(crate) fn build_int_condition(
@@ -576,9 +584,9 @@ impl Lens {
         map: &duckdb::types::OrderedMap<String, Value>,
     ) -> Option<Label> {
         let from_storage = |desc: &TagDescriptor| match &desc.storage {
-            StorageMapping::Fixed(col) => map
-                .get(&col.name())
-                .and_then(Bitical::from_scalar_db_value),
+            StorageMapping::Fixed(col) => {
+                map.get(&col.name()).and_then(Bitical::from_scalar_db_value)
+            }
             StorageMapping::Basic { column, tag_type } => {
                 let type_val = map.get(&SType::Type.name())?;
                 if type_val.as_str() == Some(tag_type) {
@@ -723,7 +731,9 @@ fn base_column_descriptors() -> Vec<TagDescriptor> {
         .map(|fc| TagDescriptor {
             tag_type: TagType::Base(fc.stype),
             storage: StorageMapping::Fixed(fc.col),
-            logical_type: sql_to_logical(crate::db::BiticalType::from_col(fc.col)),
+            logical_type: sql_to_logical(crate::db::BiticalType::from_col(
+                fc.col,
+            )),
             logical_function: None,
             sys_id: None,
         })

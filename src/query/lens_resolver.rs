@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -33,7 +35,7 @@
 //! SQL文（OneViewに対するクエリ）
 //! ```
 
-use crate::db::{Col, BiticalType};
+use crate::db::{BiticalType, Col};
 use crate::query::ast::{
     ComparisonNode, ComparisonOp, DefinitionRef, Operand, QueryNode,
 };
@@ -328,7 +330,9 @@ impl ResolvedOperand {
                 matches!(label.value(), Bitical::String(_))
             }
             ResolvedOperand::TagRef {
-                tag_type, bitical_type, ..
+                tag_type,
+                bitical_type,
+                ..
             } => {
                 // 標準タグ (Base) の VARCHAR は確実に文字列として扱う。
                 // カスタムタグ (Custom) は、暗黙の数値演算を許容するため、ここでの文字列判定からは除外する。
@@ -1361,7 +1365,8 @@ pub(crate) fn resolve_query_node(
             })
         }
         QueryNode::DefinitionRef(def) => {
-            let operand = resolve_type_ref_operand(lens, &def.value.tag_type())?;
+            let operand =
+                resolve_type_ref_operand(lens, &def.value.tag_type())?;
             let target_name = def.value.value().as_display_name();
             let default_rank = lens
                 .look_up(&TagType::from(target_name.as_str()))
@@ -4138,7 +4143,7 @@ mod tests_walk_fold {
     use super::*;
     use crate::query::ast::ArithmeticOp;
     use crate::tag::TagRegistry;
-    use crate::types::{Label, Bitical, SType, TagType};
+    use crate::types::{Bitical, Label, SType, TagType};
 
     fn leaf(name: &str) -> ResolvedNode {
         ResolvedNode::ColumnMatch {

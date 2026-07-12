@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -239,7 +241,7 @@ pub fn read_cache_metadata(
     }
     let path_str = path.to_string_lossy();
 
-    use crate::db::{DuckDbFunc, BiticalType, Val};
+    use crate::db::{BiticalType, DuckDbFunc, Val};
     let mut meta_query = Query::select();
     meta_query
         .expr(Expr::col(Val::Key).cast_as(BiticalType::String))

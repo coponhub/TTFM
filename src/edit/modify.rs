@@ -388,10 +388,7 @@ mod tests {
         let tokens = tokenize("project:A").unwrap();
         assert_eq!(
             tokens,
-            vec![(
-                TagType::from("project"),
-                Some(Bitical::String("A".into()))
-            )]
+            vec![(TagType::from("project"), Some(Bitical::String("A".into())))]
         );
     }
 
@@ -556,10 +553,8 @@ mod tests {
 
     #[test]
     fn modify_untag_existing_label() {
-        let label = Label::Other(
-            TagType::from("project"),
-            Bitical::String("A".into()),
-        );
+        let label =
+            Label::Other(TagType::from("project"), Bitical::String("A".into()));
         let item = make_item(1, vec![label.clone()]);
         let actions =
             modify(&item, Some("project:A"), QueryType::Untag, &registry())
@@ -594,10 +589,7 @@ mod tests {
     #[test]
     fn modify_untag_multiple_gives_separate_deletes() {
         let labels = vec![
-            Label::Other(
-                TagType::from("project"),
-                Bitical::String("A".into()),
-            ),
+            Label::Other(TagType::from("project"), Bitical::String("A".into())),
             Label::Other(
                 TagType::from("status"),
                 Bitical::String("done".into()),

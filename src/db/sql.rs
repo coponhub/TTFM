@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,7 +20,7 @@
 //! 検索（query/sql）・採番（indexing）の双方から使われる SQL パーツの住所。
 //! db 土台層に置くことで indexing → query の逆流依存を避ける。
 
-use super::{Col, DuckDbFunc, BiticalType};
+use super::{BiticalType, Col, DuckDbFunc};
 
 /// DuckDB 固有の複雑な構文を型安全に構築するためのヘルパー。
 pub struct CustomFunc;
@@ -316,7 +318,9 @@ impl CustomFunc {
     }
 
     /// EAV列の (Col, BiticalType) ペア配列から CASE WHEN IS NOT NULL THEN union_value(...) 式を生成します。
-    pub fn eav_union_value(arms: &[(Col, BiticalType)]) -> sea_query::SimpleExpr {
+    pub fn eav_union_value(
+        arms: &[(Col, BiticalType)],
+    ) -> sea_query::SimpleExpr {
         let Some(((first_col, first_type), rest)) = arms.split_first() else {
             return sea_query::Expr::val(Option::<String>::None).into();
         };
@@ -328,7 +332,10 @@ impl CustomFunc {
             .fold(init, |cs, (col, bitical_type)| {
                 cs.case(
                     sea_query::Expr::col(*col).is_not_null(),
-                    Self::union_value(*bitical_type, sea_query::Expr::col(*col)),
+                    Self::union_value(
+                        *bitical_type,
+                        sea_query::Expr::col(*col),
+                    ),
                 )
             })
             .finally(sea_query::Expr::val(Option::<String>::None))

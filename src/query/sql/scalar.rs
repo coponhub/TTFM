@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,7 +24,9 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_unit_aware_expr, needs_nest_context,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, QueryResultCol, BiticalType, Src};
+use crate::db::{
+    BiticalType, Col, CustomFunc, Pronoun::*, QueryResultCol, Src,
+};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
@@ -145,7 +149,10 @@ fn typeof_eq(sv: &SimpleExpr, type_str: &str) -> SimpleExpr {
 }
 
 fn cast_union(sv: &SimpleExpr, bitical_type: BiticalType) -> SimpleExpr {
-    CustomFunc::union_value(bitical_type, Expr::expr(sv.clone()).cast_as(bitical_type))
+    CustomFunc::union_value(
+        bitical_type,
+        Expr::expr(sv.clone()).cast_as(bitical_type),
+    )
 }
 
 fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
@@ -180,9 +187,18 @@ fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
         typeof_eq(&sv, "BOOLEAN"),
         cast_union(&sv, BiticalType::Boolean),
     )
-    .case(typeof_eq(&sv, "DOUBLE"), cast_union(&sv, BiticalType::Double))
-    .case(typeof_eq(&sv, "FLOAT"), cast_union(&sv, BiticalType::Double))
-    .case(typeof_eq(&sv, "VARCHAR"), cast_union(&sv, BiticalType::String))
+    .case(
+        typeof_eq(&sv, "DOUBLE"),
+        cast_union(&sv, BiticalType::Double),
+    )
+    .case(
+        typeof_eq(&sv, "FLOAT"),
+        cast_union(&sv, BiticalType::Double),
+    )
+    .case(
+        typeof_eq(&sv, "VARCHAR"),
+        cast_union(&sv, BiticalType::String),
+    )
     .finally(cast_union(&sv, BiticalType::Integer))
     .into();
 

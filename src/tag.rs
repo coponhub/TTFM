@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -912,10 +914,8 @@ impl Query for PathFn {
         _schema: &dyn LogicalSchema,
     ) -> QueryNode {
         let normalized = normalize_path_str(&label.as_str());
-        let new_label = label.rekey(
-            TagType::Base(SType::Path),
-            Bitical::String(normalized),
-        );
+        let new_label = label
+            .rekey(TagType::Base(SType::Path), Bitical::String(normalized));
         QueryNode::TypedTag(TypedTag { label: new_label })
     }
 }
@@ -1970,8 +1970,7 @@ impl Query for TypeFn {
                 id,
             })
             .collect();
-        let reserved =
-            candidates.iter().map(|c| c.name.clone()).collect();
+        let reserved = candidates.iter().map(|c| c.name.clone()).collect();
         QueryNode::DefinitionRef(DefinitionRef {
             kind: ItemKind::Type,
             value: label.rekey(tagtype.clone(), label.value()),
@@ -2487,7 +2486,7 @@ mod tests {
         use crate::query::ast::{
             BasicOp, ComparisonNode, ComparisonOp, Operand,
         };
-        use crate::types::{DateTime, Label, Bitical, SType, TagType};
+        use crate::types::{Bitical, DateTime, Label, SType, TagType};
         use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = DateTime::Date(date);
@@ -2545,7 +2544,9 @@ mod tests {
         use crate::query::lens_schema::Lens;
         use crate::types::{SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Type);
-        let tag = TypedTag { label: label.clone() };
+        let tag = TypedTag {
+            label: label.clone(),
+        };
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
         TypeFn.query().expand(&tag_type, &label, &tag, &lens)
@@ -2592,15 +2593,13 @@ mod tests {
     #[test]
     fn test_type_expand_string_pattern_plugin_candidate_has_no_sys_id() {
         use crate::query::lens_schema::Lens;
-        use crate::types::{ItemId, Bitical, SType, TagType, TypedTag};
+        use crate::types::{Bitical, ItemId, SType, TagType, TypedTag};
         let mut registry = TagRegistry::with_standard();
         registry.register_plugin(QueryTag);
         let lens = Lens::from_registry(&registry);
         let tag_type = TagType::from(SType::Type);
-        let label = Label::resolve(
-            tag_type.clone(),
-            Bitical::String("*".to_string()),
-        );
+        let label =
+            Label::resolve(tag_type.clone(), Bitical::String("*".to_string()));
         let tag = TypedTag::retag(SType::Type, &label);
         let result = TypeFn.query().expand(&tag_type, &label, &tag, &lens);
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
@@ -2656,10 +2655,8 @@ mod tests {
         // `tag:*` のソースは Stored 定義行と使用中ペアのみ。
         // registry は型のソースなので tag: の candidates にはならない。
         let tag_type = TagType::from(SType::TypedTag);
-        let label = Label::resolve(
-            tag_type.clone(),
-            Bitical::String("*".to_string()),
-        );
+        let label =
+            Label::resolve(tag_type.clone(), Bitical::String("*".to_string()));
         let tag = TypedTag::retag(SType::TypedTag, &label);
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
@@ -2746,10 +2743,8 @@ mod tests {
         use crate::query::lens_schema::Lens;
         use crate::types::{Bitical, SType, TagType, TypedTag};
         let tag_type = TagType::from(SType::Origin);
-        let label = Label::resolve(
-            tag_type.clone(),
-            Bitical::String("b*".to_string()),
-        );
+        let label =
+            Label::resolve(tag_type.clone(), Bitical::String("b*".to_string()));
         let typed_tag = TypedTag::retag(SType::Origin, &label);
         let result = OriginFn.query().expand(
             &tag_type,

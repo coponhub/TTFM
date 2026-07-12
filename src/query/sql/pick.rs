@@ -1,4 +1,6 @@
-// Copyright (C) 2026 Kensuke Aoyagi
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -23,7 +25,9 @@ use super::{
     label_to_unit_aware_expr, needs_aggregation_context, needs_nest_context,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, BiticalType, Src};
+use crate::db::{
+    BiticalType, Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src,
+};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
@@ -197,7 +201,12 @@ pub fn build_pick_agg(
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    src, storage, *bitical_type, *op, calc, agg_ctx,
+                    src,
+                    storage,
+                    *bitical_type,
+                    *op,
+                    calc,
+                    agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
                     build_agg_calc_match(src, agg, *op, calc, agg_ctx)
@@ -221,7 +230,12 @@ pub fn build_pick_agg(
                     bitical_type,
                     ..
                 } => build_agg_tag_match(
-                    src, agg, *op, storage, *bitical_type, agg_ctx,
+                    src,
+                    agg,
+                    *op,
+                    storage,
+                    *bitical_type,
+                    agg_ctx,
                 ),
                 _ => unreachable!(
                     "build_pick_agg called with nest node: use build_pick_nest"
@@ -265,7 +279,12 @@ pub fn build_pick_nest(
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    src, storage, *bitical_type, *op, calc, agg_ctx,
+                    src,
+                    storage,
+                    *bitical_type,
+                    *op,
+                    calc,
+                    agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
                     build_agg_calc_match_nest(
@@ -293,7 +312,13 @@ pub fn build_pick_nest(
                     bitical_type,
                     ..
                 } => build_agg_tag_match_nest(
-                    src, agg, *op, storage, *bitical_type, agg_ctx, nest_ctx,
+                    src,
+                    agg,
+                    *op,
+                    storage,
+                    *bitical_type,
+                    agg_ctx,
+                    nest_ctx,
                 ),
                 ResolvedNode::NestMatch {
                     keys,
@@ -376,7 +401,14 @@ fn build_tag_calculation_match_sql(
     let needs_eav =
         calc.contains_tag() || matches!(storage, StorageMapping::Basic { .. });
     if needs_eav {
-        build_tag_calc_match_eav_sql(src, storage, bitical_type, op, calc, agg_ctx)
+        build_tag_calc_match_eav_sql(
+            src,
+            storage,
+            bitical_type,
+            op,
+            calc,
+            agg_ctx,
+        )
     } else {
         let mut stmt = Query::select();
         stmt.from(src);
@@ -549,7 +581,9 @@ fn build_resolved_operand_eav_row_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, bitical_type, ..
+            storage,
+            bitical_type,
+            ..
         } => build_tag_value_eav_row_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
