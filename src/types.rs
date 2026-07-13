@@ -345,7 +345,6 @@ impl LargeOrigin {
     }
 }
 
-/// 対応する `BiticalType` を静的に持つことを示すトレイト。
 pub trait BiticalAssociate {
     const BITICAL: BiticalType;
 }
@@ -423,7 +422,6 @@ pub enum Bitical {
     Uuid(Uuid),
 }
 
-/// インデックス抽出結果など、カラム毎の値（欠損は `None`）の並び。
 pub type Biticals = Vec<Option<Bitical>>;
 
 // 等価性は「同じ値が保存されるか」= ビット同一性で定義する。
@@ -488,6 +486,8 @@ impl BiticalType {
 
     /// EAV の型付きラベルカラム（label_str/label_int/label_double/label_bool）を
     /// 重複なく列挙する。`Uuid` は `String` と同じ `LabelStr` に収束するため含まない。
+    /// 並びは宣言順 = 実際の保存列順（base_tags.parquet 等の DDL・appender が
+    /// この順に依存する）。
     pub fn to_columns() -> [SType; 4] {
         [
             BiticalType::String,
@@ -496,6 +496,15 @@ impl BiticalType {
             BiticalType::Boolean,
         ]
         .map(|t| t.to_column())
+    }
+
+    /// ラベルカラムの非 NULL 走査順。label_str は oneview で全型の VARCHAR
+    /// フォールバックを兼ねる（apply_label_columns が常に設定する）ため、
+    /// 型付きカラムが先に評価されるよう末尾に回す。
+    pub fn to_columns_scan_order() -> [SType; 4] {
+        let mut cols = Self::to_columns();
+        cols.sort_by_key(|c| *c == BiticalType::String.to_column());
+        cols
     }
 }
 
@@ -510,7 +519,6 @@ impl Bitical {
         }
     }
 
-    /// 検索結果の名前などに使用する、人間が読みやすい文字列表現。
     pub fn as_display_name(&self) -> String {
         match self {
             Bitical::String(s) => s.clone(),
@@ -523,6 +531,8 @@ impl Bitical {
     }
 }
 
+/// 書込境界。読込側の対応は `Bitical::from_db_value`（db/mod.rs）。
+/// Uuid は Value にネイティブ variant が無いため Text に収束する（非対称）。
 impl duckdb::ToSql for Bitical {
     fn to_sql(&self) -> duckdb::Result<duckdb::types::ToSqlOutput<'_>> {
         use duckdb::types::Value;
@@ -956,7 +966,6 @@ impl Label {
         Self::resolve(tag, value)
     }
 
-    /// Label が保持している物理的な値（Bitical）を返します。
     /// `Literal` は Glob 無効・完全一致の意味論を運ぶ専用 variant のため、
     /// この呼び出しを経由すると通常の `String` と区別できなくなる点に注意
     /// （区別が必要な呼び出し元は `.value()` を経由せず `Label::Literal` に直接 match すること）。
@@ -1479,6 +1488,35 @@ mod tests_types {
         assert_eq!(BiticalType::Integer.to_column(), SType::LabelInt);
         assert_eq!(BiticalType::Double.to_column(), SType::LabelDouble);
         assert_eq!(BiticalType::Boolean.to_column(), SType::LabelBool);
+    }
+
+    #[test]
+    fn test_bitical_type_to_columns_matches_storage_order() {
+        // to_columns は宣言順 = 実際の保存列順（base_tags.parquet 等）。
+        // 並びを変えると既存 parquet と DDL・appender の列順がズレる。
+        assert_eq!(
+            BiticalType::to_columns(),
+            [
+                SType::LabelStr,
+                SType::LabelInt,
+                SType::LabelDouble,
+                SType::LabelBool,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_bitical_type_to_columns_scan_order_label_str_last() {
+        // 走査順では label_str（全型の VARCHAR フォールバック）が末尾に来る
+        assert_eq!(
+            BiticalType::to_columns_scan_order(),
+            [
+                SType::LabelInt,
+                SType::LabelDouble,
+                SType::LabelBool,
+                SType::LabelStr,
+            ]
+        );
     }
 
     #[test]

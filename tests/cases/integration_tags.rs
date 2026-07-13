@@ -88,15 +88,14 @@ fn test_integration_tag_tagging() {
     let registered_paths =
         search::search(&store, &registry, "extension:txt", Default::default())
             .unwrap();
-    let item = registered_paths.results[0].primary_value().unwrap();
+    let item_id = registered_paths.results[0].id.as_i64();
 
-    tagging::tag_item(&store, &registry, &item, "project:mars").unwrap();
+    super::tag_item_id(&store, &registry, item_id, "project:mars").unwrap();
 
     let tag_id =
         tagging::get_or_create_item(&store, &registry, "tag", "project:mars")
             .unwrap();
-    tagging::tag_item(&store, &registry, &tag_id.to_string(), "priority:high")
-        .unwrap();
+    super::tag_item_id(&store, &registry, tag_id, "priority:high").unwrap();
 
     let results = search::search(
         &store,

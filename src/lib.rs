@@ -51,7 +51,7 @@ pub use search::SearchOptions;
 pub mod edit;
 pub mod tagging;
 pub use rank::{get_type_ranks, set_rank_by_id};
-pub use tagging::{add_item, get_or_create_item, tag_item};
+pub use tagging::{add_item, get_or_create_item};
 
 /// ファイルの一意識別子を 128ビット数値(FileRef)として取得します。
 pub fn get_file_ref(path: &Path) -> Result<FileRef> {
@@ -106,90 +106,3 @@ pub fn get_ttfm_plugins_dir() -> Result<std::path::PathBuf> {
     Ok(get_ttfm_home()?.join("plugins"))
 }
 
-#[cfg(test)]
-mod tests_store {
-    use crate::db::{Col, Tbl};
-    use crate::tagging;
-    use tempfile::tempdir;
-
-    fn setup_test_env() -> (
-        crate::db::Store,
-        crate::tag::TagRegistry,
-        crate::CacheManager,
-        std::path::PathBuf,
-        tempfile::TempDir,
-    ) {
-        let dir = tempdir().unwrap();
-        let db_dir = dir.path().join("db");
-        std::fs::create_dir_all(&db_dir).unwrap();
-        let store = crate::db::Store::open(&db_dir).unwrap();
-        let registry = crate::tag::TagRegistry::with_standard();
-        crate::indexing::Indexer::new(&store, &registry)
-            .initialize_tables()
-            .unwrap();
-        let cache = crate::CacheManager::new(db_dir.join("cache"), 0);
-        (store, registry, cache, db_dir, dir)
-    }
-
-    #[test]
-    fn test_user_tags_sorting() {
-        let (store, _registry, _cache, db_dir, _dir) = setup_test_env();
-
-        // Manually create empty user_tags.parquet to ensure existence
-        let path = db_dir.join("user_tags.parquet");
-        store.conn.execute("CREATE TABLE temp_create (item_id BIGINT, type VARCHAR, label_str VARCHAR, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN)", []).unwrap();
-        store
-            .conn
-            .execute(
-                &format!(
-                    "COPY temp_create TO '{}' (FORMAT PARQUET)",
-                    path.to_string_lossy()
-                ),
-                [],
-            )
-            .unwrap();
-        store.conn.execute("DROP TABLE temp_create", []).unwrap();
-
-        let id = -100; // Dummy ID
-
-        tagging::append_tag_to_parquet(
-            &store,
-            path.clone(),
-            Tbl::UserTagsDiff,
-            Col::ItemId,
-            id,
-            "type_z",
-            "val_1",
-        )
-        .unwrap();
-
-        tagging::append_tag_to_parquet(
-            &store,
-            path.clone(),
-            Tbl::UserTagsDiff,
-            Col::ItemId,
-            id,
-            "type_a",
-            "val_2",
-        )
-        .unwrap();
-
-        let rows: Vec<String> = store
-            .conn
-            .prepare(&format!(
-                "SELECT type FROM read_parquet('{}')",
-                path.to_string_lossy()
-            ))
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(
-            rows,
-            vec!["type_a", "type_z"],
-            "User tags should be sorted by type"
-        );
-    }
-}

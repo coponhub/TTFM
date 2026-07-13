@@ -42,6 +42,19 @@ impl LogicalType {
     pub fn is_numeric(&self) -> bool {
         matches!(self, Self::Integer | Self::Float | Self::Boolean)
     }
+
+    /// この論理型がマップされる物理型。Float は DOUBLE へ、
+    /// 型が定まらない Any は文字列（VARCHAR）へ収束する。
+    pub fn to_bitical(&self) -> crate::db::BiticalType {
+        use crate::db::BiticalType;
+        match self {
+            Self::Integer => BiticalType::Integer,
+            Self::Float => BiticalType::Double,
+            Self::String => BiticalType::String,
+            Self::Boolean => BiticalType::Boolean,
+            Self::Any => BiticalType::String,
+        }
+    }
 }
 
 impl Bitical {
@@ -79,4 +92,19 @@ pub trait LogicalSchema {
     /// `Settling(Origin::Plugin, _)`（未確定の counter はダミー値で構わない。
     /// このリストは SQL 生成の使い捨てで write の実解決には流れない）。
     fn iter_all_for_rank(&self) -> Vec<(TagType, Rank, ItemId)>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::BiticalType;
+
+    #[test]
+    fn test_to_bitical_mapping() {
+        assert_eq!(LogicalType::Integer.to_bitical(), BiticalType::Integer);
+        assert_eq!(LogicalType::Float.to_bitical(), BiticalType::Double);
+        assert_eq!(LogicalType::String.to_bitical(), BiticalType::String);
+        assert_eq!(LogicalType::Boolean.to_bitical(), BiticalType::Boolean);
+        assert_eq!(LogicalType::Any.to_bitical(), BiticalType::String);
+    }
 }

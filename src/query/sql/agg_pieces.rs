@@ -1300,7 +1300,7 @@ fn build_pivot_keys_into_stmt(
 
     let mut type_filters = std::collections::HashSet::new();
 
-    let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+    let union_type = CustomFunc::representative_union_type();
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef { storage, .. } => match storage {

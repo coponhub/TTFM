@@ -73,9 +73,8 @@ fn test_item_id_and_kind_refactoring() {
     // note_id should be ItemId::Stored
     assert!(note_id.to_string().parse::<i64>().is_ok());
 
-    // 2. tag_item does NOT persist label
-    tagging::tag_item(&store, &registry, &note_id.to_string(), "project:ttfm")
-        .unwrap();
+    // 2. タグ付与は label を永続化しない
+    super::tag_item_id(&store, &registry, note_id, "project:ttfm").unwrap();
 
     // 3. Volatile items from aggregation (with actual data)
     // Add some files to make count > 0

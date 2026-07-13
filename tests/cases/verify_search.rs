@@ -17,7 +17,7 @@
 
 use std::fs::File;
 use tempfile::tempdir;
-use ttfm::{search, tagging};
+use ttfm::search;
 
 #[test]
 fn verify_complex_search_patterns() -> anyhow::Result<()> {
@@ -169,9 +169,9 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // 3. カスタムタグ (TRY_CAST 経由)
     println!("Testing custom tag with TRY_CAST...");
-    // tag_item の item 引数は生 id（数値文字列）/ path / name のみ受理
-    let item_id = res.results[0].id.as_i64().to_string();
-    tagging::tag_item(&store, &registry, &item_id, "width:640")?;
+    let item_id_num = res.results[0].id.as_i64();
+    let item_id = item_id_num.to_string();
+    super::tag_item_id(&store, &registry, item_id_num, "width:640")?;
 
     let res =
         search::search(&store, &registry, "width: :> 500", Default::default())?;

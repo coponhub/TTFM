@@ -507,11 +507,14 @@ mod tests {
             "Consistency Test Memo",
         )
         .unwrap();
-        tagging::tag_item(
+        crate::edit::edit(
             &store,
             &registry,
-            &note_id.to_string(),
-            "testtag:true",
+            &format!("item_id:{note_id}"),
+            Some("testtag:true"),
+            crate::edit::QueryType::Tag,
+            None,
+            crate::edit::WriteOptions { yes: true },
         )
         .unwrap();
 

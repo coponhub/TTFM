@@ -20,7 +20,7 @@ use crate::db::{Col, Store, TargetTable, Tbl};
 use crate::db::ColumnDef;
 use crate::indexing::ScanEntry;
 use crate::tag::TagRegistry;
-use crate::types::{Biticals, ItemId};
+use crate::types::{Bitical, Biticals, ItemId};
 // use crate::types::Origin;
 use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
 // use crate::util::ParquetExt;
@@ -57,10 +57,7 @@ pub struct DynamicRow {
 pub struct TagRow {
     pub item_id: i64,
     pub tag_type: String,
-    pub label_str: Option<String>,
-    pub label_int: Option<i64>,
-    pub label_double: Option<f64>,
-    pub label_bool: Option<bool>,
+    pub value: Bitical,
 }
 
 // ========================================================

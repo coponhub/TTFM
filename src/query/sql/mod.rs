@@ -138,13 +138,7 @@ fn build_fetch_items_sql_impl(
     }
 
     // 2. EAV列を UNION 型に変換して struct_pack で集約
-    use crate::db::BiticalType;
-    let union_val = CustomFunc::eav_union_value(&[
-        (Col::LabelInt, BiticalType::Integer),
-        (Col::LabelStr, BiticalType::String),
-        (Col::LabelBool, BiticalType::Boolean),
-        (Col::LabelDouble, BiticalType::Double),
-    ]);
+    let union_val = CustomFunc::eav_union_value();
     let struct_expr = CustomFunc::struct_pack_tag(
         Expr::col(Col::Type).into(),
         union_val,
@@ -471,25 +465,25 @@ mod tests {
             "SQL should use new tag_type field: {}",
             sql_str
         );
-        // UNION型変換: union_value(i := ...) 等が含まれる
+        // UNION型変換: union_value(\"integer\" := ...) 等が含まれる
         assert!(
-            sql_str.contains("union_value(i :="),
-            "SQL should have union_value(i :=: {}",
+            sql_str.contains("union_value(\"integer\" :="),
+            "SQL should have union_value(\"integer\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(s :="),
-            "SQL should have union_value(s :=: {}",
+            sql_str.contains("union_value(\"string\" :="),
+            "SQL should have union_value(\"string\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(b :="),
-            "SQL should have union_value(b :=: {}",
+            sql_str.contains("union_value(\"boolean\" :="),
+            "SQL should have union_value(\"boolean\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(d :="),
-            "SQL should have union_value(d :=: {}",
+            sql_str.contains("union_value(\"double\" :="),
+            "SQL should have union_value(\"double\" :=: {}",
             sql_str
         );
         // struct_pack と list() でラップ

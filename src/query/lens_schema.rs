@@ -141,10 +141,7 @@ fn build_column_condition(
     let bin_op = to_bin_op(op);
 
     // 汎用ラベルカラムか？ (Basic タグの EAV カラム)
-    let is_eav_col = col == Col::LabelStr
-        || col == Col::LabelInt
-        || col == Col::LabelDouble
-        || col == Col::LabelBool;
+    let is_eav_col = crate::db::BiticalType::to_columns().contains(&col);
 
     // `Label::Literal`（quoted）は完全一致検索、それ以外の String は通常検索。
     // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
@@ -299,25 +296,6 @@ pub struct TagDescriptor {
     pub logical_type: LogicalType,
     pub logical_function: Option<Arc<dyn TagFunction>>,
     pub sys_id: Option<i64>,
-}
-
-impl TagDescriptor {
-    /// 論理型から物理型（BiticalType）への一方向マッピングを提供します。
-    pub fn logical_to_sql(lt: LogicalType) -> crate::db::BiticalType {
-        use crate::db::BiticalType;
-        match lt {
-            LogicalType::Integer => BiticalType::Integer,
-            LogicalType::Float => BiticalType::Double,
-            LogicalType::String => BiticalType::String,
-            LogicalType::Boolean => BiticalType::Boolean,
-            LogicalType::Any => BiticalType::String,
-        }
-    }
-
-    /// このタグの物理型（BiticalType）を返します。
-    pub fn sql_type(&self) -> crate::db::BiticalType {
-        Self::logical_to_sql(self.logical_type)
-    }
 }
 
 /// タグ知識の統合レジストリ
@@ -478,7 +456,7 @@ impl Lens {
                     sys_id,
                 },
                 LogicalRole::Basic => {
-                    let col = logical_type_to_col(q.logical_type());
+                    let col = q.logical_type().to_bitical().to_column();
                     TagDescriptor {
                         tag_type,
                         storage: StorageMapping::Basic {
@@ -600,17 +578,14 @@ impl Lens {
         };
 
         let from_fallback = || {
-            // Fallback: 物理カラム定義がない場合、汎用ラベルカラムから取得を試みる
-            [
-                SType::LabelInt,
-                SType::LabelStr,
-                SType::LabelBool,
-                SType::LabelDouble,
-            ]
-            .iter()
-            .find_map(|s| {
-                map.get(&s.name()).and_then(Bitical::from_scalar_db_value)
-            })
+            // Fallback: 物理カラム定義がない場合、汎用ラベルカラムから取得を試みる。
+            // label_str は全型の VARCHAR フォールバックを兼ねるため、
+            // 型付きカラムを先に評価する走査順を使う。
+            crate::db::BiticalType::to_columns_scan_order()
+                .iter()
+                .find_map(|s| {
+                    map.get(&s.name()).and_then(Bitical::from_scalar_db_value)
+                })
         };
 
         let value = self
@@ -655,16 +630,6 @@ pub fn to_bin_op(op: ComparisonOp) -> BinOper {
         BasicOp::Ge => BinOper::GreaterThanOrEqual,
         BasicOp::Lt => BinOper::SmallerThan,
         BasicOp::Le => BinOper::SmallerThanOrEqual,
-    }
-}
-
-pub(crate) fn logical_type_to_col(lt: LogicalType) -> Col {
-    use crate::db::BiticalType;
-    match TagDescriptor::logical_to_sql(lt) {
-        BiticalType::Integer => Col::LabelInt,
-        BiticalType::Double => Col::LabelDouble,
-        BiticalType::Boolean => Col::LabelBool,
-        _ => Col::LabelStr,
     }
 }
 
@@ -861,23 +826,18 @@ mod tests {
     }
 
     #[test]
-    fn test_logical_to_sql_mapping() {
-        assert_eq!(
-            TagDescriptor::logical_to_sql(LogicalType::Integer),
-            crate::db::BiticalType::Integer
-        );
-        assert_eq!(
-            TagDescriptor::logical_to_sql(LogicalType::Float),
-            crate::db::BiticalType::Double
-        );
-        assert_eq!(
-            TagDescriptor::logical_to_sql(LogicalType::String),
-            crate::db::BiticalType::String
-        );
-        assert_eq!(
-            TagDescriptor::logical_to_sql(LogicalType::Boolean),
-            crate::db::BiticalType::Boolean
-        );
+    fn test_decode_label_from_map_fallback_prefers_typed_columns() {
+        // oneview は全行に label_str（VARCHAR フォールバック）を設定するため、
+        // fallback 走査は型付きカラムを先に評価しなければならない
+        // （BiticalType::to_columns_scan_order と同じ順序）。
+        let lens = Lens::base_standard();
+        let tag = TagType::from("magic_tag_that_does_not_exist");
+        let map = duckdb::types::OrderedMap::from(vec![
+            (SType::LabelStr.name(), Value::Text("true".to_string())),
+            (SType::LabelBool.name(), Value::Boolean(true)),
+        ]);
+        let label = lens.decode_label_from_map(&tag, &map).unwrap();
+        assert_eq!(label.value(), Bitical::Boolean(true));
     }
 
     #[test]

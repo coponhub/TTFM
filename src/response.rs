@@ -45,13 +45,13 @@ pub struct RawTagRow {
     pub id: ItemId,
     pub item_kind: ItemKind,
     pub tag_type: String,
-    pub value: duckdb::types::Value,
+    pub value: Option<Bitical>,
     pub origin: String,
 }
 
 impl RawTagRow {
     pub fn from_row(r: &duckdb::Row) -> duckdb::Result<Self> {
-        use crate::db::Col;
+        use crate::db::{BiticalType, Col};
         use duckdb::types::Value;
         use sea_query::Iden;
 
@@ -61,22 +61,16 @@ impl RawTagRow {
             s
         };
 
-        let label_int: Option<i64> = r.get(col(Col::LabelInt).as_str())?;
-        let label_str: Option<String> = r.get(col(Col::LabelStr).as_str())?;
-        let label_double: Option<f64> =
-            r.get(col(Col::LabelDouble).as_str())?;
-        let label_bool: Option<bool> = r.get(col(Col::LabelBool).as_str())?;
-        let value = if let Some(i) = label_int {
-            Value::BigInt(i)
-        } else if let Some(s) = label_str {
-            Value::Text(s)
-        } else if let Some(b) = label_bool {
-            Value::Boolean(b)
-        } else if let Some(d) = label_double {
-            Value::Double(d)
-        } else {
-            Value::Null
-        };
+        // label_str は全型の VARCHAR フォールバックを兼ねるため、
+        // 型付きカラムが先に評価される走査順で最初の非 NULL を採用する。
+        let mut value = None;
+        for c in BiticalType::to_columns_scan_order() {
+            let v: Value = r.get(col(c).as_str())?;
+            if let Some(b) = Bitical::from_scalar_db_value(&v) {
+                value = Some(b);
+                break;
+            }
+        }
 
         Ok(Self {
             id: r.get(col(Col::ItemId).as_str())?,
@@ -98,7 +92,7 @@ impl RawTagRow {
             Value::Text(s) => s.clone(),
             _ => return None,
         };
-        let value = get("value").cloned().unwrap_or(Value::Null);
+        let value = get("value").cloned().and_then(Bitical::from_db_value);
         let origin = match get("origin") {
             Some(Value::Text(s)) => s.clone(),
             _ => "system".to_string(),
@@ -397,7 +391,8 @@ impl Item {
         let origin = row.origin.parse::<Origin>().unwrap_or(Origin::Builtin);
         // DB の実 NULL でも「値のない値タグ」としてそのまま記録する
         // （集約結果が空の場合の value: NULL 等）。表示は "NULL" に揃える。
-        let value = Bitical::from_db_value(row.value)
+        let value = row
+            .value
             .unwrap_or_else(|| Bitical::String("NULL".to_string()));
         let label = Label::resolve(TagType::from(row.tag_type), value);
         self.apply_tag(label, origin);

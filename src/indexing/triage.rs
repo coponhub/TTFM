@@ -180,25 +180,16 @@ impl<'a> ItemTriager<'a> {
         val: Option<Bitical>,
         name: &str,
     ) -> TriagePiece {
-        let (l_str, l_int, l_dbl, l_bool) = Bitical::to_eav_columns(val);
-
-        // 何らかの値があれば TagPiece を生成 (Null以外なら何かあるはず)
-        if l_str.is_none()
-            && l_int.is_none()
-            && l_dbl.is_none()
-            && l_bool.is_none()
-        {
-            return TriagePiece::None;
+        // 値が無ければタグ行を作らない。EAV カラムへの分解は書込境界
+        // （BaseTagMerger::ingest）まで遅延する。
+        match val {
+            Some(value) => TriagePiece::Tag(TagRow {
+                item_id: id,
+                tag_type: name.to_string(),
+                value,
+            }),
+            None => TriagePiece::None,
         }
-
-        TriagePiece::Tag(TagRow {
-            item_id: id,
-            tag_type: name.to_string(),
-            label_str: l_str,
-            label_int: l_int,
-            label_double: l_dbl,
-            label_bool: l_bool,
-        })
     }
 }
 
@@ -278,10 +269,7 @@ mod tests {
         acc = acc.collect(TriagePiece::Tag(TagRow {
             item_id: 123,
             tag_type: "ext".into(),
-            label_str: Some("rs".into()),
-            label_int: None,
-            label_double: None,
-            label_bool: None,
+            value: Bitical::String("rs".into()),
         }));
         let res = acc.finish();
         assert_eq!(res.entity_row.id, 123);

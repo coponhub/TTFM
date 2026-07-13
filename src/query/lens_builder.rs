@@ -134,13 +134,6 @@ pub(crate) fn count_types(
     Some(stmt)
 }
 
-/// 定義アイテムの name 絞り込み条件を DefinitionRef から解決し、
-/// ResolvedDefinition にまとめる。unquoted String は glob検索でそのまま
-/// candidates を使う。それ以外（quoted Literal 等）はクオート意味論を
-/// 維持するため等値の完全一致検索とし、candidates の中に同名の登録済み
-/// 候補（Stored/Settling(Plugin, _)）があればそれをそのまま使う
-/// （Stored/Volatile の区別を保つため）。無ければ、未登録・未使用の名前でも
-/// Volatile 1 行が合成されるよう、User 区画のプレースホルダを合成する。
 /// 完全一致検索用の (pattern, exact=true, candidates) を組み立てる。
 /// candidates に無ければ、未登録・未使用の名前でも合成できるよう
 /// User 区画の Volatile プレースホルダを合成する。

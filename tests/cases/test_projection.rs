@@ -408,13 +408,8 @@ fn test_projection_queries() {
     let note_id =
         tagging::add_item(&store, &registry, "note", "Category Test Note")
             .unwrap();
-    tagging::tag_item(
-        &store,
-        &registry,
-        &note_id.to_string(),
-        "category:important",
-    )
-    .unwrap();
+    super::tag_item_id(&store, &registry, note_id, "category:important")
+        .unwrap();
 
     let results =
         search::search(&store, &registry, "category:", Default::default())

@@ -40,7 +40,10 @@ fn bool_to_volatile_row(bool_expr: SimpleExpr) -> SimpleExpr {
     );
     let type_sp = CustomFunc::struct_pack_tag(
         Expr::val("bitical_type").into(),
-        CustomFunc::union_value(BiticalType::String, Expr::val("boolean")),
+        CustomFunc::union_value(
+            BiticalType::String,
+            Expr::val(BiticalType::Boolean.to_string()),
+        ),
         Expr::val("system").into(),
     );
     let value_sp = CustomFunc::struct_pack_tag(
@@ -231,7 +234,7 @@ mod tests {
         assert!(s.contains("tags"), "should have tags: {}", s);
         assert!(s.contains("tag_type"), "should have tag_type: {}", s);
         assert!(
-            s.contains("union_value(s :="),
+            s.contains("union_value(\"string\" :="),
             "should have string union arm: {}",
             s
         );
@@ -257,7 +260,7 @@ mod tests {
         assert!(s.contains("item_kind"), "should have item_kind: {}", s);
         assert!(s.contains("tags"), "should have tags: {}", s);
         assert!(
-            s.contains("union_value(s :="),
+            s.contains("union_value(\"string\" :="),
             "should have string union arm: {}",
             s
         );

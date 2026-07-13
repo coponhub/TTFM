@@ -44,14 +44,10 @@ pub enum TargetTable {
     DataTypes,
 }
 
-/// データベースのカラム定義。
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
-    /// カラム名（例: "filename"）
     pub name: String,
-    /// SQLのデータ型
     pub bitical_type: BiticalType,
-    /// 所属テーブル
     pub target_table: TargetTable,
 }
 
@@ -305,7 +301,6 @@ impl BiticalType {
         }
     }
 
-    /// カラムが保持する物理型を返す。
     pub fn from_col(col: Col) -> Self {
         match col {
             Col::LabelStr => BiticalType::String,
@@ -330,10 +325,21 @@ impl BiticalType {
             BiticalType::Integer | BiticalType::Uuid => None,
         }
     }
+
+    /// タグ値 UNION（`CustomFunc::union_type`）でこの型が収束するアーム。
+    /// アーム名は収束先の Display、SQL 型は Iden 綴り。Uuid は文字列表現のため
+    /// String アームに収束する。
+    pub(crate) fn union_arm(&self) -> BiticalType {
+        match self {
+            BiticalType::Uuid => BiticalType::String,
+            other => *other,
+        }
+    }
 }
 
 impl Bitical {
     /// duckdb から読み込んだ生の値を Bitical に変換します（読込境界）。
+    /// 書込側の対応は `impl ToSql for Bitical`（types.rs）。
     /// Union は再帰的に解き、List は先頭要素を採用する保険的措置、
     /// それ以外の未対応 variant は debug 文字列にフォールバックします。
     /// SQL NULL は None として表現します。
@@ -371,7 +377,6 @@ impl Bitical {
         }
     }
 
-    /// 値そのものを表す SQL 式に変換する。
     pub fn to_simple_expr(&self) -> SimpleExpr {
         match self {
             Bitical::String(s) => Expr::val(s.clone()).into(),
@@ -382,9 +387,20 @@ impl Bitical {
         }
     }
 
-    /// 書込先カラムと、そのカラムへ束縛する SQL 式のペアを返す。
     pub fn to_col_expr(&self) -> (Col, SimpleExpr) {
         (self.name().to_column(), self.to_simple_expr())
+    }
+
+    /// 書込先カラムと、そのカラムへ保存する形へ収束した値のペアを返す。
+    /// Uuid は label_uuid カラムが無いため LabelStr へ文字列として収束する
+    /// （物理カラム経路ではネイティブ UUID のまま保存されるので、この収束は
+    /// EAV ラベルカラム限定）。
+    pub fn to_col_value(&self) -> (Col, Bitical) {
+        let value = match self {
+            Bitical::Uuid(u) => Bitical::String(u.to_string()),
+            other => other.clone(),
+        };
+        (self.name().to_column(), value)
     }
 
     /// 列一致条件（GLOB/等価）を表す SQL 式を返す。`tag` が `SType::Label`
@@ -748,13 +764,39 @@ mod tests {
     }
 
     #[test]
+    fn test_to_col_value_routes_and_converges() {
+        assert_eq!(
+            Bitical::Integer(1).to_col_value(),
+            (Col::LabelInt, Bitical::Integer(1))
+        );
+        assert_eq!(
+            Bitical::String("a".into()).to_col_value(),
+            (Col::LabelStr, Bitical::String("a".into()))
+        );
+        assert_eq!(
+            Bitical::Double(1.5).to_col_value(),
+            (Col::LabelDouble, Bitical::Double(1.5))
+        );
+        assert_eq!(
+            Bitical::Boolean(true).to_col_value(),
+            (Col::LabelBool, Bitical::Boolean(true))
+        );
+        // Uuid は label_uuid カラムが無いため LabelStr へ文字列として収束
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            Bitical::Uuid(id).to_col_value(),
+            (Col::LabelStr, Bitical::String(id.to_string()))
+        );
+    }
+
+    #[test]
     fn test_union_value_varchar() {
         let expr =
             CustomFunc::union_value(BiticalType::String, Expr::val("hello"));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
-            sql.contains("union_value(s :="),
-            "should contain union_value(s :=: {}",
+            sql.contains("union_value(\"string\" :="),
+            "should contain union_value(\"string\" :=: {}",
             sql
         );
         assert!(sql.contains("'hello'"), "should contain value: {}", sql);
@@ -766,8 +808,8 @@ mod tests {
             CustomFunc::union_value(BiticalType::Boolean, Expr::val(true));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
-            sql.contains("union_value(b :="),
-            "should contain union_value(b :=: {}",
+            sql.contains("union_value(\"boolean\" :="),
+            "should contain union_value(\"boolean\" :=: {}",
             sql
         );
     }
@@ -778,8 +820,8 @@ mod tests {
             CustomFunc::union_value(BiticalType::Integer, Expr::val(42i64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
-            sql.contains("union_value(i :="),
-            "should contain union_value(i :=: {}",
+            sql.contains("union_value(\"integer\" :="),
+            "should contain union_value(\"integer\" :=: {}",
             sql
         );
         assert!(sql.contains("42"), "should contain 42: {}", sql);
@@ -791,9 +833,30 @@ mod tests {
             CustomFunc::union_value(BiticalType::Double, Expr::val(3.14f64));
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
-            sql.contains("union_value(d :="),
-            "should contain union_value(d :=: {}",
+            sql.contains("union_value(\"double\" :="),
+            "should contain union_value(\"double\" :=: {}",
             sql
+        );
+    }
+
+    #[test]
+    fn test_representative_union_type_spelling() {
+        // アーム名は BiticalType の Display（予約語対策で引用符付き）、順序は宣言順
+        assert_eq!(
+            CustomFunc::representative_union_type(),
+            "UNION(\"string\" VARCHAR, \"integer\" BIGINT, \
+             \"double\" DOUBLE, \"boolean\" BOOLEAN, \"uuid\" UUID)"
+        );
+    }
+
+    #[test]
+    fn test_union_type_spelling() {
+        // アーム名は BiticalType の Display（予約語対策で引用符付き）、
+        // 順序は宣言順（Uuid は string に収束）
+        assert_eq!(
+            CustomFunc::union_type(),
+            "UNION(\"string\" VARCHAR, \"integer\" BIGINT, \
+             \"double\" DOUBLE, \"boolean\" BOOLEAN)"
         );
     }
 
@@ -829,31 +892,38 @@ mod tests {
 
     #[test]
     fn test_eav_union_value_generates_case_when() {
-        let expr = CustomFunc::eav_union_value(&[
-            (Col::LabelInt, BiticalType::Integer),
-            (Col::LabelStr, BiticalType::String),
-            (Col::LabelBool, BiticalType::Boolean),
-            (Col::LabelDouble, BiticalType::Double),
-        ]);
+        let expr = CustomFunc::eav_union_value();
         let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(sql.contains("CASE"), "should have CASE: {}", sql);
+        // CASE アームは走査順（BiticalType::to_columns_scan_order）で並ぶ
+        let positions: Vec<usize> = BiticalType::to_columns_scan_order()
+            .map(|c| {
+                sql.find(&c.name()).unwrap_or_else(|| {
+                    panic!("arm for {} not found: {sql}", c.name())
+                })
+            })
+            .into();
         assert!(
-            sql.contains("union_value(i :="),
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "arms must follow scan order: {sql}"
+        );
+        assert!(
+            sql.contains("union_value(\"integer\" :="),
             "should have int arm: {}",
             sql
         );
         assert!(
-            sql.contains("union_value(s :="),
+            sql.contains("union_value(\"string\" :="),
             "should have str arm: {}",
             sql
         );
         assert!(
-            sql.contains("union_value(b :="),
+            sql.contains("union_value(\"boolean\" :="),
             "should have bool arm: {}",
             sql
         );
         assert!(
-            sql.contains("union_value(d :="),
+            sql.contains("union_value(\"double\" :="),
             "should have double arm: {}",
             sql
         );

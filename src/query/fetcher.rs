@@ -130,11 +130,11 @@ impl<'a> Fetcher<'a> {
 
     /// DuckDB の Row から Item を構築します（通常アイテム用）。
     fn decode_item_from_row(&self, row: &duckdb::Row) -> duckdb::Result<Item> {
-        use crate::types::{Bitical, Label};
+        use crate::types::Label;
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
             if tag_row.tag_type == "name" {
-                if let Some(bitical) = Bitical::from_db_value(tag_row.value) {
+                if let Some(bitical) = tag_row.value {
                     let s = bitical.as_display_name();
                     let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
@@ -202,7 +202,7 @@ impl<'a> Fetcher<'a> {
             if let Some(origin) = raw_tags
                 .iter()
                 .find(|t| t.tag_type == "origin")
-                .and_then(|t| match Bitical::from_db_value(t.value.clone()) {
+                .and_then(|t| match &t.value {
                     Some(Bitical::String(s)) => {
                         s.parse::<crate::types::Origin>().ok()
                     }
@@ -218,8 +218,7 @@ impl<'a> Fetcher<'a> {
                 // settle() 済みで役目を終えた内部信号。res.tags には出さない。
                 "origin" => {}
                 "item_count" => {
-                    if let Some(bitical) = Bitical::from_db_value(tag_row.value)
-                    {
+                    if let Some(bitical) = tag_row.value {
                         res.item_count = Some(Label::resolve(
                             TagType::from("item_count"),
                             bitical,
@@ -229,9 +228,7 @@ impl<'a> Fetcher<'a> {
                 "name" => {
                     // Lv.1 互換: representative が空の場合のみセット
                     if res.representative.is_empty() {
-                        if let Some(bitical) =
-                            Bitical::from_db_value(tag_row.value.clone())
-                        {
+                        if let Some(bitical) = tag_row.value.clone() {
                             let s = bitical.as_display_name();
                             let s = s
                                 .parse::<f64>()
@@ -458,6 +455,36 @@ mod tests {
         assert_eq!(results.len(), 2); // extension + is_dir
         assert!(results.iter().any(|r| r.tag_type == "extension"));
         assert!(results.iter().any(|r| r.tag_type == "is_dir"));
+    }
+
+    #[test]
+    fn test_raw_tag_row_from_row_prefers_typed_column_over_label_str() {
+        // oneview は全行に label_str（VARCHAR フォールバック）を設定するため、
+        // 型付きカラム（label_bool 等）を優先して走査しなければならない。
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE oneview (
+            item_id BIGINT, rank BIGINT, item_kind TEXT, origin TEXT, type TEXT,
+            label_str TEXT, label_int BIGINT, label_double DOUBLE, label_bool BOOLEAN
+        )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO oneview VALUES
+            (1, 10, 'file', 'user', 'is_dir', 'false', NULL, NULL, FALSE)",
+            [],
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM oneview").unwrap();
+        let rows: Vec<RawTagRow> = stmt
+            .query_map([], |row| RawTagRow::from_row(row))
+            .unwrap()
+            .collect::<duckdb::Result<_>>()
+            .unwrap();
+
+        assert_eq!(rows[0].value, Some(crate::types::Bitical::Boolean(false)));
     }
 
     #[test]

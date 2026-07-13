@@ -214,7 +214,7 @@ pub(super) fn build_multi_key_labels_sql(
         .and_where(Expr::col(Col::ItemId).in_subquery(ids_sql))
         .group_by_col(Col::ItemId);
 
-    let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+    let union_type = CustomFunc::representative_union_type();
     let repr_expr = Expr::cust(format!(
         "list_value({})",
         (0..keys.len())

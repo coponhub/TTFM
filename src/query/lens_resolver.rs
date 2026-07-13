@@ -1235,7 +1235,10 @@ fn resolve_type_ref_operand(
     tt: &TagType,
 ) -> Result<ResolvedOperand> {
     let (storage, bitical_type) = match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type()),
+        Some(desc) => (
+            desc.storage.clone(),
+            desc.logical_type.to_bitical(),
+        ),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
@@ -1334,7 +1337,10 @@ pub(crate) fn resolve_query_node(
         QueryNode::TypedTag(tt) => {
             let tag_type = tt.label.tag_type();
             let (storage, bitical_type) = match lens.look_up(&tag_type) {
-                Some(desc) => (desc.storage.clone(), desc.sql_type()),
+                Some(desc) => (
+                    desc.storage.clone(),
+                    desc.logical_type.to_bitical(),
+                ),
                 None => (
                     StorageMapping::Basic {
                         column: Col::LabelStr,
@@ -1359,7 +1365,7 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Match {
                 tag_type,
                 storage: desc.storage.clone(),
-                bitical_type: desc.sql_type(),
+                bitical_type: desc.logical_type.to_bitical(),
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
             })
@@ -2601,7 +2607,10 @@ fn get_storage_and_type(
     tt: &TagType,
 ) -> (StorageMapping, BiticalType) {
     match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type()),
+        Some(desc) => (
+            desc.storage.clone(),
+            desc.logical_type.to_bitical(),
+        ),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
@@ -2745,9 +2754,11 @@ impl Resolver {
                     "item_id" => ResolvedOrderKey::Column(Col::ItemId),
                     k => ResolvedOrderKey::Tag {
                         tag_type: k.to_string(),
-                        col: crate::query::lens_schema::logical_type_to_col(
-                            self.lens.get_logical_type(&o.key),
-                        ),
+                        col: self
+                            .lens
+                            .get_logical_type(&o.key)
+                            .to_bitical()
+                            .to_column(),
                     },
                 };
                 ResolvedOrder { key, desc: o.desc }

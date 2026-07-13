@@ -35,7 +35,7 @@ pub(super) struct QueryTestCase {
     >,
     /// 宣言的タグ指定: (case_dir 相対パス, タグ列) のリスト。
     /// 全ケース分をまとめて1回の write で適用するため、modify フックでの
-    /// tag_item 逐次呼び出しより大幅に速い。単純なタグ付与はこちらを使う。
+    /// tag_item_id 逐次呼び出しより大幅に速い。単純なタグ付与はこちらを使う。
     pub tags: &'static [(&'static str, &'static str)],
     /// クエリを実行前に加工する関数。デフォルトは `default_scope`。
     /// outer-agg クエリ等、特殊なスコープ付与が必要なケースで上書きする。
@@ -250,6 +250,26 @@ pub(super) fn apply_tags_batch(
         )?);
     }
     ttfm::edit::write::write_and_refresh(store, registry, actions)?;
+    Ok(())
+}
+
+/// item_id 指定で 1 タグを付与する簡易ラッパー（旧 tagging::tag_item 由来の
+/// テスト移行用）。複数タグをまとめて付与するなら `apply_tags_batch` を使う。
+pub(super) fn tag_item_id(
+    store: &ttfm::db::Store,
+    registry: &ttfm::tag::TagRegistry,
+    item_id: i64,
+    tag_str: &str,
+) -> anyhow::Result<()> {
+    ttfm::edit::edit(
+        store,
+        registry,
+        &format!("item_id:{item_id}"),
+        Some(tag_str),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions { yes: true },
+    )?;
     Ok(())
 }
 

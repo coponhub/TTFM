@@ -48,9 +48,9 @@ fn test_build_optimized_merged_projection_sql_logical() {
     let expected = normalize_sql(
         r#"
         SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
-        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)))) IN (
+        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID)))) IN (
             SELECT "group" FROM (
-                SELECT list_value(CAST("proj"."label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID))) AS "group"
+                SELECT list_value(CAST("proj"."label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID))) AS "group"
                 FROM "oneview" AS "proj"
                 INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'
@@ -88,9 +88,9 @@ fn test_build_optimized_merged_projection_sql_arithmetic() {
     let expected = normalize_sql(
         r#"
         SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
-        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)))) IN (
+        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID)))) IN (
             SELECT "group" FROM (
-                SELECT list_value(CAST("proj"."label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID))) AS "group"
+                SELECT list_value(CAST("proj"."label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID))) AS "group"
                 FROM "oneview" AS "proj"
                 INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'
@@ -132,9 +132,9 @@ fn test_build_optimized_merged_projection_sql_comparison() {
     let expected = normalize_sql(
         r#"
         SELECT DISTINCT "item_id", "rank", "item_kind" FROM "oneview"
-        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)))) IN (
+        WHERE "type" = 'parentdir' AND (list_value(CAST("label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID)))) IN (
             SELECT "group" FROM (
-                SELECT list_value(CAST("proj"."label_str" AS UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID))) AS "group"
+                SELECT list_value(CAST("proj"."label_str" AS UNION("string" VARCHAR, "integer" BIGINT, "double" DOUBLE, "boolean" BOOLEAN, "uuid" UUID))) AS "group"
                 FROM "oneview" AS "proj"
                 INNER JOIN "oneview" AS "view" ON "proj"."item_id" = "view"."item_id"
                 WHERE "proj"."type" = 'parentdir'

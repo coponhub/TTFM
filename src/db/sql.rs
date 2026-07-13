@@ -239,22 +239,40 @@ impl CustomFunc {
         sea_query::Expr::cust(sql)
     }
 
+    /// タグ値の UNION 型。アーム名は `BiticalType::union_arm`（収束先）の Display、
+    /// 型名は Iden 綴り、順序は BiticalType の宣言順から導出します。
+    /// 同一アームに収束する型は最初の1つだけ列挙します。
+    pub fn union_type() -> String {
+        use strum::IntoEnumIterator;
+        let mut seen = Vec::new();
+        let arms: Vec<String> = BiticalType::iter()
+            .filter_map(|t| {
+                let arm = t.union_arm();
+                if seen.contains(&arm) {
+                    return None;
+                }
+                seen.push(arm);
+                Some(format!(
+                    "\"{}\" {}",
+                    arm,
+                    sea_query::Iden::to_string(&arm)
+                ))
+            })
+            .collect();
+        format!("UNION({})", arms.join(", "))
+    }
+
     /// union_value(arm := expr)::UNION(...) — BiticalType に対応する UNION アームを生成し、
     /// 完全な UNION 型にキャストします。CASE 式の型統一に必要です。
     pub fn union_value<E: Into<sea_query::SimpleExpr>>(
         bitical_type: BiticalType,
         expr: E,
     ) -> sea_query::SimpleExpr {
-        let arm = match bitical_type {
-            BiticalType::Integer => "i",
-            BiticalType::Double => "d",
-            BiticalType::Boolean => "b",
-            BiticalType::String | BiticalType::Uuid => "s",
-        };
         sea_query::Expr::cust_with_exprs(
             &format!(
-                "union_value({arm} := $1)\
-                 ::UNION(i BIGINT, d DOUBLE, b BOOLEAN, s VARCHAR)"
+                "union_value(\"{}\" := $1)::{}",
+                bitical_type.union_arm(),
+                Self::union_type()
             ),
             [expr.into()],
         )
@@ -281,14 +299,25 @@ impl CustomFunc {
             .into()
     }
 
-    /// スカラー値を代表値リスト型 LIST(UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)) に変換します。
+    /// 代表値リスト要素の UNION 型。全 BiticalType が独立アームを持ち、
+    /// アーム名は Display、型名は Iden 綴り、順序は宣言順から導出します。
+    pub fn representative_union_type() -> String {
+        use strum::IntoEnumIterator;
+        let arms: Vec<String> = BiticalType::iter()
+            .map(|t| format!("\"{}\" {}", t, sea_query::Iden::to_string(&t)))
+            .collect();
+        format!("UNION({})", arms.join(", "))
+    }
+
+    /// スカラー値を代表値リスト型 LIST(UNION(...)) に変換します。
     pub fn as_representative<E: Into<sea_query::SimpleExpr>>(
         expr: E,
     ) -> sea_query::SimpleExpr {
-        let union_type =
-            "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
         sea_query::Expr::cust_with_exprs(
-            &format!("list_value(CAST($1 AS {}))", union_type),
+            &format!(
+                "list_value(CAST($1 AS {}))",
+                Self::representative_union_type()
+            ),
             [expr.into()],
         )
     }
@@ -317,13 +346,15 @@ impl CustomFunc {
             .into()
     }
 
-    /// EAV列の (Col, BiticalType) ペア配列から CASE WHEN IS NOT NULL THEN union_value(...) 式を生成します。
-    pub fn eav_union_value(
-        arms: &[(Col, BiticalType)],
-    ) -> sea_query::SimpleExpr {
-        let Some(((first_col, first_type), rest)) = arms.split_first() else {
-            return sea_query::Expr::val(Option::<String>::None).into();
-        };
+    /// EAV の型付きラベルカラムを走査し、非 NULL のカラムを対応する UNION アーム
+    /// に変換する CASE 式を生成します。カラムと型の対応は
+    /// `BiticalType::from_col`、走査順は `BiticalType::to_columns_scan_order`
+    /// から導出します。
+    pub fn eav_union_value() -> sea_query::SimpleExpr {
+        let arms = BiticalType::to_columns_scan_order()
+            .map(|c| (c, BiticalType::from_col(c)));
+        let ((first_col, first_type), rest) =
+            arms.split_first().expect("EAV columns are non-empty");
         let init = sea_query::Expr::case(
             sea_query::Expr::col(*first_col).is_not_null(),
             Self::union_value(*first_type, sea_query::Expr::col(*first_col)),

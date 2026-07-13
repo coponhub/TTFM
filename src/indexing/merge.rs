@@ -15,8 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, Store, TargetTable, Tbl};
-// use crate::db::BiticalType;
+use crate::db::{BiticalType, Col, Store, TargetTable, Tbl};
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::tag::TagRegistry;
 use crate::types::{Bitical, ItemId};
@@ -250,14 +249,16 @@ impl<'a> BaseTagMerger<'a> {
 
         for res in results {
             for t in &res.tags {
-                app.append_row([
-                    &t.item_id as &dyn ToSql,
-                    &t.tag_type,
-                    &t.label_str,
-                    &t.label_int,
-                    &t.label_double,
-                    &t.label_bool,
-                ])?;
+                // EAV 分解は書込境界のここで行う。列順はテーブル定義と同じ
+                // BiticalType::to_columns に追従し、値は書込先カラムのみ、
+                // 他カラムは NULL。
+                let (stored_col, stored) = t.value.to_col_value();
+                let none = None::<Bitical>;
+                let mut row: Vec<&dyn ToSql> = vec![&t.item_id, &t.tag_type];
+                for col in BiticalType::to_columns() {
+                    row.push(if col == stored_col { &stored } else { &none });
+                }
+                app.append_row(row.as_slice())?;
             }
         }
         Ok(self)
