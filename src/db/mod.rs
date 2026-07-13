@@ -317,6 +317,19 @@ impl BiticalType {
             _ => BiticalType::String,
         }
     }
+
+    /// この型が DuckDB の `typeof()` として返す型名。Integer/Uuid は None
+    /// （`SUM(BIGINT)` が `HUGEINT` を返すなど整数系は typeof 名を固定できない
+    /// ため、既定枝として扱われる）。`REAL`/`FLOAT` 型のカラムはこのプロジェクトの
+    /// スキーマに存在せず、集約も DOUBLE に昇格するため `FLOAT` は考慮しない。
+    pub(crate) fn to_typeofstr(&self) -> Option<&'static str> {
+        match self {
+            BiticalType::Boolean => Some("BOOLEAN"),
+            BiticalType::Double => Some("DOUBLE"),
+            BiticalType::String => Some("VARCHAR"),
+            BiticalType::Integer | BiticalType::Uuid => None,
+        }
+    }
 }
 
 impl Bitical {

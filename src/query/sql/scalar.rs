@@ -24,14 +24,12 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_unit_aware_expr, needs_nest_context,
 };
-use crate::db::{
-    BiticalType, Col, CustomFunc, Pronoun::*, QueryResultCol, Src,
-};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, QueryResultCol, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
-use sea_query::{Expr, Query, SelectStatement, SimpleExpr};
+use sea_query::{CaseStatement, Expr, Query, SelectStatement, SimpleExpr};
 
 pub(super) fn build_resolved_match_sql(
     src: &Src,
@@ -143,16 +141,35 @@ pub(super) fn build_resolved_scalar_sql(
     scalar_to_volatile_row(inner)
 }
 
-fn typeof_eq(sv: &SimpleExpr, type_str: &str) -> SimpleExpr {
-    Expr::expr(CustomFunc::type_of(sv.clone()))
-        .eq(Expr::val(type_str.to_owned()))
-}
-
 fn cast_union(sv: &SimpleExpr, bitical_type: BiticalType) -> SimpleExpr {
     CustomFunc::union_value(
         bitical_type,
         Expr::expr(sv.clone()).cast_as(bitical_type),
     )
+}
+
+fn typeof_eq(sv: &SimpleExpr, type_str: &str) -> SimpleExpr {
+    Expr::expr(CustomFunc::type_of(sv.clone()))
+        .eq(Expr::val(type_str.to_owned()))
+}
+
+/// `typeof(sv)` の値によって分岐する SQL 式を、typeof 文字列を持つ `BiticalType`
+/// 全種について組み立てる。候補のいずれにも一致しない場合は `default` を返す
+/// （`SUM(BIGINT)` が `HUGEINT` を返すなど、整数系は typeof 名を固定できないため、
+/// Integer 相当がこの既定枝に落ちる想定）。`arm` は各候補の `BiticalType` から
+/// 分岐値を組み立てるコールバック。
+fn to_expr<F>(sv: &SimpleExpr, default: SimpleExpr, mut arm: F) -> SimpleExpr
+where
+    F: FnMut(BiticalType) -> SimpleExpr,
+{
+    use strum::IntoEnumIterator;
+    let mut case = CaseStatement::new();
+    for bt in BiticalType::iter() {
+        if let Some(typeof_str) = bt.to_typeofstr() {
+            case = case.case(typeof_eq(sv, typeof_str), arm(bt));
+        }
+    }
+    case.finally(default).into()
 }
 
 fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
@@ -166,41 +183,34 @@ fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
     .into();
     let name_expr: SimpleExpr =
         Expr::case(Expr::expr(sv.clone()).is_null(), Expr::val("NULL"))
-            .case(typeof_eq(&sv, "BOOLEAN"), bool_name)
+            .case(
+                typeof_eq(
+                    &sv,
+                    BiticalType::Boolean
+                        .to_typeofstr()
+                        .expect("Boolean has a typeof string"),
+                ),
+                bool_name,
+            )
             .finally(Expr::expr(sv.clone()).cast_as(BiticalType::String))
             .into();
 
-    // NULL → 'numeric' (value is NULL regardless of declared type)
-    // BOOLEAN → boolean, DOUBLE/FLOAT → double, VARCHAR → string, ELSE → integer
-    // (SUM(BIGINT) returns HUGEINT in DuckDB, so 'BIGINT' cannot be used as a fixed check;
-    // VARCHAR and float types are the only named exclusions; everything else falls to integer)
+    // NULL → 'numeric' (value is NULL regardless of declared type); typeof 文字列 →
+    // BiticalType の判定・分岐の組み立ては to_expr に集約している
     let type_expr: SimpleExpr =
         Expr::case(Expr::expr(sv.clone()).is_null(), Expr::val("numeric"))
-            .case(typeof_eq(&sv, "BOOLEAN"), Expr::val("boolean"))
-            .case(typeof_eq(&sv, "DOUBLE"), Expr::val("double"))
-            .case(typeof_eq(&sv, "FLOAT"), Expr::val("double"))
-            .case(typeof_eq(&sv, "VARCHAR"), Expr::val("string"))
-            .finally(Expr::val("integer"))
+            .finally(to_expr(
+                &sv,
+                Expr::val(BiticalType::Integer.to_string()).into(),
+                |bt| Expr::val(bt.to_string()).into(),
+            ))
             .into();
 
-    let value_expr: SimpleExpr = Expr::case(
-        typeof_eq(&sv, "BOOLEAN"),
-        cast_union(&sv, BiticalType::Boolean),
-    )
-    .case(
-        typeof_eq(&sv, "DOUBLE"),
-        cast_union(&sv, BiticalType::Double),
-    )
-    .case(
-        typeof_eq(&sv, "FLOAT"),
-        cast_union(&sv, BiticalType::Double),
-    )
-    .case(
-        typeof_eq(&sv, "VARCHAR"),
-        cast_union(&sv, BiticalType::String),
-    )
-    .finally(cast_union(&sv, BiticalType::Integer))
-    .into();
+    let value_expr: SimpleExpr = to_expr(
+        &sv,
+        cast_union(&sv, BiticalType::Integer),
+        |bt| cast_union(&sv, bt),
+    );
 
     let tags = CustomFunc::list_value([
         CustomFunc::struct_pack_tag(

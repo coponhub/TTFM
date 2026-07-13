@@ -404,7 +404,7 @@ impl ToSql for FileTimestamp {
 // BiticalはInt, Float, String, Boolean等の、
 // ハードウェア・プロセッサレベルのプリミティブな型を指す。
 // アイテムの持つ値はこれらに収束する。
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum::Display)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, strum::Display, strum::EnumIter)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub enum BiticalType {
