@@ -423,12 +423,7 @@ impl Bitical {
                 } else {
                     tag
                 };
-                let val_str = if s.starts_with('^') {
-                    format!("{}*", &s[1..])
-                } else {
-                    s.clone()
-                };
-                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(val_str))
+                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(s.clone()))
             }
             Bitical::Boolean(b) => Expr::col(Col::LabelBool).eq(*b),
             Bitical::Double(d) => Expr::col(Col::LabelDouble).eq(*d),
@@ -786,6 +781,26 @@ mod tests {
         assert_eq!(
             Bitical::Uuid(id).to_col_value(),
             (Col::LabelStr, Bitical::String(id.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_to_column_match_expr_caret_is_literal_not_prefix_glob() {
+        // `^` は不一致(Ne)演算子であり、前方一致 glob への変換は仕様に無いバグ
+        // （事前ステップ1）。GLOB 演算子自体は維持されるが、値は `^foo` のまま。
+        let expr =
+            Bitical::String("^foo".into()).to_column_match_expr(Col::Label);
+        let sql =
+            Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("'^foo'"),
+            "value should stay literal '^foo': {}",
+            sql
+        );
+        assert!(
+            !sql.contains("'foo*'"),
+            "must not convert to prefix glob 'foo*': {}",
+            sql
         );
     }
 

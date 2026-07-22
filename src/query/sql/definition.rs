@@ -202,14 +202,6 @@ fn build_definition_rows(
     q
 }
 
-/// `^prefix` 形式を前方一致 glob に変換する（build_column_match_sql と同じ規則）。
-fn glob_pattern(s: &str) -> String {
-    match s.strip_prefix('^') {
-        Some(rest) => format!("{}*", rest),
-        None => s.to_string(),
-    }
-}
-
 /// 定義アイテムの name 列に対する絞り込み条件を返す。
 /// glob検索（unquoted）は glob パターンマッチ、完全一致検索（quoted literal）は
 /// クオート意味論を維持するため等値比較。
@@ -218,7 +210,7 @@ fn name_condition(pattern: &str, exact: bool) -> sea_query::SimpleExpr {
         Expr::col(Col::Name).eq(pattern)
     } else {
         Expr::col(Col::Name)
-            .binary(BinOper::Custom("GLOB"), Expr::val(glob_pattern(pattern)))
+            .binary(BinOper::Custom("GLOB"), Expr::val(pattern))
     }
 }
 
@@ -453,4 +445,30 @@ pub(crate) fn build_add_definitions_sql(
         q.offset(offset as u64);
     }
     q
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_name_condition_caret_is_literal_not_prefix_glob() {
+        // `^` は不一致(Ne)演算子であり、前方一致 glob への変換は仕様に無いバグ
+        // （事前ステップ1）。glob_pattern は恒等になったため関数ごと削除し、
+        // name_condition に直接インライン化した（値は `^foo` のまま GLOB へ渡る）。
+        let expr = name_condition("^foo", false);
+        let sql = sea_query::Query::select()
+            .expr(expr)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains("'^foo'"),
+            "value should stay literal '^foo': {}",
+            sql
+        );
+        assert!(
+            !sql.contains("'foo*'"),
+            "must not convert to prefix glob 'foo*': {}",
+            sql
+        );
+    }
 }

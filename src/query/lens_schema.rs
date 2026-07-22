@@ -214,9 +214,7 @@ pub(crate) fn check_string_match(
         return None;
     }
 
-    let (val_str, effective_op) = if val.starts_with('^') {
-        (format!("{}*", &val[1..]), BinOper::Custom("GLOB"))
-    } else if val.contains('*') || val.contains('?') || val.contains('[') {
+    let (val_str, effective_op) = if val.contains('*') || val.contains('?') || val.contains('[') {
         (val.to_string(), BinOper::Custom("GLOB"))
     } else {
         (val.to_string(), op)
@@ -912,6 +910,32 @@ mod tests {
         assert_eq!(
             lens.get_logical_type(&TagType::Base(SType::IsDir)),
             LogicalType::Boolean
+        );
+    }
+
+    #[test]
+    fn test_check_string_match_caret_is_literal_not_prefix_glob() {
+        // `^` は QUERY.md では不一致(Ne)演算子であり、前方一致 glob への変換は
+        // 仕様に存在しないバグ（事前ステップ1）。値はそのまま、演算子も元のまま。
+        let expr = check_string_match(
+            Col::LabelStr,
+            BinOper::Equal,
+            "^foo",
+            crate::db::BiticalType::String,
+        )
+        .unwrap();
+        let sql = sea_query::Query::select()
+            .expr(expr)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains("'^foo'"),
+            "value should stay literal '^foo': {}",
+            sql
+        );
+        assert!(
+            !sql.contains("GLOB"),
+            "must not convert to GLOB prefix match: {}",
+            sql
         );
     }
 }

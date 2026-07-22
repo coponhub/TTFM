@@ -113,7 +113,7 @@ pub enum EditStrategy {
 | `path` / `filename` / `parentdir` / `extension` / `stem` | `Relocate` |
 | `mtime` | `SetFileAttr` (Windows/Unix 両対応) |
 | `rank` | `Replace` (カラム書き込みは Lens が吸収) |
-| `name` | `Replace` (単一値) |
+| `name` | `Replace` |
 | `item_kind` / `content` | `ModifyInjection` (ユーザー不可。Volatile 登録時に `inject()` で内部注入) |
 | `item_id` | `RemoveOnly` (付与不可。`untag <Q> item_id:` による item 削除 §5.1 のみ許可) |
 | `size` / `hash` / `file_id` / `origin` / `is_dir` | Forbidden |
@@ -122,7 +122,7 @@ pub enum EditStrategy {
 
 ## 4. 編集パイプライン (`edit`)
 
-タグ編集は `edit` をエントリポイントとし、検索・キャプチャ束縛・計画・確認・適用を束ねる
+タグ編集は `edit` をエントリポイントとし、パース・検索・キャプチャ束縛・計画・確認・適用を束ねる
 一連のパイプラインで処理される。対象アイテムの解決には `search` を再利用し (§1.1)、
 最終的な永続化は `write` (第5章)、実ファイル操作は `fs_operate` (第7章) が担う。
 パイプラインは物理 parquet を直接操作せず、oneview と Lens の抽象レイヤー上で動作する (第5章)。
@@ -139,32 +139,16 @@ pub enum TagOp {
     Replace(Label),  // 単値。同一 type が複数あれば confirm が1つに畳む
 }
 
-pub fn search(store, registry, cache, query, options) -> Result<SearchResponse>;
-  // 読み出し (既存)
-pub fn search_and_apply_captures(store, registry, search_query: SearchQuery, edit_query: EditQuery) -> Result<Vec<(Item, EditQuery)>>;
-  // 検索 + キャプチャ束縛: search を実行し、{n} を各アイテムのタグ値で展開した具体的 EditQuery を返す (§8)
-pub fn plan(item_edits: Vec<(Item, EditQuery)>, registry) -> Result<(Vec<(Item, EditQuery)>, Vec<WriteAction>)>;
-  // planning: item_edits を strategy で分割し fs 操作列と WriteAction 列を構築する純関数。
-  // 単値タグに複数候補が来た場合 (§8.2) もエラーにせず Replace を複数積み、解決は confirm に委ねる
-pub fn edit(store, registry, search_query: SearchQuery, edit_query: EditQuery, options: WriteOptions) -> Result<EditResponse>;
-  // 編集エントリポイント: search_and_apply_captures → plan → confirm → fs_operate_all + write を束ねる
-pub fn fs_operate(fs_ops: Vec<(Item, EditQuery)>, registry) -> Result<()>;
-  // fs 操作担当: Relocate + SetFileAttr を実行しインデクサーへ通知する
-pub enum QueryType { Tag, Untag }
-pub fn modify(item: &Item, query: &str, query_type: QueryType, registry) -> Result<Vec<WriteAction>>;
-  // WriteAction の構築 (EditStrategy のコンパイラ, §5.3)。{n} 解決済みの具体文字列を受け取る純関数。
-  // plan が per-item で呼び出す内部ヘルパー。内部で parse を呼んでから dispatch する。
-  // TagCondition の評価は plan の責務。modify は無条件の TagQuery のみ受け取る。
-pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) -> Result<WriteResponse>;
-  // DB への書き込み。WriteAction を Lens 経由で永続化する実行器
+pub enum QueryType { Tag, Untag }  // EditQuery (Tag) / TagQuery (Untag) の二方向
 ```
 
-編集は **`edit` → `search_and_apply_captures` → `plan` → confirm → (`fs_operate` + `write`)** の流れで処理される。
-`search_and_apply_captures` が検索とキャプチャ束縛を一括で行い、`{n}` を解決済みの per-item な `(Item, EditQuery)` を返す。
-`plan` がそれを strategy で fs/db に分割し、fs 操作列と全 WriteAction を構築する。**`modify` は `plan` の内部から per-item で呼ばれる**。confirm はここで全件を把握してから表示できる。
-`modify` は `{n}` を含まない具体文字列を受け取り、内部でパースして strategy をディスパッチし Add/Delete を組み立てる純関数。
-`write` は全 WriteAction を一括で受け取り DB に書き込む。
-`modify` は loaded Item を主に対象 item の特定に使い、**現値の参照には依存しない** (Replace も旧値不要、後述)。
+編集は **`edit` → `parse` → `search_and_apply_captures` → `plan` → confirm → (`fs_operate` + `write`)** の流れで処理される。
+- `parse` は EditQuery / TagQuery のテキストを構造化する。解釈はここで完結し、以降の工程は再パースしない。
+- `search_and_apply_captures` は検索と `{n}` の束縛を行い、item ごとの EditQuery を返す (§8)。
+- `plan` は strategy で fs/db に分割し、`modify` を per-item で呼んで全 WriteAction を構築する。
+- `modify` は EditQuery から Add/Delete を組み立てる純関数 (§5.3)。**現値の参照には依存しない** (Replace も旧値不要、後述)。
+- confirm は全件を把握して表示し、Replace の競合を解決する (§8.2)。
+- `fs_operate` は実ファイル操作とインデクサー通知、`write` は Lens 経由の DB 永続化を担う。
 `modify` は `TagCondition` を持たず常に純関数。`<TagCondition>` が指定された場合は
 `plan` が `Store` を使って対象エントリの `tagged_at` 等を取得・評価し、`modify` の呼び方を制御する。
 - `TypedTag` 指定 (`project:X`) の場合: 条件を満たすエントリがなければ `modify` を呼ばない（スキップ）。
@@ -179,15 +163,13 @@ pub fn write(store, registry, actions: Vec<WriteAction>, options: WriteOptions) 
 `modify` は `Relocate` / `SetFileAttr` を受け取った場合はエラーにする (`plan` がこれらを `fs_operate` 側に振り分けた後に呼ぶ前提のため、受け取ること自体が `plan` の実装バグを示す)。
 
 #### EditQuery / TagQuery の構文とパース
-`query: &str` の構文は EditQuery (`QueryType::Tag`) と TagQuery (`QueryType::Untag`) で共通の制限付き TTQL サブセットを使う。
+EditQuery (`QueryType::Tag`) と TagQuery (`QueryType::Untag`) のテキストは、共通の制限付き TTQL サブセットを使う。
 
 - `|` とスペース区切りは**同義**（「列挙された全要素を処理する」和集合）。`project:A status:done` と `project:A | status:done` は同じ意味。
 - EditQuery (Tag 方向) 許可: `TypedTag`、`|`・スペース
 - TagQuery (Untag 方向) 許可: `TypedTag`、`Projection`、`|`・スペース
 - TagCondition 許可: ラベル比較式 (`tagged_at:>T`、`rank:>5` 等。エントリのメタ属性のみ)
 - 禁止 (エラー): `&`、Nest、集約、算術演算、`type:/label:/tag:` (EditQuery §1.2)。ラベル比較は TagQuery/EditQuery に書けず TagCondition として分離する
-
-パースは `modify` から呼ばれる内部関数 `parse(query, query_type) -> Result<Vec<EditDirective>>` が担う。
 
 #### 条件付き Delete の in-memory 評価
 `tag_condition` が指定された場合、`modify` は `TagQuery` にマッチしたエントリを `tag_condition` で
@@ -411,26 +393,28 @@ SearchQuery 側のパターンでキャプチャした部分文字列を、EditQ
 **アイテムごとに動的な値**を構築する機能。一括リネーム等で強力に機能する。
 
 ### 8.1 構文
-- **キャプチャ**: 未クォートの Glob `*` / `?` / `[]` を**暗黙の位置キャプチャ**として扱う。
+- **キャプチャ**: Glob `*` / `?` / `[]` を**暗黙の位置キャプチャ**として扱う。
   捕捉されるのは **Glob メタ文字が実際にマッチした部分文字列のみ** (ラベル全体ではない)。
   例: `project:tt*` が `ttfm` にマッチした場合、`*` が捕まえるのは `fm` (接頭辞 `tt` は含まない)。
 - **参照**: EditQuery 側で `{1}` / `{2}` … と記述する
   (`\1` 形式はシェルでの扱いが煩雑なため波括弧を採用)。
 - **参照位置**: `{n}` は type 位置にも書ける (`{1}:{2}` で型ごと動的生成可)。
 - **番号付け**: SearchQuery 全体を左から走査した通し番号とする。
-- **クォート時は無効**: SearchQuery と同様、クォート内では Glob が無効化され完全一致となるため
-  キャプチャされない。リテラルな `{1}` を書きたい場合もクォートする (`"{1}"`)。
-- **束縛されない参照は空文字**: 参照 `{n}` がそのアイテムで束縛されない場合
-  (キャプチャ総数を超える `{n}`、OR の非マッチ枝にある glob、差集合の除外側にある glob 等) は
-  **既定で空文字に展開**する (per-item で実行中断しない)。`ttfm.toml` の設定で「束縛なしをエラーにする」
+- **クオート内でも有効**: SearchQuery と同様、クォート内では Glob は有効なためキャプチャされる。
+- リテラルな `{1}` を書きたい場合エスケープする (`\{1}`)。
+- **キャプチャされなければ追加しない**: 参照 `{n}` がそのアイテムで束縛されない場合は、そのタグを追加しない。
+   (per-item で実行中断しない)。`ttfm.toml` の設定で「束縛なしをエラーにする」
   厳格モードへ切り替え可能としてもよい。
+- **nが`*`の総数よりも多い場合** エラーにする。 
+- **最短マッチ**: Query側の*は貪欲マッチではなく、最短マッチとする。
 
 ### 8.2 実行モデル
 - キャプチャの展開は `search_and_apply_captures` が担う (§4)。各アイテムのタグ値を SearchQuery の
   glob パターンに当て、`{n}` を具体値で置換した EditQuery を per-item で返す。`modify` は
   `{n}` を含まない具体的な EditQuery のみ受け取り、キャプチャを知らない。
-- **1アイテムが同 type の該当ラベルを複数持つ場合** (SearchQuery の glob が item ごとに複数マッチ): マッチ
-  ごとにテンプレートを展開し**複数の `(Item, EditQuery)` ペアを生成**する。展開先 strategy で扱いが分かれる:
+- **1アイテムが同 type の該当ラベルを複数持つ場合** (SearchQuery の glob が item ごとに複数マッチ): 
+  マッチごとにEditQueryを展開し、列挙後、重複を削除し`(Item, Option<EditQuery>)` を生成する。
+  Item毎に展開先 strategy で扱いが分かれる:
   - `Append`: 異なる label は複数行として共存 (完全一致は §5.1 の冪等性で吸収)。
   - `Replace`: 同一 item・同一 type に複数の `Replace(tag)` が積まれ、`confirm` が1候補に解決する。
 - 静的な多重リテラル (`name:a name:b`) は曖昧なので **`edit` 入口で事前エラー**とする。
