@@ -81,7 +81,7 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
 
     for (query, expected) in cases {
         let results =
-            search::search(&store, &registry, query, Default::default())?;
+            search::search_nowarn(&store, &registry, query, Default::default())?;
         assert_eq!(
             results.results.len(),
             expected,

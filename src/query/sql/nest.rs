@@ -1657,7 +1657,7 @@ mod tests {
     #[test]
     fn test_build_fetch_nest_sql_generates_concat() {
         let query_str = "extension:";
-        let resolver = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolver = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .expect("Failed to resolve");
 
         let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
@@ -1683,7 +1683,7 @@ mod tests {
 
     #[test]
     fn test_nvalue_count_projection_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: count(extension:jpg)",
             &TagRegistry::with_standard(),
         )
@@ -1717,7 +1717,7 @@ mod tests {
 
     #[test]
     fn test_nvalue_sum_projection_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: sum(size:)",
             &TagRegistry::with_standard(),
         )
@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn test_fetch_projection_no_nvalue_regression() {
         let resolver =
-            Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("extension:", &TagRegistry::with_standard()).unwrap();
 
         assert!(
             resolver.get_nvalue().is_none(),
@@ -1771,7 +1771,7 @@ mod tests {
 
     #[test]
     fn test_nvalue_condition_having_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: (count(extension:jpg) > 1)",
             &TagRegistry::with_standard(),
         )
@@ -1808,7 +1808,7 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()
@@ -1866,7 +1866,7 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
 
             let sql =
                 build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
@@ -1906,7 +1906,7 @@ mod tests {
         for (query_body, expected_keywords) in test_cases {
             let query = format!("parentdir: &: ({})", query_body);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()
@@ -1948,7 +1948,7 @@ mod tests {
     #[test]
     fn test_print_sql_for_debugging_nest_bug() {
         let query_str = "(((parentdir: &: count(extension:rs))) / ((parentdir: &: count()))) :> 1";
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             query_str,
             &TagRegistry::with_standard(),
         )
@@ -1962,7 +1962,7 @@ mod tests {
         );
 
         if optimized.get_projection().is_some() {
-            let resolver2 = crate::query::lens_resolver::Resolver::new(
+            let resolver2 = crate::query::lens_resolver::Resolver::new_nowarn(
                 query_str,
                 &TagRegistry::with_standard(),
             )

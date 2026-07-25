@@ -8,6 +8,7 @@ mod tag_filter;
 pub mod write;
 
 use crate::db::Store;
+use crate::query::error::WarningSink;
 use crate::tag::TagRegistry;
 use anyhow::Result;
 
@@ -38,12 +39,14 @@ pub fn edit(
     query_type: QueryType,
     tag_condition: Option<&str>,
     options: WriteOptions,
+    sink: &mut dyn WarningSink,
 ) -> Result<EditResponse> {
     let item_edits = search_and_apply_captures::search_and_apply_captures(
         store,
         registry,
         search_query,
         edit_query,
+        sink,
     )?;
     let (fs_ops_list, actions) = plan(
         store,

@@ -52,6 +52,7 @@ define_cases! {
                 ttfm::edit::QueryType::Tag,
                 None,
                 ttfm::edit::WriteOptions { yes: true },
+                &mut Vec::new(),
             )?;
             Ok(())
         }),
@@ -86,7 +87,7 @@ fn test_integration_tag_tagging() {
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
     let registered_paths =
-        search::search(&store, &registry, "extension:txt", Default::default())
+        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
             .unwrap();
     let item_id = registered_paths.results[0].id.as_i64();
 
@@ -97,7 +98,7 @@ fn test_integration_tag_tagging() {
             .unwrap();
     super::tag_item_id(&store, &registry, tag_id, "priority:high").unwrap();
 
-    let results = search::search(
+    let results = search::search_nowarn(
         &store,
         &registry,
         "priority:high & item_kind:tag",
@@ -109,7 +110,7 @@ fn test_integration_tag_tagging() {
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
     let file_results =
-        search::search(&store, &registry, "project:mars", Default::default())
+        search::search_nowarn(&store, &registry, "project:mars", Default::default())
             .unwrap();
     assert!(file_results
         .results
@@ -135,7 +136,7 @@ fn test_system_item_metadata_integration() {
         .unwrap();
 
     let ext_list =
-        search::search(&store, &registry, "type:extension", Default::default())
+        search::search_nowarn(&store, &registry, "type:extension", Default::default())
             .unwrap();
     assert!(
         !ext_list
@@ -145,7 +146,7 @@ fn test_system_item_metadata_integration() {
         "Empty extension tag should not exist"
     );
 
-    let results_physical = search::search(
+    let results_physical = search::search_nowarn(
         &store,
         &registry,
         "item_kind:tag & label:rs",
@@ -158,7 +159,7 @@ fn test_system_item_metadata_integration() {
     );
 
     let results_proj =
-        search::search(&store, &registry, "extension:", Default::default())
+        search::search_nowarn(&store, &registry, "extension:", Default::default())
             .unwrap();
     assert!(
         !results_proj.results.is_empty(),

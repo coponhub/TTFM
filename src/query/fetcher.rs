@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn test_expand_query_recursive() {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "directory:docs",
             &TagRegistry::with_standard(),
         )
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_resolve_query_physical_mapping() {
         // Focused Lens 生成
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "size:100",
             &TagRegistry::with_standard(),
         )
@@ -408,7 +408,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -444,7 +444,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -511,7 +511,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -539,7 +539,7 @@ mod tests {
 
         // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
         // データがない -> fetch_boolean は FALSE (0) を返すはず
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "max(mtime:) < 2026-02-01",
             &TagRegistry::with_standard(),
         )
@@ -637,7 +637,7 @@ mod tests {
         std::env::set_var("TTFM_DEBUG", "1");
 
         // parentdir: &: count(extension:jpg) → src=1, docs=1
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "parentdir: &: count(extension:jpg)",
             &TagRegistry::with_standard(),
         )
@@ -717,7 +717,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:",
             &TagRegistry::with_standard(),
         )
@@ -791,7 +791,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "txt");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -817,7 +817,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "txt");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:",
             &TagRegistry::with_standard(),
         )
@@ -854,7 +854,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "sum(size:)",
             &TagRegistry::with_standard(),
         )
@@ -880,7 +880,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "md");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "parentdir: &: (count(extension:rs) > 0)",
             &TagRegistry::with_standard(),
         )

@@ -64,6 +64,7 @@ pub fn search(
     registry: &TagRegistry,
     query: &str,
     options: SearchOptions,
+    sink: &mut dyn crate::query::error::WarningSink,
 ) -> Result<SearchResponse> {
     if !store.path_for_target(TargetTable::FileReferences).exists() {
         return Err(anyhow::anyhow!(
@@ -77,10 +78,10 @@ pub fn search(
     // キャッシュ無効パス。cache:false、または「全件(n=0)かつ読み込む cid も無い」場合。
     // cid があれば n に関わらずキャッシュ読みを試みる（下の有効パスへ）。
     if !options.cache || (n == 0 && options.cid.is_none()) {
-        let (results, has_more, warnings) =
-            search_core(store, registry, query, n, offset, &options.order)?;
+        let (results, has_more) =
+            search_core(store, registry, query, n, offset, &options.order, sink)?;
         return Ok(SearchResponse::from_results(
-            results, None, has_more, n, offset, query, warnings,
+            results, None, has_more, n, offset, query,
         ));
     }
 
@@ -88,13 +89,13 @@ pub fn search(
     let cache = CacheManager::new(store.db_dir.join("cache"), CACHE_MAX_BYTES);
 
     if let Some(res) =
-        try_resolve_cache(store, registry, &cache, query, &options)?
+        try_resolve_cache(store, registry, &cache, query, &options, sink)?
     {
         return Ok(res);
     }
 
-    let (results, has_more, warnings) =
-        search_core(store, registry, query, n, offset, &options.order)?;
+    let (results, has_more) =
+        search_core(store, registry, query, n, offset, &options.order, sink)?;
 
     let cid = if has_more {
         let new_cid = uuid::Uuid::new_v4().to_string();
@@ -105,8 +106,19 @@ pub fn search(
     };
 
     Ok(SearchResponse::from_results(
-        results, cid, has_more, n, offset, query, warnings,
+        results, cid, has_more, n, offset, query,
     ))
+}
+
+/// クエリ文字列を使用してインデックスを検索します。警告は破棄します。
+pub fn search_nowarn(
+    store: &Store,
+    registry: &TagRegistry,
+    query: &str,
+    options: SearchOptions,
+) -> Result<SearchResponse> {
+    let mut discard: Vec<crate::query::error::Warning> = Vec::new();
+    search(store, registry, query, options, &mut discard)
 }
 
 /// 検索のコア処理。resolver 生成・fetch・スカラー表示整形・ページングを行う。
@@ -118,25 +130,12 @@ fn search_core(
     n: usize,
     offset: usize,
     order: &[crate::types::Order],
-) -> Result<(Vec<crate::response::Item>, bool, Vec<String>)> {
-    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?
-        .with_order(order);
+    sink: &mut dyn crate::query::error::WarningSink,
+) -> Result<(Vec<crate::response::Item>, bool)> {
+    let resolver =
+        crate::query::lens_resolver::Resolver::new(query, registry, sink)?
+            .with_order(order);
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
-
-    let mut warnings = Vec::new();
-    if resolver.is_label_set_intersect() {
-        warnings.push(
-            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
-        );
-    }
-    if resolver.has_definition_count_in_nest() {
-        warnings.push(
-            "count(type:*) inside a Nest ('&:') counts the type definitions, \
-             which is the same for every group. Did you mean count(type:) \
-             to count the types actually attached in each group?"
-                .to_string(),
-        );
-    }
 
     let mut results = fetcher.fetch(n, offset)?;
 
@@ -166,7 +165,7 @@ fn search_core(
         results.truncate(n);
     }
 
-    Ok((results, has_more, warnings))
+    Ok((results, has_more))
 }
 
 /// 非同期に全件検索結果を Parquet キャッシュとして書き出します。
@@ -187,7 +186,7 @@ pub fn spawn_cache_worker(
             let conn = Connection::open_in_memory()?;
 
             let std_registry = crate::tag::TagRegistry::with_standard();
-            let resolver = crate::query::lens_resolver::Resolver::new(
+            let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
                 &query_owned,
                 &std_registry,
             )?;
@@ -266,6 +265,7 @@ fn try_resolve_cache(
     cache: &CacheManager,
     query: &str,
     options: &SearchOptions,
+    sink: &mut dyn crate::query::error::WarningSink,
 ) -> Result<Option<SearchResponse>> {
     let Some(cid) = &options.cid else {
         return Ok(None);
@@ -303,6 +303,7 @@ fn try_resolve_cache(
         &cache_path,
         options.clone(),
         cid,
+        sink,
     )?))
 }
 
@@ -313,6 +314,7 @@ fn search_from_cache(
     path: &Path,
     options: SearchOptions,
     cid: &str,
+    sink: &mut dyn crate::query::error::WarningSink,
 ) -> Result<SearchResponse> {
     let n = options.n.unwrap_or(0);
     let offset = options.offset.unwrap_or(0);
@@ -323,8 +325,9 @@ fn search_from_cache(
         .get(crate::cache::META_QUERY)
         .ok_or_else(|| anyhow::anyhow!("Query not found in cache"))?;
 
-    let resolver = crate::query::lens_resolver::Resolver::new(query, registry)?
-        .with_order(&options.order);
+    let resolver =
+        crate::query::lens_resolver::Resolver::new(query, registry, sink)?
+            .with_order(&options.order);
     let fetcher = crate::query::fetcher::Fetcher::new(&resolver, &store.conn);
     let src = crate::db::Src::Parquet(path_str);
 
@@ -352,7 +355,6 @@ fn search_from_cache(
                 total: None,
                 is_done: !has_more,
             },
-            warnings: Vec::new(),
             query: query.to_string(),
         }
     };
@@ -415,6 +417,39 @@ mod tests {
     }
 
     #[test]
+    fn test_search_forwards_warnings_to_caller_sink() -> Result<()> {
+        let dir = tempdir()?;
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir(&db_dir)?;
+        let (store, registry, _cache) = setup(&db_dir)?;
+        Indexer::new(&store, &registry).run(
+            dir.path(),
+            None::<&fn(usize)>,
+            false,
+        )?;
+
+        let mut warnings: Vec<crate::query::error::Warning> = Vec::new();
+        search(
+            &store,
+            &registry,
+            "width:>height:",
+            SearchOptions {
+                n: Some(10),
+                ..Default::default()
+            },
+            &mut warnings,
+        )?;
+
+        assert!(
+            warnings.iter().any(|w| w.0.contains("width: :> height:")),
+            "expected sink to receive the warning, got: {:?}",
+            warnings.iter().map(|w| &w.0).collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_metadata_special_characters() -> Result<()> {
         let dir = tempdir()?;
         let db_dir = dir.path().join("db");
@@ -464,7 +499,7 @@ mod tests {
 
         let query = "extension:txt";
 
-        let res_full = search(
+        let res_full = search_nowarn(
             &store,
             &registry,
             query,
@@ -475,7 +510,7 @@ mod tests {
         )?;
         assert_eq!(res_full.results.len(), 5);
 
-        let res_p1 = search(
+        let res_p1 = search_nowarn(
             &store,
             &registry,
             query,
@@ -485,7 +520,7 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        let res_p2 = search(
+        let res_p2 = search_nowarn(
             &store,
             &registry,
             query,
@@ -495,7 +530,7 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        let res_p3 = search(
+        let res_p3 = search_nowarn(
             &store,
             &registry,
             query,
@@ -531,7 +566,7 @@ mod tests {
         let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             "extension:txt",
@@ -557,7 +592,7 @@ mod tests {
         let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             "extension:txt",
@@ -588,7 +623,7 @@ mod tests {
         let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             "extension:txt",
@@ -620,7 +655,7 @@ mod tests {
         let (store, registry, _cache) = setup(&db_dir)?;
         Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             "name:test.bin",
@@ -652,7 +687,7 @@ mod tests {
         let query = "extension:";
 
         let res_db =
-            search(&store, &registry, query, SearchOptions::default())?;
+            search_nowarn(&store, &registry, query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
         assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
             |e| e.label.tag_type() == crate::types::TagType::from("item")
@@ -674,7 +709,7 @@ mod tests {
         }
         assert!(cache_path.exists());
 
-        let res_cache = search(
+        let res_cache = search_nowarn(
             &store,
             &registry,
             query,
@@ -769,7 +804,7 @@ mod tests {
             "Cache should be created for complex query"
         );
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             query,
@@ -796,7 +831,7 @@ mod tests {
         std::fs::create_dir(&db_dir)?;
         let (store, registry, _cache) = setup(&db_dir)?;
 
-        let res = search(
+        let res = search_nowarn(
             &store,
             &registry,
             "name:non-existent",

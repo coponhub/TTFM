@@ -44,7 +44,7 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     // In strict grammar, this is a Parse Error.
     // Our post-processor should catch it.
     let res =
-        search::search(&store, &registry, "size: > 100", Default::default());
+        search::search_nowarn(&store, &registry, "size: > 100", Default::default());
 
     if res.is_ok() {
         // Fail the test if it unexpectedly succeeds (Loose grammar state)
@@ -88,7 +88,7 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let res = search::search(&store, &registry, "1 >1", Default::default());
+    let res = search::search_nowarn(&store, &registry, "1 >1", Default::default());
 
     if res.is_ok() {
         panic!("Expected error for '1 >1', but it succeeded. Grammar is too loose.");
@@ -124,7 +124,7 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     let res =
-        search::search(&store, &registry, "size:^=100", Default::default());
+        search::search_nowarn(&store, &registry, "size:^=100", Default::default());
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     println!("Actual error: {}", err_msg);
@@ -158,7 +158,7 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     )?;
 
     // Scalar comparison with projection in calculation should fail
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "(mtime: / 100) < 100",
@@ -178,7 +178,7 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     );
 
     // Label comparison with projection calculation should work
-    let res2 = search::search(
+    let res2 = search::search_nowarn(
         &store,
         &registry,
         "(size: / 1024) :> 100",
@@ -191,7 +191,7 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     );
 
     // Bare arithmetic with aggregation
-    let res3 = search::search(
+    let res3 = search::search_nowarn(
         &store,
         &registry,
         "count(extension:rs) + count(extension:c)",

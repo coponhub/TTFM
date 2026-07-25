@@ -453,9 +453,6 @@ mod tests {
 
     #[test]
     fn test_name_condition_caret_is_literal_not_prefix_glob() {
-        // `^` は不一致(Ne)演算子であり、前方一致 glob への変換は仕様に無いバグ
-        // （事前ステップ1）。glob_pattern は恒等になったため関数ごと削除し、
-        // name_condition に直接インライン化した（値は `^foo` のまま GLOB へ渡る）。
         let expr = name_condition("^foo", false);
         let sql = sea_query::Query::select()
             .expr(expr)

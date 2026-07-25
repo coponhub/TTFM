@@ -59,6 +59,124 @@ pub fn invalid_scalar_comparison_msg(
     )
 }
 
+// =========================================================================
+// Warning Sink
+// =========================================================================
+
+/// パース時・論理展開時に検出された警告の発出先。
+/// 発生した層が発生時に直接発出するための抽象で、どの構造体にも
+/// 保持させず、処理の実行中だけ `&mut dyn WarningSink` として借用で通す。
+pub trait WarningSink {
+    fn warn(&mut self, warning: Warning);
+}
+
+impl WarningSink for Vec<Warning> {
+    fn warn(&mut self, warning: Warning) {
+        self.push(warning);
+    }
+}
+
+#[derive(Debug)]
+pub struct Warning(pub String);
+
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Warning: {}", self.0)
+    }
+}
+
+pub struct ImmediateWarningSink<'a> {
+    pub writer: &'a mut dyn std::io::Write,
+}
+
+impl WarningSink for ImmediateWarningSink<'_> {
+    fn warn(&mut self, warning: Warning) {
+        writeln!(self.writer, "{}", warning).unwrap_or(());
+    }
+}
+
+// =========================================================================
+// Parser Warnings
+// =========================================================================
+
+pub fn stuck_comparison_unquoted_colon_msg(
+    lhs: &str,
+    op: &str,
+    rhs: &str,
+) -> Warning {
+    Warning(format!(
+        "'{rhs}' was parsed as a literal string because there is no space before ':'. \nDid you mean: '{lhs} :{op} {rhs}'?"
+    ))
+}
+
+pub fn label_set_intersect_warning_msg() -> Warning {
+    Warning("Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string())
+}
+
+pub fn definition_count_in_nest_warning_msg() -> Warning {
+    Warning(
+        "count(type:*) inside a Nest ('&:') counts the type definitions, \
+         which is the same for every group. Did you mean count(type:) \
+         to count the types actually attached in each group?"
+            .to_string(),
+    )
+}
+
+// =========================================================================
+// Parser Warnings: 検出専用ヘルパー
+// warning 検出にしか使わない QueryNode 走査はここに置き、ast.rs は
+// 汎用の構造アクセサのみを保持する。
+// =========================================================================
+
+impl QueryNode {
+    /// 自身、または入れ子のいずれかに Projection / Nest を含むかどうかを判定します
+    /// （lens_resolver::ResolvedNode::is_projection_recursive の QueryNode 版。
+    /// 解決前の生 AST 上で「この子は解決後 Projection 的に振る舞うか」を判定するために使う）。
+    fn is_projection_recursive(&self) -> bool {
+        match self {
+            QueryNode::Projection(_) | QueryNode::Nest(_) => true,
+            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                nodes.iter().any(|n| n.is_projection_recursive())
+            }
+            QueryNode::Difference(l, r) => {
+                l.is_projection_recursive() || r.is_projection_recursive()
+            }
+            _ => false,
+        }
+    }
+
+    /// And 直下に Projection 的な子が2つ以上あるノードが木の中に存在するかどうかを判定します
+    /// （lens_resolver 解決後に生成される `ResolvedNode::LabelSetOp{Intersect}` が現れる条件の
+    /// パース時ミラー。`ResolvedNode::get_label_set_op` と同様、And による透過ラップのみを辿り、
+    /// Or / Difference / Nest の内側までは踏み込まない）。
+    pub fn has_projection_intersection(&self) -> bool {
+        match self {
+            QueryNode::And(nodes) => {
+                let projection_children = nodes
+                    .iter()
+                    .filter(|n| n.is_projection_recursive())
+                    .count();
+                projection_children >= 2
+                    || nodes.iter().any(|n| n.has_projection_intersection())
+            }
+            _ => false,
+        }
+    }
+
+    /// ルートから Or だけを辿って DefinitionRef 枝に到達できるかどうかを判定します
+    /// （lens_resolver::ResolvedNode::has_definition_branch の QueryNode 版。
+    /// `type:*` のような定義アイテム参照が候補の Or に展開された場合も検出する）。
+    pub fn has_definition_branch(&self) -> bool {
+        match self {
+            QueryNode::DefinitionRef(_) => true,
+            QueryNode::Or(nodes) => {
+                nodes.iter().any(|n| n.has_definition_branch())
+            }
+            _ => false,
+        }
+    }
+}
+
 /// QueryNodeを簡易的に文字列化（提案生成用）
 fn node_to_simple_string(node: &QueryNode) -> String {
     match node {
@@ -736,6 +854,17 @@ pub fn unsupported_string_aggregation(op: &str) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vec_warning_sink_collects_pushed_messages() {
+        let mut sink: Vec<Warning> = Vec::new();
+        sink.warn(Warning("first".to_string()));
+        sink.warn(Warning("second".to_string()));
+        assert_eq!(
+            sink.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
 
     #[test]
     fn test_error_suggestion_no_double_colon() {

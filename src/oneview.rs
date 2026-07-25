@@ -515,6 +515,7 @@ mod tests {
             crate::edit::QueryType::Tag,
             None,
             crate::edit::WriteOptions { yes: true },
+            &mut Vec::new(),
         )
         .unwrap();
 

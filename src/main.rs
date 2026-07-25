@@ -232,8 +232,14 @@ fn main() -> Result<()> {
                 cid: cid.clone(),
                 ..Default::default()
             };
-            let response =
-                ttfm::search::search(&store, &registry, query, opts)?;
+            let mut stdout = std::io::stdout();
+            let response = ttfm::search::search(
+                &store,
+                &registry,
+                query,
+                opts,
+                &mut ColorWarningSink { writer: &mut stdout },
+            )?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -262,7 +268,14 @@ fn main() -> Result<()> {
                 cid: cid.clone(),
                 ..Default::default()
             };
-            let response = ttfm::search::search(&store, &registry, "", opts)?;
+            let mut stdout = std::io::stdout();
+            let response = ttfm::search::search(
+                &store,
+                &registry,
+                "",
+                opts,
+                &mut ColorWarningSink { writer: &mut stdout },
+            )?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -280,6 +293,7 @@ fn main() -> Result<()> {
             search_query,
             edit_query,
         } => {
+            let mut stdout = std::io::stdout();
             let resp = edit(
                 &store,
                 &registry,
@@ -288,6 +302,7 @@ fn main() -> Result<()> {
                 QueryType::Tag,
                 None,
                 WriteOptions { yes: cli.yes },
+                &mut ColorWarningSink { writer: &mut stdout },
             )?;
             safe_println!("Updated {} tag(s).", resp.updated);
         }
@@ -296,6 +311,7 @@ fn main() -> Result<()> {
             tag_query,
             condition,
         } => {
+            let mut stdout = std::io::stdout();
             let resp = edit(
                 &store,
                 &registry,
@@ -304,6 +320,7 @@ fn main() -> Result<()> {
                 QueryType::Untag,
                 condition.as_deref(),
                 WriteOptions { yes: cli.yes },
+                &mut ColorWarningSink { writer: &mut stdout },
             )?;
             safe_println!("Deleted {} tag(s).", resp.deleted);
         }
@@ -364,9 +381,13 @@ fn get_terminal_width() -> usize {
     100 // default fallback
 }
 
-fn print_warnings(warnings: &[String], writer: &mut dyn std::io::Write) {
-    for w in warnings {
-        writeln!(writer, "\x1b[1;33mWarning: {}\x1b[0m", w).unwrap_or(());
+struct ColorWarningSink<'a> {
+    writer: &'a mut dyn std::io::Write,
+}
+
+impl ttfm::query::error::WarningSink for ColorWarningSink<'_> {
+    fn warn(&mut self, warning: ttfm::query::error::Warning) {
+        writeln!(self.writer, "\x1b[1;33m{}\x1b[0m", warning).unwrap_or(());
     }
 }
 
@@ -379,8 +400,6 @@ fn print_results(
     current_n: usize,
     writer: &mut dyn std::io::Write,
 ) {
-    print_warnings(&response.warnings, writer);
-
     // 続きがある場合のみ、進捗状況（キャッシュ生成待ち）をチェックして表示
     if response.has_more && !response.progress.is_finished() {
         writeln!(
@@ -759,7 +778,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "name:sized.bin",
@@ -808,7 +827,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "name:dated.txt",
@@ -853,7 +872,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "sum(size:)",
@@ -891,7 +910,7 @@ mod tests {
         std::fs::create_dir_all(&db_dir).unwrap();
         let (store, registry) = make_store_and_registry(&db_dir);
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "type:*",
@@ -914,14 +933,15 @@ mod tests {
     }
 
     #[test]
-    fn test_print_warnings_outputs_warning_lines() {
-        let warnings = vec![
-            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
-        ];
+    fn test_color_warning_sink_writes_immediately() {
+        use ttfm::query::error::{Warning, WarningSink};
         let mut out = Vec::<u8>::new();
-        print_warnings(&warnings, &mut out);
+        let mut sink = ColorWarningSink { writer: &mut out };
+        sink.warn(Warning(
+            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+        ));
         let text = String::from_utf8(out).unwrap();
-        assert!(!text.is_empty(), "print_warnings should produce output");
+        assert!(!text.is_empty(), "ColorWarningSink should produce output");
         assert!(text.contains("&:"), "output should contain '&:' suggestion");
     }
 }

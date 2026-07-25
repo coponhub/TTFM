@@ -20,7 +20,7 @@ use crate::query::ast::{
     ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::types::{Label, TagType, TypedTag};
+use crate::types::{Bitical, Label, TagType, TypedTag};
 use crate::util::DotOk;
 use anyhow::{anyhow, Result};
 use pest::error::{Error, ErrorVariant};
@@ -52,7 +52,11 @@ fn get_parser() -> &'static PrattParser<Rule> {
 }
 
 /// クエリ文字列を解析し、QueryNode AST を構築します。
-pub fn parse(input: &str) -> Result<QueryNode> {
+/// パース中に検出された警告は `sink` へ即時発出されます。
+pub fn parse(
+    input: &str,
+    sink: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let mut pairs = PestQueryParser::parse(Rule::query, input)
         .map_err(|e| error::map_grammar_error(input, e))?;
 
@@ -70,11 +74,11 @@ pub fn parse(input: &str) -> Result<QueryNode> {
 
     let inner_pair = query_pair.into_inner().next().unwrap();
 
-    match inner_pair.as_rule() {
-        Rule::expr => build_expr(inner_pair),
+    let node = match inner_pair.as_rule() {
+        Rule::expr => build_expr(inner_pair, sink),
         Rule::scalar_arithmetic_query => {
             let inner = inner_pair.into_inner().next().unwrap();
-            let calc = build_scalar_arithmetic_expr(inner)?;
+            let calc = build_scalar_arithmetic_expr(inner, sink)?;
             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
         Rule::EOI => Err(anyhow!("Empty query")),
@@ -82,33 +86,51 @@ pub fn parse(input: &str) -> Result<QueryNode> {
             "Unexpected top-level rule: {:?}",
             inner_pair.as_rule()
         )),
+    }?;
+
+    if node.has_projection_intersection() {
+        sink.warn(error::label_set_intersect_warning_msg());
     }
+
+    Ok(node)
 }
 
-fn build_ast(pair: Pair<Rule>) -> Result<QueryNode> {
+/// 警告を捨てて QueryNode のみを返す薄いラッパー。
+pub fn parse_nowarn(input: &str) -> Result<QueryNode> {
+    let mut discard: Vec<error::Warning> = Vec::new();
+    parse(input, &mut discard)
+}
+
+fn build_ast(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     match pair.as_rule() {
         Rule::scalar_arithmetic_query => {
             let inner = pair.into_inner().next().unwrap();
-            let calc = build_scalar_arithmetic_expr(inner)?;
+            let calc = build_scalar_arithmetic_expr(inner, warnings)?;
             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
-        Rule::comparison => build_comparison(pair),
+        Rule::comparison => build_comparison(pair, warnings),
         Rule::typed_tag => build_typed_tag(pair),
-        Rule::projection => build_projection(pair),
+        Rule::projection => build_projection(pair, warnings),
         Rule::aggregation => {
-            build_aggregation(pair).map(QueryNode::Aggregation)
+            build_aggregation(pair, warnings).map(QueryNode::Aggregation)
         }
-        Rule::nest_expr => build_nest_expr(pair),
-        Rule::expr => build_expr(pair),
-        Rule::primary => build_primary(pair),
-        Rule::factor => build_factor(pair),
+        Rule::nest_expr => build_nest_expr(pair, warnings),
+        Rule::expr => build_expr(pair, warnings),
+        Rule::primary => build_primary(pair, warnings),
+        Rule::factor => build_factor(pair, warnings),
         // complement was removed from grammar; // No changes needed for parser.rs as logic is generic enough.
         // Complement nodes are still generated internally by functions.rs (date Ne expansion).
         _ => Err(anyhow!(error::UNKNOWN_FACTOR_INNER)),
     }
 }
 
-fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
+fn build_aggregation(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<AggregationNode> {
     let mut inner = pair.into_inner();
     let op_pair = inner.next().ok_or_else(|| anyhow!("Missing aggregator"))?;
     let op_str = op_pair.as_str();
@@ -119,10 +141,10 @@ fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
         match body_pair.as_rule() {
             Rule::bare_calculation => {
                 let calc_inner = body_pair.into_inner().next().unwrap();
-                let calc = build_calculation(calc_inner)?;
+                let calc = build_calculation(calc_inner, warnings)?;
                 QueryNode::Projection(Operand::Calculation(Box::new(calc)))
             }
-            Rule::expr => build_expr(body_pair)?,
+            Rule::expr => build_expr(body_pair, warnings)?,
             _ => {
                 return Err(anyhow!(
                     "Unexpected rule in aggregation: {:?}",
@@ -169,10 +191,13 @@ fn build_aggregation(pair: Pair<Rule>) -> Result<AggregationNode> {
     }
 }
 
-fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_expr(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let pairs = pair.into_inner();
     get_parser()
-        .map_primary(|primary| build_ast(primary))
+        .map_primary(|primary| build_ast(primary, warnings))
         .map_infix(|lhs, op, rhs| {
             let lhs = lhs?;
             let rhs = rhs?;
@@ -211,21 +236,27 @@ fn build_expr(pair: Pair<Rule>) -> Result<QueryNode> {
         .parse(pairs)
 }
 
-fn build_primary(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_primary(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
-    build_ast(inner)
+    build_ast(inner, warnings)
 }
 
-fn build_factor(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_factor(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::expr => build_ast(inner),
+        Rule::expr => build_ast(inner, warnings),
         Rule::typed_tag => build_typed_tag(inner),
-        Rule::comparison => build_comparison(inner),
-        Rule::nest_expr => build_nest_expr(inner),
-        Rule::projection => build_projection(inner),
+        Rule::comparison => build_comparison(inner, warnings),
+        Rule::nest_expr => build_nest_expr(inner, warnings),
+        Rule::projection => build_projection(inner, warnings),
         Rule::aggregation => {
-            build_aggregation(inner).map(QueryNode::Aggregation)
+            build_aggregation(inner, warnings).map(QueryNode::Aggregation)
         }
         Rule::label => {
             let label = build_label(inner)?;
@@ -260,7 +291,10 @@ fn build_typed_tag(pair: Pair<Rule>) -> Result<QueryNode> {
     Ok(QueryNode::TypedTag(TypedTag::retag(tagtype, &label)))
 }
 
-fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_projection(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::type_ref => {
@@ -268,7 +302,7 @@ fn build_projection(pair: Pair<Rule>) -> Result<QueryNode> {
             Ok(QueryNode::Projection(Operand::TypeRef(tag_type)))
         }
         Rule::calculation => {
-            let calc = build_calculation(inner)?;
+            let calc = build_calculation(inner, warnings)?;
             Ok(QueryNode::Projection(Operand::Calculation(Box::new(calc))))
         }
         _ => Err(anyhow!(
@@ -300,23 +334,34 @@ fn build_tag_type(pair: Pair<Rule>) -> Result<TagType> {
     }
 }
 
-fn build_comparison(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_comparison(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     // comparison = { label_comparison | scalar_comparison }
     let inner = pair.into_inner().next().unwrap();
-    build_comparison_inner(inner)
+    build_comparison_inner(inner, warnings)
 }
 
 /// scalar_comparison を nest_operand 内で直接処理するためのヘルパー。
-fn build_comparison_from_scalar(pair: Pair<Rule>) -> Result<QueryNode> {
-    build_comparison_inner(pair)
+fn build_comparison_from_scalar(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
+    build_comparison_inner(pair, warnings)
 }
 
 /// label_comparison または scalar_comparison のペアを受け取り Comparison ノードを構築します。
-fn build_comparison_inner(inner: Pair<Rule>) -> Result<QueryNode> {
+fn build_comparison_inner(
+    inner: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let rule = inner.as_rule();
     let mut inner_pairs = inner.into_inner();
 
-    let first_op = build_operand(inner_pairs.next().unwrap())?;
+    let first_pair = inner_pairs.next().unwrap();
+    let first_text = first_pair.as_str().to_string();
+    let first_op = build_operand(first_pair, warnings)?;
     let mut rest = Vec::new();
 
     while let Some(step_pair) = inner_pairs.next() {
@@ -341,7 +386,26 @@ fn build_comparison_inner(inner: Pair<Rule>) -> Result<QueryNode> {
                     step_inner.next().unwrap().as_str() // stuck_basic_op
                 };
                 let basic_op = parse_label_basic_op(op_str)?;
-                let right_op = build_operand(step_inner.next().unwrap())?;
+                let right_pair = step_inner.next().unwrap();
+                let right_text = right_pair.as_str().to_string();
+                let right_op = build_operand(right_pair, warnings)?;
+
+                // 密着比較（空白なし）の未クォート右辺が ':' で終わる場合、
+                // Projection のつもりが文字列として解釈されている可能性を警告する。
+                // 空白ありの label_op / label_op_to_proj は右辺に type_ref を許容するため
+                // ここには到達せず（Operand::TypeRef になる）、密着形のみを検出する。
+                if let Operand::Literal(Label::Other(_, Bitical::String(s))) =
+                    &right_op
+                {
+                    if s.ends_with(':') {
+                        warnings.warn(error::stuck_comparison_unquoted_colon_msg(
+                            &first_text,
+                            op_str,
+                            &right_text,
+                        ));
+                    }
+                }
+
                 (ComparisonOp::Label(basic_op), right_op)
             }
             Rule::scalar_comparison => {
@@ -350,7 +414,8 @@ fn build_comparison_inner(inner: Pair<Rule>) -> Result<QueryNode> {
 
                 let basic_op_str = actual_step.as_str();
                 let basic_op = parse_scalar_basic_op(basic_op_str)?;
-                let right_op = build_operand(inner_pairs.next().unwrap())?;
+                let right_op =
+                    build_operand(inner_pairs.next().unwrap(), warnings)?;
 
                 if let Operand::TypeRef(tt) = &right_op {
                     let op_span = actual_step.as_span();
@@ -407,7 +472,10 @@ fn parse_scalar_basic_op(s: &str) -> Result<BasicOp> {
     }
 }
 
-fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
+fn build_operand(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<Operand> {
     let rule = pair.as_rule();
     let inner = if rule == Rule::operand
         || rule == Rule::scalar_operand
@@ -432,9 +500,9 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::scalar_calculation
         | Rule::scalar_calculation_inner
         | Rule::label_calc
-        | Rule::label_calc_inner => {
-            Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
-        }
+        | Rule::label_calc_inner => Ok(Operand::Calculation(Box::new(
+            build_calculation(inner, warnings)?,
+        ))),
         Rule::type_ref => {
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
@@ -446,20 +514,20 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::unquoted_tag_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
-        Rule::aggregation => {
-            Ok(Operand::Aggregation(Box::new(build_aggregation(inner)?)))
-        }
+        Rule::aggregation => Ok(Operand::Aggregation(Box::new(
+            build_aggregation(inner, warnings)?,
+        ))),
         Rule::parenthesized_expr => {
             let expr_pair = inner.into_inner().next().unwrap();
-            let node = build_expr(expr_pair)?;
+            let node = build_expr(expr_pair, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
         Rule::nest_expr => {
-            let node = build_nest_expr(inner)?;
+            let node = build_nest_expr(inner, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
         Rule::nest_parenthesized_expr => {
-            build_nested_parenthesized_operand(inner)
+            build_nested_parenthesized_operand(inner, warnings)
         }
         _ => Err(anyhow!(
             "{}: {:?}",
@@ -469,25 +537,33 @@ fn build_operand(pair: Pair<Rule>) -> Result<Operand> {
     }
 }
 
-fn build_nested_parenthesized_operand(pair: Pair<Rule>) -> Result<Operand> {
+fn build_nested_parenthesized_operand(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<Operand> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::nest_expr => {
-            let node = build_nest_expr(inner)?;
+            let node = build_nest_expr(inner, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
-        Rule::nest_parenthesized_expr => build_nested_parenthesized_operand(inner),
+        Rule::nest_parenthesized_expr => {
+            build_nested_parenthesized_operand(inner, warnings)
+        }
         _ => unreachable!("nest_parenthesized_expr inner must be nest_expr or nest_parenthesized_expr"),
     }
 }
 
 /// `nest_expr = ${ nest_operand ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_operand)+ }`
 /// を左結合で Nest ノードにビルドします。
-fn build_nest_expr(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_nest_expr(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let mut inner = pair.into_inner();
 
     let first = inner.next().unwrap();
-    let mut left = build_nest_operand(first)?;
+    let mut left = build_nest_operand(first, warnings)?;
 
     // inner yields alternating: ampersand_colon, nest_operand, ampersand_colon, nest_operand, ...
     // (WHITESPACE is silent _{ } so it doesn't produce tokens)
@@ -495,7 +571,7 @@ fn build_nest_expr(pair: Pair<Rule>) -> Result<QueryNode> {
         // op_pair should be ampersand_colon
         debug_assert_eq!(op_pair.as_rule(), Rule::ampersand_colon);
         let right_pair = inner.next().unwrap();
-        let right = build_nest_operand(right_pair)?;
+        let right = build_nest_operand(right_pair, warnings)?;
         left = QueryNode::Nest(NestNode {
             left: Box::new(left),
             right: Box::new(right),
@@ -505,15 +581,18 @@ fn build_nest_expr(pair: Pair<Rule>) -> Result<QueryNode> {
 }
 
 /// `nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }`
-fn build_nest_operand(pair: Pair<Rule>) -> Result<QueryNode> {
+fn build_nest_operand(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::scalar_comparison => build_comparison_from_scalar(inner),
+        Rule::scalar_comparison => build_comparison_from_scalar(inner, warnings),
         Rule::aggregation => {
-            build_aggregation(inner).map(QueryNode::Aggregation)
+            build_aggregation(inner, warnings).map(QueryNode::Aggregation)
         }
-        Rule::projection => build_projection(inner),
-        Rule::expr => build_expr(inner),
+        Rule::projection => build_projection(inner, warnings),
+        Rule::expr => build_expr(inner, warnings),
         Rule::label => {
             let label = build_label(inner)?;
             Ok(QueryNode::Projection(Operand::Literal(label)))
@@ -525,7 +604,10 @@ fn build_nest_operand(pair: Pair<Rule>) -> Result<QueryNode> {
     }
 }
 
-fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
+fn build_calculation(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<CalculationNode> {
     let rule = pair.as_rule();
     let inner_pair = if rule == Rule::calculation
         || rule == Rule::scalar_calculation
@@ -539,12 +621,12 @@ fn build_calculation(pair: Pair<Rule>) -> Result<CalculationNode> {
     let mut pairs = inner_pair.into_inner();
 
     let first_pair = pairs.next().unwrap();
-    let mut left = build_operand_calc(first_pair)?;
+    let mut left = build_operand_calc(first_pair, warnings)?;
 
     while let Some(op_pair) = pairs.next() {
         let op = parse_arithmetic_op(op_pair.as_str())?;
         let right_pair = pairs.next().unwrap();
-        let right = build_operand_calc(right_pair)?;
+        let right = build_operand_calc(right_pair, warnings)?;
 
         // Build left-associative chain: (A + B) + C
         left =
@@ -569,7 +651,10 @@ fn parse_arithmetic_op(s: &str) -> Result<ArithmeticOp> {
     }
 }
 
-fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
+fn build_operand_calc(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<Operand> {
     let rule = pair.as_rule();
     let inner = if rule == Rule::operand_calc
         || rule == Rule::scalar_operand
@@ -582,9 +667,9 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
     };
 
     match inner.as_rule() {
-        Rule::aggregation => {
-            Ok(Operand::Aggregation(Box::new(build_aggregation(inner)?)))
-        }
+        Rule::aggregation => Ok(Operand::Aggregation(Box::new(
+            build_aggregation(inner, warnings)?,
+        ))),
         Rule::type_ref => {
             let inner_tag = inner.into_inner().next().unwrap();
             Ok(Operand::TypeRef(build_tag_type(inner_tag)?))
@@ -601,13 +686,13 @@ fn build_operand_calc(pair: Pair<Rule>) -> Result<Operand> {
         | Rule::scalar_calculation
         | Rule::scalar_calculation_inner
         | Rule::label_calc
-        | Rule::label_calc_inner => {
-            Ok(Operand::Calculation(Box::new(build_calculation(inner)?)))
-        }
+        | Rule::label_calc_inner => Ok(Operand::Calculation(Box::new(
+            build_calculation(inner, warnings)?,
+        ))),
         Rule::parenthesized_expr => {
             // 括弧で囲まれた式: (is_dir:false & size:)
             let expr_pair = inner.into_inner().next().unwrap();
-            let node = build_expr(expr_pair)?;
+            let node = build_expr(expr_pair, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
 
@@ -738,10 +823,13 @@ fn unescape_unquoted(s: &str) -> Result<String> {
 /// 文法上は許容されたスカラー比較が、意味的に不正（プロジェクションへの適用）でないかチェックします。
 // check_invalid_scalar_comparison removed (moved to error.rs)
 
-fn build_scalar_arithmetic_expr(pair: Pair<Rule>) -> Result<CalculationNode> {
+fn build_scalar_arithmetic_expr(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<CalculationNode> {
     let mut inner = pair.into_inner();
     let first = inner.next().unwrap();
-    let mut lhs_operand = build_arithmetic_operand(first)?;
+    let mut lhs_operand = build_arithmetic_operand(first, warnings)?;
 
     while let Some(op_pair) = inner.next() {
         let op_str = op_pair.as_str().trim();
@@ -761,7 +849,7 @@ fn build_scalar_arithmetic_expr(pair: Pair<Rule>) -> Result<CalculationNode> {
         };
 
         let rhs_pair = inner.next().unwrap();
-        let rhs_operand = build_arithmetic_operand(rhs_pair)?;
+        let rhs_operand = build_arithmetic_operand(rhs_pair, warnings)?;
 
         let lhs_node = CalculationNode {
             left: lhs_operand,
@@ -780,11 +868,14 @@ fn build_scalar_arithmetic_expr(pair: Pair<Rule>) -> Result<CalculationNode> {
     }
 }
 
-fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
+fn build_arithmetic_operand(
+    pair: Pair<Rule>,
+    warnings: &mut dyn error::WarningSink,
+) -> Result<Operand> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::aggregation => {
-            let agg = build_aggregation(inner)?;
+            let agg = build_aggregation(inner, warnings)?;
             Ok(Operand::Aggregation(Box::new(agg)))
         }
         Rule::number => {
@@ -793,7 +884,7 @@ fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
         }
         Rule::calculation => {
             let calc_inner = inner.into_inner().next().unwrap();
-            let calc = build_calculation(calc_inner)?;
+            let calc = build_calculation(calc_inner, warnings)?;
             Ok(Operand::Calculation(Box::new(calc)))
         }
         Rule::type_ref => {
@@ -804,7 +895,7 @@ fn build_arithmetic_operand(pair: Pair<Rule>) -> Result<Operand> {
         }
         Rule::parenthesized_expr => {
             let expr_pair = inner.into_inner().next().unwrap();
-            let node = build_expr(expr_pair)?;
+            let node = build_expr(expr_pair, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
         Rule::label | Rule::quoted_string | Rule::unquoted_string => {
@@ -824,7 +915,8 @@ mod tests {
 
     #[test]
     fn test_quoted_string_parses_to_label_literal() {
-        let node = parse("\"hello\"").expect("quoted string should parse");
+        let node =
+            parse_nowarn("\"hello\"").expect("quoted string should parse");
         match node {
             QueryNode::Projection(Operand::Literal(Label::Literal(tt, s))) => {
                 assert_eq!(s, "hello");
@@ -884,7 +976,8 @@ mod tests {
 
     #[test]
     fn test_parse_typed_tag() {
-        let node = parse("name:test.txt").expect("Failed to parse typed tag");
+        let node = parse_nowarn("name:test.txt")
+            .expect("Failed to parse typed tag");
         match node {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(tt.label.tag_type().as_str(), "name");
@@ -895,9 +988,135 @@ mod tests {
     }
 
     #[test]
+    fn test_numeric_type_name_typed_tag() {
+        let node =
+            parse_nowarn("5:x").expect("numeric type name should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.label.tag_type().as_str(), "5");
+                assert_eq!(tt.label.as_str(), "x");
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_numeric_type_name_projection() {
+        let node =
+            parse_nowarn("5:").expect("numeric type_ref should parse");
+        match node {
+            QueryNode::Projection(Operand::TypeRef(tt)) => {
+                assert_eq!(tt.as_str(), "5");
+            }
+            _ => panic!("Expected Projection(TypeRef), got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_numeric_type_name_with_numeric_label() {
+        let node = parse_nowarn("123:456")
+            .expect("numeric type:label should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.label.tag_type().as_str(), "123");
+                assert_eq!(tt.label.as_str(), "456");
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_numeric_type_name_bare_arithmetic() {
+        parse_nowarn("5: + 3")
+            .expect("bare arithmetic with numeric type_ref should parse");
+    }
+
+    #[test]
+    fn test_numeric_type_name_in_aggregation() {
+        parse_nowarn("sum(5:)")
+            .expect("aggregation over numeric type_ref should parse");
+    }
+
+    #[test]
+    fn test_stuck_comparison_rhs_calculation_with_projection_is_error() {
+        let result = parse_nowarn("size:>(size: + 1)");
+        assert!(
+            result.is_err(),
+            "expected error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_stuck_comparison_rhs_scalar_calculation_still_works() {
+        parse_nowarn("size:>(1 + 2)")
+            .expect("scalar-only calculation RHS should still parse");
+    }
+
+    #[test]
+    fn test_stuck_comparison_unquoted_colon_rhs_warns() {
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        parse("width:>height:", &mut warnings).expect("Failed to parse");
+        assert!(
+            warnings.iter().any(|w| w.0.contains("width: :> height:")),
+            "Expected a warning suggesting 'width: :> height:', got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_stuck_comparison_quoted_rhs_does_not_warn() {
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        parse(r#"width:>"height:""#, &mut warnings)
+            .expect("Failed to parse");
+        assert!(
+            warnings.is_empty(),
+            "Quoted RHS is an explicit literal, should not warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_spaced_comparison_rhs_ending_in_colon_does_not_warn() {
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        parse("width: :> height:", &mut warnings)
+            .expect("Failed to parse");
+        assert!(
+            warnings.is_empty(),
+            "Spaced form's RHS parses as TypeRef, not a literal, so no warning should fire: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_projection_intersection_warns() {
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        parse("parentdir: & extension:", &mut warnings)
+            .expect("Failed to parse");
+        assert!(
+            warnings.iter().any(|w| w.0.contains("&:")),
+            "Expected Projection intersection warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_typed_tag_intersection_does_not_warn() {
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        parse("extension:rs & size:>100", &mut warnings)
+            .expect("Failed to parse");
+        assert!(
+            warnings.is_empty(),
+            "Non-projection And should not warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
     fn test_parse_comparison_simple() {
         // Using colon-operator format for explicit Label comparison
-        let node = parse("size:>100").expect("Failed to parse comparison");
+        let node =
+            parse_nowarn("size:>100").expect("Failed to parse comparison");
         match node {
             QueryNode::Comparison(cmp) => {
                 // first should be 'size' (Operand::TypeRef) because 'size:' is parsed as TypeRef
@@ -927,7 +1146,7 @@ mod tests {
     #[test]
     fn test_parse_logical_ops() {
         // AND
-        let node = parse("a:1 & b:2").expect("Failed to parse AND");
+        let node = parse_nowarn("a:1 & b:2").expect("Failed to parse AND");
         match node {
             QueryNode::And(nodes) => {
                 assert_eq!(nodes.len(), 2);
@@ -936,7 +1155,8 @@ mod tests {
         }
 
         // Parentheses
-        let node = parse("(a:1 | b:2)").expect("Failed to parse parentheses");
+        let node = parse_nowarn("(a:1 | b:2)")
+            .expect("Failed to parse parentheses");
         match node {
             QueryNode::Or(nodes) => assert_eq!(nodes.len(), 2),
             _ => panic!("Expected Or, got {:?}", node),
@@ -945,7 +1165,8 @@ mod tests {
 
     #[test]
     fn test_parse_origin_projection() {
-        let node = parse("origin:").expect("Failed to parse origin:");
+        let node =
+            parse_nowarn("origin:").expect("Failed to parse origin:");
         match node {
             QueryNode::Projection(op) => match op {
                 Operand::TypeRef(tt) => assert_eq!(tt.as_str(), "origin"),
@@ -957,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_parse_count_items() {
-        let node = parse("count(name:*.rs)")
+        let node = parse_nowarn("count(name:*.rs)")
             .expect("Failed to parse count(name:*.rs)");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -979,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_parse_count_projection() {
-        let node = parse("count(extension:)")
+        let node = parse_nowarn("count(extension:)")
             .expect("Failed to parse count(extension:)");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -1003,7 +1224,8 @@ mod tests {
 
     #[test]
     fn test_parse_sum_projection() {
-        let node = parse("sum(size:)").expect("Failed to parse sum(size:)");
+        let node =
+            parse_nowarn("sum(size:)").expect("Failed to parse sum(size:)");
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Arithmetic { op, ref inner } => {
@@ -1031,8 +1253,8 @@ mod tests {
 
     #[test]
     fn test_parse_aggregation_comparison() {
-        let node =
-            parse("sum(size:) > 100").expect("Failed to parse comparison");
+        let node = parse_nowarn("sum(size:) > 100")
+            .expect("Failed to parse comparison");
         match node {
             QueryNode::Comparison(cmp) => match &cmp.first {
                 Operand::Aggregation(agg) => match &**agg {
@@ -1052,7 +1274,7 @@ mod tests {
     #[test]
     fn test_mismatched_comparison_error() {
         // size: > 100 (本来は :> であるべき)
-        let result = parse("size: > 100");
+        let result = parse_nowarn("size: > 100");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
 
@@ -1071,8 +1293,8 @@ mod tests {
     /// Arithmetic { Sum, Projection(Calculation { TypeRef(size), Sub, Literal(100) }) }
     #[test]
     fn test_parse_bare_calc_sum() {
-        let node =
-            parse("sum(size: - 100)").expect("bare_calc sum should parse");
+        let node = parse_nowarn("sum(size: - 100)")
+            .expect("bare_calc sum should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Arithmetic { op, ref inner } => {
@@ -1124,7 +1346,7 @@ mod tests {
     /// ((size + 100) - 50)
     #[test]
     fn test_parse_bare_calc_multiop() {
-        let node = parse("sum(size: + 100 - 50)")
+        let node = parse_nowarn("sum(size: + 100 - 50)")
             .expect("bare_calc multiop should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -1194,7 +1416,8 @@ mod tests {
     /// リグレッション: sum(size:) は既存動作と同一
     #[test]
     fn test_parse_agg_projection_no_regression() {
-        let node = parse("sum(size:)").expect("sum(size:) should parse");
+        let node =
+            parse_nowarn("sum(size:)").expect("sum(size:) should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Arithmetic { op, ref inner } => {
@@ -1218,7 +1441,7 @@ mod tests {
     /// リグレッション: count(extension:txt) は既存動作と同一
     #[test]
     fn test_parse_agg_typed_tag_no_regression() {
-        let node = parse("count(extension:txt)")
+        let node = parse_nowarn("count(extension:txt)")
             .expect("count(extension:txt) should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -1241,7 +1464,7 @@ mod tests {
     /// リグレッション: count(extension:txt & size:>100) は既存動作と同一 (And ノード)
     #[test]
     fn test_parse_agg_set_op_no_regression() {
-        let node = parse("count(extension:txt & size:>100)")
+        let node = parse_nowarn("count(extension:txt & size:>100)")
             .expect("count with set-op should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -1268,7 +1491,7 @@ mod tests {
     /// sum((is_dir:false & size:) + 1000)
     #[test]
     fn test_parse_parenthesized_expr_in_arithmetic() {
-        let node = parse("sum((is_dir:false & size:) + 1000)")
+        let node = parse_nowarn("sum((is_dir:false & size:) + 1000)")
             .expect("parenthesized expr with arithmetic should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
@@ -1320,7 +1543,7 @@ mod tests {
 
     #[test]
     fn test_parse_count_empty_args() {
-        let node = parse("count()").expect("count() should parse");
+        let node = parse_nowarn("count()").expect("count() should parse");
         match node {
             QueryNode::Aggregation(AggregationNode::Count(inner)) => {
                 match &*inner {
@@ -1340,7 +1563,7 @@ mod tests {
 
     #[test]
     fn test_parse_sum_empty_args_fail() {
-        let result = parse("sum()");
+        let result = parse_nowarn("sum()");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1352,8 +1575,8 @@ mod tests {
 
     #[test]
     fn test_parse_nest_basic() {
-        let node =
-            parse("project: &: extension:").expect("nest basic should parse");
+        let node = parse_nowarn("project: &: extension:")
+            .expect("nest basic should parse");
         match node {
             QueryNode::Nest(nest) => {
                 match &*nest.left {
@@ -1381,7 +1604,7 @@ mod tests {
 
     #[test]
     fn test_parse_nest_with_agg() {
-        let node = parse("parentdir: &: count(extension:jpg)")
+        let node = parse_nowarn("parentdir: &: count(extension:jpg)")
             .expect("nest with agg should parse");
         match node {
             QueryNode::Nest(nest) => {
@@ -1408,7 +1631,7 @@ mod tests {
 
     #[test]
     fn test_parse_nest_with_comparison() {
-        let node = parse("project: &: (count(extension:jpg) > 10)")
+        let node = parse_nowarn("project: &: (count(extension:jpg) > 10)")
             .expect("nest with comparison should parse");
         match node {
             QueryNode::Nest(nest) => {
@@ -1436,7 +1659,8 @@ mod tests {
     #[test]
     fn test_parse_nest_chain() {
         // a: &: b: &: c: → Nest(Nest(a, b), c) due to left-associativity
-        let node = parse("a: &: b: &: c:").expect("nest chain should parse");
+        let node = parse_nowarn("a: &: b: &: c:")
+            .expect("nest chain should parse");
         match node {
             QueryNode::Nest(outer) => {
                 match &*outer.right {
@@ -1477,7 +1701,8 @@ mod tests {
     fn test_parse_nest_priority_over_and() {
         // a: &: b: & c:d → And(Nest(a, b), TypedTag(c:d))
         // &: has higher priority than &
-        let node = parse("a: &: b: & c:d").expect("nest priority should parse");
+        let node = parse_nowarn("a: &: b: & c:d")
+            .expect("nest priority should parse");
         match node {
             QueryNode::And(nodes) => {
                 assert_eq!(nodes.len(), 2);
@@ -1522,7 +1747,7 @@ mod tests {
     #[test]
     fn test_parse_nest_nest_join() {
         // (a: &: b:) &: (c: &: d:) → Nest(Nest(a, b), Nest(c, d))
-        let node = parse("(a: &: b:) &: (c: &: d:)")
+        let node = parse_nowarn("(a: &: b:) &: (c: &: d:)")
             .expect("nest-nest join should parse");
         match node {
             QueryNode::Nest(outer) => {
@@ -1569,7 +1794,8 @@ mod tests {
 
     #[test]
     fn test_parse_nest_collect_types() {
-        let node = parse("project: &: extension:").expect("should parse");
+        let node = parse_nowarn("project: &: extension:")
+            .expect("should parse");
         let types = node.get_all_types();
         assert!(types.contains(&"project".to_string()));
         assert!(types.contains(&"extension".to_string()));
@@ -1579,7 +1805,8 @@ mod tests {
     /// 括弧内はスカラー式なので `>` を使うべき。
     #[test]
     fn test_parse_nest_right_label_op_in_scalar_context_is_error() {
-        let result = parse("parentdir: &: (count(extension:jpg) :> 1)");
+        let result =
+            parse_nowarn("parentdir: &: (count(extension:jpg) :> 1)");
         assert!(
             result.is_err(),
             "Using label op :> inside Nest right scalar context should be a parse error"
@@ -1590,12 +1817,12 @@ mod tests {
     fn test_parse_nested_arithmetic_in_nest() {
         // スペースなし
         let query_no_inner_space = "parentdir: &: ((sum(size:) + count()) / 2)";
-        assert!(parse(query_no_inner_space).is_ok());
+        assert!(parse_nowarn(query_no_inner_space).is_ok());
 
         // スペースあり (以前は失敗していたケース)
         let query_with_inner_space =
             "parentdir: &: ( (sum(size:) + count()) / 2 )";
-        let res = parse(query_with_inner_space);
+        let res = parse_nowarn(query_with_inner_space);
         assert!(res.is_ok(), "Should now parse with spaces: {:?}", res.err());
     }
 }

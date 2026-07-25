@@ -42,6 +42,9 @@ pub(super) struct QueryTestCase {
     pub format_query: fn(&str, &Path) -> String,
     pub query: &'static str,
     pub assert: fn(&SearchResponse, &Path) -> anyhow::Result<()>,
+    /// 警告を検証したいケースのみ上書きする。デフォルトは無検証。
+    pub assert_warnings:
+        fn(&[ttfm::query::error::Warning]) -> anyhow::Result<()>,
 }
 
 impl QueryTestCase {
@@ -55,6 +58,7 @@ impl QueryTestCase {
         format_query: default_scope,
         query: "",
         assert: |_, _| Ok(()),
+        assert_warnings: |_| Ok(()),
     };
 }
 
@@ -136,13 +140,16 @@ macro_rules! define_cases {
             let case = CASES.iter().find(|c| c.name == name).unwrap();
             let case_dir = fix.root.path().join(case.name);
             let query = (case.format_query)(case.query, &case_dir);
+            let mut warnings: Vec<ttfm::query::error::Warning> = Vec::new();
             let res = ttfm::search::search(
                 &store,
                 &fix.registry,
                 &query,
                 ttfm::SearchOptions::default(),
+                &mut warnings,
             )?;
-            (case.assert)(&res, &case_dir)
+            (case.assert)(&res, &case_dir)?;
+            (case.assert_warnings)(&warnings)
         }
 
         $(
@@ -269,6 +276,7 @@ pub(super) fn tag_item_id(
         ttfm::edit::QueryType::Tag,
         None,
         ttfm::edit::WriteOptions { yes: true },
+        &mut Vec::new(),
     )?;
     Ok(())
 }

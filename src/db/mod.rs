@@ -786,8 +786,6 @@ mod tests {
 
     #[test]
     fn test_to_column_match_expr_caret_is_literal_not_prefix_glob() {
-        // `^` は不一致(Ne)演算子であり、前方一致 glob への変換は仕様に無いバグ
-        // （事前ステップ1）。GLOB 演算子自体は維持されるが、値は `^foo` のまま。
         let expr =
             Bitical::String("^foo".into()).to_column_match_expr(Col::Label);
         let sql =

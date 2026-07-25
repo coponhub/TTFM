@@ -52,6 +52,7 @@ fn test_rank_sorting_files() {
         QueryType::Tag,
         None,
         WriteOptions { yes: true },
+        &mut Vec::new(),
     )
     .unwrap();
 
@@ -64,12 +65,13 @@ fn test_rank_sorting_files() {
         QueryType::Tag,
         None,
         WriteOptions { yes: true },
+        &mut Vec::new(),
     )
     .unwrap();
 
     // 3. 検索して順序を確認
     let results =
-        search::search(&store, &registry, "extension:txt", Default::default())
+        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
             .unwrap();
     assert_eq!(results.results.len(), 3);
 
@@ -110,7 +112,7 @@ fn test_rank_batch_update() {
 
     // 1. *.txt のランクを一括で 10 に設定
     let results =
-        search::search(&store, &registry, "extension:txt", Default::default())
+        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
             .unwrap();
     assert_eq!(results.results.len(), 2);
     edit(
@@ -121,11 +123,12 @@ fn test_rank_batch_update() {
         QueryType::Tag,
         None,
         WriteOptions { yes: true },
+        &mut Vec::new(),
     )
     .unwrap();
 
     // 2. 結果を確認
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "extension:txt | extension:rs",
@@ -159,7 +162,7 @@ fn test_rank_set_by_id_low_level() {
     ttfm::rank::set_rank_by_id(&store, &registry, id, false, 500).unwrap();
 
     let results =
-        search::search(&store, &registry, "item_kind:note", Default::default())
+        search::search_nowarn(&store, &registry, "item_kind:note", Default::default())
             .unwrap();
     assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
@@ -212,7 +215,7 @@ fn test_definition_ref_rank_falls_back_to_registry_default() {
     );
 
     let results =
-        search::search(&store, &registry, "type:filename", Default::default())
+        search::search_nowarn(&store, &registry, "type:filename", Default::default())
             .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(

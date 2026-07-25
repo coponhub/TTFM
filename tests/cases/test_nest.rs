@@ -1477,7 +1477,7 @@ define_cases! {
             Ok(())
         },
     },
-    // ケース⑧ Proj & Proj → SearchResponse.warnings に警告を生成する
+    // ケース⑧ Proj & Proj → 警告を生成する
     label_set_intersect_warns: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
@@ -1490,13 +1490,13 @@ define_cases! {
         ],
         format_query: default_scope,
         query: "cat: & flavor:",
-        assert: |res, _dir| {
+        assert_warnings: |warnings| {
             assert!(
-                !res.warnings.is_empty(),
+                !warnings.is_empty(),
                 "Proj & Proj should generate a warning"
             );
             assert!(
-                res.warnings.iter().any(|w| w.contains("&:")),
+                warnings.iter().any(|w| w.0.contains("&:")),
                 "Warning should suggest using '&:'"
             );
             Ok(())
@@ -2285,7 +2285,7 @@ define_cases! {
 
 #[test]
 fn test_nest_parse_basic() {
-    let node = ttfm::query::parse("extension: &: parentdir:").unwrap();
+    let node = ttfm::query::parse_nowarn("extension: &: parentdir:").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
             matches!(*nest.left, ttfm::query::QueryNode::Projection(_)),
@@ -2302,7 +2302,7 @@ fn test_nest_parse_basic() {
 
 #[test]
 fn test_nest_parse_chain() {
-    let node = ttfm::query::parse("extension: &: parentdir: &: name:").unwrap();
+    let node = ttfm::query::parse_nowarn("extension: &: parentdir: &: name:").unwrap();
     if let ttfm::query::QueryNode::Nest(outer) = &node {
         assert!(
             matches!(*outer.left, ttfm::query::QueryNode::Nest(_)),
@@ -2320,7 +2320,7 @@ fn test_nest_parse_chain() {
 #[test]
 fn test_nest_priority_over_and() {
     let node =
-        ttfm::query::parse("extension: &: parentdir: & extension:rs").unwrap();
+        ttfm::query::parse_nowarn("extension: &: parentdir: & extension:rs").unwrap();
     assert!(
         matches!(node, ttfm::query::QueryNode::And(_)),
         "top-level And, got {:?}",
@@ -2331,7 +2331,7 @@ fn test_nest_priority_over_and() {
 #[test]
 fn test_nest_parse_with_aggregation() {
     let node =
-        ttfm::query::parse("parentdir: &: count(extension:jpg)").unwrap();
+        ttfm::query::parse_nowarn("parentdir: &: count(extension:jpg)").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
             matches!(*nest.right, ttfm::query::QueryNode::Aggregation(_)),
@@ -2348,7 +2348,7 @@ fn test_nest_parse_with_aggregation() {
 
 #[test]
 fn test_nest_left_must_be_projection() {
-    let result = ttfm::query::lens_resolver::Resolver::new(
+    let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:rs &: name:",
         &TagRegistry::with_standard(),
     );
@@ -2361,7 +2361,7 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: count(extension:jpg)",
         &TagRegistry::with_standard(),
     )
@@ -2372,7 +2372,7 @@ fn test_nest_resolves_to_projection_with_nvalue() {
 
 #[test]
 fn test_nest_resolves_sum_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: sum(size:)",
         &TagRegistry::with_standard(),
     )
@@ -2383,7 +2383,7 @@ fn test_nest_resolves_sum_nvalue() {
 
 #[test]
 fn test_plain_projection_no_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:",
         &TagRegistry::with_standard(),
     )
@@ -2401,7 +2401,7 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:rs &: count(*:*)",
         &TagRegistry::with_standard()
     )
@@ -2410,7 +2410,7 @@ fn test_nest_error_typed_tag_left() {
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "count(*:*) &: extension:",
         &TagRegistry::with_standard()
     )
@@ -2419,7 +2419,7 @@ fn test_nest_error_aggregation_left() {
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "(size: > 100) &: extension:",
         &TagRegistry::with_standard()
     )
@@ -2428,7 +2428,7 @@ fn test_nest_error_comparison_left() {
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: (count(extension:jpg) > 1)",
         &TagRegistry::with_standard(),
     )
@@ -2460,7 +2460,7 @@ fn test_nest_resolver_all_aggregations() {
         "filename: &: sum(size:)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2482,7 +2482,7 @@ fn test_nest_resolver_all_aggregations() {
 
 #[test]
 fn test_nest_scalar_right_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: 100",
         &TagRegistry::with_standard(),
     )
@@ -2502,7 +2502,7 @@ fn test_nest_comparison_resolver_patterns() {
         "extension: &: (count(*:*) > 2)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2535,7 +2535,7 @@ fn test_nest_query_vs_calc_resolves() {
         "parentdir: &: (avg(size:) > (sum(size:) / count()))",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2571,7 +2571,7 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "parentdir: &: extension:",
@@ -2600,7 +2600,7 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "parentdir: &: (size: * 2)",
@@ -2634,7 +2634,7 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     )?;
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "type: & parentdir:",
@@ -2643,7 +2643,7 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "type: | extension:",

@@ -130,7 +130,7 @@ fn test_plugin_normalize_label_applied_in_search() {
         .unwrap();
 
     // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
-    let results = search::search(
+    let results = search::search_nowarn(
         &store,
         &registry,
         "my_status:m",
@@ -202,7 +202,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
-        search::search(
+        search::search_nowarn(
             &store,
             &registry,
             "mimetype:application/x-test-override",
@@ -224,7 +224,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
-        search::search(
+        search::search_nowarn(
             &store,
             &registry,
             "mimetype:application/x-test-override",
@@ -392,11 +392,12 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )
     .expect("edit should materialize the plugin type definition");
 
     let results =
-        search::search(&store, &registry, "type:*", SearchOptions::default())
+        search::search_nowarn(&store, &registry, "type:*", SearchOptions::default())
             .unwrap();
     let plugin_item = results
         .results

@@ -283,7 +283,7 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res1 = search::search(
+    let res1 = search::search_nowarn(
         &store,
         &registry,
         "count(extension:txt) ^ 0",
@@ -295,7 +295,7 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
         "Should match root directory (calc is true)"
     );
 
-    let res2 = search::search(
+    let res2 = search::search_nowarn(
         &store,
         &registry,
         "count(extension:txt) ^ 2",
@@ -326,7 +326,7 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(item_id:)",
@@ -335,7 +335,7 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(item_id) failed: {}", val);
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(item_kind:)",
@@ -345,11 +345,11 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     assert!(val >= 1.0, "count(item_kind) failed: {}", val);
 
     let res =
-        search::search(&store, &registry, "count(rank:)", Default::default())?;
+        search::search_nowarn(&store, &registry, "count(rank:)", Default::default())?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(rank) failed: {}", val);
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(origin:)",
@@ -359,11 +359,11 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     assert!(val >= 1.0, "count(origin) failed: {}", val);
 
     let res =
-        search::search(&store, &registry, "count(path:)", Default::default())?;
+        search::search_nowarn(&store, &registry, "count(path:)", Default::default())?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(path) failed: {}", val);
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(parentdir:)",
@@ -372,7 +372,7 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(parentdir) failed: {}", val);
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(filename:)",
@@ -404,7 +404,7 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res2 = search::search(
+    let res2 = search::search_nowarn(
         &store,
         &registry,
         "max(mtime:) < 2027-01-01",
@@ -436,7 +436,7 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "max(extension:txt & mtime:) < 2027-02-01",
@@ -466,7 +466,7 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "max(mtime:) == 2026",
@@ -476,7 +476,7 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     assert_eq!(res.results[0].raw_repr(), "TRUE");
     assert!(res.results[0].id.is_volatile());
 
-    let res_false = search::search(
+    let res_false = search::search_nowarn(
         &store,
         &registry,
         "max(mtime:) == 2025",
@@ -521,7 +521,7 @@ impl TestContext {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(&self.root, None::<&fn(usize)>, false)
             .unwrap();
-        search::search(&store, &registry, query, ttfm::SearchOptions::default())
+        search::search_nowarn(&store, &registry, query, ttfm::SearchOptions::default())
             .unwrap()
     }
 }
@@ -559,7 +559,7 @@ fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(&store, &registry,
+    let res = search::search_nowarn(&store, &registry,
         "sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)",
         Default::default(),
     )?;
@@ -610,9 +610,9 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     )?;
 
     let res_any_top =
-        search::search(&store, &registry, "count()", Default::default())?;
+        search::search_nowarn(&store, &registry, "count()", Default::default())?;
     let res_wild_top =
-        search::search(&store, &registry, "count(*:*)", Default::default())?;
+        search::search_nowarn(&store, &registry, "count(*:*)", Default::default())?;
     assert_eq!(
         res_any_top.results[0].raw_repr(),
         res_wild_top.results[0].raw_repr()
@@ -622,7 +622,7 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let query_indirect =
         format!("count() - count(*:* - parentdir:\"{}\")", root_str);
     let res_indirect =
-        search::search(&store, &registry, &query_indirect, Default::default())?;
+        search::search_nowarn(&store, &registry, &query_indirect, Default::default())?;
     assert_eq!(res_indirect.results[0].raw_repr(), "5");
 
     Ok(())

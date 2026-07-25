@@ -60,7 +60,7 @@ fn search_with_order(
     query: &str,
     order: Vec<Order>,
 ) -> Vec<String> {
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         store,
         registry,
         query,

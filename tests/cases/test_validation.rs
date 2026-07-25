@@ -41,7 +41,7 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
 
     // クエリ: (path: + 10) :> 100
     // path: は文字列型なので、+ 10（数値演算）は論理展開フェーズで失敗すべき
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "(path: + 10) :> 100",
@@ -81,7 +81,7 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
 
     // クエリ: ('str' + 10) :> 100
     // 文字列リテラルとの演算も失敗すべき
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "('str' + 10) :> 100",
@@ -123,7 +123,7 @@ fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
 
     // クエリ: count(path:) & type:file
     // 左オペランドが集約関数（スカラー値）
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "count(path:) & type:file",
@@ -168,7 +168,7 @@ fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
 
     // クエリ: type:file & sum(size:)
     // 右オペランドが集約関数（スカラー値）
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "type:file & sum(size:)",
@@ -213,7 +213,7 @@ fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
 
     // クエリ: (1 > 0) & type:file
     // 左オペランドがスカラー比較（真偽値）
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "(1 > 0) & type:file",
@@ -259,7 +259,7 @@ fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
 
     // クエリ: type:file - sum(size:)
     // 右オペランドが集約関数（スカラー値）
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "type:file - sum(size:)",
@@ -302,7 +302,7 @@ fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
     )?;
 
     // 正常な集合演算: type:file & path:
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "type:file & path:",
@@ -315,7 +315,7 @@ fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
 
     // 正常な集合演算: ラベル比較（集合） & 集合
     // size: :> 0 はラベル比較として集合を返す
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "(size: :> 0) & type:file",
@@ -327,7 +327,7 @@ fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
     );
 
     // 正常な集合演算: type:file | type:directory
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "type:file | type:directory",
@@ -360,7 +360,7 @@ fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
 
     // クエリ: sum(size:) & count(path:)
     // 両方のオペランドがスカラー値
-    let result = search::search(
+    let result = search::search_nowarn(
         &store,
         &registry,
         "sum(size:) & count(path:)",
@@ -407,7 +407,7 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
     let queries = vec!["sum()", "avg()", "max()", "min()"];
 
     for q in queries {
-        let result = search::search(&store, &registry, q, Default::default());
+        let result = search::search_nowarn(&store, &registry, q, Default::default());
         assert!(
             result.is_err(),
             "Aggregator '{}' without arguments should fail",
@@ -427,7 +427,7 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
 #[test]
 fn test_parse_nest_in_comparison_left() {
     let query = "count(parentdir: &: count(extension:rs) :> 5)";
-    let result = ttfm::parse(query);
+    let result = ttfm::query::parser::parse_nowarn(query);
     assert!(
         result.is_ok(),
         "Nested label comparison inside aggregation should parse successfully: {:?}",
@@ -479,7 +479,7 @@ fn test_sum_with_label_comparison_inner_is_error() {
         "parentdir: &: ((size: * 2) :> 1000)",
     ];
     for q in &queries {
-        let result = search::search(&store, &registry, q, Default::default());
+        let result = search::search_nowarn(&store, &registry, q, Default::default());
         assert!(result.is_err(), "'{q}' should return an error, not panic");
     }
 }
@@ -507,7 +507,7 @@ fn test_set_operation_error_message_says_invalid() -> anyhow::Result<()> {
         "sum(size:) & count(path:)",
     ];
     for q in &queries {
-        let result = search::search(&store, &registry, q, Default::default());
+        let result = search::search_nowarn(&store, &registry, q, Default::default());
         assert!(result.is_err(), "'{q}' should return an error");
         let msg = result.unwrap_err().to_string();
         assert!(

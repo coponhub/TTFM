@@ -653,7 +653,8 @@ fn find_tagtype_name_in_comparison(node: &ComparisonNode) -> Option<String> {
 /// TTQL クエリ文字列を QueryNode に変換する。
 /// パースエラー時はパニックする（expand() 内での使用を想定）。
 pub fn ttql_parse(query: &str) -> QueryNode {
-    crate::parse(query).unwrap_or_else(|e| panic!("{e}"))
+    crate::query::parser::parse_nowarn(query)
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// format!() を内包する ttql_parse 呼び出しマクロ。

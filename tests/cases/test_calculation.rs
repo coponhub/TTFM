@@ -373,7 +373,7 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res_explicit = search::search(
+    let res_explicit = search::search_nowarn(
         &store,
         &registry,
         "sum((size: - 100))",
@@ -384,7 +384,7 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
         "Explicit paren should work"
     );
 
-    let res_bare = search::search(
+    let res_bare = search::search_nowarn(
         &store,
         &registry,
         "sum(size: - 100)",

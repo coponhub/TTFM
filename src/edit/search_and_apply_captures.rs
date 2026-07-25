@@ -1,4 +1,5 @@
 use crate::db::Store;
+use crate::query::error::WarningSink;
 use crate::response::Item;
 use crate::search::SearchOptions;
 use crate::tag::TagRegistry;
@@ -9,12 +10,14 @@ pub fn search_and_apply_captures(
     registry: &TagRegistry,
     search_query: &str,
     edit_query: Option<&str>,
+    sink: &mut dyn WarningSink,
 ) -> Result<Vec<(Item, Option<String>)>> {
     let mut resp = crate::search::search(
         store,
         registry,
         search_query,
         SearchOptions::default(),
+        sink,
     )?;
     resp.query_into_tags();
     resp.results

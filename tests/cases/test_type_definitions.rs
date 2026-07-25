@@ -62,9 +62,10 @@ fn type_includes_builtin_and_user_defined_types() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -119,9 +120,10 @@ fn tag_includes_used_tag_definitions() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:*",
@@ -162,7 +164,7 @@ fn type_prefers_stored_definition_over_volatile_duplicate() -> anyhow::Result<()
     )?;
     let stored_id = resp.new_item_ids[0];
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -221,9 +223,10 @@ fn type_stored_row_shows_user_attached_tags() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -262,9 +265,10 @@ fn type_volatile_items_get_type_instance_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -299,9 +303,10 @@ fn tag_volatile_items_get_type_instance_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:*",
@@ -340,9 +345,10 @@ fn type_volatile_items_get_name_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -378,9 +384,10 @@ fn tag_volatile_items_get_name_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:*",
@@ -412,7 +419,7 @@ fn definition_ref_exact_match_survives_or_with_projection() -> anyhow::Result<()
 {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type: | type:\"nosuchtype\"",
@@ -441,7 +448,7 @@ fn definition_ref_exact_match_survives_or_with_glob_search(
 ) -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:* | type:\"nosuchtype\"",
@@ -466,7 +473,7 @@ fn definition_ref_exact_match_survives_or_with_glob_search(
 fn count_type_matches_enumeration_row_count() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let enum_results = ttfm::search::search(
+    let enum_results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -474,7 +481,7 @@ fn count_type_matches_enumeration_row_count() -> anyhow::Result<()> {
     )?;
     let expected = enum_results.results.len();
 
-    let count_results = ttfm::search::search(
+    let count_results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "count(type:*)",
@@ -493,7 +500,7 @@ fn count_type_matches_enumeration_row_count() -> anyhow::Result<()> {
 fn count_type_exact_match_unregistered_value_is_one() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "count(type:\"nosuchtype\")",
@@ -524,7 +531,7 @@ fn count_definition_ref_mixed_or_with_projection() -> anyhow::Result<()> {
     Indexer::new(&store, &registry).initialize_tables()?;
     Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
 
-    let type_count = ttfm::search::search(
+    let type_count = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -533,7 +540,7 @@ fn count_definition_ref_mixed_or_with_projection() -> anyhow::Result<()> {
     .results
     .len();
 
-    let rs_count = ttfm::search::search(
+    let rs_count = ttfm::search::search_nowarn(
         &store,
         &registry,
         "extension:rs",
@@ -542,7 +549,7 @@ fn count_definition_ref_mixed_or_with_projection() -> anyhow::Result<()> {
     .results
     .len();
 
-    let count_results = ttfm::search::search(
+    let count_results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "count(type:* | extension:rs)",
@@ -562,7 +569,7 @@ fn count_definition_ref_mixed_or_with_projection() -> anyhow::Result<()> {
 fn builtin_type_appears_as_stable_sys_stored_id() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let first = ttfm::search::search(
+    let first = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -584,7 +591,7 @@ fn builtin_type_appears_as_stable_sys_stored_id() -> anyhow::Result<()> {
         "built-in type 'hash' id should live in the Builtin block"
     );
 
-    let second = ttfm::search::search(
+    let second = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -617,9 +624,10 @@ fn used_type_remains_volatile() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -650,7 +658,7 @@ fn builtin_type_stored_via_sys_id_still_gets_synthetic_tags(
 ) -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -693,7 +701,7 @@ fn builtin_type_stored_via_sys_id_still_gets_synthetic_tags(
 fn builtin_type_origin_is_derivable_from_stored_id() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -735,9 +743,10 @@ fn used_type_settles_into_user_block() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -779,7 +788,7 @@ fn plugin_type_settles_into_plugin_block() -> anyhow::Result<()> {
     }
     registry.register_plugin(MockPluginType);
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -814,7 +823,7 @@ fn plugin_type_settles_into_plugin_block() -> anyhow::Result<()> {
 fn builtin_type_edit_materializes_with_stable_sys_id() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let before = ttfm::search::search(
+    let before = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -840,9 +849,10 @@ fn builtin_type_edit_materializes_with_stable_sys_id() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let after = ttfm::search::search(
+    let after = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -886,9 +896,10 @@ fn builtin_type_item_kind_is_type_without_db_row() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -935,9 +946,10 @@ fn type_results_are_ordered_by_item_id_desc() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -990,6 +1002,7 @@ fn used_type_edit_materializes_in_user_block() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
     edit(
         &store,
@@ -999,9 +1012,10 @@ fn used_type_edit_materializes_in_user_block() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -1044,9 +1058,10 @@ fn plugin_type_edit_materializes_in_plugin_block() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "type:*",
@@ -1075,17 +1090,19 @@ fn plugin_type_edit_materializes_in_plugin_block() -> anyhow::Result<()> {
 fn count_type_in_nest_context_emits_guidance_warning() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
-    let results = ttfm::search::search(
+    let mut warnings: Vec<ttfm::query::error::Warning> = Vec::new();
+    ttfm::search::search(
         &store,
         &registry,
         "parentdir: &: count(type:*)",
         SearchOptions::default(),
+        &mut warnings,
     )?;
 
     assert!(
-        results.warnings.iter().any(|w| w.contains("count(type:)")),
+        warnings.iter().any(|w| w.0.contains("count(type:)")),
         "expected a guidance warning mentioning count(type:), got {:?}",
-        results.warnings
+        warnings
     );
 
     Ok(())
@@ -1105,10 +1122,11 @@ fn test_origin_builtin_and_system_search_does_not_contain_user_or_plugin_types(
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // 1. origin:builtin の検証
-    let results_builtin = ttfm::search::search(
+    let results_builtin = ttfm::search::search_nowarn(
         &store,
         &registry,
         "origin:builtin",
@@ -1128,7 +1146,7 @@ fn test_origin_builtin_and_system_search_does_not_contain_user_or_plugin_types(
     }
 
     // 2. origin:system の検証 (system 由来のみ: builtin, file, plugin)
-    let results_system = ttfm::search::search(
+    let results_system = ttfm::search::search_nowarn(
         &store,
         &registry,
         "origin:system",
@@ -1183,9 +1201,10 @@ fn origin_search_has_no_duplicate_registered_definition_names(
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "origin:*",
@@ -1228,7 +1247,7 @@ fn type_glob_does_not_include_nonexistent_types() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
     for query in ["type:*", "type:__*"] {
-        let results = ttfm::search::search(
+        let results = ttfm::search::search_nowarn(
             &store,
             &registry,
             query,

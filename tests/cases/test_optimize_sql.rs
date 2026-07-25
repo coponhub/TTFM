@@ -34,7 +34,7 @@ fn test_build_optimized_merged_projection_sql_logical() {
     let query_str =
         "parentdir: &: (count(extension:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+    let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
         .unwrap()
         .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
@@ -73,7 +73,7 @@ fn test_build_optimized_merged_projection_sql_arithmetic() {
     let query_str =
         "(((parentdir: &: count(extension:rs))) / ((parentdir: &: count()))) :> 100";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+    let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
         .unwrap()
         .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);
@@ -118,7 +118,7 @@ fn test_build_optimized_merged_projection_sql_comparison() {
     let query_str =
         "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
 
-    let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+    let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
         .unwrap()
         .resolved_query;
     let optimized = ttfm::query::lens_optimizer::optimize(resolved);

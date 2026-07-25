@@ -36,7 +36,16 @@ define_cases! {
         modify: None,
         format_query: super::default_scope,
         query: "width:>height:",
-        assert: |_res, _dir| Ok(()),
+        assert_warnings: |warnings| {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.0.contains("width: :> height:")),
+                "Expected a warning suggesting 'width: :> height:', got: {:?}",
+                warnings
+            );
+            Ok(())
+        },
     },
     calc_reverse_consistency_gt: {
         setup: |dir| {
@@ -98,7 +107,7 @@ fn test_reverse_pattern_scalar_gt_projection() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
     let res =
-        search::search(&store, &registry, "100 > size:", Default::default());
+        search::search_nowarn(&store, &registry, "100 > size:", Default::default());
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -126,7 +135,7 @@ fn test_reverse_pattern_aggregation_label_op() -> Result<()> {
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "sum(size:) :> 100",
@@ -159,7 +168,7 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
-    let res = search::search(&store, &registry, "1 :> 100", Default::default());
+    let res = search::search_nowarn(&store, &registry, "1 :> 100", Default::default());
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -171,7 +180,7 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     assert!(err_msg.contains("-->"), "Expected pretty printing");
 
     let res =
-        search::search(&store, &registry, "100 :< size:", Default::default());
+        search::search_nowarn(&store, &registry, "100 :< size:", Default::default());
     assert!(
         res.is_ok(),
         "Valid query '100 :< size:' should be allowed. Error: {:?}",
@@ -190,7 +199,7 @@ fn test_double_colon_suggestion_fix() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
     let res =
-        search::search(&store, &registry, "size: > path:", Default::default());
+        search::search_nowarn(&store, &registry, "size: > path:", Default::default());
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();

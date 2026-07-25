@@ -40,10 +40,11 @@ fn edit_tag_adds_user_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
     assert_eq!(resp.updated, 1);
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "project:A",
@@ -67,10 +68,11 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // tag:"project:A" → Volatile な tag 定義アイテムが返る
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -92,7 +94,7 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     write_and_refresh(&store, &registry, actions)?;
 
     // Stored になり rank が付いている
-    let results2 = ttfm::search::search(
+    let results2 = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -113,7 +115,7 @@ fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
     let (store, registry, _dir) = setup();
 
     // parentdir: → Volatile な Projection アイテムが返る
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "parentdir:",
@@ -156,9 +158,10 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -177,7 +180,7 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
     write_and_refresh(&store, &registry, actions)?;
 
     // Stored になっている (rank は付かない)
-    let results2 = ttfm::search::search(
+    let results2 = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -203,10 +206,11 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // 定義未登録 → タグ定義は Volatile 1件（タグ付きファイル foo.txt ではない）
-    let r = ttfm::search::search(
+    let r = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -224,7 +228,7 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
 
     // item_references に tag 定義を登録 → Stored
     ttfm::tagging::add_item(&store, &registry, "tag", "project:A")?;
-    let r2 = ttfm::search::search(
+    let r2 = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -255,6 +259,7 @@ fn edit_calc_result_persists_query_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // user_tags に type='query', label_str=元クエリ の行が保存されている
@@ -286,8 +291,9 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
-    let r = ttfm::search::search(
+    let r = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -307,8 +313,9 @@ fn edit_no_edit_query_registers_definition() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
-    let r2 = ttfm::search::search(
+    let r2 = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -337,10 +344,11 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // tag 定義を rank 付きで登録（§5.7 + rank）。name は user_tags に注入される。
-    let r = ttfm::search::search(
+    let r = ttfm::search::search_nowarn(
         &store,
         &registry,
         "tag:\"project:A\"",
@@ -355,7 +363,7 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
     write_and_refresh(&store, &registry, actions)?;
 
     // rank: projection の item 表示が 'unknown' でなく 'project:A' を含む
-    let proj = ttfm::search::search(
+    let proj = ttfm::search::search_nowarn(
         &store,
         &registry,
         "rank:",
@@ -396,6 +404,7 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     // list() の入力順を反転させてバグを顕在化させる（user名を先頭・filename(system)を末尾へ）。
@@ -415,7 +424,7 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
     )?;
 
     // ファイルを検索 → representative の name は user 名（filename ではない）
-    let r = ttfm::search::search(
+    let r = ttfm::search::search_nowarn(
         &store,
         &registry,
         "filename:foo.txt",
@@ -451,6 +460,7 @@ fn edit_untag_removes_user_tag() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
 
     let resp = edit(
@@ -461,10 +471,11 @@ fn edit_untag_removes_user_tag() -> anyhow::Result<()> {
         QueryType::Untag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
     assert_eq!(resp.deleted, 1);
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "project:A",
@@ -502,10 +513,11 @@ fn edit_tag_applies_to_all_over_100_files() -> anyhow::Result<()> {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )?;
     assert_eq!(resp.updated, 150, "all 150 files should be tagged");
 
-    let results = ttfm::search::search(
+    let results = ttfm::search::search_nowarn(
         &store,
         &registry,
         "project:bulk",

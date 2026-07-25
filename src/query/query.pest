@@ -107,7 +107,7 @@ label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ (type_ref | calcula
 // DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
 // DESIGN.md:88 - NO whitespace allowed between operator and operand
 stuck_op_step = ${ stuck_basic_op ~ stuck_operand }
-stuck_operand = { quoted_string | number | type_ref | calculation | unquoted_tag_string }
+stuck_operand = { quoted_string | number | scalar_calculation | unquoted_tag_string }
 
 colon = { ":" }
 
@@ -200,7 +200,7 @@ parenthesized_expr = { "(" ~ expr ~ ")" }
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }
 
-tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ (WHITESPACE | EOI | ":")) ~ identifier) }
+tag_type = ${ quoted_string | identifier }
 
 // --- Labels and Literals ---
 label = { quoted_string | number | (!type_ref ~ unquoted_string) }

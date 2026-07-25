@@ -33,7 +33,7 @@ fn test_search_progress_zero_results() -> Result<()> {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     // 0件検索 (name:non-existent)
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "name:non_existent",
@@ -83,7 +83,7 @@ fn test_search_progress_finished_small_results() -> Result<()> {
     )?;
 
     // 少数ヒット (1件)
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "extension:txt",

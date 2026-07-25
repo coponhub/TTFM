@@ -51,6 +51,7 @@ pub use super::logical_schema::{LogicalSchema, LogicalType};
 pub(crate) fn expand_query_node(
     schema: &impl LogicalSchema,
     node: QueryNode,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<QueryNode> {
     match node {
         QueryNode::TypedTag(tt) => {
@@ -61,7 +62,7 @@ pub(crate) fn expand_query_node(
             // 中身がプロジェクションを返さない（アイテムセットを返すフィルター）なら、ラップを剥がす
             if let Operand::Query(node) = &op {
                 if !returns_projection(node) {
-                    return expand_query_node(schema, *node.clone());
+                    return expand_query_node(schema, *node.clone(), sink);
                 }
             }
             // TypeRef の場合は schema による展開を適用
@@ -69,7 +70,7 @@ pub(crate) fn expand_query_node(
                 Ok(schema.expand_projection(tag_type))
             } else {
                 // それ以外の Operand (Calculation, Aggregation, Query) は展開
-                let expanded_op = expand_operand(schema, op)?;
+                let expanded_op = expand_operand(schema, op, sink)?;
 
                 // Operand 内に埋もれた Nest フィルタを抽出
                 let mut lifted_filters = Vec::new();
@@ -90,7 +91,7 @@ pub(crate) fn expand_query_node(
             validate_set_operation_operands(&nodes, "&")?;
             let mut expanded = Vec::new();
             for n in nodes {
-                expanded.push(expand_query_node(schema, n)?);
+                expanded.push(expand_query_node(schema, n, sink)?);
             }
             Ok(QueryNode::And(expanded))
         }
@@ -98,32 +99,32 @@ pub(crate) fn expand_query_node(
             validate_set_operation_operands(&nodes, "|")?;
             let mut expanded = Vec::new();
             for n in nodes {
-                expanded.push(expand_query_node(schema, n)?);
+                expanded.push(expand_query_node(schema, n, sink)?);
             }
             Ok(QueryNode::Or(expanded))
         }
         QueryNode::Difference(l, r) => {
             validate_set_operation_operands(&[*l.clone(), *r.clone()], "-")?;
             Ok(QueryNode::Difference(
-                Box::new(expand_query_node(schema, *l)?),
-                Box::new(expand_query_node(schema, *r)?),
+                Box::new(expand_query_node(schema, *l, sink)?),
+                Box::new(expand_query_node(schema, *r, sink)?),
             ))
         }
         QueryNode::Comparison(cmp) => {
-            expand_comparison_with_recursion(schema, cmp)
+            expand_comparison_with_recursion(schema, cmp, sink)
         }
         QueryNode::Aggregation(agg) => {
-            let expanded = expand_aggregation(schema, agg)?;
+            let expanded = expand_aggregation(schema, agg, sink)?;
             // Unnest 可能な集約（inner に Nest を含む）は Nest/Projection 形式に変換する。
             // And/Or で包まれた内部の Nest も透過的に扱う（Issue #4 対応）。
             if is_unnestable_aggregation(&expanded) {
                 let unnested = unnest_aggregation(expanded);
-                Ok(expand_query_node(schema, unnested)?)
+                Ok(expand_query_node(schema, unnested, sink)?)
             } else {
                 Ok(QueryNode::Aggregation(expanded))
             }
         }
-        QueryNode::Nest(nest) => Ok(expand_nest(schema, nest)?),
+        QueryNode::Nest(nest) => Ok(expand_nest(schema, nest, sink)?),
         other => Ok(other),
     }
 }
@@ -131,6 +132,7 @@ pub(crate) fn expand_query_node(
 fn expand_comparison_with_recursion(
     schema: &impl LogicalSchema,
     mut cmp: ComparisonNode,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<QueryNode> {
     // 演算のバリデーションを実施
     validate_comparison_operands(&cmp, schema)?;
@@ -145,20 +147,20 @@ fn expand_comparison_with_recursion(
                 rest: vec![(op, right.clone())],
             };
             // 各比較を再帰的に展開
-            nodes.push(expand_comparison_with_recursion(schema, single_cmp)?);
+            nodes.push(expand_comparison_with_recursion(schema, single_cmp, sink)?);
             left = right;
         }
         return Ok(QueryNode::And(nodes));
     }
 
     // Firstオペランドの展開
-    cmp.first = expand_operand(schema, cmp.first)?;
+    cmp.first = expand_operand(schema, cmp.first, sink)?;
 
     // Restオペランドの展開
     // ここに来る時は rest.len() == 1 または 0 のはず
     let mut expanded_rest = Vec::new();
     for (op, operand) in cmp.rest {
-        let expanded_operand = expand_operand(schema, operand)?;
+        let expanded_operand = expand_operand(schema, operand, sink)?;
         expanded_rest.push((op, expanded_operand));
     }
     cmp.rest = expanded_rest;
@@ -388,6 +390,7 @@ fn returns_projection(node: &QueryNode) -> bool {
 fn expand_operand(
     schema: &impl LogicalSchema,
     operand: Operand,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<Operand> {
     match operand {
         Operand::Literal(label) => {
@@ -404,16 +407,16 @@ fn expand_operand(
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
         Operand::Calculation(calc) => {
-            let expanded = expand_calculation(schema, *calc)?;
+            let expanded = expand_calculation(schema, *calc, sink)?;
             Ok(try_fold_calculation(expanded))
         }
         Operand::Aggregation(agg) => {
-            let expanded = expand_aggregation(schema, *agg)?;
+            let expanded = expand_aggregation(schema, *agg, sink)?;
             Ok(Operand::Aggregation(Box::new(expanded)))
         }
         Operand::Query(node) => {
             // 括弧で囲まれた式を論理展開
-            let flattened = expand_query_node(schema, *node)?;
+            let flattened = expand_query_node(schema, *node, sink)?;
 
             // Queryが算術演算のコンテキストで使用される場合、Projectionを返す必要がある
             if !returns_projection(&flattened) {
@@ -470,9 +473,10 @@ fn strip_filters_from_operand(
 fn expand_calculation(
     schema: &impl LogicalSchema,
     calc: CalculationNode,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<CalculationNode> {
-    let left = expand_operand(schema, calc.left)?;
-    let right = expand_operand(schema, calc.right)?;
+    let left = expand_operand(schema, calc.left, sink)?;
+    let right = expand_operand(schema, calc.right, sink)?;
     Ok(CalculationNode {
         left,
         op: calc.op,
@@ -721,9 +725,18 @@ fn wrap_with_filter(node: QueryNode, filter: &QueryNode) -> QueryNode {
 fn expand_nest(
     schema: &impl LogicalSchema,
     nest: NestNode,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<QueryNode> {
-    let left_raw = expand_query_node(schema, *nest.left)?;
-    let right = expand_query_node(schema, *nest.right)?;
+    let left_raw = expand_query_node(schema, *nest.left, sink)?;
+    let right = expand_query_node(schema, *nest.right, sink)?;
+
+    // Nest（&:）の右辺が定義アイテム（type:/tag: 等）に対する count() の場合、
+    // 結果はグループに依存しない定数になり count(type:) との混同が起きやすいため警告する。
+    if let QueryNode::Aggregation(AggregationNode::Count(ref inner)) = right {
+        if inner.has_definition_branch() {
+            sink.warn(error::definition_count_in_nest_warning_msg());
+        }
+    }
 
     // 左辺からフィルタを分離
     let (left, filter) = split_projection_filter(left_raw);
@@ -1040,10 +1053,11 @@ fn unnest_aggregation(agg: AggregationNode) -> QueryNode {
 fn expand_aggregation(
     schema: &impl LogicalSchema,
     agg: AggregationNode,
+    sink: &mut dyn error::WarningSink,
 ) -> Result<AggregationNode> {
     match agg {
         AggregationNode::Count(node) => {
-            let expanded = expand_query_node(schema, *node)?;
+            let expanded = expand_query_node(schema, *node, sink)?;
             if let QueryNode::Aggregation(ref inner) = expanded {
                 return Err(error::invalid_aggregation_over_scalar(
                     "count", inner,
@@ -1052,7 +1066,7 @@ fn expand_aggregation(
             Ok(AggregationNode::Count(Box::new(expanded)))
         }
         AggregationNode::Arithmetic { op, inner } => {
-            let expanded = expand_query_node(schema, *inner)?;
+            let expanded = expand_query_node(schema, *inner, sink)?;
             if let QueryNode::Aggregation(ref inner) = expanded {
                 return Err(error::invalid_aggregation_over_scalar(
                     error::agg_op_name(op),
@@ -1153,9 +1167,53 @@ mod tests {
             QueryNode::TypedTag(TypedTag::new("size", "100")),
             QueryNode::TypedTag(TypedTag::new("mtime", "today")),
         ]);
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        let expanded =
+            expand_query_node(&lens, node, &mut warnings).unwrap();
         // and(size:100, mtime:today) -> and(size:100, and(mtime>=..., mtime<=...))
         assert!(matches!(expanded, QueryNode::And(_)));
+    }
+
+    #[test]
+    fn test_expand_nest_count_type_wildcard_warns() {
+        let lens = Lens::base_standard();
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::TypedTag(TypedTag::new("type", "*"))),
+            ))),
+        });
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        expand_query_node(&lens, node, &mut warnings).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.0.contains("count(type:)")),
+            "Expected a guidance warning mentioning count(type:), got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_expand_nest_count_extension_does_not_warn() {
+        let lens = Lens::base_standard();
+        let node = QueryNode::Nest(NestNode {
+            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from("parentdir"),
+            ))),
+            right: Box::new(QueryNode::Aggregation(AggregationNode::Count(
+                Box::new(QueryNode::TypedTag(TypedTag::new(
+                    "extension", "rs",
+                ))),
+            ))),
+        });
+        let mut warnings: Vec<error::Warning> = Vec::new();
+        expand_query_node(&lens, node, &mut warnings).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "count over a non-definition tag should not warn: {:?}",
+            warnings
+        );
     }
 
     #[test]
@@ -1177,7 +1235,7 @@ mod tests {
             )],
         };
         let node = QueryNode::Comparison(cmp);
-        let result = expand_query_node(&lens, node);
+        let result = expand_query_node(&lens, node, &mut Vec::new());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not allowed"));
     }
@@ -1267,7 +1325,7 @@ mod tests {
         };
 
         let node = QueryNode::Comparison(cmp);
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 期待値: And([Comparison(10 < size:), Comparison(size: <= 100)])
         if let QueryNode::And(nodes) = expanded {
@@ -1295,7 +1353,7 @@ mod tests {
             right: Operand::Literal(Label::from(2i64)),
         };
         let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         // 畳み込みにより Projection(Literal(5)) になるはず
         match expanded {
             QueryNode::Projection(Operand::Literal(l)) => {
@@ -1319,7 +1377,7 @@ mod tests {
             right: Operand::Literal(Label::from(1i64)),
         };
         let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         assert!(matches!(
             expanded,
             QueryNode::Projection(Operand::Calculation(_))
@@ -1341,7 +1399,7 @@ mod tests {
                 TagType::from("category"),
             ))),
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         match expanded {
             QueryNode::Nest(nest) => {
                 assert!(
@@ -1396,7 +1454,7 @@ mod tests {
             right: Box::new(QueryNode::Comparison(cmp)),
         });
 
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 結果は Comparison（分配された形）
         match &expanded {
@@ -1459,7 +1517,7 @@ mod tests {
             right: Box::new(QueryNode::Comparison(cmp)),
         });
 
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 結果は Comparison（分配された形）
         match &expanded {
@@ -1497,7 +1555,7 @@ mod tests {
                 ))),
             ))),
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // extension: は And に展開されるため、結果も And になるはず
         match &expanded {
@@ -1559,7 +1617,7 @@ mod tests {
             })),
         });
 
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 結果は And([Comparison, Comparison]) であるべき
         match &expanded {
@@ -1614,7 +1672,7 @@ mod tests {
             ))),
         });
 
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 期待: And([is_dir:false, Nest(Projection(ext), Count(And([is_dir:false, name])))])
         let nest = find_nest_in_and(&expanded);
@@ -1654,7 +1712,7 @@ mod tests {
             ))),
         });
 
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 期待: And([is_dir:false, Projection(Calculation(Query(Nest(Proj, Count(And([filter, tag])))), *, Literal))])
         match &expanded {
@@ -1740,7 +1798,7 @@ mod tests {
                 ))),
             ))),
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         let nest = find_nest_in_and(&expanded);
         let agg_inner = get_agg_inner(&nest.right);
@@ -1765,7 +1823,7 @@ mod tests {
                 },
             )),
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         let nest = find_nest_in_and(&expanded);
         let agg_inner = get_agg_inner(&nest.right);
@@ -1819,7 +1877,7 @@ mod tests {
                 Operand::Literal(crate::types::Label::from(0)),
             )],
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         // 結果は And([is_dir:false, Comparison(Calc(Query(Nest(...)), *, 10), :>, 0)])
         let QueryNode::And(ref nodes) = expanded else {
@@ -1859,7 +1917,7 @@ mod tests {
                 ))),
             ))),
         });
-        let expanded = expand_query_node(&lens, node).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
 
         assert!(
             matches!(&expanded, QueryNode::Nest(_)),
@@ -2203,7 +2261,7 @@ mod tests {
         // This tests that the delegation works (not hardcoded parse_size)
         let lens = Lens::base_standard();
         let op = Operand::Literal(crate::types::Label::from("1MB"));
-        let expanded = expand_operand(&lens, op).unwrap();
+        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
         match expanded {
             Operand::Literal(label) => {
                 assert_eq!(
@@ -2221,7 +2279,7 @@ mod tests {
         // "2026-02-01" as unquoted string literal should be normalized to Label::Date
         let lens = Lens::base_standard();
         let op = Operand::Literal(crate::types::Label::from("2026-02-01"));
-        let expanded = expand_operand(&lens, op).unwrap();
+        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
         match expanded {
             Operand::Literal(label) => match label {
                 crate::types::Label::Date(dt) => {
@@ -2246,7 +2304,7 @@ mod tests {
             "1MB".to_string(),
         );
         let op = Operand::Literal(label.clone());
-        let expanded = expand_operand(&lens, op).unwrap();
+        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
         match expanded {
             Operand::Literal(l) => assert_eq!(l, label),
             other => panic!("Expected Literal unchanged, got {:?}", other),

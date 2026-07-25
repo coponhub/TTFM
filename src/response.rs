@@ -121,8 +121,6 @@ pub struct SearchResponse {
     pub has_more: bool,
     /// キャッシュ生成等の進捗状況
     pub progress: crate::types::Progress,
-    /// クエリ実行時の警告メッセージ
-    pub warnings: Vec<String>,
     /// この SearchResponse を生成した SearchQuery 文字列
     pub query: String,
 }
@@ -232,7 +230,6 @@ impl SearchResponse {
                 total: Some(0),
                 is_done: true,
             },
-            warnings: Vec::new(),
             query: query.into(),
         }
     }
@@ -249,7 +246,6 @@ impl SearchResponse {
             has_more: true,
             total_count: None,
             progress,
-            warnings: Vec::new(),
             query: query.into(),
         }
     }
@@ -263,7 +259,6 @@ impl SearchResponse {
         n: usize,
         offset: usize,
         query: impl Into<String>,
-        warnings: Vec<String>,
     ) -> Self {
         let (total_count, progress_total) = if has_more {
             (None, None)
@@ -281,7 +276,6 @@ impl SearchResponse {
                 total: progress_total,
                 is_done: !has_more,
             },
-            warnings,
             query: query.into(),
         }
     }
@@ -681,7 +675,6 @@ mod tests {
             total_count: None,
             has_more: false,
             progress: Progress::default(),
-            warnings: Vec::new(),
             query: String::new(),
         };
 
