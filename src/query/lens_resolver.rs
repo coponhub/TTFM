@@ -91,13 +91,13 @@ pub enum ResolvedNode {
     AggregationMatch {
         agg: ResolvedAggregationNode,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
     },
     /// 算術演算とリテラルの比較 (例: (1 + 2) :> size:)
     CalculationMatch {
         calc: ResolvedCalculationNode,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
     },
     /// タグと算術演算の比較 (例: size: > (1000 + 500))
     TagCalculationMatch {
@@ -158,7 +158,7 @@ pub enum ResolvedNode {
         keys: Vec<ResolvedOperand>,
         nvalue: ResolvedOperand,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
         /// このプロジェクション（およびそのnvalue集計）に適用されるべきフィルタ
         context: Option<Box<ResolvedNode>>,
     },
@@ -180,6 +180,16 @@ pub enum ResolvedNode {
         keys: Vec<ResolvedOperand>,
         matches: Vec<NestMatchCondition>,
         is_or: bool,
+    },
+    /// 日付の絞り込み（区間 or 周期的なスロット制約）への物理マッチ。
+    /// `Match` から独立した変種にしている理由は `sql/nest.rs` の
+    /// `resolve_simple_filter_condition` 参照（フィールド追加だと `op`/`range` を
+    /// 無視した誤った SQL が高速経路で作られてしまう）。
+    DateTimeMatch {
+        tag_type: TagType,
+        storage: StorageMapping,
+        op: crate::query::ast::BasicOp,
+        range: crate::types::DateTimeRange,
     },
 }
 
@@ -203,8 +213,23 @@ pub enum NestMatchOp {
 pub struct NestMatchCondition {
     pub nvalue: ResolvedOperand,
     pub op: NestMatchOp,
-    pub right: ResolvedOperand,
+    pub right: NestMatchRhs,
     pub context: Option<Box<ResolvedNode>>,
+}
+
+/// nvalue 比較の右辺制約。ラベルの等値/順序比較、または日付の区間・スロット制約。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NvalueRhs {
+    Label(Label),
+    DateTime(crate::types::DateTimeRange),
+}
+
+/// `NestMatchCondition` の右辺。他の nvalue オペランドとの比較（同士比較の合流）も
+/// 起こりうるため `NvalueRhs` とは別に `ResolvedOperand` も保持できる。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NestMatchRhs {
+    Operand(ResolvedOperand),
+    DateTime(crate::types::DateTimeRange),
 }
 #[derive(Debug, PartialEq, Clone)]
 pub enum ResolvedAggregationNode {
@@ -615,10 +640,14 @@ impl ResolvedNode {
             | ResolvedNode::NestNestMatch { .. }
             | ResolvedNode::MergedNestMatch { .. }
             | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::LabelSetOp { .. } => {
+            | ResolvedNode::LabelSetOp { .. }
+            | ResolvedNode::DateTimeMatch { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
                 // 連結用には Condition::any() を返しておく。
+                // DateTimeMatch も同様: Match の高速経路（sql/nest.rs の
+                // resolve_simple_filter_condition）を通さず専用ビルダーで扱うため、
+                // ここでは条件を作らない。
                 Condition::any()
             }
         }
@@ -940,24 +969,25 @@ impl ResolvedNode {
     }
 
     /// NestMatch の比較条件を再帰的に探索して返します。
-    pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
+    pub fn get_nvalue_condition(&self) -> Option<(ComparisonOp, NvalueRhs)> {
         match self {
-            ResolvedNode::NestMatch { op, label, .. } => Some((op, label)),
+            ResolvedNode::NestMatch { op, rhs, .. } => Some((*op, rhs.clone())),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_condition())
             }
             ResolvedNode::Difference(l, _) => l.get_nvalue_condition(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.iter().find_map(|m| {
-                    let crate::query::lens_resolver::NestMatchOp::Comparison(
-                        op,
-                    ) = &m.op;
-                    if let crate::query::ResolvedOperand::Literal(label) =
-                        &m.right
-                    {
-                        return Some((op, label));
+                    let NestMatchOp::Comparison(op) = &m.op;
+                    match &m.right {
+                        NestMatchRhs::DateTime(range) => {
+                            Some((*op, NvalueRhs::DateTime(range.clone())))
+                        }
+                        NestMatchRhs::Operand(ResolvedOperand::Literal(
+                            label,
+                        )) => Some((*op, NvalueRhs::Label(label.clone()))),
+                        NestMatchRhs::Operand(_) => None,
                     }
-                    None
                 })
             }
             _ => None,
@@ -1166,10 +1196,7 @@ fn cond_column_match(tag: SType, label: &Label) -> Condition {
 
 fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_type.contains('*')
-        || tag_type.contains('?')
-        || tag_type.contains('[')
-    {
+    if crate::util::is_glob_pattern(tag_type) {
         tag_op = BinOper::Custom("GLOB");
     }
     Expr::col(Col::Type).binary(tag_op, tag_type)
@@ -1475,6 +1502,83 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Aggregation(res))
         }
         QueryNode::Nest(nest) => resolve_nest(lens, nest),
+        QueryNode::DateTimeRange { first, op, range } => {
+            resolve_date_time_range(lens, first, op, range)
+        }
+    }
+}
+
+fn resolve_date_time_range(
+    lens: &Lens,
+    first: Operand,
+    op: crate::query::ast::BasicOp,
+    range: crate::types::DateTimeRange,
+) -> Result<ResolvedNode> {
+    match first {
+        Operand::TypeRef(tag) => {
+            let storage = match lens.look_up(&tag) {
+                Some(desc) => desc.storage.clone(),
+                None => StorageMapping::Basic {
+                    column: Col::LabelStr,
+                    tag_type: tag.as_str().to_string(),
+                },
+            };
+            Ok(ResolvedNode::DateTimeMatch {
+                tag_type: tag,
+                storage,
+                op,
+                range,
+            })
+        }
+        Operand::Aggregation(agg) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationMatch {
+                agg: res_agg,
+                op: ComparisonOp::Label(op),
+                rhs: NvalueRhs::DateTime(range),
+            })
+        }
+        Operand::Calculation(calc) => {
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::CalculationMatch {
+                calc: res_calc,
+                op: ComparisonOp::Label(op),
+                rhs: NvalueRhs::DateTime(range),
+            })
+        }
+        Operand::Query(node) => {
+            let resolved = resolve_query_node(lens, *node)?;
+            match resolved {
+                ResolvedNode::Nest {
+                    mut keys,
+                    nvalue,
+                    context,
+                } => {
+                    let nv = nvalue.unwrap_or_else(|| {
+                        keys.pop().expect("Nest must have at least one key")
+                    });
+                    Ok(ResolvedNode::NestMatch {
+                        keys,
+                        nvalue: nv,
+                        op: ComparisonOp::Label(op),
+                        rhs: NvalueRhs::DateTime(range),
+                        context,
+                    })
+                }
+                ResolvedNode::And(ref nodes)
+                    if nodes.iter().any(|n| n.get_projection().is_some()) =>
+                {
+                    Ok(resolved)
+                }
+                _ => bail!(
+                    "DateTimeRange comparison must resolve to Nest, got: {:?}",
+                    resolved
+                ),
+            }
+        }
+        Operand::Literal(_) => {
+            bail!("DateTimeRange comparison first operand cannot be a literal")
+        }
     }
 }
 
@@ -2176,7 +2280,78 @@ fn resolve_comparison(
     }
 
     let (op, right) = cmp.rest.pop().unwrap();
-    resolve_single_match(lens, cmp.first, op, right)
+    let resolved = resolve_single_match(lens, cmp.first, op, right)?;
+    validate_order_op_not_partial_glob(&resolved)?;
+    Ok(resolved)
+}
+
+/// 文字列型の順序演算子（Gt/Ge/Lt/Le）× 部分 glob をエラーにする。
+/// 全一致 glob（`*`）は全域規則（Gt/Lt→FALSE、Ge/Le→TRUE）で扱うため対象外。
+/// Eq/Ne は GLOB / NOT GLOB へ翻訳できるため対象外。
+fn validate_order_op_not_partial_glob(node: &ResolvedNode) -> Result<()> {
+    use crate::query::ast::BasicOp;
+
+    let (op, rhs, is_string) = match node {
+        ResolvedNode::Match {
+            tag_type,
+            bitical_type,
+            op,
+            label,
+            ..
+        } => {
+            let is_string = !matches!(tag_type, TagType::Custom(_))
+                && matches!(bitical_type, BiticalType::String);
+            (*op, Some(label), is_string)
+        }
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (*op, label, agg.is_string_type())
+        }
+        ResolvedNode::CalculationMatch { calc, op, rhs } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (
+                *op,
+                label,
+                calc.left.is_string_type() && calc.right.is_string_type(),
+            )
+        }
+        ResolvedNode::NestMatch { nvalue, op, rhs, .. } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (*op, label, nvalue.is_string_type())
+        }
+        _ => return Ok(()),
+    };
+
+    if !is_string {
+        return Ok(());
+    }
+    let Some(label) = rhs else {
+        return Ok(());
+    };
+    let basic_op = match op {
+        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+    };
+    if matches!(basic_op, BasicOp::Eq | BasicOp::Ne) {
+        return Ok(());
+    }
+
+    let s = label.as_str();
+    if crate::util::is_glob_pattern(&s) && !crate::util::is_full_match_glob(&s) {
+        return Err(crate::query::error::order_op_partial_glob(
+            &format!("{:?}", basic_op),
+            &s,
+        ));
+    }
+    Ok(())
 }
 
 /// メイン解決ロジック（15パターンの比較処理）
@@ -2212,7 +2387,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::AggregationMatch {
                 agg: res_agg,
                 op,
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         (Operand::Literal(lab), Operand::Aggregation(agg)) => {
@@ -2220,7 +2395,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::AggregationMatch {
                 agg: res_agg,
                 op: flip_op(op),
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // (nest_calc) :> 100 → Nest 算術演算子の NestMatch に変換
@@ -2249,7 +2424,7 @@ fn resolve_single_match(
                         },
                     )),
                     op,
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context: left_context,
                 }),
                 // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
@@ -2261,7 +2436,7 @@ fn resolve_single_match(
                     keys,
                     nvalue: nv,
                     op,
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context,
                 }),
                 // 多段キー (keys > 1): 比較演算子は未サポート
@@ -2287,7 +2462,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::CalculationMatch {
                 calc: res_calc,
                 op,
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // size: > (1000 + 500)
@@ -2396,7 +2571,7 @@ fn resolve_single_match(
                         },
                     )),
                     op: flip_op(op),
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context: left_context,
                 }),
                 // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
@@ -2408,7 +2583,7 @@ fn resolve_single_match(
                     keys,
                     nvalue: nv,
                     op: flip_op(op),
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context,
                 }),
                 _ => Ok(resolved),
@@ -2421,7 +2596,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::CalculationMatch {
                 calc: res_calc,
                 op: flip_op(op),
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // width: > height:
@@ -2459,7 +2634,7 @@ fn resolve_single_match(
                         keys,
                         nvalue: nv,
                         op,
-                        label: lit,
+                        rhs: NvalueRhs::Label(lit),
                         context,
                     })
                 }
@@ -2489,7 +2664,7 @@ fn resolve_single_match(
                         keys,
                         nvalue: nv,
                         op: flip_op(op),
-                        label: lit,
+                        rhs: NvalueRhs::Label(lit),
                         context,
                     })
                 }
@@ -2610,25 +2785,6 @@ pub fn flip_basic_op(
         BasicOp::Lt => BasicOp::Gt,
         BasicOp::Le => BasicOp::Ge,
         other => other,
-    }
-}
-
-/// ComparisonOp を sea_query の BinOper に変換します。
-///
-/// **重要**: sql.rs で使用中
-pub fn to_bin_op(op: ComparisonOp) -> BinOper {
-    use crate::query::ast::BasicOp;
-    let basic = match op {
-        ComparisonOp::Scalar(b) => b,
-        ComparisonOp::Label(b) => b,
-    };
-    match basic {
-        BasicOp::Eq => BinOper::Equal,
-        BasicOp::Ne => BinOper::NotEqual,
-        BasicOp::Gt => BinOper::GreaterThan,
-        BasicOp::Ge => BinOper::GreaterThanOrEqual,
-        BasicOp::Lt => BinOper::SmallerThan,
-        BasicOp::Le => BinOper::SmallerThanOrEqual,
     }
 }
 
@@ -2812,7 +2968,7 @@ impl Resolver {
     }
 
     /// nvalue に対するフィルタ条件を返す（resolved_query から再帰的に探索）
-    pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
+    pub fn get_nvalue_condition(&self) -> Option<(ComparisonOp, NvalueRhs)> {
         self.resolved_query.get_nvalue_condition()
     }
 
@@ -3618,6 +3774,40 @@ mod tests {
                 result.resolved_query
             ),
         }
+    }
+
+    // --- 文字列型の順序演算子 × 部分 glob のエラー化 ---
+
+    #[test]
+    fn test_order_op_partial_glob_context_b_direct_tag_is_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("name: :> *.rs", &reg);
+        assert!(result.is_err(), "expected error");
+    }
+
+    #[test]
+    fn test_order_op_full_match_glob_context_b_is_not_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("name: :> *", &reg);
+        assert!(
+            result.is_ok(),
+            "expected ok, got {}",
+            result.err().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_order_op_partial_glob_eq_ne_context_b_is_not_error() {
+        let reg = TagRegistry::with_standard();
+        assert!(Resolver::new_nowarn("name:*.rs", &reg).is_ok());
+        assert!(Resolver::new_nowarn("name: :^ *.rs", &reg).is_ok());
+    }
+
+    #[test]
+    fn test_order_op_partial_glob_context_c_aggregation_is_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("max(name:) > *.rs", &reg);
+        assert!(result.is_err(), "expected error");
     }
 }
 

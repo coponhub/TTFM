@@ -55,7 +55,7 @@ pub(crate) fn expand_query_node(
 ) -> Result<QueryNode> {
     match node {
         QueryNode::TypedTag(tt) => {
-            Ok(schema.expand_tag(&tt.label.tag_type(), &tt.label))
+            schema.expand_tag(&tt.label.tag_type(), &tt.label)
         }
         QueryNode::Projection(op) => {
             // 括弧で囲まれた式 (sum > 10) などが Projection(Query(Comparison)) としてパースされる場合がある
@@ -176,7 +176,7 @@ fn expand_comparison_with_recursion(
     cmp.rest = new_rest;
 
     // 登録済みプラグインの比較ノード展開（日付範囲化・ラベル正規化など）を実行
-    let expanded_node = schema.expand_comparison(cmp);
+    let expanded_node = schema.expand_comparison(cmp)?;
 
     // 抽出したフィルタがあれば Comparison 全体を And で包む
     if lifted_filters.is_empty() {
@@ -283,7 +283,8 @@ fn is_set_operation(node: &QueryNode) -> bool {
         | QueryNode::Difference(_, _)
         | QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }
-        | QueryNode::DefinitionRef { .. } => true,
+        | QueryNode::DefinitionRef { .. }
+        | QueryNode::DateTimeRange { .. } => true,
 
         // Projection は集合を返すが、Literal のみの場合はスカラー
         QueryNode::Projection(op) => !matches!(op, Operand::Literal(_)),
@@ -381,7 +382,8 @@ fn returns_projection(node: &QueryNode) -> bool {
         | QueryNode::ColumnMatch { .. }
         | QueryNode::DefinitionRef { .. }
         | QueryNode::Comparison(_)
-        | QueryNode::Aggregation(_) => false,
+        | QueryNode::Aggregation(_)
+        | QueryNode::DateTimeRange { .. } => false,
         QueryNode::Nest(nest) => returns_projection(&nest.left),
     }
 }
@@ -754,6 +756,13 @@ fn expand_nest(
             }
             expand_nest_comparison(left.clone(), cmp)?
         }
+        QueryNode::DateTimeRange { first, op, range } => {
+            QueryNode::DateTimeRange {
+                first: distribute_nest_over_operand(&left, first),
+                op,
+                range,
+            }
+        }
         QueryNode::And(mut nodes) => {
             // 右辺が And の場合、プロジェクションが含まれているか確認
             let mut projections = Vec::new();
@@ -1090,7 +1099,9 @@ fn infer_type(
     schema: &impl LogicalSchema,
 ) -> Result<LogicalType> {
     match operand {
-        Operand::Literal(label) => Ok(label.value().infer_logical_type()),
+        Operand::Literal(label) => {
+            Ok(label.value().infer_logical_type_with_range())
+        }
         Operand::TypeRef(tag_type) => Ok(schema.get_logical_type(tag_type)),
         Operand::Calculation(calc) => {
             validate_calculation(calc, schema)?;
@@ -1276,6 +1287,46 @@ mod tests {
             right: Operand::Literal(crate::types::Label::from(1i64)),
         };
         assert!(validate_calculation(&calc_bool, &lens).is_ok());
+    }
+
+    /// 素のリテラルの型は各 `OperandFormat` に順に尋ねて決まる。単位付きサイズを
+    /// 主張するのは `ByteSizeRange` で、単位を持たない裸の数値は最下位の `Bitical` が
+    /// その変種のまま（小数は Float、整数は Integer）報告する。
+    #[test]
+    fn test_infer_type_asks_operand_formats_in_order() {
+        let lens = Lens::base_standard();
+        let infer = |s: &str| {
+            infer_type(&Operand::Literal(crate::types::Label::from(s)), &lens)
+                .unwrap()
+        };
+        assert_eq!(infer("1MB"), LogicalType::Integer, "size notation");
+        assert_eq!(infer("0.1"), LogicalType::Float, "bare decimal");
+        assert_eq!(infer("100"), LogicalType::Integer, "bare integer");
+        assert_eq!(infer("hello"), LogicalType::String, "plain string");
+    }
+
+    /// 日付表記・時間語彙は `DateTimeRange` が主張するので、算術の型としては
+    /// タイムスタンプ＝数値になる。文字列同士の演算だったものが混合型エラーへ変わる。
+    #[test]
+    fn test_infer_type_treats_date_notation_as_numeric() {
+        let lens = Lens::base_standard();
+        let infer = |s: &str| {
+            infer_type(&Operand::Literal(crate::types::Label::from(s)), &lens)
+                .unwrap()
+        };
+        for s in ["2026-02-01", "today", "7d ago", "12:30"] {
+            assert_eq!(infer(s), LogicalType::Integer, "date notation: {s}");
+        }
+
+        let calc = CalculationNode {
+            left: Operand::TypeRef(TagType::from("path")),
+            op: crate::query::ast::ArithmeticOp::Add,
+            right: Operand::Literal(crate::types::Label::from("today")),
+        };
+        assert!(
+            validate_calculation(&calc, &lens).is_err(),
+            "path: + today should now be a mixed-type error"
+        );
     }
 
     #[test]

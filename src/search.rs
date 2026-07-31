@@ -22,7 +22,6 @@ use crate::response::SearchResponse;
 use crate::tag::TagRegistry;
 use crate::types::Progress;
 use anyhow::Result;
-use duckdb::Connection;
 use sea_query::{Expr, PostgresQueryBuilder, Query};
 use std::collections::HashMap;
 use std::path::Path;
@@ -183,7 +182,7 @@ pub fn spawn_cache_worker(
 
     std::thread::spawn(move || {
         let res = (|| -> Result<()> {
-            let conn = Connection::open_in_memory()?;
+            let conn = crate::db::open_connection()?;
 
             let std_registry = crate::tag::TagRegistry::with_standard();
             let resolver = crate::query::lens_resolver::Resolver::new_nowarn(

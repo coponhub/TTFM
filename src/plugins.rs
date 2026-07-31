@@ -31,6 +31,7 @@ use crate::tag::{
     ScanRole, TagFunction,
 };
 use crate::types::{Bitical, Label, Rank, TagType};
+use crate::util::DotOk;
 
 // --- インターフェース用の手動型定義 ---
 
@@ -355,7 +356,7 @@ impl Query for WasmPluginAdapter {
         crate::query::lens_schema::sql_to_logical(self.bitical_type)
     }
 
-    fn normalize_label(&self, label: &Label) -> Label {
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
             let mut cache = cache.borrow_mut();
@@ -381,7 +382,7 @@ impl Query for WasmPluginAdapter {
         match result {
             Ok(Some(s)) => Label::from(s),
             _ => label.clone(),
-        }
+        }.to_ok()
     }
 
     fn expand(
@@ -390,7 +391,7 @@ impl Query for WasmPluginAdapter {
         label: &Label,
         tag: &crate::types::TypedTag,
         _schema: &dyn crate::query::logical_schema::LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         let tag_type_str = tagtype.as_str().to_string();
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
@@ -417,7 +418,7 @@ impl Query for WasmPluginAdapter {
         match result {
             Ok(Some(ttql)) => crate::tag::ttql_parse(&ttql),
             _ => QueryNode::TypedTag(tag.clone()),
-        }
+        }.to_ok()
     }
 
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {

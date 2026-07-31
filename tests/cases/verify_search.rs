@@ -478,7 +478,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     .unwrap();
     assert_eq!(results.results.len(), 1); // beta only
 
-    // 7. クォート内でのGlob (無効化されるはず)
+    // 7. クォート内でも Glob は有効
     let results = search::search_nowarn(
         &store,
         &registry,
@@ -486,7 +486,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
         Default::default(),
     )
     .unwrap();
-    assert_eq!(results.results.len(), 0); // リテラル一致を試みるため0件
+    assert_eq!(results.results.len(), 2); // alpha と beta の両方
 
     // 8. クォートでの完全一致
     let results = search::search_nowarn(
@@ -580,6 +580,25 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(results.results[0].raw_repr(), "[WIP]_test.txt");
+
+    // 14. 不一致 × Glob (`:^`) は「一致」に反転せず、除外として働く
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "filename: :^ *.pdf & is_dir:false",
+        Default::default(),
+    )
+    .unwrap();
+    let names: Vec<String> =
+        results.results.iter().map(|r| r.raw_repr()).collect();
+    assert!(
+        !names.iter().any(|n| n == "project_alpha.pdf"),
+        ".pdf は除外されるべき: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "project_beta.txt"),
+        ".pdf 以外は残るべき: {names:?}"
+    );
 
     Ok(())
 }

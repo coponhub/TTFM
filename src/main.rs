@@ -806,8 +806,8 @@ mod tests {
 
         let output = String::from_utf8(out).unwrap();
         assert!(
-            output.contains("1.0KB"),
-            "size should show '1.0KB', got:\n{}",
+            output.contains("1.00KB"),
+            "size should show '1.00KB', got:\n{}",
             output
         );
     }

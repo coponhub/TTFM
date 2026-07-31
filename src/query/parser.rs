@@ -767,21 +767,33 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
 /// 引用符で囲まれた文字列内のエスケープシーケンスを展開します。
 ///
 /// 標準的なエスケープシーケンス（\n, \r, \t, \\, \', \"）を処理します。
+/// glob メタ文字（*, ?, [, ]）前のバックスラッシュは、リテラル指定として
+/// 後段の照合へ渡すため保持します。
 /// クエリ文法の `quoted_string` ルールで使用されます。
-fn unescape_string(s: &str) -> Result<String> {
+pub(crate) fn unescape_string(s: &str) -> Result<String> {
     let mut chars = s.chars();
-    std::iter::from_fn(move || match chars.next()? {
-        '\\' => match chars.next() {
-            Some('n') => Some('\n'),
-            Some('r') => Some('\r'),
-            Some('t') => Some('\t'),
-            Some('\\') => Some('\\'),
-            Some('\'') => Some('\''),
-            Some('"') => Some('"'),
-            Some(c) => Some(c),
-            None => Some('\\'),
-        },
-        c => Some(c),
+    let mut pending = VecDeque::new();
+    std::iter::from_fn(move || {
+        if let Some(c) = pending.pop_front() {
+            return Some(c);
+        }
+        match chars.next()? {
+            '\\' => match chars.next() {
+                Some('n') => Some('\n'),
+                Some('r') => Some('\r'),
+                Some('t') => Some('\t'),
+                Some('\\') => Some('\\'),
+                Some('\'') => Some('\''),
+                Some('"') => Some('"'),
+                Some(c @ ('*' | '?' | '[' | ']')) => {
+                    pending.push_back(c);
+                    Some('\\')
+                }
+                Some(c) => Some(c),
+                None => Some('\\'),
+            },
+            c => Some(c),
+        }
     })
     .collect::<String>()
     .to_ok()
@@ -942,6 +954,15 @@ mod tests {
         assert_eq!(unescape_string(r"foo\\bar").unwrap(), "foo\\bar");
         assert_eq!(unescape_string(r#"foo\"bar"#).unwrap(), "foo\"bar");
         assert_eq!(unescape_string(r"foo\'bar").unwrap(), "foo'bar");
+    }
+
+    #[test]
+    fn test_unescape_string_keeps_glob_escapes() {
+        assert_eq!(unescape_string(r"foo\*bar").unwrap(), r"foo\*bar");
+        assert_eq!(unescape_string(r"foo\?bar").unwrap(), r"foo\?bar");
+        assert_eq!(unescape_string(r"foo\[bar").unwrap(), r"foo\[bar");
+        assert_eq!(unescape_string(r"foo\]bar").unwrap(), r"foo\]bar");
+        assert_eq!(unescape_string("foo*bar").unwrap(), "foo*bar");
     }
 
     #[test]

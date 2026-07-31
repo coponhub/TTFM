@@ -83,24 +83,7 @@ pub(super) fn fold_simple_operand(
     child_results: Vec<SimpleExpr>,
 ) -> Option<SimpleExpr> {
     match op {
-        ResolvedOperand::Literal(lab) => {
-            let expr =
-                if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
-                    sea_query::Expr::val(bytes)
-                        .cast_as(crate::db::BiticalType::Double)
-                        .into()
-                } else {
-                    match lab.value() {
-                        crate::types::Bitical::Integer(i) => {
-                            sea_query::Expr::val(i)
-                                .cast_as(crate::db::BiticalType::Double)
-                                .into()
-                        }
-                        other => other.to_simple_expr(),
-                    }
-                };
-            Some(expr)
-        }
+        ResolvedOperand::Literal(lab) => Some(build_resolved_literal_expr(lab)),
         ResolvedOperand::TagRef { .. } => Some(sea_query::Expr::val(0).into()),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =

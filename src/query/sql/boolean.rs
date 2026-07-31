@@ -19,8 +19,8 @@ use super::agg_pieces::{
     build_agg, build_agg_calc_expr, build_agg_calc_subquery,
 };
 use super::{
-    build_aggregation_context, label_to_unit_aware_expr, subquery,
-    wrap_in_subquery, BuildPick, PickNode,
+    build_aggregation_context, label_to_simple_expr, nvalue_rhs_condition,
+    subquery, wrap_in_subquery, BuildPick, PickNode,
 };
 use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, Src};
 use crate::query::ast::ComparisonOp;
@@ -54,13 +54,7 @@ fn bool_to_volatile_row(bool_expr: SimpleExpr) -> SimpleExpr {
     CustomFunc::list_value([name_sp, type_sp, value_sp])
 }
 
-fn build_boolean_comparison_sql(
-    left: SimpleExpr,
-    op: ComparisonOp,
-    right: SimpleExpr,
-) -> SelectStatement {
-    let bin_op = to_bin_op(op);
-    let bool_expr = Expr::expr(left).binary(bin_op, right).into();
+fn build_boolean_condition_sql(bool_expr: SimpleExpr) -> SelectStatement {
     let mut q = Query::select();
     // 揮発 id は SQL 側では NULL とし、fetch 後に Rust 側で採番する。
     q.expr_as(Expr::val(None::<i64>), Col::ItemId)
@@ -71,6 +65,15 @@ fn build_boolean_comparison_sql(
             crate::db::QueryResultCol::Tags,
         );
     q
+}
+
+fn build_boolean_comparison_sql(
+    left: SimpleExpr,
+    op: ComparisonOp,
+    right: SimpleExpr,
+) -> SelectStatement {
+    let bin_op = to_bin_op(op);
+    build_boolean_condition_sql(Expr::expr(left).binary(bin_op, right).into())
 }
 
 pub(super) fn build_boolean_existence_sql(
@@ -170,12 +173,14 @@ pub(super) fn build_boolean_sql(
 ) -> SelectStatement {
     let agg_ctx = build_aggregation_context(src, node);
     match node {
-        ResolvedNode::AggregationMatch { agg, op, label } => {
-            build_boolean_comparison_sql(
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
+            let cond = nvalue_rhs_condition(
                 subquery(build_agg(src, agg, &agg_ctx)),
                 *op,
-                label_to_unit_aware_expr(label),
-            )
+                rhs,
+                agg.is_string_type(),
+            );
+            build_boolean_condition_sql(cond.into())
         }
         ResolvedNode::AggregationAggregationMatch { left, op, right } => {
             build_boolean_comparison_sql(
@@ -202,9 +207,9 @@ pub(super) fn build_boolean_sql(
         }
         ResolvedNode::ScalarMatch { left, op, right } => {
             build_boolean_comparison_sql(
-                label_to_unit_aware_expr(left),
+                label_to_simple_expr(left),
                 *op,
-                label_to_unit_aware_expr(right),
+                label_to_simple_expr(right),
             )
         }
         _ => {

@@ -103,12 +103,12 @@ fn test_plugin_normalize_label_applied_in_search() {
         }
     }
     impl ttfm::tag::Query for ShortLabelTag {
-        fn normalize_label(&self, label: &Label) -> Label {
-            match label.as_str().as_str() {
+        fn normalize_label(&self, label: &Label) -> anyhow::Result<Label> {
+            Ok(match label.as_str().as_str() {
                 "m" => Label::from("modified"),
                 "c" => Label::from("clean"),
                 _ => label.clone(),
-            }
+            })
         }
     }
 
@@ -267,7 +267,7 @@ fn test_wasm_adapter_normalize_label_default() {
     let adapter = load_sample_adapter();
     let query = adapter.query();
     let label = Label::from("hello");
-    assert_eq!(query.normalize_label(&label).as_str(), "hello");
+    assert_eq!(query.normalize_label(&label).unwrap().as_str(), "hello");
 }
 
 /// プラグインが expand で None を返す場合、TypedTag のデフォルト動作を使う
@@ -278,12 +278,14 @@ fn test_wasm_adapter_expand_default_returns_typed_tag() {
     let tag_type = TagType::from("sample");
     let label = Label::from("foo");
     let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
-    let node = query.expand(
-        &tag_type,
-        &label,
-        &typed_tag,
-        &ttfm::query::lens_schema::Lens::base_standard(),
-    );
+    let node = query
+        .expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &ttfm::query::lens_schema::Lens::base_standard(),
+        )
+        .unwrap();
     assert_eq!(node, QueryNode::TypedTag(typed_tag));
 }
 
@@ -323,12 +325,14 @@ fn test_wasm_adapter_query_available_without_query_export() {
     let tag_type = TagType::from("mimetype");
     let label = Label::from("text/plain");
     let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
-    let node = query.expand(
-        &tag_type,
-        &label,
-        &typed_tag,
-        &ttfm::query::lens_schema::Lens::base_standard(),
-    );
+    let node = query
+        .expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &ttfm::query::lens_schema::Lens::base_standard(),
+        )
+        .unwrap();
     assert_eq!(node, QueryNode::TypedTag(typed_tag));
 }
 

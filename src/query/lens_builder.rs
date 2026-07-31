@@ -23,7 +23,7 @@
 
 use crate::db::Col;
 use crate::query::lens_schema::fixed_attributes;
-use crate::types::{Bitical, Label};
+use crate::types::Bitical;
 
 /// Fixed 属性名の定数リストに、元の物理行を表す NULL マーカー行を先頭に加えた
 /// 1列（name）のサブクエリを返す。base との CROSS JOIN で「元の行＋属性ごとの
@@ -164,15 +164,13 @@ fn resolve_definition_name_filter(
 ) -> crate::query::sql::definition::ResolvedDefinition {
     use crate::query::sql::definition::ResolvedDefinition;
 
-    // `Label::Literal`（quoted）は完全一致検索、それ以外の String は glob検索。
-    // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
-    // まず `def.value` 自体で判定する。
+    // glob メタ文字を含まない名前は完全一致検索（未登録名なら定義作成の候補になる）。
     let (pattern, exact, candidates) =
         if let Bitical::String(pattern) = def.value.value() {
-            if matches!(def.value, Label::Literal(..)) {
-                exact_match_candidate(pattern, def, default_rank)
-            } else {
+            if crate::util::is_glob_pattern(&pattern) {
                 (pattern, false, def.candidates.clone())
+            } else {
+                exact_match_candidate(pattern, def, default_rank)
             }
         } else {
             let v = def.value.value().as_display_name();

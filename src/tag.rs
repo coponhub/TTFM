@@ -22,10 +22,10 @@ use crate::query::ast::{
 };
 use crate::response::Item;
 use crate::types::{
-    Bitical, BiticalAssociate, Biticals, ItemId, ItemKind, Label, LargeOrigin,
-    Origin, Rank, SType, TagType, TypedTag,
+    Bitical, BiticalAssociate, Biticals, DateTime, ItemId, ItemKind, Label,
+    LargeOrigin, Origin, Rank, SType, TagType, TypedTag,
 };
-use crate::util::{parse_datetime, DatetimeRange, SafeMetadata};
+use crate::util::{DotOk, SafeMetadata};
 use anyhow::Result;
 use chrono::TimeZone as _;
 use indexmap::IndexMap;
@@ -205,13 +205,14 @@ pub trait Query: Send + Sync {
     }
 
     /// タグを QueryNode へ展開する。デフォルトはそのまま TypedTag。
+    /// 値がその型として解釈できない場合はエラーを返す。
     fn expand(
         &self,
         tagtype: &TagType,
         label: &Label,
         tag: &TypedTag,
         schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         if let Some(kind) = self.item_kind() {
             // 定義アイテム参照: tag:/type: などは item_references の定義行を参照する。
             // value は自身の型を付与した representative（未登録時の Volatile 用）。
@@ -227,8 +228,9 @@ pub trait Query: Send + Sync {
                     .collect(),
                 recorded: true,
             })
+            .to_ok()
         } else {
-            QueryNode::TypedTag(tag.clone())
+            QueryNode::TypedTag(tag.clone()).to_ok()
         }
     }
 
@@ -245,8 +247,9 @@ pub trait Query: Send + Sync {
     }
 
     /// ラベル値を正規化する（例: "1MB" → 1048576）。
-    fn normalize_label(&self, label: &Label) -> Label {
-        label.clone()
+    /// 値がその型として解釈できない場合はエラーを返す。
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
+        label.clone().to_ok()
     }
 
     /// タグのストレージ上の役割。
@@ -265,17 +268,18 @@ pub trait Query: Send + Sync {
     }
 
     /// 比較ノードを展開する。デフォルトはリテラルを normalize_label して ComparisonNode を返す。
-    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+    /// 値がその型として解釈できない場合はエラーを返す。
+    fn expand_comparison(&self, node: ComparisonNode) -> Result<QueryNode> {
         let mut node = node;
         if let Operand::Literal(label) = &mut node.first {
-            *label = self.normalize_label(label);
+            *label = self.normalize_label(label)?;
         }
         for (_, rhs) in &mut node.rest {
             if let Operand::Literal(label) = rhs {
-                *label = self.normalize_label(label);
+                *label = self.normalize_label(label)?;
             }
         }
-        QueryNode::Comparison(node)
+        QueryNode::Comparison(node).to_ok()
     }
 }
 
@@ -456,34 +460,6 @@ impl TagRegistry {
         reg
     }
 
-    /// 指定タグ名の `TagFunction::normalize_label` を呼び出す。
-    /// `Label::Literal` はどの関数にも委譲せずそのまま返す。
-    pub fn normalize_label(&self, tag_name: &str, label: &Label) -> Label {
-        if matches!(label, Label::Literal(..)) {
-            return label.clone();
-        }
-        if let Some(f) = self.get(tag_name) {
-            return f.query().normalize_label(label);
-        }
-        label.clone()
-    }
-
-    /// 全 TagFunction の `normalize_label` を登録の降順に試し、最初に変換された結果を返す。
-    /// タグ文脈によらず全リテラルに適用される変換（サイズ単位・日付文字列等）に使用。
-    /// `Label::Literal` はどの関数にも委譲せずそのまま返す。
-    pub fn normalize_label_any(&self, label: &Label) -> Label {
-        if matches!(label, Label::Literal(..)) {
-            return label.clone();
-        }
-        for f in self.functions.values().rev() {
-            let normalized = f.query().normalize_label(label);
-            if normalized != *label {
-                return normalized;
-            }
-        }
-        label.clone()
-    }
-
     pub fn get_all_columns(&self) -> Vec<crate::db::ColumnDef> {
         self.functions
             .values()
@@ -503,17 +479,6 @@ impl TagRegistry {
             .filter_map(|f| f.index())
             .map(|idx| idx.extract(path))
             .collect()
-    }
-
-    pub fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
-        let name = find_tagtype_name_in_comparison(&node);
-        let Some(name) = name else {
-            return QueryNode::Comparison(node);
-        };
-        let Some(func) = self.get(&name) else {
-            return QueryNode::Comparison(node);
-        };
-        func.query().expand_comparison(node)
     }
 
     pub fn register_plugin(&mut self, func: impl TagFunction + 'static) {
@@ -606,46 +571,6 @@ impl TagRegistry {
     }
 }
 
-fn find_tagtype_name_in_comparison(node: &ComparisonNode) -> Option<String> {
-    fn tagtype_name(tt: &TagType) -> Option<String> {
-        if let TagType::Base(stype) = tt {
-            let s: &'static str = (*stype).into();
-            Some(s.to_string())
-        } else {
-            None
-        }
-    }
-
-    fn find_in_querynode(qnode: &QueryNode) -> Option<&TagType> {
-        match qnode {
-            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt),
-            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
-                nodes.iter().find_map(find_in_querynode)
-            }
-            QueryNode::Difference(l, _) => find_in_querynode(l),
-            _ => None,
-        }
-    }
-
-    fn find_in_operand(op: &Operand) -> Option<String> {
-        use crate::query::ast::AggregationNode;
-        match op {
-            Operand::TypeRef(tt) => tagtype_name(tt),
-            Operand::Aggregation(agg) => {
-                let inner = match agg.as_ref() {
-                    AggregationNode::Count(q) => q,
-                    AggregationNode::Arithmetic { inner, .. } => inner,
-                };
-                find_in_querynode(inner.as_ref()).and_then(tagtype_name)
-            }
-            _ => None,
-        }
-    }
-
-    find_in_operand(&node.first)
-        .or_else(|| node.rest.iter().find_map(|(_, op)| find_in_operand(op)))
-}
-
 // ============================================================
 // ttql_parse / ttql!
 // ============================================================
@@ -653,8 +578,7 @@ fn find_tagtype_name_in_comparison(node: &ComparisonNode) -> Option<String> {
 /// TTQL クエリ文字列を QueryNode に変換する。
 /// パースエラー時はパニックする（expand() 内での使用を想定）。
 pub fn ttql_parse(query: &str) -> QueryNode {
-    crate::query::parser::parse_nowarn(query)
-        .unwrap_or_else(|e| panic!("{e}"))
+    crate::query::parser::parse_nowarn(query).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// format!() を内包する ttql_parse 呼び出しマクロ。
@@ -705,11 +629,11 @@ impl Query for DirectoryFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::retag(SType::Filename, label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, true)),
-        ])
+        ]).to_ok()
     }
     fn expand_projection(&self, _tt: &TagType) -> QueryNode {
         QueryNode::And(vec![
@@ -777,11 +701,11 @@ impl Query for FilenameFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::retag(SType::Filename, label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
-        ])
+        ]).to_ok()
     }
     fn expand_projection(&self, _tt: &TagType) -> QueryNode {
         QueryNode::And(vec![
@@ -832,10 +756,16 @@ impl Query for ExtensionFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
     }
-    fn normalize_label(&self, label: &Label) -> Label {
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
         let s = label.as_str().to_lowercase();
         let s = s.trim_start_matches('.');
-        Label::Extension(s.to_string())
+        let has_alnum = s.chars().any(|c| c.is_ascii_alphanumeric());
+        let has_disallowed_symbol =
+            s.chars().any(|c| !matches!(c, '#' | '$' | '~' | '_'));
+        if !has_alnum && has_disallowed_symbol {
+            return Ok(label.clone());
+        }
+        Label::Extension(s.to_string()).to_ok()
     }
     fn expand(
         &self,
@@ -843,12 +773,12 @@ impl Query for ExtensionFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
-        let label = self.normalize_label(label);
+    ) -> Result<QueryNode> {
+        let label = self.normalize_label(label)?;
         QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::retag(SType::Extension, &label)),
             QueryNode::TypedTag(TypedTag::new(SType::IsDir, false)),
-        ])
+        ]).to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::And(vec![
@@ -913,11 +843,11 @@ impl Query for PathFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         let normalized = normalize_path_str(&label.as_str());
         let new_label = label
             .rekey(TagType::Base(SType::Path), Bitical::String(normalized));
-        QueryNode::TypedTag(TypedTag { label: new_label })
+        QueryNode::TypedTag(TypedTag { label: new_label }).to_ok()
     }
 }
 
@@ -971,13 +901,13 @@ impl Query for ParentDirFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         let normalized = normalize_path_str(&label.as_str());
         let new_label = label.rekey(
             TagType::Base(SType::Parentdir),
             Bitical::String(normalized),
         );
-        QueryNode::TypedTag(TypedTag { label: new_label })
+        QueryNode::TypedTag(TypedTag { label: new_label }).to_ok()
     }
 }
 
@@ -1048,6 +978,114 @@ impl Index for IsDirFn {
 impl Query for IsDirFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Boolean
+    }
+    fn expand(
+        &self,
+        _tt: &TagType,
+        label: &Label,
+        tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
+    ) -> Result<QueryNode> {
+        let s = label.as_str();
+        if !crate::util::is_glob_pattern(&s) {
+            return Ok(QueryNode::TypedTag(tag.clone()));
+        }
+        let first = Operand::TypeRef(SType::IsDir.into());
+        let nodes: Vec<QueryNode> = [true, false]
+            .into_iter()
+            .filter(|b| crate::util::glob_match(&s, &b.to_string()))
+            .map(|b| {
+                QueryNode::Comparison(ComparisonNode {
+                    first: first.clone(),
+                    rest: vec![(
+                        ComparisonOp::Label(BasicOp::Eq),
+                        Operand::Literal(Label::IsDir(b)),
+                    )],
+                })
+            })
+            .collect();
+        match nodes.len() {
+            1 => nodes.into_iter().next().unwrap(),
+            _ => QueryNode::Or(nodes),
+        }.to_ok()
+    }
+    fn expand_comparison(&self, node: ComparisonNode) -> Result<QueryNode> {
+        let mut first = node.first;
+        if let Operand::Literal(label) = &mut first {
+            *label = self.normalize_label(label)?;
+        }
+
+        let mut conditions = Vec::new();
+        for (op, rhs) in node.rest {
+            if let Operand::Literal(label) = &rhs {
+                let s = label.as_str();
+                if crate::util::is_glob_pattern(&s) {
+                    let basic_op = match op {
+                        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+                    };
+                    let ctor: fn(BasicOp) -> ComparisonOp = match op {
+                        ComparisonOp::Label(_) => ComparisonOp::Label,
+                        ComparisonOp::Scalar(_) => ComparisonOp::Scalar,
+                    };
+                    match basic_op {
+                        BasicOp::Eq | BasicOp::Ne => {
+                            let want_match = basic_op == BasicOp::Eq;
+                            let nodes: Vec<QueryNode> = [true, false]
+                                .into_iter()
+                                .filter(|b| {
+                                    crate::util::glob_match(&s, &b.to_string())
+                                        == want_match
+                                })
+                                .map(|b| {
+                                    QueryNode::Comparison(ComparisonNode {
+                                        first: first.clone(),
+                                        rest: vec![(
+                                            ctor(BasicOp::Eq),
+                                            Operand::Literal(Label::IsDir(b)),
+                                        )],
+                                    })
+                                })
+                                .collect();
+                            conditions.push(match nodes.len() {
+                                1 => nodes.into_iter().next().unwrap(),
+                                _ => QueryNode::Or(nodes),
+                            });
+                            continue;
+                        }
+                        BasicOp::Gt
+                        | BasicOp::Ge
+                        | BasicOp::Lt
+                        | BasicOp::Le
+                            if crate::util::is_full_match_glob(&s) =>
+                        {
+                            // 全一致 glob × 順序演算子は全型共通の全域規則（Gt/Lt→FALSE、Ge/Le→TRUE）に揃える
+                            let always_true =
+                                matches!(basic_op, BasicOp::Ge | BasicOp::Le);
+                            conditions.push(if always_true {
+                                QueryNode::And(vec![])
+                            } else {
+                                QueryNode::Or(vec![])
+                            });
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut rhs = rhs;
+            if let Operand::Literal(label) = &mut rhs {
+                *label = self.normalize_label(label)?;
+            }
+            conditions.push(QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, rhs)],
+            }));
+        }
+
+        match conditions.len() {
+            1 => conditions.remove(0),
+            _ => QueryNode::And(conditions),
+        }.to_ok()
     }
 }
 
@@ -1182,8 +1220,8 @@ impl Query for NameFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::retag(SType::Name, label))
+    ) -> Result<QueryNode> {
+        QueryNode::TypedTag(TypedTag::retag(SType::Name, label)).to_ok()
     }
 }
 
@@ -1232,12 +1270,27 @@ impl Query for SizeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Integer
     }
-    fn normalize_label(&self, label: &Label) -> Label {
-        if let Some(bytes) = crate::util::parse_size(&label.as_str()) {
-            Label::Size(bytes)
-        } else {
-            label.clone()
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
+        use crate::query::format::ByteSizeRange;
+        let s = label.as_str();
+        match ByteSizeRange::parse(&s) {
+            Some(Ok(ByteSizeRange::Range { lo, hi })) if lo == hi => {
+                return Label::Size(lo).to_ok();
+            }
+            Some(Ok(_)) => {
+                return Label::Other(
+                    TagType::from(SType::Size),
+                    Bitical::String(s.to_string()),
+                ).to_ok();
+            }
+            _ => {}
         }
+        // 単位の無い数値は ByteSizeRange が主張しないので、SizeFn 自身がバイトと読む
+        // （MtimeFn が裸の整数を年と読むのと同じ構造）。
+        if let Some(bytes) = crate::util::parse_size(&s) {
+            return Label::Size(bytes).to_ok();
+        }
+        label.clone().to_ok()
     }
     fn expand(
         &self,
@@ -1245,9 +1298,84 @@ impl Query for SizeFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
-        let label = self.normalize_label(label);
-        QueryNode::TypedTag(TypedTag::retag(TagType::from(SType::Size), &label))
+    ) -> Result<QueryNode> {
+        use crate::query::format::ByteSizeRange;
+        let normalized = self.normalize_label(label)?;
+        if matches!(normalized, Label::Size(_)) {
+            return QueryNode::TypedTag(TypedTag::retag(
+                TagType::from(SType::Size),
+                &normalized,
+            )).to_ok();
+        }
+        let s = label.as_str();
+        if let Some(Ok(range)) = ByteSizeRange::parse(&s) {
+            return crate::query::format::byte_size_range_condition(
+                Operand::TypeRef(SType::Size.into()),
+                ComparisonOp::Label,
+                BasicOp::Eq,
+                range,
+            ).to_ok();
+        }
+        if crate::util::is_full_match_glob(&s) {
+            return QueryNode::TypedTag(TypedTag::retag(
+                TagType::from(SType::Size),
+                &normalized,
+            )).to_ok();
+        }
+        Err(crate::query::error::tag_value_not_interpretable("size", &s))
+    }
+    fn expand_comparison(&self, node: ComparisonNode) -> Result<QueryNode> {
+        use crate::query::format::ByteSizeRange;
+        let mut first = node.first;
+        if let Operand::Literal(label) = &mut first {
+            *label = self.normalize_label(label)?;
+        }
+
+        let mut conditions = Vec::new();
+        for (op, rhs) in node.rest {
+            if let Operand::Literal(label) = &rhs {
+                let normalized_rhs = self.normalize_label(label)?;
+                if !matches!(normalized_rhs, Label::Size(_)) {
+                    let s = label.as_str();
+                    if let Some(Ok(range)) = ByteSizeRange::parse(&s) {
+                        let (basic_op, ctor): (
+                            BasicOp,
+                            fn(BasicOp) -> ComparisonOp,
+                        ) = match op {
+                            ComparisonOp::Label(b) => (b, ComparisonOp::Label),
+                            ComparisonOp::Scalar(b) => {
+                                (b, ComparisonOp::Scalar)
+                            }
+                        };
+                        conditions.push(crate::query::format::byte_size_range_condition(
+                            first.clone(),
+                            ctor,
+                            basic_op,
+                            range,
+                        ));
+                        continue;
+                    }
+                    if !crate::util::is_full_match_glob(&s) {
+                        return Err(crate::query::error::tag_value_not_interpretable(
+                            "size", &s,
+                        ));
+                    }
+                }
+            }
+            let mut rhs = rhs;
+            if let Operand::Literal(label) = &mut rhs {
+                *label = self.normalize_label(label)?;
+            }
+            conditions.push(QueryNode::Comparison(ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, rhs)],
+            }));
+        }
+
+        match conditions.len() {
+            1 => conditions.remove(0),
+            _ => QueryNode::And(conditions),
+        }.to_ok()
     }
 }
 impl Display for SizeFn {
@@ -1283,7 +1411,7 @@ fn format_size_si(bytes: i64) -> String {
         val /= 1024.0;
         idx += 1;
     }
-    format!("{:.1}{}", val, UNITS[idx])
+    format!("{:.2}{}", val, UNITS[idx])
 }
 
 fn format_size_binary(bytes: i64) -> String {
@@ -1297,56 +1425,7 @@ fn format_size_binary(bytes: i64) -> String {
         val /= 1024.0;
         idx += 1;
     }
-    format!("{:.1}{}", val, UNITS[idx])
-}
-
-// ---------------------------------------------------------------------------
-// DateTime::to_range — tag.rs で impl（BasicOp との循環依存を避けるため）
-// ---------------------------------------------------------------------------
-impl crate::types::DateTime {
-    /// オペレータに応じた (BasicOp, timestamp) 条件リストを返す。
-    /// Eq  → [(Ge, floor_ts), (Le, ceil_ts)]
-    /// Gt  → [(Gt, ceil_ts)]
-    /// Ge  → [(Ge, floor_ts)]
-    /// Lt  → [(Lt, floor_ts)]
-    /// Le  → [(Le, ceil_ts)]
-    /// Ne  → [(Lt, floor_ts), (Gt, ceil_ts)]
-    pub fn to_range(
-        &self,
-        op: crate::query::ast::BasicOp,
-    ) -> Vec<(crate::query::ast::BasicOp, i64)> {
-        use crate::query::ast::BasicOp;
-        use crate::types::DateTime;
-        use chrono::{Local, TimeZone};
-
-        let to_ts = |ndt: chrono::NaiveDateTime| -> i64 {
-            Local
-                .from_local_datetime(&ndt)
-                .earliest()
-                .map(|t| t.timestamp())
-                .unwrap_or(0)
-        };
-
-        if let DateTime::Instant(instant) = self {
-            return vec![(op, instant.timestamp())];
-        }
-
-        let floor_ts = self.floor().map(to_ts).unwrap_or(0);
-        let ceil_ts = self.ceiling().map(to_ts).unwrap_or(0);
-
-        match op {
-            BasicOp::Eq => {
-                vec![(BasicOp::Ge, floor_ts), (BasicOp::Le, ceil_ts)]
-            }
-            BasicOp::Gt => vec![(BasicOp::Gt, ceil_ts)],
-            BasicOp::Ge => vec![(BasicOp::Ge, floor_ts)],
-            BasicOp::Lt => vec![(BasicOp::Lt, floor_ts)],
-            BasicOp::Le => vec![(BasicOp::Le, ceil_ts)],
-            BasicOp::Ne => {
-                vec![(BasicOp::Lt, floor_ts), (BasicOp::Gt, ceil_ts)]
-            }
-        }
-    }
+    format!("{:.2}{}", val, UNITS[idx])
 }
 
 // --- MtimeFn ---
@@ -1401,81 +1480,6 @@ impl Index for MtimeFn {
         BiticalType::Integer
     }
 }
-fn mtime_range_op(
-    first: &Operand,
-    op: ComparisonOp,
-    range: DatetimeRange,
-) -> Vec<QueryNode> {
-    let basic_op = match op {
-        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
-    };
-    let make_op = |b: BasicOp| match op {
-        ComparisonOp::Label(_) => ComparisonOp::Label(b),
-        ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
-    };
-    match basic_op {
-        BasicOp::Eq => vec![
-            QueryNode::Comparison(ComparisonNode {
-                first: first.clone(),
-                rest: vec![(
-                    make_op(BasicOp::Ge),
-                    Operand::Literal(Label::Mtime(range.start)),
-                )],
-            }),
-            QueryNode::Comparison(ComparisonNode {
-                first: first.clone(),
-                rest: vec![(
-                    make_op(BasicOp::Le),
-                    Operand::Literal(Label::Mtime(range.end)),
-                )],
-            }),
-        ],
-        BasicOp::Ne => vec![QueryNode::Or(vec![
-            QueryNode::Comparison(ComparisonNode {
-                first: first.clone(),
-                rest: vec![(
-                    make_op(BasicOp::Lt),
-                    Operand::Literal(Label::Mtime(range.start)),
-                )],
-            }),
-            QueryNode::Comparison(ComparisonNode {
-                first: first.clone(),
-                rest: vec![(
-                    make_op(BasicOp::Gt),
-                    Operand::Literal(Label::Mtime(range.end)),
-                )],
-            }),
-        ])],
-        BasicOp::Gt => vec![QueryNode::Comparison(ComparisonNode {
-            first: first.clone(),
-            rest: vec![(
-                make_op(BasicOp::Gt),
-                Operand::Literal(Label::Mtime(range.end)),
-            )],
-        })],
-        BasicOp::Ge => vec![QueryNode::Comparison(ComparisonNode {
-            first: first.clone(),
-            rest: vec![(
-                make_op(BasicOp::Ge),
-                Operand::Literal(Label::Mtime(range.start)),
-            )],
-        })],
-        BasicOp::Lt => vec![QueryNode::Comparison(ComparisonNode {
-            first: first.clone(),
-            rest: vec![(
-                make_op(BasicOp::Lt),
-                Operand::Literal(Label::Mtime(range.start)),
-            )],
-        })],
-        BasicOp::Le => vec![QueryNode::Comparison(ComparisonNode {
-            first: first.clone(),
-            rest: vec![(
-                make_op(BasicOp::Le),
-                Operand::Literal(Label::Mtime(range.end)),
-            )],
-        })],
-    }
-}
 fn format_mtime_relative(secs: i64) -> String {
     let diff = chrono::Local::now().timestamp() - secs;
     let abs = diff.unsigned_abs();
@@ -1500,50 +1504,32 @@ fn format_mtime_relative(secs: i64) -> String {
     }
 }
 
-/// 構造化日付文字列（YYYY-MM-DD / YYYY-MM）のみを DateTime に変換する。
-/// 4桁年単体・自然言語は対象外（normalize_label 用）。
-fn parse_date_literal(s: &str) -> Option<crate::types::DateTime> {
-    use chrono::NaiveDate;
-    let s = s.trim();
-    let parts: Vec<&str> = s
-        .split(|c| c == '/' || c == '-')
-        .filter(|p| !p.is_empty())
-        .collect();
-    // YYYY-MM-DD / YYYY/MM/DD
-    if parts.len() == 3
-        && parts[0].len() == 4
-        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-    {
-        let y: i32 = parts[0].parse().ok()?;
-        let m: u32 = parts[1].parse().ok()?;
-        let d: u32 = parts[2].parse().ok()?;
-        return NaiveDate::from_ymd_opt(y, m, d)
-            .map(crate::types::DateTime::Date);
+fn parse_mtime_bare_year(s: &str) -> Option<crate::types::DateTimeRange> {
+    if s.len() != 4 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    // YYYY-MM / YYYY/MM
-    if parts.len() == 2
-        && parts[0].len() == 4
-        && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
-    {
-        let y: i32 = parts[0].parse().ok()?;
-        let m: u32 = parts[1].parse().ok()?;
-        NaiveDate::from_ymd_opt(y, m, 1)?;
-        return Some(crate::types::DateTime::YearMonth { year: y, month: m });
-    }
-    None
+    let y: i32 = s.parse().ok()?;
+    crate::types::DateTime::Year(y).to_interval()
 }
 
 impl Query for MtimeFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Integer
     }
-    fn normalize_label(&self, label: &Label) -> Label {
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
         if let Bitical::String(s) = label.value() {
-            if let Some(dt) = parse_date_literal(&s) {
-                return Label::Date(dt);
+            // 構造化日付（YYYY-MM-DD / YYYY-MM）のみ対象。4桁年単体・自然言語は
+            // ここでは扱わない（expand/expand_comparison の parse_datetime 経由）。
+            // DateTime::parse_structured は自然言語を試さないため、"today" 等が
+            // 同じ Date 型に収束して誤って対象化される心配がない。
+            if let Some(Ok(
+                dt @ (DateTime::Date(_) | DateTime::YearMonth { .. }),
+            )) = DateTime::parse_structured(&s)
+            {
+                return Label::Date(dt).to_ok();
             }
         }
-        label.clone()
+        label.clone().to_ok()
     }
     fn expand(
         &self,
@@ -1551,62 +1537,53 @@ impl Query for MtimeFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         if let Label::Date(dt) = label {
-            let first = Operand::TypeRef(SType::Mtime.into());
-            let nodes: Vec<_> = dt
-                .to_range(BasicOp::Eq)
-                .into_iter()
-                .map(|(b, ts)| {
-                    QueryNode::Comparison(ComparisonNode {
-                        first: first.clone(),
-                        rest: vec![(
-                            ComparisonOp::Label(b),
-                            Operand::Literal(Label::Mtime(ts)),
-                        )],
-                    })
-                })
-                .collect();
-            return match nodes.len() {
-                1 => nodes.into_iter().next().unwrap(),
-                _ => QueryNode::And(nodes),
-            };
+            return QueryNode::DateTimeRange {
+                first: Operand::TypeRef(SType::Mtime.into()),
+                op: BasicOp::Eq,
+                range: dt.to_interval().expect(
+                    "Date-precision DateTime must always succeed floor/ceiling",
+                ),
+            }.to_ok();
         }
-        if let Some(range) = crate::util::parse_datetime(&label.as_str()) {
-            if range.start == range.end {
-                QueryNode::TypedTag(TypedTag::new(SType::Mtime, range.start))
-            } else {
-                QueryNode::And(vec![
-                    QueryNode::Comparison(ComparisonNode {
-                        first: Operand::TypeRef(SType::Mtime.into()),
-                        rest: vec![(
-                            ComparisonOp::Label(BasicOp::Ge),
-                            Operand::Literal(Label::Mtime(range.start)),
-                        )],
-                    }),
-                    QueryNode::Comparison(ComparisonNode {
-                        first: Operand::TypeRef(SType::Mtime.into()),
-                        rest: vec![(
-                            ComparisonOp::Label(BasicOp::Le),
-                            Operand::Literal(Label::Mtime(range.end)),
-                        )],
-                    }),
-                ])
-            }
-        } else {
-            QueryNode::TypedTag(TypedTag::retag(SType::Mtime, label))
+        let s = label.as_str();
+        if let Some(Ok(range)) = crate::types::DateTimeRange::parse(&s) {
+            return QueryNode::DateTimeRange {
+                first: Operand::TypeRef(SType::Mtime.into()),
+                op: BasicOp::Eq,
+                range,
+            }.to_ok();
         }
+        if let Some(range) = parse_mtime_bare_year(&s) {
+            return QueryNode::DateTimeRange {
+                first: Operand::TypeRef(SType::Mtime.into()),
+                op: BasicOp::Eq,
+                range,
+            }.to_ok();
+        }
+        if crate::util::is_full_match_glob(&s) {
+            return QueryNode::TypedTag(TypedTag::retag(SType::Mtime, label))
+                .to_ok();
+        }
+        Err(crate::query::error::tag_value_not_interpretable("mtime", &s))
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
     }
-    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+    fn expand_comparison(&self, node: ComparisonNode) -> Result<QueryNode> {
         let mut first = node.first.clone();
         let rest = node.rest;
 
         if let Operand::Literal(label) = &mut first {
-            if let Some(range) = parse_datetime(&label.as_str()) {
-                *label = Label::Mtime(range.start);
+            let range = crate::types::DateTimeRange::parse(&label.as_str())
+                .and_then(|r| r.ok())
+                .or_else(|| parse_mtime_bare_year(&label.as_str()));
+            if let Some(range) = range {
+                let (start, _) = range
+                    .as_interval()
+                    .expect("parse_datetime only ever returns interval form");
+                *label = Label::Mtime(start);
             }
         }
 
@@ -1616,27 +1593,30 @@ impl Query for MtimeFn {
                 let basic_op = match op {
                     ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
                 };
-                let make_op = |b: BasicOp| match op {
-                    ComparisonOp::Label(_) => ComparisonOp::Label(b),
-                    ComparisonOp::Scalar(_) => ComparisonOp::Scalar(b),
+                let s = label.as_str();
+                let range = if let Label::Date(dt) = label {
+                    Some(dt.to_interval().expect(
+                        "Date-precision DateTime must always succeed floor/ceiling",
+                    ))
+                } else {
+                    crate::types::DateTimeRange::parse(&s)
+                        .and_then(|r| r.ok())
+                        .or_else(|| parse_mtime_bare_year(&s))
                 };
-                if let Label::Date(dt) = label {
-                    let nodes =
-                        dt.to_range(basic_op).into_iter().map(|(b, ts)| {
-                            QueryNode::Comparison(ComparisonNode {
-                                first: first.clone(),
-                                rest: vec![(
-                                    make_op(b),
-                                    Operand::Literal(Label::Mtime(ts)),
-                                )],
-                            })
-                        });
-                    conditions.extend(nodes);
+                if let Some(range) = range {
+                    conditions.push(QueryNode::DateTimeRange {
+                        first: first.clone(),
+                        op: basic_op,
+                        range,
+                    });
                     continue;
                 }
-                if let Some(range) = parse_datetime(&label.as_str()) {
-                    conditions.extend(mtime_range_op(&first, op, range));
-                    continue;
+                if !matches!(label, Label::Date(_))
+                    && !crate::util::is_full_match_glob(&s)
+                {
+                    return Err(crate::query::error::tag_value_not_interpretable(
+                        "mtime", &s,
+                    ));
                 }
             }
             conditions.push(QueryNode::Comparison(ComparisonNode {
@@ -1648,7 +1628,7 @@ impl Query for MtimeFn {
         match conditions.len() {
             1 => conditions.remove(0),
             _ => QueryNode::And(conditions),
-        }
+        }.to_ok()
     }
 }
 impl Display for MtimeFn {
@@ -1710,15 +1690,15 @@ impl Query for ItemIdFn {
     }
     /// ローカル形式（"User(0)"/"Sys(10)"）を raw i64 へ正規化する。
     /// 生整数文字列や Literal 以外はそのまま返す。
-    fn normalize_label(&self, label: &Label) -> Label {
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
         let s = match label.value() {
             Bitical::String(s) => s,
-            _ => return label.clone(),
+            _ => return label.clone().to_ok(),
         };
         match crate::db::identifier::parse(&s) {
             Ok(id) => Label::ItemId(id),
             Err(_) => label.clone(),
-        }
+        }.to_ok()
     }
     fn expand(
         &self,
@@ -1726,11 +1706,40 @@ impl Query for ItemIdFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
+        let s = label.as_str();
+        if crate::util::is_glob_pattern(&s) {
+            if let Some(Ok(crate::query::format::ItemIdRange { lo, hi })) =
+                crate::query::format::ItemIdRange::parse(&s)
+            {
+                let first = Operand::TypeRef(SType::ItemId.into());
+                return QueryNode::And(vec![
+                    QueryNode::Comparison(ComparisonNode {
+                        first: first.clone(),
+                        rest: vec![(
+                            ComparisonOp::Label(BasicOp::Ge),
+                            Operand::Literal(Label::ItemId(lo)),
+                        )],
+                    }),
+                    QueryNode::Comparison(ComparisonNode {
+                        first,
+                        rest: vec![(
+                            ComparisonOp::Label(BasicOp::Le),
+                            Operand::Literal(Label::ItemId(hi)),
+                        )],
+                    }),
+                ]).to_ok();
+            }
+            if !crate::util::is_full_match_glob(&s) {
+                return Err(crate::query::error::tag_value_not_interpretable(
+                    "item_id", &s,
+                ));
+            }
+        }
         QueryNode::ColumnMatch {
             tag: SType::ItemId,
             label: label.clone(),
-        }
+        }.to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -1781,11 +1790,11 @@ impl Query for ItemKindFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         QueryNode::ColumnMatch {
             tag: SType::ItemKind,
             label: label.clone(),
-        }
+        }.to_ok()
     }
 }
 
@@ -1814,14 +1823,32 @@ impl Query for RankFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::Integer
     }
+    fn normalize_label(&self, label: &Label) -> Result<Label> {
+        match label.value() {
+            Bitical::String(s) => match s.parse::<i64>() {
+                Ok(n) => Label::Rank(n.into()).to_ok(),
+                Err(_) => label.clone().to_ok(),
+            },
+            _ => label.clone().to_ok(),
+        }
+    }
     fn expand(
         &self,
         _tt: &TagType,
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
-        QueryNode::TypedTag(TypedTag::retag(SType::Rank, label))
+    ) -> Result<QueryNode> {
+        let normalized = self.normalize_label(label)?;
+        let s = label.as_str();
+        if matches!(normalized.value(), Bitical::String(_))
+            && !crate::util::is_full_match_glob(&s)
+        {
+            return Err(crate::query::error::tag_value_not_interpretable(
+                "rank", &s,
+            ));
+        }
+        QueryNode::TypedTag(TypedTag::retag(SType::Rank, &normalized)).to_ok()
     }
 }
 
@@ -1848,7 +1875,7 @@ impl Query for OriginFn {
         label: &Label,
         _tag: &TypedTag,
         schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         // "system" は大分類のエイリアス。実値である小分類 (Builtin/File/Plugin)
         // への Or として展開する (ITEM.md の Origin 大分類)。
         if label.as_str() == LargeOrigin::System.as_str() {
@@ -1863,8 +1890,8 @@ impl Query for OriginFn {
                         );
                         self.expand(_tt, &sub_label, _tag, schema)
                     })
-                    .collect(),
-            );
+                    .collect::<Result<Vec<_>>>()?,
+            ).to_ok();
         }
 
         let origin_str = label.as_str();
@@ -1919,7 +1946,7 @@ impl Query for OriginFn {
             sub_queries.remove(0)
         } else {
             QueryNode::Or(sub_queries)
-        }
+        }.to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -1955,9 +1982,8 @@ impl Query for TypeFn {
         label: &Label,
         _tag: &TypedTag,
         schema: &dyn LogicalSchema,
-    ) -> QueryNode {
-        // Literal（quoted）= 完全一致検索、String（unquoted/glob）= glob検索。
-        // どちらも registry の登録型名＋default_rank＋出所（ItemId）を
+    ) -> Result<QueryNode> {
+        // registry の登録型名＋default_rank＋出所（ItemId）を
         // candidates にする。完全一致検索でも
         // Stored（組み込み）/Settling（プラグイン）の区別を保つため、
         // 検索経路によらず常に同じ candidates を渡す。GLOB によるパターン
@@ -1979,7 +2005,7 @@ impl Query for TypeFn {
             origins: Vec::new(),
             reserved,
             recorded: true,
-        })
+        }).to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -2018,11 +2044,11 @@ impl Query for LabelFn {
         label: &Label,
         _tag: &TypedTag,
         _schema: &dyn LogicalSchema,
-    ) -> QueryNode {
+    ) -> Result<QueryNode> {
         QueryNode::ColumnMatch {
             tag: SType::Label,
             label: label.clone(),
-        }
+        }.to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::Projection(Operand::from(tagtype.clone()))
@@ -2098,11 +2124,11 @@ mod tests {
         }
     }
     impl Query for QueryTag {
-        fn normalize_label(&self, label: &Label) -> Label {
+        fn normalize_label(&self, label: &Label) -> Result<Label> {
             Label::Other(
                 TagType::from("qtest"),
                 Bitical::String(label.as_str().to_uppercase()),
-            )
+            ).to_ok()
         }
     }
 
@@ -2189,7 +2215,7 @@ mod tests {
         assert!(SimpleTag.display().is_none());
         // query は常に存在し、宣言しなければ Query の全デフォルト実装が使われる
         let label = Label::from("x");
-        assert_eq!(SimpleTag.query().normalize_label(&label), label);
+        assert_eq!(SimpleTag.query().normalize_label(&label).unwrap(), label);
         assert_eq!(SimpleTag.query().logical_type(), LogicalType::String);
     }
 
@@ -2224,7 +2250,7 @@ mod tests {
             TagType::from("qtest"),
             Bitical::String("hello".to_string()),
         );
-        let normalized = qry.normalize_label(&label);
+        let normalized = qry.normalize_label(&label).unwrap();
         assert_eq!(normalized.as_str(), "HELLO");
     }
 
@@ -2237,17 +2263,84 @@ mod tests {
             TagType::from("size"),
             Bitical::String("1MB".to_string()),
         );
-        let normalized = q.query().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label).unwrap();
         assert_eq!(normalized, Label::Size(1_048_576));
     }
 
     #[test]
-    fn test_registry_normalize_label_literal_skipped() {
-        // Literal ("quoted") must bypass normalize_label entirely at registry level
-        let reg = TagRegistry::with_standard();
-        let label = Label::Literal(TagType::from("size"), "1MB".to_string());
-        let normalized = reg.normalize_label("size", &label);
+    fn test_size_normalize_label_glob_pattern_becomes_size_typed_other() {
+        let q = SizeFn;
+        // 比較右辺のリテラルは Label::from(&str) と同じ形（TagType::Custom("")）で来る
+        let label = Label::from("*MB");
+        let normalized = q.query().normalize_label(&label).unwrap();
+        assert_eq!(
+            normalized,
+            Label::Other(
+                TagType::from(SType::Size),
+                Bitical::String("*MB".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_rank_normalize_label_numeric_string_converts() {
+        let q = RankFn;
+        let label = Label::Other(
+            TagType::from("rank"),
+            Bitical::String("3".to_string()),
+        );
+        let normalized = q.query().normalize_label(&label).unwrap();
+        assert_eq!(normalized, Label::Rank(3.into()));
+    }
+
+    #[test]
+    fn test_rank_expand_unparseable_is_error() {
+        let q = RankFn;
+        let label = Label::Other(
+            TagType::from("rank"),
+            Bitical::String("abc".to_string()),
+        );
+        let tag = TypedTag::retag(SType::Rank, &label);
+        let lens = crate::query::lens_schema::Lens::base_standard();
+        let result =
+            q.query().expand(&TagType::from("rank"), &label, &tag, &lens);
+        assert!(result.is_err(), "rank:abc must not be silently passed through");
+    }
+
+    // --- ExtensionFn::normalize_label の記号のみ判定 ---
+
+    #[test]
+    fn test_extension_normalize_label_glob_star_not_treated_as_extension() {
+        let q = ExtensionFn;
+        let label = Label::Other(
+            TagType::from("extension"),
+            Bitical::String("*".to_string()),
+        );
+        let normalized = q.query().normalize_label(&label).unwrap();
         assert_eq!(normalized, label);
+    }
+
+    #[test]
+    fn test_extension_normalize_label_glob_question_mark_not_treated_as_extension(
+    ) {
+        let q = ExtensionFn;
+        let label = Label::Other(
+            TagType::from("extension"),
+            Bitical::String("?".to_string()),
+        );
+        let normalized = q.query().normalize_label(&label).unwrap();
+        assert_eq!(normalized, label);
+    }
+
+    #[test]
+    fn test_extension_normalize_label_allowed_symbol_only_stays_extension() {
+        let q = ExtensionFn;
+        let label = Label::Other(
+            TagType::from("extension"),
+            Bitical::String("~".to_string()),
+        );
+        let normalized = q.query().normalize_label(&label).unwrap();
+        assert_eq!(normalized, Label::Extension("~".to_string()));
     }
 
     #[test]
@@ -2257,7 +2350,7 @@ mod tests {
             TagType::from("mtime"),
             Bitical::String("2026-02-01".to_string()),
         );
-        let normalized = q.query().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label).unwrap();
         match normalized {
             Label::Date(crate::types::DateTime::Date(d)) => {
                 assert_eq!(
@@ -2277,7 +2370,7 @@ mod tests {
             TagType::from("mtime"),
             Bitical::String("2026".to_string()),
         );
-        let normalized = q.query().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label).unwrap();
         assert_eq!(
             normalized, label,
             "bare YYYY should be unchanged by normalize_label"
@@ -2291,48 +2384,39 @@ mod tests {
             TagType::from("mtime"),
             Bitical::String("not-a-date".to_string()),
         );
-        let normalized = q.query().normalize_label(&label);
+        let normalized = q.query().normalize_label(&label).unwrap();
         assert_eq!(normalized, label);
     }
 
     #[test]
-    fn test_registry_normalize_label_size() {
-        let reg = TagRegistry::with_standard();
-        let label = Label::Other(
-            TagType::from("size"),
-            Bitical::String("2MB".to_string()),
-        );
-        let normalized = reg.normalize_label("size", &label);
-        assert_eq!(normalized, Label::Size(2_097_152));
-    }
-
-    #[test]
-    fn test_registry_normalize_label_mtime() {
-        let reg = TagRegistry::with_standard();
+    fn test_mtime_normalize_label_year_month_string() {
+        let q = MtimeFn;
         let label = Label::Other(
             TagType::from("mtime"),
-            Bitical::String("2026-01-01".to_string()),
+            Bitical::String("2026-02".to_string()),
         );
-        let normalized = reg.normalize_label("mtime", &label);
-        match normalized {
-            Label::Date(crate::types::DateTime::Date(d)) => {
-                assert_eq!(
-                    d,
-                    chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()
-                );
-            }
-            other => panic!("expected Label::Date(Date(_)), got {:?}", other),
-        }
+        let normalized = q.query().normalize_label(&label).unwrap();
+        assert_eq!(
+            normalized,
+            Label::Date(crate::types::DateTime::YearMonth {
+                year: 2026,
+                month: 2
+            })
+        );
     }
 
     #[test]
-    fn test_registry_normalize_label_unknown_unchanged() {
-        let reg = TagRegistry::with_standard();
+    fn test_mtime_normalize_label_natural_language_unchanged() {
+        // 自然言語（"today" 等）は normalize_label の対象外のまま
+        // （expand/expand_comparison の parse_datetime 経由で処理される。
+        // DateTime::from_str へのパーサ統合後も normalize_label の受理範囲
+        // 自体は変えない = 構造化日付（YYYY-MM-DD/YYYY-MM）のみ）
+        let q = MtimeFn;
         let label = Label::Other(
-            TagType::from("custom"),
-            Bitical::String("hello".to_string()),
+            TagType::from("mtime"),
+            Bitical::String("today".to_string()),
         );
-        let normalized = reg.normalize_label("custom", &label);
+        let normalized = q.query().normalize_label(&label).unwrap();
         assert_eq!(normalized, label);
     }
 
@@ -2391,68 +2475,16 @@ mod tests {
         }
     }
 
-    // --- Phase 2: DateTime::to_range ---
-
-    #[test]
-    fn test_datetime_to_range_date_eq() {
-        use crate::query::ast::BasicOp;
-        use chrono::NaiveDate;
-        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let dt = crate::types::DateTime::Date(d);
-        let ranges = dt.to_range(BasicOp::Eq);
-        assert_eq!(ranges.len(), 2);
-        let ops: Vec<BasicOp> = ranges.iter().map(|(op, _)| *op).collect();
-        assert!(ops.contains(&BasicOp::Ge));
-        assert!(ops.contains(&BasicOp::Le));
-        let ge_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Ge).unwrap().1;
-        let le_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Le).unwrap().1;
-        assert!(ge_ts < le_ts);
-    }
-
-    #[test]
-    fn test_datetime_to_range_date_gt() {
-        use crate::query::ast::BasicOp;
-        use chrono::NaiveDate;
-        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let dt = crate::types::DateTime::Date(d);
-        let ranges = dt.to_range(BasicOp::Gt);
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0].0, BasicOp::Gt);
-    }
-
-    #[test]
-    fn test_datetime_to_range_year_eq() {
-        use crate::query::ast::BasicOp;
-        let dt = crate::types::DateTime::Year(2026);
-        let ranges = dt.to_range(BasicOp::Eq);
-        assert_eq!(ranges.len(), 2);
-        let ge_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Ge).unwrap().1;
-        let le_ts = ranges.iter().find(|(op, _)| *op == BasicOp::Le).unwrap().1;
-        assert!(ge_ts < le_ts);
-    }
-
-    #[test]
-    fn test_datetime_to_range_instant_any_op() {
-        use crate::query::ast::BasicOp;
-        use chrono::{Local, TimeZone};
-        let local_dt = Local.with_ymd_and_hms(2026, 2, 1, 12, 0, 0).unwrap();
-        let ts = local_dt.timestamp();
-        let dt = crate::types::DateTime::Instant(local_dt);
-        let ranges = dt.to_range(BasicOp::Gt);
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0].0, BasicOp::Gt);
-        assert_eq!(ranges[0].1, ts);
-    }
-
     // --- Phase 6: MtimeFn::expand ---
 
     #[test]
     fn test_mtime_expand_date_label_becomes_range() {
-        use crate::query::ast::{BasicOp, ComparisonOp};
+        use crate::query::ast::BasicOp;
         use crate::types::{DateTime, Label, SType, TagType, TypedTag};
         use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let label = Label::Date(DateTime::Date(date));
+        let dt = DateTime::Date(date);
+        let label = Label::Date(dt.clone());
         let tag_type = TagType::from(SType::Mtime);
         let typed_tag = TypedTag::retag(SType::Mtime, &label);
         let result = MtimeFn.query().expand(
@@ -2460,24 +2492,614 @@ mod tests {
             &label,
             &typed_tag,
             &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        // Date Eq → QueryNode::DateTimeRange { op: Eq, range: floor..ceiling }
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("expected DateTimeRange, got {:?}", result)
+        };
+        assert_eq!(
+            first,
+            crate::query::ast::Operand::TypeRef(TagType::from(SType::Mtime))
         );
-        // Date Eq → And([Ge(floor), Le(ceil)])
+        assert_eq!(op, BasicOp::Eq);
+        assert_eq!(
+            range.as_interval(),
+            dt.to_interval().unwrap().as_interval()
+        );
+    }
+
+    // --- SizeFn::expand の glob 翻訳（数値部のフィールド単位 glob） ---
+
+    /// (first, op) -> bytes のペアを取り出す。first の形は問わない
+    /// （TypeRef=単純な範囲 / Calculation=剰余の周期条件）。
+    fn extract_size_bounds(
+        result: &QueryNode,
+    ) -> (Option<i64>, Option<i64>, crate::query::ast::Operand) {
+        use crate::query::ast::{BasicOp, ComparisonOp, Operand};
+        use crate::types::Label;
         let QueryNode::And(nodes) = result else {
             panic!("expected And, got {:?}", result)
         };
         assert_eq!(nodes.len(), 2);
-        let ops: Vec<_> = nodes
+        let mut ge = None;
+        let mut le = None;
+        let mut first = None;
+        for n in nodes {
+            let QueryNode::Comparison(c) = n else {
+                panic!("expected Comparison, got {:?}", n)
+            };
+            first = Some(c.first.clone());
+            let (op, val) = &c.rest[0];
+            let Operand::Literal(Label::Size(bytes)) = val else {
+                panic!("expected Label::Size literal, got {:?}", val)
+            };
+            match op {
+                ComparisonOp::Label(BasicOp::Ge) => ge = Some(*bytes),
+                ComparisonOp::Label(BasicOp::Le) => le = Some(*bytes),
+                other => panic!("unexpected op {:?}", other),
+            }
+        }
+        (ge, le, first.unwrap())
+    }
+
+    #[test]
+    fn test_size_expand_glob_star_mb_matches_all_sizes() {
+        use crate::query::ast::Operand;
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label =
+            Label::Other(tag_type.clone(), Bitical::String("*MB".to_string()));
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        assert_eq!(ge, Some(0));
+        assert_eq!(le, Some(i64::MAX));
+        assert!(matches!(first, Operand::TypeRef(_)));
+    }
+
+    #[test]
+    fn test_size_expand_glob_star_b_matches_all_sizes() {
+        use crate::query::ast::Operand;
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label =
+            Label::Other(tag_type.clone(), Bitical::String("*B".to_string()));
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        assert_eq!(ge, Some(0));
+        assert_eq!(le, Some(i64::MAX));
+        assert!(matches!(first, Operand::TypeRef(_)));
+    }
+
+    #[test]
+    fn test_size_expand_glob_decimal_free_integer_literal_translates_to_single_range(
+    ) {
+        use crate::query::ast::Operand;
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("2.*MB".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        // 整数部が2で小数部が自由 → [2.00MB, 3.00MB)。
+        assert_eq!(ge, Some(2_097_152));
+        assert_eq!(le, Some(3_145_727));
+        assert!(matches!(first, Operand::TypeRef(_)));
+    }
+
+    #[test]
+    fn test_size_expand_glob_integer_free_decimal_literal_translates_to_periodic_condition(
+    ) {
+        use crate::query::ast::{ArithmeticOp, Operand};
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("*.5MB".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        // 小数第1位が5・第2位は自由 → 1MBごとの剰余が [0.50MB, 0.60MB) に入る周期条件。
+        assert_eq!(ge, Some(524_288));
+        assert_eq!(le, Some(629_145));
+        let Operand::Calculation(calc) = first else {
+            panic!("expected Calculation (modulo), got {:?}", first)
+        };
+        assert_eq!(calc.op, ArithmeticOp::Mod);
+        assert!(matches!(calc.left, Operand::TypeRef(_)));
+        assert_eq!(calc.right, Operand::Literal(Label::Size(1024 * 1024)));
+    }
+
+    #[test]
+    fn test_size_expand_glob_two_digit_decimal_narrows_to_second_place() {
+        use crate::query::ast::{ArithmeticOp, Operand};
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("*.55MB".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        // 2桁とも指定されたので [0.55MB, 0.56MB) に狭まる。
+        assert_eq!(ge, Some(576_717));
+        assert_eq!(le, Some(587_202));
+        let Operand::Calculation(calc) = first else {
+            panic!("expected Calculation (modulo), got {:?}", first)
+        };
+        assert_eq!(calc.op, ArithmeticOp::Mod);
+    }
+
+    #[test]
+    fn test_size_expand_glob_three_digit_decimal_narrows_to_third_place() {
+        use crate::query::ast::{ArithmeticOp, Operand};
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("*.555MB".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let (ge, le, first) = extract_size_bounds(&result);
+        // 桁数に上限はない。3桁とも指定されたので [0.555MB, 0.556MB) に狭まる。
+        assert_eq!(ge, Some(581_960));
+        assert_eq!(le, Some(583_008));
+        let Operand::Calculation(calc) = first else {
+            panic!("expected Calculation (modulo), got {:?}", first)
+        };
+        assert_eq!(calc.op, ArithmeticOp::Mod);
+    }
+
+    #[test]
+    fn test_size_expand_glob_digit_prefix_partial_glob_is_error() {
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::Size);
+        let label =
+            Label::Other(tag_type.clone(), Bitical::String("1*".to_string()));
+        let typed_tag = TypedTag::retag(SType::Size, &label);
+        let result = SizeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        );
+        // フィールド内の部分 glob は整数部/小数部いずれの形式でも解釈できないので、
+        // 元のタグ一致へ黙って通さずエラーにする。
+        assert!(result.is_err());
+    }
+
+    // --- SizeFn::expand_comparison の glob 翻訳（B・C・D・F の size 列） ---
+
+    /// 単一の Comparison ノードから (first, op, バイト値) を取り出す。
+    fn extract_single_size_comparison(
+        result: &QueryNode,
+    ) -> (crate::query::ast::Operand, crate::query::ast::BasicOp, i64) {
+        use crate::query::ast::{ComparisonOp, Operand};
+        use crate::types::Label;
+        let QueryNode::Comparison(c) = result else {
+            panic!("expected Comparison, got {:?}", result)
+        };
+        assert_eq!(c.rest.len(), 1);
+        let (op, val) = &c.rest[0];
+        let basic_op = match op {
+            ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => *b,
+        };
+        let Operand::Literal(Label::Size(bytes)) = val else {
+            panic!("expected Label::Size literal, got {:?}", val)
+        };
+        (c.first.clone(), basic_op, *bytes)
+    }
+
+    fn size_glob_comparison_node(
+        op: crate::query::ast::BasicOp,
+        pattern: &str,
+    ) -> crate::query::ast::ComparisonNode {
+        use crate::query::ast::{ComparisonOp, Operand};
+        use crate::types::{Bitical, SType, TagType};
+        crate::query::ast::ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::Size)),
+            rest: vec![(
+                ComparisonOp::Label(op),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::Size),
+                    Bitical::String(pattern.to_string()),
+                )),
+            )],
+        }
+    }
+
+    /// 整数部リテラル・小数部自由（範囲形）は、順序演算子ごとに区間の境界へ翻訳される。
+    /// Gt/Le は上限側、Ge/Lt は下限側の境界を使う（日付の区間形と同じ行列）。
+    #[test]
+    fn test_size_expand_comparison_range_glob_order_ops_use_interval_bounds() {
+        use crate::query::ast::{BasicOp, Operand};
+        use crate::types::SType;
+        let size_ref = Operand::TypeRef(SType::Size.into());
+
+        let gt = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Gt, "2.*MB")).unwrap();
+        let (first, op, val) = extract_single_size_comparison(&gt);
+        assert_eq!(first, size_ref);
+        assert_eq!(op, BasicOp::Gt);
+        assert_eq!(val, 3_145_727);
+
+        let ge = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Ge, "2.*MB")).unwrap();
+        let (_, op, val) = extract_single_size_comparison(&ge);
+        assert_eq!(op, BasicOp::Ge);
+        assert_eq!(val, 2_097_152);
+
+        let lt = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Lt, "2.*MB")).unwrap();
+        let (_, op, val) = extract_single_size_comparison(&lt);
+        assert_eq!(op, BasicOp::Lt);
+        assert_eq!(val, 2_097_152);
+
+        let le = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Le, "2.*MB")).unwrap();
+        let (_, op, val) = extract_single_size_comparison(&le);
+        assert_eq!(op, BasicOp::Le);
+        assert_eq!(val, 3_145_727);
+    }
+
+    /// 範囲形の Eq/Ne は、素の値と同じ And/Or の2条件に翻訳される。
+    #[test]
+    fn test_size_expand_comparison_range_glob_eq_and_ne() {
+        use crate::query::ast::{BasicOp, ComparisonOp, Operand};
+        use crate::types::Label;
+
+        let eq = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Eq, "2.*MB")).unwrap();
+        let (ge, le, _) = extract_size_bounds(&eq);
+        assert_eq!(ge, Some(2_097_152));
+        assert_eq!(le, Some(3_145_727));
+
+        let ne = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Ne, "2.*MB")).unwrap();
+        let QueryNode::Or(nodes) = &ne else {
+            panic!("expected Or, got {:?}", ne)
+        };
+        assert_eq!(nodes.len(), 2);
+        for n in nodes {
+            let QueryNode::Comparison(c) = n else {
+                panic!("expected Comparison, got {:?}", n)
+            };
+            let (op, val) = &c.rest[0];
+            let Operand::Literal(Label::Size(bytes)) = val else {
+                panic!("expected Label::Size literal, got {:?}", val)
+            };
+            match op {
+                ComparisonOp::Label(BasicOp::Lt) => {
+                    assert_eq!(*bytes, 2_097_152)
+                }
+                ComparisonOp::Label(BasicOp::Gt) => {
+                    assert_eq!(*bytes, 3_145_727)
+                }
+                other => panic!("unexpected op {:?}", other),
+            }
+        }
+    }
+
+    /// 整数部自由・小数部リテラル（周期形）は first を剰余（Calculation）へ包んだうえで
+    /// 同じ区間の境界行列を適用する。
+    #[test]
+    fn test_size_expand_comparison_periodic_glob_order_ops_wrap_modulo() {
+        use crate::query::ast::{ArithmeticOp, BasicOp, Operand};
+
+        let gt = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Gt, "*.5MB")).unwrap();
+        let (first, op, val) = extract_single_size_comparison(&gt);
+        assert_eq!(op, BasicOp::Gt);
+        assert_eq!(val, 629_145);
+        let Operand::Calculation(calc) = first else {
+            panic!("expected Calculation (modulo), got {:?}", gt)
+        };
+        assert_eq!(calc.op, ArithmeticOp::Mod);
+        assert!(matches!(calc.left, Operand::TypeRef(_)));
+
+        let ge = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Ge, "*.5MB")).unwrap();
+        let (_, op, val) = extract_single_size_comparison(&ge);
+        assert_eq!(op, BasicOp::Ge);
+        assert_eq!(val, 524_288);
+    }
+
+    /// first が単純な TypeRef でない場合（例: max(size:) :> *.5MB）でも、first の構造が
+    /// 剰余の Calculation の内側にそのまま保持される必要がある（Mtime と同じ回帰防止）。
+    #[test]
+    fn test_size_expand_comparison_aggregation_wrapped_size_preserves_first() {
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, ArithmeticOp, BasicOp,
+            ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, SType, TagType};
+        let agg = Operand::Aggregation(Box::new(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Max,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from(SType::Size),
+            ))),
+        }));
+        let node = ComparisonNode {
+            first: agg.clone(),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::Size),
+                    Bitical::String("*.5MB".to_string()),
+                )),
+            )],
+        };
+        let result = SizeFn.query().expand_comparison(node).unwrap();
+        let (first, op, _) = extract_single_size_comparison(&result);
+        assert_eq!(op, BasicOp::Gt);
+        let Operand::Calculation(calc) = first else {
+            panic!("expected Calculation (modulo), got {:?}", result)
+        };
+        assert_eq!(calc.op, ArithmeticOp::Mod);
+        assert_eq!(calc.left, agg, "first（集約）が保持されているべき");
+    }
+
+    /// フィールド内の部分 glob は解釈できないので、比較の右辺でもエラーにする。
+    #[test]
+    fn test_size_expand_comparison_digit_prefix_partial_glob_is_error() {
+        use crate::query::ast::BasicOp;
+        let result = SizeFn
+            .query()
+            .expand_comparison(size_glob_comparison_node(BasicOp::Gt, "1*"));
+        assert!(result.is_err(), "got: {:?}", result);
+    }
+
+    // --- MtimeFn::expand の glob 翻訳 ---
+
+    #[test]
+    fn test_mtime_expand_glob_month_day_slot_translates_to_slots_range() {
+        use crate::query::ast::BasicOp;
+        use crate::types::{
+            Bitical, DateTimeRange, Label, SType, TagType, TypedTag,
+        };
+        let tag_type = TagType::from(SType::Mtime);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("*-02-01".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::Mtime, &label);
+        let result = MtimeFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("expected DateTimeRange, got {:?}", result)
+        };
+        assert_eq!(first, crate::query::ast::Operand::TypeRef(tag_type));
+        assert_eq!(op, BasicOp::Eq);
+        assert_eq!(range, DateTimeRange::parse_slot_glob("*-02-01").unwrap());
+    }
+
+    // --- ItemIdFn::expand の glob 翻訳 ---
+
+    #[test]
+    fn test_item_id_expand_glob_origin_star_translates_to_block_range() {
+        use crate::query::ast::{BasicOp, ComparisonOp, Operand};
+        use crate::types::{Bitical, Label, Origin, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::ItemId);
+        let label = Label::Other(
+            tag_type.clone(),
+            Bitical::String("File(*)".to_string()),
+        );
+        let typed_tag = TypedTag::retag(SType::ItemId, &label);
+        let result = ItemIdFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let QueryNode::And(nodes) = result else {
+            panic!("expected And, got {:?}", result)
+        };
+        assert_eq!(nodes.len(), 2);
+        let mut ge = None;
+        let mut le = None;
+        for n in &nodes {
+            let QueryNode::Comparison(c) = n else {
+                panic!("expected Comparison, got {:?}", n)
+            };
+            let (op, val) = &c.rest[0];
+            let Operand::Literal(Label::ItemId(id)) = val else {
+                panic!("expected Label::ItemId literal, got {:?}", val)
+            };
+            match op {
+                ComparisonOp::Label(BasicOp::Ge) => ge = Some(*id),
+                ComparisonOp::Label(BasicOp::Le) => le = Some(*id),
+                other => panic!("unexpected op {:?}", other),
+            }
+        }
+        assert_eq!(ge, Some(Origin::File.block_lo()));
+        assert_eq!(le, Some(Origin::File.block_hi() - 1));
+    }
+
+    // --- IsDirFn::expand の glob 翻訳 ---
+
+    #[test]
+    fn test_isdir_expand_glob_star_translates_to_true_or_false() {
+        use crate::query::ast::{BasicOp, ComparisonOp, Operand};
+        use crate::types::{Bitical, Label, SType, TagType, TypedTag};
+        let tag_type = TagType::from(SType::IsDir);
+        let label =
+            Label::Other(tag_type.clone(), Bitical::String("*".to_string()));
+        let typed_tag = TypedTag::retag(SType::IsDir, &label);
+        let result = IsDirFn.query().expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &crate::query::lens_schema::Lens::base_standard(),
+        ).unwrap();
+        let QueryNode::Or(nodes) = result else {
+            panic!("expected Or, got {:?}", result)
+        };
+        assert_eq!(nodes.len(), 2);
+        let bools: Vec<bool> = nodes
             .iter()
             .map(|n| {
-                if let QueryNode::Comparison(c) = n {
-                    c.rest[0].0.clone()
-                } else {
-                    panic!()
-                }
+                let QueryNode::Comparison(c) = n else {
+                    panic!("expected Comparison, got {:?}", n)
+                };
+                assert_eq!(c.rest[0].0, ComparisonOp::Label(BasicOp::Eq));
+                let Operand::Literal(Label::IsDir(b)) = &c.rest[0].1 else {
+                    panic!(
+                        "expected Label::IsDir literal, got {:?}",
+                        c.rest[0].1
+                    )
+                };
+                *b
             })
             .collect();
-        assert!(ops.contains(&ComparisonOp::Label(BasicOp::Ge)));
-        assert!(ops.contains(&ComparisonOp::Label(BasicOp::Le)));
+        assert!(bools.contains(&true));
+        assert!(bools.contains(&false));
+    }
+
+    // --- IsDirFn::expand_comparison の glob 翻訳 ---
+
+    #[test]
+    fn test_isdir_expand_comparison_glob_eq_enumerates_matching_boolean() {
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, Label, SType, TagType};
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::IsDir)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Eq),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::IsDir),
+                    Bitical::String("tr*".to_string()),
+                )),
+            )],
+        };
+        let result = IsDirFn.query().expand_comparison(node).unwrap();
+        let QueryNode::Comparison(c) = result else {
+            panic!("expected Comparison, got {:?}", result)
+        };
+        assert_eq!(c.rest[0].0, ComparisonOp::Label(BasicOp::Eq));
+        assert_eq!(c.rest[0].1, Operand::Literal(Label::IsDir(true)));
+    }
+
+    #[test]
+    fn test_isdir_expand_comparison_glob_ne_enumerates_non_matching_boolean() {
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, Label, SType, TagType};
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::IsDir)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Ne),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::IsDir),
+                    Bitical::String("tr*".to_string()),
+                )),
+            )],
+        };
+        let result = IsDirFn.query().expand_comparison(node).unwrap();
+        let QueryNode::Comparison(c) = result else {
+            panic!("expected Comparison, got {:?}", result)
+        };
+        assert_eq!(c.rest[0].0, ComparisonOp::Label(BasicOp::Eq));
+        assert_eq!(c.rest[0].1, Operand::Literal(Label::IsDir(false)));
+    }
+
+    #[test]
+    fn test_isdir_expand_comparison_full_match_glob_ne_becomes_false() {
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, Label, SType, TagType};
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::IsDir)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Ne),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::IsDir),
+                    Bitical::String("*".to_string()),
+                )),
+            )],
+        };
+        let result = IsDirFn.query().expand_comparison(node).unwrap();
+        assert_eq!(result, QueryNode::Or(vec![]));
+    }
+
+    #[test]
+    fn test_isdir_expand_comparison_full_match_glob_order_ops_follow_domain_rule(
+    ) {
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, Label, SType, TagType};
+        let case = |op: BasicOp| {
+            let node = ComparisonNode {
+                first: Operand::TypeRef(TagType::from(SType::IsDir)),
+                rest: vec![(
+                    ComparisonOp::Label(op),
+                    Operand::Literal(Label::Other(
+                        TagType::from(SType::IsDir),
+                        Bitical::String("*".to_string()),
+                    )),
+                )],
+            };
+            IsDirFn.query().expand_comparison(node).unwrap()
+        };
+        // Gt/Lt は全域 glob に対して 0 件（FALSE）
+        assert_eq!(case(BasicOp::Gt), QueryNode::Or(vec![]));
+        assert_eq!(case(BasicOp::Lt), QueryNode::Or(vec![]));
+        // Ge/Le は全域 glob に対して全件（TRUE）
+        assert_eq!(case(BasicOp::Ge), QueryNode::And(vec![]));
+        assert_eq!(case(BasicOp::Le), QueryNode::And(vec![]));
     }
 
     // --- Phase 5: MtimeFn::expand_comparison ---
@@ -2487,7 +3109,7 @@ mod tests {
         use crate::query::ast::{
             BasicOp, ComparisonNode, ComparisonOp, Operand,
         };
-        use crate::types::{Bitical, DateTime, Label, SType, TagType};
+        use crate::types::{DateTime, Label, SType, TagType};
         use chrono::NaiveDate;
         let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
         let dt = DateTime::Date(date);
@@ -2498,24 +3120,20 @@ mod tests {
                 Operand::Literal(Label::Date(dt.clone())),
             )],
         };
-        let result = MtimeFn.query().expand_comparison(node);
-        // Gt → ceil_ts で単一条件
-        let QueryNode::Comparison(c) = result else {
-            panic!("expected Comparison, got {:?}", result)
+        let result = MtimeFn.query().expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("expected DateTimeRange, got {:?}", result)
         };
-        let (op, rhs) = &c.rest[0];
-        assert_eq!(*op, ComparisonOp::Label(BasicOp::Gt));
-        let Operand::Literal(label) = rhs else {
-            panic!()
-        };
-        assert!(
-            matches!(label.value(), Bitical::Integer(_)),
-            "should be Mtime(i64)"
+        assert_eq!(first, Operand::TypeRef(TagType::from(SType::Mtime)));
+        assert_eq!(op, BasicOp::Gt);
+        assert_eq!(
+            range.as_interval(),
+            dt.to_interval().unwrap().as_interval()
         );
     }
 
     #[test]
-    fn test_mtime_expand_comparison_date_label_eq_expands_to_and() {
+    fn test_mtime_expand_comparison_date_label_eq_is_date_time_range() {
         use crate::query::ast::{
             BasicOp, ComparisonNode, ComparisonOp, Operand,
         };
@@ -2530,13 +3148,78 @@ mod tests {
                 Operand::Literal(Label::Date(dt)),
             )],
         };
-        let result = MtimeFn.query().expand_comparison(node);
-        // Eq → And([Ge, Le])
-        assert!(
-            matches!(result, QueryNode::And(_)),
-            "expected And for Eq, got {:?}",
-            result
+        let result = MtimeFn.query().expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { op, .. } = result else {
+            panic!("expected DateTimeRange for Eq, got {:?}", result)
+        };
+        assert_eq!(op, BasicOp::Eq);
+    }
+
+    #[test]
+    fn test_mtime_expand_comparison_aggregation_wrapped_date_preserves_first() {
+        // first が単純な TypeRef でない場合（例: max(mtime:) < 2026-02-01）でも、
+        // DateTimeRange.first に集約の構造がそのまま保持される必要がある
+        // （集約が消えて単純タグ一致に化ける回帰を test_fetch_boolean が実データで検出した）。
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, BasicOp, ComparisonNode,
+            ComparisonOp, Operand,
+        };
+        use crate::types::{DateTime, Label, SType, TagType};
+        use chrono::NaiveDate;
+        let date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        let dt = DateTime::Date(date);
+        let agg = Operand::Aggregation(Box::new(AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Max,
+            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+                TagType::from(SType::Mtime),
+            ))),
+        }));
+        let node = ComparisonNode {
+            first: agg.clone(),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Lt),
+                Operand::Literal(Label::Date(dt.clone())),
+            )],
+        };
+        let result = MtimeFn.query().expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!(
+                "expected DateTimeRange preserving the aggregation first, got {:?}",
+                result
+            )
+        };
+        assert_eq!(first, agg, "first（集約）が保持されているべき");
+        assert_eq!(op, BasicOp::Lt);
+        assert_eq!(
+            range.as_interval(),
+            dt.to_interval().unwrap().as_interval()
         );
+    }
+
+    #[test]
+    fn test_mtime_expand_comparison_slot_glob_direct_tag_becomes_date_time_range(
+    ) {
+        use crate::query::ast::{
+            BasicOp, ComparisonNode, ComparisonOp, Operand,
+        };
+        use crate::types::{Bitical, DateTimeRange, SType, TagType};
+        let node = ComparisonNode {
+            first: Operand::TypeRef(TagType::from(SType::Mtime)),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(Label::Other(
+                    TagType::from(SType::Mtime),
+                    Bitical::String("*-02-01".to_string()),
+                )),
+            )],
+        };
+        let result = MtimeFn.query().expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("expected DateTimeRange, got {:?}", result)
+        };
+        assert_eq!(first, Operand::TypeRef(TagType::from(SType::Mtime)));
+        assert_eq!(op, BasicOp::Gt);
+        assert_eq!(range, DateTimeRange::parse_slot_glob("*-02-01").unwrap());
     }
 
     // --- TypeFn::expand: Literal=完全一致検索 / String=glob検索 の振り分け ---
@@ -2550,7 +3233,7 @@ mod tests {
         };
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
-        TypeFn.query().expand(&tag_type, &label, &tag, &lens)
+        TypeFn.query().expand(&tag_type, &label, &tag, &lens).unwrap()
     }
 
     #[test]
@@ -2602,7 +3285,7 @@ mod tests {
         let label =
             Label::resolve(tag_type.clone(), Bitical::String("*".to_string()));
         let tag = TypedTag::retag(SType::Type, &label);
-        let result = TypeFn.query().expand(&tag_type, &label, &tag, &lens);
+        let result = TypeFn.query().expand(&tag_type, &label, &tag, &lens).unwrap();
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
         else {
             panic!("expected DefinitionRef, got {:?}", result)
@@ -2661,7 +3344,7 @@ mod tests {
         let tag = TypedTag::retag(SType::TypedTag, &label);
         let registry = TagRegistry::with_standard();
         let lens = Lens::from_registry(&registry);
-        let result = TypedTagFn.query().expand(&tag_type, &label, &tag, &lens);
+        let result = TypedTagFn.query().expand(&tag_type, &label, &tag, &lens).unwrap();
         let QueryNode::DefinitionRef(DefinitionRef { candidates, .. }) = result
         else {
             panic!("expected DefinitionRef, got {:?}", result)
@@ -2690,7 +3373,7 @@ mod tests {
             &label,
             &typed_tag,
             &Lens::base_standard(),
-        );
+        ).unwrap();
         let QueryNode::Or(nodes) = result else {
             panic!("expected Or, got {:?}", result)
         };
@@ -2731,7 +3414,7 @@ mod tests {
             &label,
             &typed_tag,
             &Lens::base_standard(),
-        );
+        ).unwrap();
         let QueryNode::ColumnMatch { tag, label: l } = result else {
             panic!("expected ColumnMatch, got {:?}", result)
         };
@@ -2752,7 +3435,7 @@ mod tests {
             &label,
             &typed_tag,
             &Lens::base_standard(),
-        );
+        ).unwrap();
         let QueryNode::Or(nodes) = result else {
             panic!("expected Or, got {:?}", result)
         };

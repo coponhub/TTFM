@@ -63,7 +63,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].raw_repr(), "1.1KB");
+            assert_eq!(res.results[0].raw_repr(), "1.07KB");
             Ok(())
         },
     },

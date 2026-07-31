@@ -160,6 +160,32 @@ macro_rules! define_scan_entry {
     };
 }
 
+/// `OperandFormat` を宣言順で試す推論レジストリを生成するマクロ。
+/// 宣言順は「全形式が譲ったら最後の形式に落ちる」という最下位保証のためだけに使う。
+#[macro_export]
+macro_rules! define_operand_formats {
+    ( $( $ty:ty ),+ $(,)? ) => {
+        impl $crate::types::Bitical {
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式が報告する
+            /// `LogicalType` を返す。どれも主張しなければ文字列のまま。
+            pub fn infer_logical_type_with_range(
+                &self,
+            ) -> $crate::query::logical_schema::LogicalType {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return self.logical_type();
+                };
+                $(
+                    if let Some(Ok(value)) = <$ty as OperandFormat>::parse(s) {
+                        return <$ty as OperandFormat>::logical_type(&value);
+                    }
+                )+
+                self.logical_type()
+            }
+        }
+    };
+}
+
 /// テーブル行のカラム順序を一元管理するマクロ。
 /// 構造体定義、SELECTプロジェクション、カラムリスト生成を一度の定義で行います。
 #[macro_export]

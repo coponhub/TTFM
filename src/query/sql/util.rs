@@ -20,7 +20,9 @@ use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
-use sea_query::{BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
+use sea_query::{
+    BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
+};
 use std::collections::HashMap;
 
 /// `SelectStatement` をインライン副問合せ式 (`SimpleExpr`) に変換します。
@@ -59,29 +61,53 @@ pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
     label.value().to_simple_expr()
 }
 
-/// `Label` の値をサイズ単位を考慮した SQL 式に変換します（例: "1MB" → 1048576）。
-pub(super) fn label_to_unit_aware_expr(label: &Label) -> SimpleExpr {
-    use crate::types::Bitical;
-    let value = label.value();
-    if let Bitical::String(s) = &value {
-        if let Some(bytes) = crate::util::parse_size(s) {
-            return Expr::val(bytes).into();
-        }
-    }
-    value.to_simple_expr()
-}
-
-/// リテラルラベルを SQL 式に変換します。サイズ単位のパース（"1MB" → 1048576）および
-/// 数値リテラルの DOUBLE キャストを行います。
+/// リテラルラベルを SQL 式に変換します。数値リテラルは DOUBLE へキャストします。
 pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
     use crate::types::Bitical;
-    let s = lab.as_str();
-    if let Some(bytes) = crate::util::parse_size(&s) {
-        return Expr::val(bytes).cast_as(BiticalType::Double).into();
-    }
     match lab.value() {
         Bitical::Integer(i) => Expr::val(i).cast_as(BiticalType::Double).into(),
         other => other.to_simple_expr(),
+    }
+}
+
+/// nvalue 比較の右辺制約（`NvalueRhs`）を Condition へ変換する共有ヘルパ。
+/// Label は `is_string` に応じて数値/文字列で描画し、文字列 × glob は
+/// Eq → GLOB / Ne → NOT GLOB（`check_string_match` と同じ規則）。
+/// DateTime は区間/スロット条件（`date_time_condition_expr` に op 行列を集約）。
+pub(super) fn nvalue_rhs_condition(
+    lhs: SimpleExpr,
+    op: crate::query::ast::ComparisonOp,
+    rhs: &crate::query::lens_resolver::NvalueRhs,
+    is_string: bool,
+) -> Condition {
+    use crate::query::ast::{BasicOp, ComparisonOp};
+    use crate::query::lens_resolver::NvalueRhs;
+
+    let basic_op = match op {
+        ComparisonOp::Scalar(b) | ComparisonOp::Label(b) => b,
+    };
+    match rhs {
+        NvalueRhs::DateTime(range) => {
+            super::date_time_condition_expr(&lhs, basic_op, range)
+        }
+        NvalueRhs::Label(label) => {
+            let bin_op = crate::query::lens_schema::to_bin_op(op);
+            if is_string {
+                let s = label.as_str();
+                if crate::util::is_glob_pattern(&s) {
+                    let glob = Expr::expr(lhs)
+                        .binary(BinOper::Custom("GLOB"), Expr::val(s));
+                    let expr =
+                        if basic_op == BasicOp::Ne { glob.not() } else { glob };
+                    Condition::all().add(expr)
+                } else {
+                    Condition::all().add(Expr::expr(lhs).binary(bin_op, Expr::val(s)))
+                }
+            } else {
+                let rhs_expr = label_to_simple_expr(label);
+                Condition::all().add(Expr::expr(lhs).binary(bin_op, rhs_expr))
+            }
+        }
     }
 }
 
@@ -241,7 +267,7 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
     let mut fixed_types = Vec::new();
     let glob_op = sea_query::BinOper::Custom("GLOB");
     for t in types {
-        if t.contains('*') || t.contains('?') || t.contains('[') {
+        if crate::util::is_glob_pattern(&t) {
             cond = cond.add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
         } else {
             fixed_types.push(t);

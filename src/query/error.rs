@@ -851,6 +851,31 @@ pub fn unsupported_string_aggregation(op: &str) -> anyhow::Error {
     anyhow::anyhow!("{}: '{}'", AGGREGATION_STRING_UNSUPPORTED, op)
 }
 
+pub const ORDER_OP_PARTIAL_GLOB_UNSUPPORTED: &str =
+    "Order operator against a partial glob pattern is not supported \
+     (only full-match glob '*' is allowed; use Eq/Ne for other patterns)";
+
+pub fn order_op_partial_glob(op: &str, pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        ORDER_OP_PARTIAL_GLOB_UNSUPPORTED,
+        op,
+        pattern
+    )
+}
+
+pub const TAG_VALUE_NOT_INTERPRETABLE: &str =
+    "Value cannot be interpreted for this tag's type";
+
+pub fn tag_value_not_interpretable(tag_type: &str, pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        TAG_VALUE_NOT_INTERPRETABLE,
+        tag_type,
+        pattern
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

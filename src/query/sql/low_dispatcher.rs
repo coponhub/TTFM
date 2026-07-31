@@ -18,9 +18,9 @@
 use super::nest::filter;
 use super::{
     build_column_match_sql, build_label_set_op_pick_sql,
-    build_resolved_and_sql, build_resolved_diff_sql, build_resolved_match_sql,
-    build_resolved_or_sql, build_resolved_tag_tag_match_sql,
-    build_scalar_match_sql,
+    build_resolved_and_sql, build_resolved_date_time_match_sql,
+    build_resolved_diff_sql, build_resolved_match_sql, build_resolved_or_sql,
+    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
 };
 use crate::db::Src;
 use crate::query::lens_resolver::ResolvedNode;
@@ -83,6 +83,9 @@ pub(super) fn try_dispatch_common(
         )),
         ResolvedNode::ScalarMatch { left, op, right } => {
             Ok(build_scalar_match_sql(src, left, *op, right))
+        }
+        ResolvedNode::DateTimeMatch { storage, op, range, .. } => {
+            Ok(build_resolved_date_time_match_sql(src, storage, *op, range))
         }
         _ => Err(child_sqls),
     }

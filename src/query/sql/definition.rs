@@ -203,8 +203,7 @@ fn build_definition_rows(
 }
 
 /// 定義アイテムの name 列に対する絞り込み条件を返す。
-/// glob検索（unquoted）は glob パターンマッチ、完全一致検索（quoted literal）は
-/// クオート意味論を維持するため等値比較。
+/// メタ文字を含む名前は glob パターンマッチ、含まない名前は等値比較。
 fn name_condition(pattern: &str, exact: bool) -> sea_query::SimpleExpr {
     if exact {
         Expr::col(Col::Name).eq(pattern)

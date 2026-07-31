@@ -61,9 +61,10 @@ pub use precompute::{
     needs_nest_context,
 };
 use scalar::{
-    build_column_match_sql, build_resolved_match_sql,
-    build_resolved_scalar_sql, build_resolved_tag_tag_match_sql,
-    build_scalar_match_sql,
+    build_column_match_sql, build_resolved_date_time_match_sql,
+    build_resolved_match_sql, build_resolved_scalar_sql,
+    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
+    date_time_condition_expr,
 };
 use util::*;
 pub use util::{to_tag_condition, AggregationContext, NestContext};

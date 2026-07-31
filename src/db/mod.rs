@@ -51,6 +51,11 @@ pub struct ColumnDef {
     pub target_table: TargetTable,
 }
 
+pub fn open_connection() -> duckdb::Result<Connection> {
+    let config = duckdb::Config::default().enable_autoload_extension(false)?;
+    Connection::open_in_memory_with_flags(config)
+}
+
 /// DB接続とParquetファイルのパスを管理する構造体（設計書4.4 IndexStore）。
 pub struct Store {
     pub conn: Connection,
@@ -67,7 +72,7 @@ impl Store {
                 format!("Failed to create db dir: {:?}", db_dir)
             })?;
         }
-        let conn = Connection::open_in_memory()
+        let conn = open_connection()
             .context("Failed to open in-memory DuckDB connection")?;
         Ok(Self { conn, db_dir })
     }
@@ -650,6 +655,23 @@ impl Schema {
 mod tests {
     use super::*;
     use sea_query::{Expr, PostgresQueryBuilder, Query};
+
+    #[test]
+    fn test_store_open_disables_extension_autoload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        for setting in ["autoinstall_known_extensions", "autoload_known_extensions"] {
+            let value: String = store
+                .conn
+                .query_row(
+                    &format!("SELECT current_setting('{setting}')::VARCHAR"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "false", "{setting} は無効であるべき");
+        }
+    }
 
     #[test]
     fn test_bitical_type_repr_values() {

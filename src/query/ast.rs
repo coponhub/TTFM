@@ -16,7 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::types::{
-    ItemId, ItemKind, Label, Origin, Rank, SType, TagType, TypedTag,
+    DateTimeRange, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
+    TypedTag,
 };
 use std::collections::HashSet;
 
@@ -164,6 +165,14 @@ pub enum QueryNode {
     Nest(NestNode),
     /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
     DefinitionRef(DefinitionRef),
+    /// 日付の絞り込み（区間 or 周期的なスロット制約）。
+    /// `first` は比較対象（TypeRef=直接タグ / Aggregation=集約 / Calculation=算術ラップ /
+    /// Query(Nest)=Nest 内集約比較）。
+    DateTimeRange {
+        first: Operand,
+        op: BasicOp,
+        range: DateTimeRange,
+    },
 }
 
 impl QueryNode {
@@ -222,6 +231,9 @@ impl QueryNode {
             }
             QueryNode::DefinitionRef(def) => {
                 types.insert(def.value.tag_type().as_str().to_string());
+            }
+            QueryNode::DateTimeRange { first, .. } => {
+                first.collect_types(types);
             }
         }
     }
@@ -462,5 +474,19 @@ mod tests {
         let types = node.get_all_types();
         assert!(types.contains(&"width".to_string()));
         assert!(types.contains(&"height".to_string()));
+    }
+
+    #[test]
+    fn test_date_time_range_node_collects_tag_type() {
+        use crate::types::DateTimeRange;
+        let node = QueryNode::DateTimeRange {
+            first: Operand::TypeRef(TagType::from("mtime")),
+            op: BasicOp::Eq,
+            range: DateTimeRange::interval(0, 100),
+        };
+        let types = node.get_all_types();
+        assert_eq!(types, vec!["mtime".to_string()]);
+        // Projection ではないので get_projections には含まれない
+        assert!(node.get_projections().is_empty());
     }
 }

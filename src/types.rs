@@ -653,7 +653,7 @@ impl TryFrom<Bitical> for FileTimestamp {
 pub enum TagType {
     Base(SType),
     Custom(String),
-    /// 引用符で囲まれたリテラル。Glob無効・自動展開を行わない。
+    /// 引用符で囲まれたリテラル。自動展開を行わない。
     LiteralCustom(String),
 }
 
@@ -717,7 +717,7 @@ pub enum Label {
     IsDir(bool),
     /// 日付リテラル（normalize_label で生成される中間表現）
     Date(DateTime),
-    /// 引用符付き文字列リテラル（完全一致・Glob無効）。
+    /// 引用符付き文字列リテラル（値を解釈しない）。
     Literal(TagType, String),
 
     // --- 汎用・未解決型 ---
@@ -736,7 +736,9 @@ pub enum DateTime {
     YearMonth { year: i32, month: u32 },
     /// 年月日（例: "2026-02-01"）
     Date(chrono::NaiveDate),
-    /// 時点（"today", "7d ago" など）
+    /// 時分（秒指定なし。例: "12:30"）
+    Minute(chrono::NaiveDateTime),
+    /// 時点（秒まで指定。例: "12:30:05"）
     Instant(chrono::DateTime<chrono::Local>),
 }
 
@@ -752,6 +754,10 @@ impl DateTime {
                 NaiveDate::from_ymd_opt(*year, *month, 1)?.and_hms_opt(0, 0, 0)
             }
             DateTime::Date(d) => d.and_hms_opt(0, 0, 0),
+            DateTime::Minute(ndt) => {
+                use chrono::Timelike;
+                ndt.with_second(0)
+            }
             DateTime::Instant(dt) => Some(
                 chrono::Local
                     .timestamp_opt(dt.timestamp(), 0)
@@ -774,6 +780,10 @@ impl DateTime {
                     .and_hms_opt(23, 59, 59)
             }
             DateTime::Date(d) => d.and_hms_opt(23, 59, 59),
+            DateTime::Minute(ndt) => {
+                use chrono::Timelike;
+                ndt.with_second(59)
+            }
             DateTime::Instant(dt) => Some(
                 chrono::Local
                     .timestamp_opt(dt.timestamp(), 0)
@@ -788,8 +798,17 @@ impl DateTime {
             DateTime::Year(y) => y.to_string(),
             DateTime::YearMonth { year, month } => format!("{year}-{month:02}"),
             DateTime::Date(d) => d.format("%Y-%m-%d").to_string(),
+            DateTime::Minute(ndt) => ndt.format("%Y-%m-%d %H:%M").to_string(),
             DateTime::Instant(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
+    }
+
+    pub fn local_utc_offset_secs() -> i64 {
+        chrono::Local::now().offset().local_minus_utc() as i64
+    }
+
+    pub fn utc_epoch_to_local_epoch(utc_epoch_secs: i64) -> i64 {
+        utc_epoch_secs + Self::local_utc_offset_secs()
     }
 
     /// 任意タイムゾーンの `chrono::DateTime` を `Instant` バリアントとして生成する。
@@ -807,13 +826,31 @@ impl DateTime {
             .map(|dt| dt.timestamp())
             .unwrap_or(0)
     }
+
+    /// この DateTime が表す期間を `DateTimeRange::Interval`（floor..ceiling の
+    /// 生タイムスタンプ）へ変換する。検索/SQL 側が扱う生表現への変換点。
+    pub fn to_interval(&self) -> Option<DateTimeRange> {
+        use chrono::{Local, TimeZone};
+        let to_ts = |ndt: chrono::NaiveDateTime| -> Option<i64> {
+            Local
+                .from_local_datetime(&ndt)
+                .earliest()
+                .map(|dt| dt.timestamp())
+        };
+        let start = to_ts(self.floor()?)?;
+        let end = to_ts(self.ceiling()?)?;
+        Some(DateTimeRange::interval(start, end))
+    }
 }
 
-impl std::str::FromStr for DateTime {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, ()> {
-        use chrono::{Local, NaiveDate};
+impl DateTime {
+    /// 構造化日付（YYYY-MM-DD / YYYY-MM / M/D今年 / YYYY 単体）のみを解釈する。
+    /// 自然言語・相対日付は対象外。`normalize_label`（型固有の解釈。tag.rs）が
+    /// 自然言語まで拾わないよう、`FromStr::from_str` から独立して呼べる形にしている。
+    /// `None` = 構造化日付の形をしていない（呼び出し元は他の解釈を試してよい）、
+    /// `Some(Err(()))` = 形はしているが値が不正（例: 存在しない日付）。
+    pub(crate) fn parse_structured(s: &str) -> Option<Result<DateTime, ()>> {
+        use chrono::{Datelike, Local, NaiveDate};
 
         let s = s.trim();
         let parts: Vec<&str> = s
@@ -826,38 +863,80 @@ impl std::str::FromStr for DateTime {
             && parts[0].len() == 4
             && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
         {
-            let y: i32 = parts[0].parse().map_err(|_| ())?;
-            let m: u32 = parts[1].parse().map_err(|_| ())?;
-            let d: u32 = parts[2].parse().map_err(|_| ())?;
-            return NaiveDate::from_ymd_opt(y, m, d)
-                .map(DateTime::Date)
-                .ok_or(());
+            let Ok(y) = parts[0].parse::<i32>() else {
+                return Some(Err(()));
+            };
+            let Ok(m) = parts[1].parse::<u32>() else {
+                return Some(Err(()));
+            };
+            let Ok(d) = parts[2].parse::<u32>() else {
+                return Some(Err(()));
+            };
+            return Some(
+                NaiveDate::from_ymd_opt(y, m, d).map(DateTime::Date).ok_or(()),
+            );
         }
 
-        // YYYY-MM / YYYY/MM
+        // YYYY-MM / YYYY/MM（4桁年）、M/D（今年。月<=12 かつ非4桁の1個目）
         if parts.len() == 2
-            && parts[0].len() == 4
             && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit()))
         {
-            let y: i32 = parts[0].parse().map_err(|_| ())?;
-            let m: u32 = parts[1].parse().map_err(|_| ())?;
-            NaiveDate::from_ymd_opt(y, m, 1).ok_or(())?;
-            return Ok(DateTime::YearMonth { year: y, month: m });
+            let Ok(p1) = parts[0].parse::<i32>() else {
+                return Some(Err(()));
+            };
+            let Ok(p2) = parts[1].parse::<u32>() else {
+                return Some(Err(()));
+            };
+            if parts[0].len() == 4 || p1 > 12 {
+                return Some(
+                    NaiveDate::from_ymd_opt(p1, p2, 1)
+                        .map(|_| DateTime::YearMonth { year: p1, month: p2 })
+                        .ok_or(()),
+                );
+            }
+            return Some(
+                NaiveDate::from_ymd_opt(Local::now().year(), p1 as u32, p2)
+                    .map(DateTime::Date)
+                    .ok_or(()),
+            );
         }
 
-        // YYYY（4桁年単体）
-        if parts.len() == 1
-            && parts[0].len() == 4
-            && parts[0].chars().all(|c| c.is_ascii_digit())
-        {
-            let y: i32 = parts[0].parse().map_err(|_| ())?;
-            if (1000..=9999).contains(&y) {
-                return Ok(DateTime::Year(y));
-            }
+        None
+    }
+}
+
+impl std::str::FromStr for DateTime {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        use chrono::{Datelike, Local};
+
+        let s = s.trim();
+        if let Some(result) = Self::parse_structured(s) {
+            return result;
+        }
+        // 区切りも時間語彙も持たない裸の数値は日付ではない。chrono_english は
+        // 独自ヒューリスティクスでこれらを掴んでしまうので、渡す前に弾く。
+        if s.parse::<f64>().is_ok() {
             return Err(());
         }
 
-        // 自然言語・相対日付（"today", "7d ago" 等）
+        // 自然言語・相対日付（"today", "7d ago", "12:30", "12:30:05" 等）。
+        // コロンの個数で精度を分類する: 0個 = 日精度（丸1日）、1個 = 分精度、
+        // 2個 = 瞬間（秒まで指定済み）。
+        let colon_count = s.matches(':').count();
+        let classify = |dt: chrono::DateTime<Local>| -> DateTime {
+            use chrono::Timelike;
+            match colon_count {
+                0 => DateTime::Date(dt.date_naive()),
+                1 => DateTime::Minute(
+                    dt.naive_local()
+                        .with_second(0)
+                        .unwrap_or_else(|| dt.naive_local()),
+                ),
+                _ => DateTime::from_localtime(dt),
+            }
+        };
         let s_lower = s.to_lowercase();
         let now = Local::now();
         if let Ok(dt) = chrono_english::parse_date_string(
@@ -865,13 +944,189 @@ impl std::str::FromStr for DateTime {
             now,
             chrono_english::Dialect::Uk,
         ) {
-            return Ok(DateTime::from_localtime(dt));
+            return Ok(classify(dt));
         }
+
+        // ago 指定の明示的試行（parse_date_string が失敗しても
+        // parse_duration が成功するケースの救済）
+        if s_lower.contains("ago") {
+            if let Ok(interval) = chrono_english::parse_duration(&s_lower) {
+                use chrono_english::Interval;
+                let past = match interval {
+                    Interval::Seconds(sec) => {
+                        now + chrono::Duration::seconds(sec.into())
+                    }
+                    Interval::Days(d) => now + chrono::Duration::days(d as i64),
+                    Interval::Months(m) => {
+                        let mut y = now.year();
+                        let mut mo = now.month() as i32 + m;
+                        while mo <= 0 {
+                            y -= 1;
+                            mo += 12;
+                        }
+                        now.with_year(y)
+                            .and_then(|d| d.with_month(mo as u32))
+                            .unwrap_or(now)
+                    }
+                };
+                return Ok(classify(past));
+            }
+        }
+
         if let Ok(dt) = dateparser::parse_with_timezone(s, &Local) {
-            return Ok(DateTime::from_localtime(dt));
+            return Ok(classify(dt.with_timezone(&Local)));
         }
 
         Err(())
+    }
+}
+
+/// スロット制約の対象フィールド。宣言順が有意性の高い順であり、
+/// スロット列の並びの唯一の定義。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+impl DateField {
+    pub const ALL: [DateField; 6] = [
+        DateField::Year,
+        DateField::Month,
+        DateField::Day,
+        DateField::Hour,
+        DateField::Minute,
+        DateField::Second,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// 日付部（`-` 区切り）のフィールド。有意性の高い順。
+    pub const DATE_PART: [DateField; 3] =
+        [DateField::Year, DateField::Month, DateField::Day];
+    /// 時刻部（`:` 区切り）のフィールド。有意性の高い順。
+    pub const TIME_PART: [DateField; 3] =
+        [DateField::Hour, DateField::Minute, DateField::Second];
+
+    /// SQL の `EXTRACT(<field> FROM ...)` に渡すフィールド名。
+    pub fn extract_name(self) -> &'static str {
+        match self {
+            DateField::Year => "YEAR",
+            DateField::Month => "MONTH",
+            DateField::Day => "DAY",
+            DateField::Hour => "HOUR",
+            DateField::Minute => "MINUTE",
+            DateField::Second => "SECOND",
+        }
+    }
+}
+
+/// 日付スロット1つぶんの制約（自由 | 単一値）。
+/// フィールド内の文字単位の部分 glob は扱わないので、値は単一値のみ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateSlot {
+    Free,
+    Value(i64),
+}
+
+/// 日付の絞り込み条件。区間（暦スロットに揃わない時点。`7d ago` 等）、または
+/// YMDHMS 各フィールドのスロット制約（周期的な条件。`*-02-01` 等）のいずれかを表す。
+/// op（Eq/Gt/...）は持たない — 適用は SQL 生成側の責務（DateTime::to_range とは異なる）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DateTimeRange {
+    Interval {
+        start: i64,
+        end: i64,
+    },
+    /// `DateField::ALL` と同じ順のスロット列。
+    Slots([DateSlot; DateField::COUNT]),
+}
+
+impl DateTimeRange {
+    pub fn interval(start: i64, end: i64) -> Self {
+        DateTimeRange::Interval { start, end }
+    }
+
+    /// 区間形の場合のみ (start, end) を返す。スロット制約形は None。
+    pub fn as_interval(&self) -> Option<(i64, i64)> {
+        match self {
+            DateTimeRange::Interval { start, end } => Some((*start, *end)),
+            DateTimeRange::Slots(..) => None,
+        }
+    }
+
+    /// フィールド単位の glob（例: `*-02-01` / `2026-*` / `12:*` / `*-02-01T12:*`）を
+    /// スロット制約形へ翻訳する。
+    ///
+    /// 各フィールドは `*`（自由）か数値リテラル（単一値）のどちらかで、フィールド内の
+    /// 文字単位の部分 glob（`2026-0*` / `20*`）は受け付けない — 「2000年以降」のような
+    /// 範囲は glob ではなく比較式で書く。末尾の欠けたフィールドは自由になる
+    /// （`2026-*` は2026年全体）。日付部と時刻部は `T` で区切る。`T` が無く `:` を含む
+    /// ものは時刻のみのパターン（`12:*` は各日の12時台）。
+    ///
+    /// glob を含まないパターンは通常の日付解釈に任せるため None を返す。
+    pub fn parse_slot_glob(pattern: &str) -> Option<Self> {
+        if !pattern.contains('*') {
+            return None;
+        }
+        if pattern == "*" {
+            return None;
+        }
+        let (date_part, time_part) = match pattern.split_once('T') {
+            Some((d, t)) => (Some(d), Some(t)),
+            None if pattern.contains(':') => (None, Some(pattern)),
+            None => (Some(pattern), None),
+        };
+
+        let mut slots = [DateSlot::Free; DateField::COUNT];
+        for (part, fields, sep) in [
+            (date_part, DateField::DATE_PART, '-'),
+            (time_part, DateField::TIME_PART, ':'),
+        ] {
+            let Some(part) = part else { continue };
+            let values: Vec<&str> = part.split(sep).collect();
+            if values.len() > fields.len() {
+                return None;
+            }
+            for (field, value) in fields.iter().zip(values) {
+                slots[*field as usize] = Self::parse_slot_field(value)?;
+            }
+        }
+        Some(DateTimeRange::Slots(slots))
+    }
+
+    fn parse_slot_field(field: &str) -> Option<DateSlot> {
+        if field == "*" {
+            return Some(DateSlot::Free);
+        }
+        if !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()) {
+            return field.parse::<i64>().ok().map(DateSlot::Value);
+        }
+        None
+    }
+
+    /// `parse_structured` / `parse_slot_glob` / 自然言語（`FromStr`）を1本に束ねた入口。
+    pub fn parse(s: &str) -> Option<Result<DateTimeRange, String>> {
+        let s = s.trim();
+        if let Some(range) = Self::parse_slot_glob(s) {
+            return Some(Ok(range));
+        }
+        if let Some(result) = DateTime::parse_structured(s) {
+            return Some(result.map_err(|_| format!("invalid date: {s}")).and_then(|dt| {
+                dt.to_interval()
+                    .ok_or_else(|| format!("cannot resolve date range: {s}"))
+            }));
+        }
+        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        match s.parse::<DateTime>() {
+            Ok(dt) => dt.to_interval().map(Ok),
+            Err(()) => None,
+        }
     }
 }
 
@@ -966,7 +1221,7 @@ impl Label {
         Self::resolve(tag, value)
     }
 
-    /// `Literal` は Glob 無効・完全一致の意味論を運ぶ専用 variant のため、
+    /// `Literal` は「値を解釈しない」意味論を運ぶ専用 variant のため、
     /// この呼び出しを経由すると通常の `String` と区別できなくなる点に注意
     /// （区別が必要な呼び出し元は `.value()` を経由せず `Label::Literal` に直接 match すること）。
     pub fn value(&self) -> Bitical {
@@ -1013,7 +1268,7 @@ impl Label {
     }
 
     /// TagType と値を変えつつ、元が `Literal` なら `Literal` のまま Label を作り直します。
-    /// `resolve` を経由すると Literal 性（Glob 無効・完全一致）が失われるため、
+    /// `resolve` を経由すると Literal 性（値を解釈しない）が失われるため、
     /// タグ再解決（正規化・DefinitionRef 化など）で値を保ったまま TagType だけ変える箇所で使います。
     pub fn rekey(&self, tag: TagType, value: Bitical) -> Self {
         match (self, value) {
@@ -1077,7 +1332,7 @@ impl TypedTag {
     }
 
     /// 既存の `Label` の値を保ったまま TagType だけ変えて `TypedTag` を作ります。
-    /// `label` が `Literal` の場合、`Literal` 性（Glob 無効・完全一致）を保ちます
+    /// `label` が `Literal` の場合、`Literal` 性（値を解釈しない）を保ちます
     /// （`new` は `impl Into<Bitical>` 経由のため Literal 性を失います。`Label::rekey` 参照）。
     pub fn retag(tagtype: impl Into<TagType>, label: &Label) -> Self {
         Self {
@@ -1399,6 +1654,23 @@ impl std::str::FromStr for SType {
 #[cfg(test)]
 mod tests_types {
     use super::*;
+
+    #[test]
+    fn test_date_time_utc_epoch_to_local_epoch_matches_chrono_local() {
+        use chrono::{Local, TimeZone};
+        // 2024-12-31 23:00:00 JST を表す UTC 秒
+        let utc_epoch = Local
+            .with_ymd_and_hms(2024, 12, 31, 23, 0, 0)
+            .unwrap()
+            .timestamp();
+        let local_epoch = DateTime::utc_epoch_to_local_epoch(utc_epoch);
+        // ローカル時刻として素朴に読める（timezone なしで解釈した）暦フィールドが
+        // 元のローカル時刻と一致すること
+        let naive = chrono::DateTime::from_timestamp(local_epoch, 0)
+            .unwrap()
+            .naive_utc();
+        assert_eq!(naive.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-12-31 23:00:00");
+    }
 
     #[test]
     fn test_bitical_equality_is_bitwise() {
@@ -1806,22 +2078,87 @@ mod tests_types {
         );
     }
 
+    /// 裸の4桁整数は区切りも時間語彙も持たない目印なしの表記なので、
+    /// parse_structured はもう主張しない（Year 単体解釈は MtimeFn 側の型文脈の知識）。
     #[test]
-    fn test_datetime_from_str_year_only() {
-        let dt: DateTime = "2026".parse().unwrap();
-        assert_eq!(dt, DateTime::Year(2026));
+    fn test_date_time_parse_structured_declines_bare_year() {
+        assert_eq!(DateTime::parse_structured("2026"), None);
+    }
+
+    #[test]
+    fn test_datetime_from_str_declines_bare_integer() {
+        for s in ["2026", "0", "123456"] {
+            assert!(
+                s.parse::<DateTime>().is_err(),
+                "should decline a bare integer with no marker: {s}"
+            );
+        }
     }
 
     #[test]
     fn test_datetime_from_str_today() {
+        // コロンなしの自然言語日付は日精度（丸1日を表す。util::parse_datetime の
+        // 「非コロン一致は丸1日」広げと同じ精度に統合。旧 Instant 判定は撤回）
         let dt: DateTime = "today".parse().unwrap();
-        assert!(matches!(dt, DateTime::Instant(_)));
+        assert!(matches!(dt, DateTime::Date(_)));
     }
 
     #[test]
     fn test_datetime_from_str_relative() {
+        // "7d ago" にもコロンが無いため日精度
         let dt: DateTime = "7d ago".parse().unwrap();
+        assert!(matches!(dt, DateTime::Date(_)));
+    }
+
+    #[test]
+    fn test_datetime_from_str_hm_minute_precision() {
+        // コロン1個（秒指定なし）は分精度
+        let dt: DateTime = "12:30".parse().unwrap();
+        match dt {
+            DateTime::Minute(ndt) => {
+                use chrono::Timelike;
+                assert_eq!((ndt.hour(), ndt.minute()), (12, 30));
+            }
+            other => panic!("expected Minute, got {other:?}"),
+        }
+        let floor = dt.floor().unwrap();
+        let ceiling = dt.ceiling().unwrap();
+        use chrono::Timelike;
+        assert_eq!(floor.second(), 0);
+        assert_eq!(ceiling.second(), 59);
+        assert_eq!(floor.minute(), 30);
+        assert_eq!(ceiling.minute(), 30);
+    }
+
+    #[test]
+    fn test_datetime_from_str_hms_instant_precision() {
+        // コロン2個（秒指定あり）は瞬間（floor == ceiling）
+        let dt: DateTime = "12:30:05".parse().unwrap();
         assert!(matches!(dt, DateTime::Instant(_)));
+        assert_eq!(dt.floor(), dt.ceiling());
+    }
+
+    #[test]
+    fn test_datetime_from_str_md_shorthand_this_year() {
+        use chrono::{Datelike, Local, NaiveDate};
+        let dt: DateTime = "1/10".parse().unwrap();
+        let this_year = Local::now().year();
+        assert_eq!(
+            dt,
+            DateTime::Date(NaiveDate::from_ymd_opt(this_year, 1, 10).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_datetime_from_str_ym_slash() {
+        let dt: DateTime = "2013/1".parse().unwrap();
+        assert_eq!(
+            dt,
+            DateTime::YearMonth {
+                year: 2013,
+                month: 1
+            }
+        );
     }
 
     #[test]
@@ -1995,6 +2332,172 @@ mod tests_types {
             .timestamp();
         assert_eq!(floor_ts, ts);
         assert_eq!(ceiling_ts, ts);
+    }
+
+    // --- DateTimeRange（旧 util::DatetimeRange。区間 | スロット制約の2形） ---
+
+    #[test]
+    fn test_date_time_range_interval_round_trips() {
+        let range = DateTimeRange::interval(100, 200);
+        assert_eq!(range.as_interval(), Some((100, 200)));
+    }
+
+    #[test]
+    fn test_date_time_range_interval_equality() {
+        assert_eq!(
+            DateTimeRange::interval(100, 200),
+            DateTimeRange::interval(100, 200)
+        );
+        assert_ne!(
+            DateTimeRange::interval(100, 200),
+            DateTimeRange::interval(100, 201)
+        );
+    }
+
+    /// スロット制約は生タイムスタンプの区間を持たない。
+    #[test]
+    fn test_date_time_range_slots_have_no_interval() {
+        let range = DateTimeRange::parse_slot_glob("*-02-01").unwrap();
+        assert_eq!(range.as_interval(), None);
+    }
+
+    /// フィールド単位の glob として受理するパターン。
+    /// フィールドが足りない分は自由（`2026-*` は2026年全体）。
+    #[test]
+    fn test_date_time_range_parse_slot_glob_accepts_field_globs() {
+        for pattern in [
+            "*-*-*",
+            "*-02-01",
+            "2026-*",
+            "2026-*-01",
+            "*-*-15",
+            "12:*",
+            "*-02-01T12:*",
+        ] {
+            assert!(
+                DateTimeRange::parse_slot_glob(pattern).is_some(),
+                "受理されるべき: {pattern}"
+            );
+        }
+    }
+
+    /// 裸の `*` は区切りも単位も持たない汎用の全一致 glob なので、日付型と見做せない。
+    #[test]
+    fn test_date_time_range_parse_slot_glob_declines_bare_wildcard() {
+        assert!(
+            DateTimeRange::parse_slot_glob("*").is_none(),
+            "should decline a bare *"
+        );
+    }
+
+    /// フィールド内の文字単位の部分 glob は受理しない（年の前方一致も含む）。
+    /// 「2000年以降」のような範囲は glob ではなく比較式で書く。
+    #[test]
+    fn test_date_time_range_parse_slot_glob_rejects_partial_field_glob() {
+        for pattern in [
+            "2026-0*", "20*", "*-0*-01", "20*-1*", "12:3*", "2026-02-0*",
+        ] {
+            assert!(
+                DateTimeRange::parse_slot_glob(pattern).is_none(),
+                "フィールド内の部分 glob は拒否されるべき: {pattern}"
+            );
+        }
+    }
+
+    /// glob を含まないものは通常の日付解釈に任せる（スロットにはしない）。
+    #[test]
+    fn test_date_time_range_parse_slot_glob_requires_glob_char() {
+        for pattern in ["2026-02-01", "2026", "12:30"] {
+            assert!(
+                DateTimeRange::parse_slot_glob(pattern).is_none(),
+                "glob でないものは拒否されるべき: {pattern}"
+            );
+        }
+    }
+
+    /// フィールド数の不正・空フィールドは受理しない。
+    #[test]
+    fn test_date_time_range_parse_slot_glob_rejects_malformed() {
+        for pattern in ["2026-", "*-", "*-1-2-3", "12:*:*:*", "-*"] {
+            assert!(
+                DateTimeRange::parse_slot_glob(pattern).is_none(),
+                "壊れたパターンは拒否されるべき: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_date_time_to_interval_matches_floor_ceiling() {
+        use chrono::{Local, NaiveDate, TimeZone};
+        let dt = DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+        let range = dt.to_interval().unwrap();
+        let (start, end) = range.as_interval().unwrap();
+        let expected_start = Local
+            .from_local_datetime(&dt.floor().unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp();
+        let expected_end = Local
+            .from_local_datetime(&dt.ceiling().unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp();
+        assert_eq!(start, expected_start);
+        assert_eq!(end, expected_end);
+        assert!(start < end);
+    }
+
+    // --- DateTimeRange::parse (unifies parse_structured / parse_slot_glob / FromStr) ---
+
+    #[test]
+    fn test_date_time_range_parse_delegates_to_slot_glob() {
+        assert_eq!(
+            DateTimeRange::parse("*-02-01"),
+            Some(Ok(DateTimeRange::parse_slot_glob("*-02-01").unwrap()))
+        );
+    }
+
+    #[test]
+    fn test_date_time_range_parse_delegates_to_structured_date() {
+        use chrono::NaiveDate;
+        let dt = DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+        assert_eq!(DateTimeRange::parse("2026-02-01"), Some(Ok(dt.to_interval().unwrap())));
+    }
+
+    #[test]
+    fn test_date_time_range_parse_claims_natural_language() {
+        let dt: DateTime = "today".parse().unwrap();
+        assert_eq!(DateTimeRange::parse("today"), Some(Ok(dt.to_interval().unwrap())));
+    }
+
+    #[test]
+    fn test_date_time_range_parse_reports_invalid_calendar_date() {
+        assert!(matches!(DateTimeRange::parse("2026-13-45"), Some(Err(_))));
+    }
+
+    /// 区切り記号も時間語彙も持たない裸の数値は日付の目印を持たない。
+    /// 小数も同様（chrono_english は `0.1` を日付として掴んでしまう）。
+    #[test]
+    fn test_date_time_range_parse_declines_bare_number() {
+        for s in ["2026", "0", "123456", "0.1", "3.14", "1e5"] {
+            assert_eq!(DateTimeRange::parse(s), None, "should decline a bare number: {s}");
+        }
+    }
+
+    #[test]
+    fn test_date_time_range_parse_declines_unrecognized_garbage() {
+        assert_eq!(DateTimeRange::parse("not_a_date"), None);
+    }
+
+    #[test]
+    fn test_date_time_range_parse_declines_malformed_glob() {
+        for pattern in ["2026-0*", "20*", "*-0*-01"] {
+            assert_eq!(
+                DateTimeRange::parse(pattern),
+                None,
+                "should decline a malformed field glob: {pattern}"
+            );
+        }
     }
 }
 
