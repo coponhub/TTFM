@@ -47,13 +47,9 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::ColumnMatch { tag, label } => {
             Ok(build_column_match_sql(src, *tag, label))
         }
-        ResolvedNode::DefinitionRef {
-            def, default_rank, ..
-        } => Ok(crate::query::lens_builder::filter_definitions(
-            src,
-            def,
-            *default_rank,
-        )),
+        ResolvedNode::DefinitionRef { def, .. } => {
+            Ok(super::definition::build_definition_pick_sql(src, def))
+        }
         ResolvedNode::Match {
             storage,
             bitical_type,

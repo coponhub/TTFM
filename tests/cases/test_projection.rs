@@ -492,13 +492,13 @@ fn test_projection_returns_label_volatile_items() {
             // 検証6: tags に "item:name#id" 形式のタグが含まれている
             // Type="item", Label="name#id" 形式であることを確認
             let has_item_ref = item.tags.entries.iter().any(|entry| {
-                entry.label.tag_type().as_str() == "item"
-                    && entry.label.as_str().contains('#')
+                entry.typed_tag.tag_type().as_str() == "item"
+                    && entry.typed_tag.as_str().contains('#')
             });
             assert!(
                 has_item_ref,
                 "Label volatile item should contain Type='item' tags with Label='name#id', found: {:?}",
-                item.tags.entries.iter().map(|e| format!("{}:{}", e.label.tag_type().as_str(), e.label.as_str())).collect::<Vec<_>>()
+                item.tags.entries.iter().map(|e| format!("{}:{}", e.typed_tag.tag_type().as_str(), e.typed_tag.as_str())).collect::<Vec<_>>()
             );
 
             // 検証7: item_count に total_count が保存されている
@@ -554,12 +554,12 @@ fn test_projection_returns_label_volatile_items() {
             .tags
             .entries
             .iter()
-            .any(|entry| entry.label.as_str().contains("test.rs"));
+            .any(|entry| entry.typed_tag.as_str().contains("test.rs"));
         let has_another_rs = rs_item
             .tags
             .entries
             .iter()
-            .any(|entry| entry.label.as_str().contains("another.rs"));
+            .any(|entry| entry.typed_tag.as_str().contains("another.rs"));
         assert!(
             has_test_rs || has_another_rs,
             "rs label should contain references to test.rs or another.rs"

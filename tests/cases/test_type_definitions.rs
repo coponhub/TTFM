@@ -25,7 +25,7 @@ use ttfm::{
     },
     indexing::Indexer,
     tag::{TagFunction, TagRegistry},
-    types::{ItemId, ItemKind, Label, TagType},
+    types::{ItemId, ItemKind, SType, TagType, TypedTag},
     SearchOptions,
 };
 
@@ -156,9 +156,9 @@ fn type_prefers_stored_definition_over_volatile_duplicate() -> anyhow::Result<()
         vec![WriteAction::Add {
             item: ItemId::Volatile(0),
             tags: vec![
-                TagOp::Append(Label::ItemKind("type".to_string())),
-                TagOp::Append(Label::Content("hash".to_string())),
-                TagOp::Append(Label::Rank(999)),
+                TagOp::Append(TypedTag::new(SType::ItemKind, "type")),
+                TagOp::Append(TypedTag::new(SType::Content, "hash")),
+                TagOp::Append(TypedTag::new(SType::Rank, 999)),
             ],
         }],
     )?;
@@ -207,9 +207,9 @@ fn type_stored_row_shows_user_attached_tags() -> anyhow::Result<()> {
         vec![WriteAction::Add {
             item: ItemId::Volatile(0),
             tags: vec![
-                TagOp::Append(Label::ItemKind("type".to_string())),
-                TagOp::Append(Label::Content("hash".to_string())),
-                TagOp::Append(Label::Rank(999)),
+                TagOp::Append(TypedTag::new(SType::ItemKind, "type")),
+                TagOp::Append(TypedTag::new(SType::Content, "hash")),
+                TagOp::Append(TypedTag::new(SType::Rank, 999)),
             ],
         }],
     )?;
@@ -362,7 +362,7 @@ fn type_volatile_items_get_name_tag() -> anyhow::Result<()> {
         .expect("project should be in the type: result as Volatile");
     assert!(
         project_item.tags.entries.iter().any(|e| {
-            e.label.tag_type() == TagType::from("name") && e.label.as_str() == "project"
+            e.typed_tag.tag_type() == TagType::from("name") && e.typed_tag.as_str() == "project"
         }),
         "Volatile type-definition item should have a real name tag entry, got tags: {:?}",
         project_item.tags
@@ -401,8 +401,8 @@ fn tag_volatile_items_get_name_tag() -> anyhow::Result<()> {
         .expect("project:x should be in the tag: result as Volatile");
     assert!(
         tag_item.tags.entries.iter().any(|e| {
-            e.label.tag_type() == TagType::from("name")
-                && e.label.as_str() == "project:x"
+            e.typed_tag.tag_type() == TagType::from("name")
+                && e.typed_tag.as_str() == "project:x"
         }),
         "Volatile tag-definition item should have a real name tag entry, got tags: {:?}",
         tag_item.tags
@@ -681,8 +681,8 @@ fn builtin_type_stored_via_sys_id_still_gets_synthetic_tags(
     );
     assert!(
         hash_item.tags.entries.iter().any(|e| {
-            e.label.tag_type() == TagType::from("name")
-                && e.label.as_str() == "hash"
+            e.typed_tag.tag_type() == TagType::from("name")
+                && e.typed_tag.as_str() == "hash"
         }),
         "built-in Stored (Sys id) type-definition item should still carry \
          a synthetic name tag entry, got tags: {:?}",
@@ -723,7 +723,7 @@ fn builtin_type_origin_is_derivable_from_stored_id() -> anyhow::Result<()> {
             .tags
             .entries
             .iter()
-            .any(|e| e.label.tag_type() == TagType::from("origin")),
+            .any(|e| e.typed_tag.tag_type() == TagType::from("origin")),
         "origin should not be exposed as a tag, got tags: {:?}",
         hash_item.tags
     );
@@ -767,7 +767,7 @@ fn used_type_settles_into_user_block() -> anyhow::Result<()> {
             .tags
             .entries
             .iter()
-            .any(|e| e.label.tag_type() == TagType::from("origin")),
+            .any(|e| e.typed_tag.tag_type() == TagType::from("origin")),
         "origin should not be exposed as a tag, got tags: {:?}",
         project_item.tags
     );
@@ -809,7 +809,7 @@ fn plugin_type_settles_into_plugin_block() -> anyhow::Result<()> {
             .tags
             .entries
             .iter()
-            .any(|e| e.label.tag_type() == TagType::from("origin")),
+            .any(|e| e.typed_tag.tag_type() == TagType::from("origin")),
         "origin should not be exposed as a tag, got tags: {:?}",
         qtest_item.tags
     );

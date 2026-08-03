@@ -103,12 +103,21 @@ fn test_plugin_normalize_label_applied_in_search() {
         }
     }
     impl ttfm::tag::Query for ShortLabelTag {
-        fn normalize_label(&self, label: &Label) -> anyhow::Result<Label> {
-            Ok(match label.as_str().as_str() {
+        fn interpret(
+            &self,
+            first: &ttfm::query::ast::Operand,
+            op: ttfm::query::ast::ComparisonOp,
+            label: &Label,
+        ) -> anyhow::Result<ttfm::QueryNode> {
+            let normalized = match label.as_str().as_str() {
                 "m" => Label::from("modified"),
                 "c" => Label::from("clean"),
                 _ => label.clone(),
-            })
+            };
+            Ok(ttfm::QueryNode::Comparison(ttfm::query::ast::ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, ttfm::query::ast::Operand::Literal(normalized))],
+            }))
         }
     }
 
@@ -264,10 +273,24 @@ fn test_wasm_adapter_display_is_some() {
 /// プラグインが normalize-label で None を返す場合、ラベルは変更されない
 #[test]
 fn test_wasm_adapter_normalize_label_default() {
+    use ttfm::query::ast::{ComparisonOp, Operand};
     let adapter = load_sample_adapter();
     let query = adapter.query();
     let label = Label::from("hello");
-    assert_eq!(query.normalize_label(&label).unwrap().as_str(), "hello");
+    let result = query
+        .interpret(
+            &Operand::TypeRef("mimetype".into()),
+            ComparisonOp::Label(ttfm::query::ast::BasicOp::Eq),
+            &label,
+        )
+        .unwrap();
+    let ttfm::QueryNode::Comparison(node) = result else {
+        panic!("expected Comparison, got {:?}", result)
+    };
+    let Operand::Literal(normalized) = &node.rest[0].1 else {
+        panic!("expected Literal operand, got {:?}", node.rest[0].1)
+    };
+    assert_eq!(normalized.as_str(), "hello");
 }
 
 /// プラグインが expand で None を返す場合、TypedTag のデフォルト動作を使う

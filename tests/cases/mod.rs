@@ -169,16 +169,16 @@ pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
-        .map(|e| e.label.as_str().to_string())
+        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.typed_tag.as_str().to_string())
 }
 
 pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type().as_str() == "nvalue")
-        .map(|e| match e.label.value() {
+        .find(|e| e.typed_tag.tag_type().as_str() == "nvalue")
+        .map(|e| match e.typed_tag.value() {
             ttfm::types::Bitical::Double(d) => d,
             ttfm::types::Bitical::Integer(i) => i as f64,
             _ => panic!("Unexpected nvalue type"),
@@ -191,7 +191,7 @@ pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
         r.tags
             .entries
             .iter()
-            .any(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+            .any(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("item"))
     })
 }
 
@@ -439,6 +439,7 @@ pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
 pub mod test_type_definitions;
+pub mod test_typedtag_label_node;
 pub mod test_validation;
 pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;

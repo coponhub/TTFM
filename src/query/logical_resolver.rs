@@ -38,7 +38,7 @@ use crate::query::ast::{
     ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::error;
-use crate::types::{Bitical, Label, TagType};
+use crate::types::{Bitical, Label};
 use anyhow::{bail, Result};
 
 // ========== Logical Representation ==========
@@ -54,8 +54,13 @@ pub(crate) fn expand_query_node(
     sink: &mut dyn error::WarningSink,
 ) -> Result<QueryNode> {
     match node {
+        // 展開済みの段が刻まれた TypedTag を再展開すると、既存の Node を捨てて
+        // 同じ解釈を作り直すことになるため、そのまま返す。
+        QueryNode::TypedTag(tt) if !tt.is_default_node() => {
+            Ok(QueryNode::TypedTag(tt))
+        }
         QueryNode::TypedTag(tt) => {
-            schema.expand_tag(&tt.label.tag_type(), &tt.label)
+            schema.expand_tag(&tt.tag_type(), &tt.label)
         }
         QueryNode::Projection(op) => {
             // 括弧で囲まれた式 (sum > 10) などが Projection(Query(Comparison)) としてパースされる場合がある
@@ -283,7 +288,7 @@ fn is_set_operation(node: &QueryNode) -> bool {
         | QueryNode::Difference(_, _)
         | QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }
-        | QueryNode::DefinitionRef { .. }
+        | QueryNode::OriginRef(_)
         | QueryNode::DateTimeRange { .. } => true,
 
         // Projection は集合を返すが、Literal のみの場合はスカラー
@@ -380,7 +385,7 @@ fn returns_projection(node: &QueryNode) -> bool {
         }
         QueryNode::TypedTag(_)
         | QueryNode::ColumnMatch { .. }
-        | QueryNode::DefinitionRef { .. }
+        | QueryNode::OriginRef(_)
         | QueryNode::Comparison(_)
         | QueryNode::Aggregation(_)
         | QueryNode::DateTimeRange { .. } => false,
@@ -403,8 +408,7 @@ fn expand_operand(
             } else if s == "false" {
                 Ok(Operand::Literal(crate::types::Label::from(false)))
             } else {
-                // サイズ・日付等の変換は登録済みプラグインの normalize_label に委譲
-                Ok(Operand::Literal(schema.normalize_label_any(&label)))
+                Ok(Operand::Literal(label))
             }
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
@@ -500,13 +504,17 @@ fn try_fold_calculation(calc: CalculationNode) -> Operand {
 }
 
 /// リテラル同士の算術演算を計算します。
+fn numeric_bitical_for_arithmetic(label: &crate::types::Label) -> Bitical {
+    label.resolved_value()
+}
+
 fn fold_literal_arithmetic(
     left: &crate::types::Label,
     op: ArithmeticOp,
     right: &crate::types::Label,
 ) -> Option<crate::types::Label> {
-    let lv = left.value();
-    let rv = right.value();
+    let lv = numeric_bitical_for_arithmetic(left);
+    let rv = numeric_bitical_for_arithmetic(right);
 
     match (lv, rv) {
         (Bitical::Integer(l), Bitical::Integer(r)) => {
@@ -597,7 +605,7 @@ fn fold_literal_arithmetic(
 
 /// f64 値を Label に変換するヘルパー
 fn double_label(v: f64) -> crate::types::Label {
-    Label::Other(TagType::Custom(String::new()), Bitical::Double(v))
+    Label::other(Bitical::Double(v))
 }
 
 /// And ノードから投影ノードとそれ以外のフィルタを分離します。
@@ -735,13 +743,15 @@ fn expand_nest(
     // Nest（&:）の右辺が定義アイテム（type:/tag: 等）に対する count() の場合、
     // 結果はグループに依存しない定数になり count(type:) との混同が起きやすいため警告する。
     if let QueryNode::Aggregation(AggregationNode::Count(ref inner)) = right {
-        if inner.has_definition_branch() {
+        if inner.has_definition_branch(schema) {
             sink.warn(error::definition_count_in_nest_warning_msg());
         }
     }
 
     // 左辺からフィルタを分離
     let (left, filter) = split_projection_filter(left_raw);
+    // 右辺由来のフィルタのうち、左辺に注入できず宙に浮いたぶん
+    let mut outer_filters: Vec<QueryNode> = Vec::new();
 
     // 右辺にフィルタを注入（集計ノード内部に And 結合）
     let right_with_filter = match &filter {
@@ -799,7 +809,17 @@ fn expand_nest(
 
                 // 左辺に右辺由来のフィルタを注入
                 let left_with_sub_filter = match sub_filter {
-                    Some(sf) => inject_filter_into_aggregations(left, &sf),
+                    Some(sf) => {
+                        let injected =
+                            inject_filter_into_aggregations(left.clone(), &sf);
+                        // 左辺が素の Projection だと注入先の集約が無く、
+                        // このままではフィルタが消える。左辺由来フィルタと
+                        // 同じく Nest 全体を And で包んでアイテム集合を絞る。
+                        if injected == left {
+                            outer_filters.push(sf);
+                        }
+                        injected
+                    }
                     None => left,
                 };
 
@@ -841,9 +861,12 @@ fn expand_nest(
     };
 
     // フィルタを全体にも適用（Projection 結果の絞り込み用）
-    match filter {
-        Some(f) => Ok(QueryNode::And(vec![f, result])),
-        None => Ok(result),
+    outer_filters.extend(filter);
+    if outer_filters.is_empty() {
+        Ok(result)
+    } else {
+        outer_filters.push(result);
+        Ok(QueryNode::And(outer_filters))
     }
 }
 
@@ -1170,6 +1193,31 @@ mod tests {
     };
     use crate::query::lens_schema::Lens;
     use crate::types::{Bitical, TagType, TypedTag};
+
+    #[test]
+    fn expand_is_idempotent() {
+        let lens = Lens::base_standard();
+        for q in [
+            "size:1k",
+            "extension:rs",
+            "mtime:2026",
+            "size: :> 1k",
+            "filename:foo",
+            "directory:foo",
+        ] {
+            let parsed = crate::query::parser::parse_nowarn(q).unwrap();
+            let once =
+                expand_query_node(&lens, parsed, &mut Vec::new()).unwrap();
+            let twice =
+                expand_query_node(&lens, once.clone(), &mut Vec::new())
+                    .unwrap();
+            assert_eq!(
+                format!("{once:?}"),
+                format!("{twice:?}"),
+                "expanding {q} twice must not rebuild the already-stamped Node"
+            );
+        }
+    }
 
     #[test]
     fn test_expand_simple_and() {
@@ -2304,61 +2352,41 @@ mod tests {
         assert!(is_unnestable_aggregation(&agg));
     }
 
-    // --- Phase 4: expand_operand delegates size normalization via normalize_label_any ---
-
     #[test]
-    fn test_expand_operand_size_literal_via_normalize() {
-        // "1MB" as unquoted string literal should be normalized to Label::Size(1_048_576)
-        // This tests that the delegation works (not hardcoded parse_size)
-        let lens = Lens::base_standard();
-        let op = Operand::Literal(crate::types::Label::from("1MB"));
-        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
-        match expanded {
-            Operand::Literal(label) => {
-                assert_eq!(
-                    label.as_i64(),
-                    1_048_576,
-                    "1MB should be 1048576 bytes"
-                );
-            }
-            other => panic!("Expected Literal, got {:?}", other),
-        }
+    fn test_fold_literal_arithmetic_reads_formatted_byte_size() {
+        use crate::query::format::{ByteSizeRange, Formatted};
+        use crate::types::{Bitical, Label, LabelNode};
+
+        let mut left = Label::other(Bitical::String("1MB".to_string()));
+        left.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
+            ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 },
+        )));
+        let mut right = Label::other(Bitical::String("100B".to_string()));
+        right.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
+            ByteSizeRange::Range { lo: 100, hi: 100 },
+        )));
+
+        let result = fold_literal_arithmetic(&left, ArithmeticOp::Add, &right)
+            .expect("should fold byte-size literals via Formatted");
+        assert_eq!(result.as_i64(), 1_048_676);
     }
 
     #[test]
-    fn test_expand_operand_date_string_becomes_date_label() {
-        // "2026-02-01" as unquoted string literal should be normalized to Label::Date
+    fn unregistered_tag_value_is_not_reinterpreted_by_format() {
         let lens = Lens::base_standard();
-        let op = Operand::Literal(crate::types::Label::from("2026-02-01"));
-        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
-        match expanded {
-            Operand::Literal(label) => match label {
-                crate::types::Label::Date(dt) => {
-                    assert!(
-                        matches!(dt, crate::types::DateTime::Date(_)),
-                        "Expected DateTime::Date, got {:?}",
-                        dt
-                    );
-                }
-                other => panic!("Expected Label::Date, got {:?}", other),
-            },
-            other => panic!("Expected Literal, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_expand_operand_quoted_literal_unchanged() {
-        // Quoted ("literal") should NOT be normalized — stays as Label::Literal
-        let lens = Lens::base_standard();
-        let label = crate::types::Label::Literal(
-            crate::types::TagType::Custom(String::new()),
-            "1MB".to_string(),
-        );
-        let op = Operand::Literal(label.clone());
-        let expanded = expand_operand(&lens, op, &mut Vec::new()).unwrap();
-        match expanded {
-            Operand::Literal(l) => assert_eq!(l, label),
-            other => panic!("Expected Literal unchanged, got {:?}", other),
+        for q in ["cat:1MB", "cat:\"1MB\""] {
+            let parsed = crate::query::parser::parse_nowarn(q).unwrap();
+            let expanded =
+                expand_query_node(&lens, parsed, &mut Vec::new()).unwrap();
+            let QueryNode::TypedTag(tt) = &expanded else {
+                panic!("expected TypedTag for {q}, got {expanded:?}")
+            };
+            assert_eq!(
+                tt.label.value(),
+                Bitical::String("1MB".to_string()),
+                "a tag with no TagFn must keep its raw value; only a TagFn may \
+                 read a notation like 1MB as bytes ({q})"
+            );
         }
     }
 }

@@ -394,16 +394,15 @@ fn build_comparison_inner(
                 // Projection のつもりが文字列として解釈されている可能性を警告する。
                 // 空白ありの label_op / label_op_to_proj は右辺に type_ref を許容するため
                 // ここには到達せず（Operand::TypeRef になる）、密着形のみを検出する。
-                if let Operand::Literal(Label::Other(_, Bitical::String(s))) =
-                    &right_op
+                if matches!(&right_op, Operand::Literal(Label { value: Bitical::String(_), .. }))
+                    && !right_text.starts_with('"')
+                    && right_text.ends_with(':')
                 {
-                    if s.ends_with(':') {
-                        warnings.warn(error::stuck_comparison_unquoted_colon_msg(
-                            &first_text,
-                            op_str,
-                            &right_text,
-                        ));
-                    }
+                    warnings.warn(error::stuck_comparison_unquoted_colon_msg(
+                        &first_text,
+                        op_str,
+                        &right_text,
+                    ));
                 }
 
                 (ComparisonOp::Label(basic_op), right_op)
@@ -746,15 +745,15 @@ fn build_label(pair: Pair<Rule>) -> Result<Label> {
             // Remove outer quotes before unescaping
             let content = &inner.as_str()[1..inner.as_str().len() - 1];
             let s = unescape_string(content)?;
-            Ok(Label::Literal(TagType::Custom(String::new()), s))
+            Ok(Label::from(s))
         }
         Rule::number => {
             let i = inner.as_str().parse::<i64>()?;
-            Ok(Label::from(i))
+            Ok(crate::query::format::attach_formatted_node(Label::from(i)))
         }
         Rule::unquoted_string | Rule::unquoted_tag_string => {
             let s = unescape_glob_string(inner.as_str())?;
-            Ok(Label::from(s))
+            Ok(crate::query::format::attach_formatted_node(Label::from(s)))
         }
         _ => Err(anyhow!(
             "{}: {:?}",
@@ -890,10 +889,6 @@ fn build_arithmetic_operand(
             let agg = build_aggregation(inner, warnings)?;
             Ok(Operand::Aggregation(Box::new(agg)))
         }
-        Rule::number => {
-            let s = inner.as_str();
-            Ok(Operand::Literal(Label::from(s)))
-        }
         Rule::calculation => {
             let calc_inner = inner.into_inner().next().unwrap();
             let calc = build_calculation(calc_inner, warnings)?;
@@ -910,7 +905,10 @@ fn build_arithmetic_operand(
             let node = build_expr(expr_pair, warnings)?;
             Ok(Operand::Query(Box::new(node)))
         }
-        Rule::label | Rule::quoted_string | Rule::unquoted_string => {
+        Rule::number
+        | Rule::label
+        | Rule::quoted_string
+        | Rule::unquoted_string => {
             Ok(Operand::Literal(build_label(inner)?))
         }
         _ => Err(anyhow!(
@@ -926,13 +924,65 @@ mod tests {
     use crate::query::ast::{ComparisonOp, QueryNode};
 
     #[test]
+    fn test_literal_first_size_comparison_interprets_unit_string() {
+        use crate::query::ast::{BasicOp, ComparisonNode, Operand};
+        use crate::query::lens_resolver::Resolver;
+        use crate::tag::TagRegistry;
+        use crate::types::{Bitical, Label, SType, TagType};
+        let resolver =
+            Resolver::new_nowarn("\"1MB\" :> size:", &TagRegistry::with_standard())
+                .expect("should expand");
+        assert_eq!(
+            resolver.expanded_query,
+            QueryNode::Comparison(ComparisonNode {
+                first: Operand::Literal(Label::other(Bitical::Integer(1_048_576))),
+                rest: vec![(
+                    ComparisonOp::Label(BasicOp::Gt),
+                    Operand::TypeRef(TagType::from(SType::Size)),
+                )],
+            }),
+        );
+    }
+
+    #[test]
+    fn test_literal_first_mtime_comparison_interprets_date_string() {
+        use crate::query::ast::{BasicOp, ComparisonNode, Operand};
+        use crate::query::lens_resolver::Resolver;
+        use crate::tag::TagRegistry;
+        use crate::types::{DateTime, SType, TagType};
+        use chrono::NaiveDate;
+        let resolver =
+            Resolver::new_nowarn("2026-02-01 :> mtime:", &TagRegistry::with_standard())
+                .expect("should expand");
+        let QueryNode::Comparison(ComparisonNode { first, rest }) = resolver.expanded_query
+        else {
+            panic!("expected Comparison, got {:?}", resolver.expanded_query)
+        };
+        let Operand::Literal(label) = first else {
+            panic!("expected literal first")
+        };
+        let date = DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
+        let (start, _) = date.to_interval().unwrap().as_interval().unwrap();
+        assert_eq!(label.as_i64(), start);
+        assert_eq!(
+            rest,
+            vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::TypeRef(TagType::from(SType::Mtime)),
+            )]
+        );
+    }
+
+    #[test]
     fn test_quoted_string_parses_to_label_literal() {
         let node =
             parse_nowarn("\"hello\"").expect("quoted string should parse");
         match node {
-            QueryNode::Projection(Operand::Literal(Label::Literal(tt, s))) => {
+            QueryNode::Projection(Operand::Literal(Label {
+                value: Bitical::String(s),
+                ..
+            })) => {
                 assert_eq!(s, "hello");
-                assert_eq!(tt, TagType::Custom(String::new()));
             }
             other => {
                 panic!("Expected Literal(Label::Literal), got {:?}", other)
@@ -1001,8 +1051,8 @@ mod tests {
             .expect("Failed to parse typed tag");
         match node {
             QueryNode::TypedTag(tt) => {
-                assert_eq!(tt.label.tag_type().as_str(), "name");
-                assert_eq!(tt.label.as_str(), "test.txt");
+                assert_eq!(tt.tag_type().as_str(), "name");
+                assert_eq!(tt.as_str(), "test.txt");
             }
             _ => panic!("Expected TypedTag, got {:?}", node),
         }
@@ -1014,8 +1064,8 @@ mod tests {
             parse_nowarn("5:x").expect("numeric type name should parse");
         match node {
             QueryNode::TypedTag(tt) => {
-                assert_eq!(tt.label.tag_type().as_str(), "5");
-                assert_eq!(tt.label.as_str(), "x");
+                assert_eq!(tt.tag_type().as_str(), "5");
+                assert_eq!(tt.as_str(), "x");
             }
             _ => panic!("Expected TypedTag, got {:?}", node),
         }
@@ -1039,8 +1089,8 @@ mod tests {
             .expect("numeric type:label should parse");
         match node {
             QueryNode::TypedTag(tt) => {
-                assert_eq!(tt.label.tag_type().as_str(), "123");
-                assert_eq!(tt.label.as_str(), "456");
+                assert_eq!(tt.tag_type().as_str(), "123");
+                assert_eq!(tt.as_str(), "456");
             }
             _ => panic!("Expected TypedTag, got {:?}", node),
         }
@@ -1165,6 +1215,81 @@ mod tests {
     }
 
     #[test]
+    fn test_arithmetic_operand_number_is_integer_not_string() {
+        use crate::types::Bitical;
+        let node = parse_nowarn("count() + 1").expect("should parse");
+        match node {
+            QueryNode::Projection(Operand::Calculation(calc)) => match calc.right {
+                Operand::Literal(l) => {
+                    assert_eq!(l.value(), Bitical::Integer(1));
+                }
+                other => panic!("Expected Literal, got {:?}", other),
+            },
+            other => panic!("Expected Projection(Calculation), got {:?}", other),
+        }
+    }
+
+    // --- build_label: Format 解釈の付与 ---
+
+    #[test]
+    fn test_unquoted_label_attaches_formatted_when_format_claims() {
+        use crate::query::format::{ByteSizeRange, Formatted};
+        use crate::types::LabelNode;
+        let node = parse_nowarn("size:1MB").expect("should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(
+                    tt.label.node(),
+                    &LabelNode::Formatted(Formatted::ByteSizeRange(
+                        ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 }
+                    ))
+                );
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_number_label_attaches_formatted_bitical_integer() {
+        use crate::query::format::Formatted;
+        use crate::types::LabelNode;
+        let node = parse_nowarn("cat:42").expect("should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(
+                    tt.label.node(),
+                    &LabelNode::Formatted(Formatted::Bitical(Bitical::Integer(42)))
+                );
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_unquoted_label_stays_default_when_no_format_claims() {
+        use crate::types::LabelNode;
+        let node = parse_nowarn("cat:hello").expect("should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.label.node(), &LabelNode::DefaultLabelNode);
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_quoted_label_stays_default_even_when_format_would_claim() {
+        use crate::types::LabelNode;
+        let node = parse_nowarn("size:\"1MB\"").expect("should parse");
+        match node {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.label.node(), &LabelNode::DefaultLabelNode);
+            }
+            _ => panic!("Expected TypedTag, got {:?}", node),
+        }
+    }
+
+    #[test]
     fn test_parse_logical_ops() {
         // AND
         let node = parse_nowarn("a:1 & b:2").expect("Failed to parse AND");
@@ -1205,8 +1330,8 @@ mod tests {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Count(inner) => match &*inner {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.label.tag_type().as_str(), "name");
-                        assert_eq!(tt.label.as_str(), "*.rs");
+                        assert_eq!(tt.tag_type().as_str(), "name");
+                        assert_eq!(tt.as_str(), "*.rs");
                     }
                     _ => panic!(
                         "Expected TypedTag inside count, got {:?}",
@@ -1468,8 +1593,8 @@ mod tests {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Count(ref inner) => match &**inner {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.label.tag_type().as_str(), "extension");
-                        assert_eq!(tt.label.as_str(), "txt");
+                        assert_eq!(tt.tag_type().as_str(), "extension");
+                        assert_eq!(tt.as_str(), "txt");
                     }
                     _ => panic!(
                         "Expected TypedTag inside count, got {:?}",
@@ -1569,8 +1694,8 @@ mod tests {
             QueryNode::Aggregation(AggregationNode::Count(inner)) => {
                 match &*inner {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.label.tag_type().as_str(), "*");
-                        assert_eq!(tt.label.as_str(), "*");
+                        assert_eq!(tt.tag_type().as_str(), "*");
+                        assert_eq!(tt.as_str(), "*");
                     }
                     _ => panic!(
                         "Expected TypedTag(*:*) inside count(), got {:?}",
@@ -1755,8 +1880,8 @@ mod tests {
                 }
                 match &nodes[1] {
                     QueryNode::TypedTag(tt) => {
-                        assert_eq!(tt.label.tag_type().as_str(), "c");
-                        assert_eq!(tt.label.as_str(), "d");
+                        assert_eq!(tt.tag_type().as_str(), "c");
+                        assert_eq!(tt.as_str(), "d");
                     }
                     _ => panic!("Expected TypedTag(c:d), got {:?}", nodes[1]),
                 }

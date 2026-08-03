@@ -260,7 +260,7 @@ fn test_system_items_registration() {
         .tags
         .entries
         .iter()
-        .any(|entry| entry.label.as_str().contains("hello.txt"));
+        .any(|entry| entry.typed_tag.as_str().contains("hello.txt"));
     assert!(
         has_hello_txt,
         "file origin label should contain reference to hello.txt"

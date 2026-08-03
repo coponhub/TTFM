@@ -80,8 +80,6 @@ pub trait LogicalSchema {
         label: &Label,
     ) -> anyhow::Result<QueryNode>;
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
-    /// リテラル値（サイズ単位・日付文字列等）を正規化する。Literal は変換しない。
-    fn normalize_label_any(&self, label: &Label) -> Label;
     /// 比較ノードを展開する（日付範囲化・ラベル正規化等）。
     /// 値がその型として解釈できない場合はエラーを返す。
     fn expand_comparison(
@@ -94,6 +92,8 @@ pub trait LogicalSchema {
     /// `Settling(Origin::Plugin, _)`（未確定の counter はダミー値で構わない。
     /// このリストは SQL 生成の使い捨てで write の実解決には流れない）。
     fn iter_all_for_rank(&self) -> Vec<(TagType, Rank, ItemId)>;
+    /// その型が定義アイテムを指すなら、その ItemKind を返す。
+    fn item_kind(&self, tag_type: &TagType) -> Option<crate::types::ItemKind>;
 }
 
 #[cfg(test)]

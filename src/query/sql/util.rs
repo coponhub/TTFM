@@ -58,13 +58,13 @@ pub(super) fn wrap_in_subquery_star(q: SelectStatement) -> SelectStatement {
 
 /// `Label` の値を単純な SQL 式に変換します。
 pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
-    label.value().to_simple_expr()
+    label.resolved_value().to_simple_expr()
 }
 
 /// リテラルラベルを SQL 式に変換します。数値リテラルは DOUBLE へキャストします。
 pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
     use crate::types::Bitical;
-    match lab.value() {
+    match lab.resolved_value() {
         Bitical::Integer(i) => Expr::val(i).cast_as(BiticalType::Double).into(),
         other => other.to_simple_expr(),
     }
@@ -133,31 +133,37 @@ pub(super) fn apply_arithmetic_agg(
     }
 }
 
-/// `StorageMapping` からカラム式を生成します。
-/// 数値演算が必要な `LabelStr` には `TRY_CAST` を適用します。
 pub(super) fn build_storage_column_expr(
     storage: &StorageMapping,
     bitical_type: BiticalType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Fixed(col) => Expr::col(*col).into(),
-        StorageMapping::Basic { column, .. } => {
-            let col_expr = Expr::col(*column);
-            if *column == Col::LabelStr
-                && matches!(
-                    bitical_type,
-                    BiticalType::Integer | BiticalType::Double
-                )
-            {
-                CustomFunc::try_cast_double(col_expr)
-            } else {
-                col_expr.into()
+        StorageMapping::Basic { column, .. } if *column == Col::LabelStr => {
+            match bitical_type {
+                BiticalType::Integer => {
+                    Expr::col(Col::LabelInt).cast_as(BiticalType::Double).into()
+                }
+                BiticalType::Double => Expr::col(Col::LabelDouble).into(),
+                _ => coalesce_label_columns_as_string(),
             }
         }
-        StorageMapping::Composite => {
-            CustomFunc::any_value(Expr::col(Col::LabelStr)).into()
-        }
+        StorageMapping::Basic { column, .. } => Expr::col(*column).into(),
+        StorageMapping::Composite => coalesce_label_columns_as_string(),
     }
+}
+
+pub(super) fn coalesce_label_columns_as_string() -> SimpleExpr {
+    Func::coalesce([
+        Expr::col(Col::LabelStr).into(),
+        Expr::col(Col::LabelInt).cast_as(BiticalType::String).into(),
+        Expr::col(Col::LabelDouble).cast_as(BiticalType::String).into(),
+        sea_query::CaseStatement::new()
+            .case(Expr::col(Col::LabelBool).eq(true), "true")
+            .case(Expr::col(Col::LabelBool).eq(false), "false")
+            .into(),
+    ])
+    .into()
 }
 
 // ── AggregationContext / NestContext ───────────────────────────────────────
@@ -225,7 +231,12 @@ pub(super) fn build_tag_value_agg_expr(
             CustomFunc::any_value(Expr::col(*col)).into()
         }
         StorageMapping::Basic { column, tag_type } => {
-            let cast_expr = CustomFunc::try_cast_double(Expr::col(*column));
+            let value_expr = if *column == Col::LabelStr {
+                coalesce_label_columns_as_string()
+            } else {
+                Expr::col(*column).into()
+            };
+            let cast_expr = CustomFunc::try_cast_double(value_expr);
             let case_expr = Expr::case(
                 Expr::col(Col::Type).eq(tag_type.as_str()),
                 cast_expr,

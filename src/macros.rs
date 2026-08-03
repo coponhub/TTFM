@@ -164,7 +164,7 @@ macro_rules! define_scan_entry {
 /// 宣言順は「全形式が譲ったら最後の形式に落ちる」という最下位保証のためだけに使う。
 #[macro_export]
 macro_rules! define_operand_formats {
-    ( $( $ty:ty ),+ $(,)? ) => {
+    ( $( $name:ident ),+ $(,)? ) => {
         impl $crate::types::Bitical {
             /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式が報告する
             /// `LogicalType` を返す。どれも主張しなければ文字列のまま。
@@ -176,12 +176,32 @@ macro_rules! define_operand_formats {
                     return self.logical_type();
                 };
                 $(
-                    if let Some(Ok(value)) = <$ty as OperandFormat>::parse(s) {
-                        return <$ty as OperandFormat>::logical_type(&value);
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return <$name as OperandFormat>::logical_type(&value);
                     }
                 )+
                 self.logical_type()
             }
+
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式のパース結果を
+            /// 型ごと保つ。どれも主張しなければ `Formatted::Bitical` のまま。
+            pub fn to_formatted(&self) -> $crate::query::format::Formatted {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return $crate::query::format::Formatted::Bitical(self.clone());
+                };
+                $(
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return $crate::query::format::Formatted::$name(value);
+                    }
+                )+
+                $crate::query::format::Formatted::Bitical(self.clone())
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum Formatted {
+            $( $name($name), )+
         }
     };
 }

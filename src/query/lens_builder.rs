@@ -23,7 +23,6 @@
 
 use crate::db::Col;
 use crate::query::lens_schema::fixed_attributes;
-use crate::types::Bitical;
 
 /// Fixed 属性名の定数リストに、元の物理行を表す NULL マーカー行を先頭に加えた
 /// 1列（name）のサブクエリを返す。base との CROSS JOIN で「元の行＋属性ごとの
@@ -134,84 +133,6 @@ pub(crate) fn count_types(
     Some(stmt)
 }
 
-/// 完全一致検索用の (pattern, exact=true, candidates) を組み立てる。
-/// candidates に無ければ、未登録・未使用の名前でも合成できるよう
-/// User 区画の Volatile プレースホルダを合成する。
-fn exact_match_candidate(
-    pattern: String,
-    def: &crate::query::ast::DefinitionRef,
-    default_rank: crate::types::Rank,
-) -> (String, bool, Vec<crate::query::ast::Candidate>) {
-    use crate::query::ast::Candidate;
-    use crate::types::{ItemId, Origin};
-
-    let entry = def
-        .candidates
-        .iter()
-        .find(|c| c.name == pattern)
-        .cloned()
-        .unwrap_or_else(|| Candidate {
-            name: pattern.clone(),
-            rank: default_rank,
-            id: ItemId::Settling(Origin::User, 0),
-        });
-    (pattern, true, vec![entry])
-}
-
-fn resolve_definition_name_filter(
-    def: &crate::query::ast::DefinitionRef,
-    default_rank: crate::types::Rank,
-) -> crate::query::sql::definition::ResolvedDefinition {
-    use crate::query::sql::definition::ResolvedDefinition;
-
-    // glob メタ文字を含まない名前は完全一致検索（未登録名なら定義作成の候補になる）。
-    let (pattern, exact, candidates) =
-        if let Bitical::String(pattern) = def.value.value() {
-            if crate::util::is_glob_pattern(&pattern) {
-                (pattern, false, def.candidates.clone())
-            } else {
-                exact_match_candidate(pattern, def, default_rank)
-            }
-        } else {
-            let v = def.value.value().as_display_name();
-            exact_match_candidate(v, def, default_rank)
-        };
-    ResolvedDefinition {
-        kind: def.kind,
-        pattern,
-        exact,
-        candidates,
-        origins: def.origins.clone(),
-        reserved: def.reserved.clone(),
-        recorded: def.recorded,
-    }
-}
-
-/// 定義アイテムの参照（`tag:"X"` の完全一致検索 / `type:*` の glob検索）の pick SQL。
-/// 定義アイテム（Stored 定義行 ∪ registry 由来の candidates ∪ 使用中の型/タグの
-/// Volatile 合成）を name で絞り込む。
-pub(crate) fn filter_definitions(
-    src: &crate::db::Src,
-    def: &crate::query::ast::DefinitionRef,
-    default_rank: crate::types::Rank,
-) -> sea_query::SelectStatement {
-    let resolved = resolve_definition_name_filter(def, default_rank);
-    crate::query::sql::definition::build_definition_pick_sql(src, &resolved)
-}
-
-/// 定義参照1枝ぶんの SQL（fetch 行スキーマ:
-/// 空 tags・representative・並び替え専用の name 付き）。
-/// 絞り込みロジックは filter_definitions と同一で、スキーマだけが異なる。
-/// limit/offset は適用しない（呼び出し側が Or の他枝との UNION 後にまとめて適用する）。
-fn definition_branch_sql(
-    src: &crate::db::Src,
-    def: &crate::query::ast::DefinitionRef,
-    default_rank: crate::types::Rank,
-) -> sea_query::SelectStatement {
-    let resolved = resolve_definition_name_filter(def, default_rank);
-    crate::query::sql::definition::build_definition_fetch_sql(src, &resolved)
-}
-
 /// 定義枝（複数可、Or 経由で到達可能なもの）が指す定義アイテムの distinct 件数の
 /// スカラー SQL。`defs` は DefinitionRef 以外を含んではならない
 /// （split_definition_branches の構築上、常にこの前提が成り立つ）。
@@ -224,18 +145,12 @@ pub(crate) fn count_definitions(
     let branches = defs
         .iter()
         .map(|node| {
-            let ResolvedNode::DefinitionRef {
-                def, default_rank, ..
-            } = node
-            else {
+            let ResolvedNode::DefinitionRef { def, .. } = node else {
                 unreachable!(
                     "count_definitions: defs must only contain DefinitionRef"
                 );
             };
-            let resolved = resolve_definition_name_filter(def, *default_rank);
-            crate::query::sql::definition::build_definition_name_sql(
-                src, &resolved,
-            )
+            crate::query::sql::definition::build_definition_name_sql(src, def)
         })
         .collect();
     crate::query::sql::definition::build_definitions_count_sql(branches)
@@ -257,16 +172,15 @@ pub(crate) fn add_definitions(
 
     let mut branches = Vec::with_capacity(defs.len() + 1);
     for node in defs {
-        let ResolvedNode::DefinitionRef {
-            def, default_rank, ..
-        } = node
-        else {
+        let ResolvedNode::DefinitionRef { def, .. } = node else {
             anyhow::bail!(
                 "add_definitions: DefinitionRef 以外の枝: {:?}",
                 node
             );
         };
-        branches.push(definition_branch_sql(src, def, *default_rank));
+        branches.push(
+            crate::query::sql::definition::build_definition_fetch_sql(src, def),
+        );
     }
     branches.extend(rest_fetch);
     Ok(crate::query::sql::definition::build_add_definitions_sql(

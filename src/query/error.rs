@@ -163,14 +163,21 @@ impl QueryNode {
         }
     }
 
-    /// ルートから Or だけを辿って DefinitionRef 枝に到達できるかどうかを判定します
+    /// ルートから Or だけを辿って定義アイテム参照に到達できるかどうかを判定します
     /// （lens_resolver::ResolvedNode::has_definition_branch の QueryNode 版。
     /// `type:*` のような定義アイテム参照が候補の Or に展開された場合も検出する）。
-    pub fn has_definition_branch(&self) -> bool {
+    /// 展開後の定義参照は素の `TypedTag` と見分けが付かないため schema に問う。
+    pub fn has_definition_branch(
+        &self,
+        schema: &dyn crate::query::logical_schema::LogicalSchema,
+    ) -> bool {
         match self {
-            QueryNode::DefinitionRef(_) => true,
+            QueryNode::OriginRef(_) => true,
+            QueryNode::TypedTag(tt) => {
+                schema.item_kind(&tt.tag_type()).is_some()
+            }
             QueryNode::Or(nodes) => {
-                nodes.iter().any(|n| n.has_definition_branch())
+                nodes.iter().any(|n| n.has_definition_branch(schema))
             }
             _ => false,
         }
@@ -181,7 +188,7 @@ impl QueryNode {
 fn node_to_simple_string(node: &QueryNode) -> String {
     match node {
         QueryNode::TypedTag(tt) => {
-            format!("{}:{}", tt.label.tag_type().as_str(), tt.label.as_str())
+            format!("{}:{}", tt.tag_type().as_str(), tt.as_str())
         }
         QueryNode::Projection(Operand::TypeRef(tt)) => {
             format!("{}:", tt.as_str())
@@ -874,6 +881,25 @@ pub fn tag_value_not_interpretable(tag_type: &str, pattern: &str) -> anyhow::Err
         tag_type,
         pattern
     )
+}
+
+pub const TAG_VALUE_NOT_A_SINGLE_VALUE: &str =
+    "Value does not resolve to a single value";
+
+pub fn tag_value_not_a_single_value(
+    tag_type: &str,
+    pattern: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        TAG_VALUE_NOT_A_SINGLE_VALUE,
+        tag_type,
+        pattern
+    )
+}
+
+pub fn comparison_operand_not_a_single_value(pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!("{}: '{}'", TAG_VALUE_NOT_A_SINGLE_VALUE, pattern)
 }
 
 #[cfg(test)]

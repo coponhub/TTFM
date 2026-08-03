@@ -45,7 +45,9 @@ pub fn parse(s: &str) -> Result<i64> {
             Origin::iter().find(|o| o.short() == label).ok_or_else(|| {
                 anyhow::anyhow!("unknown item_id origin: {label}")
             })?;
-        return Ok(origin.block_lo() + offset);
+        return origin.id_at_offset(offset).ok_or_else(|| {
+            anyhow::anyhow!("item_id offset outside {label} block: {s}")
+        });
     }
     s.parse()
         .map_err(|_| anyhow::anyhow!("invalid item_id: {s}"))
@@ -152,6 +154,17 @@ mod tests {
         assert_eq!(Origin::User.short(), "User");
         assert_eq!(Origin::File.short(), "File");
         assert_eq!(Origin::Plugin.short(), "Plg");
+    }
+
+    #[test]
+    fn parse_rejects_offset_outside_the_block() {
+        assert!(
+            parse(&format!("File({})", i64::MAX)).is_err(),
+            "an offset that overflows must error, not panic"
+        );
+        assert!(parse("File(-1)").is_err());
+        assert!(parse(&format!("File({})", 8 * B)).is_err());
+        assert_eq!(parse(&format!("File({})", 8 * B - 1)).unwrap(), 16 * B - 1);
     }
 
     #[test]

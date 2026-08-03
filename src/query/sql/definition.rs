@@ -16,8 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! 定義アイテム（`type:*` / `tag:"X"` 等の完全一致検索・glob検索）の SQL 構築。
-//! エントリポイントは lens_builder の `filter_definitions` / `add_definitions` で、
-//! pick / fetch パスからは lens 経由でのみ使用する。
+//! pick パスからは low_dispatcher、fetch / count パスからは lens_builder の
+//! `add_definitions` / `count_definitions` 経由で使用する。
 
 use crate::db::{
     BiticalType, Col, CustomFunc,
@@ -25,23 +25,111 @@ use crate::db::{
     QueryResultCol, Src, Val,
 };
 use crate::query::ast::Candidate;
-use crate::types::{ItemId, ItemKind, Origin};
+use crate::types::{Bitical, ItemId, ItemKind, Origin, Rank, TypedTag};
 use sea_query::{
     BinOper, CaseStatement, CommonTableExpression, Expr, Func, JoinType, Query,
     SelectStatement, UnionType, WithClause,
 };
 
-/// 定義アイテムの name 絞り込みまで解決済みの DefinitionRef。
-/// lens_builder の resolve_definition_name_filter が組み立て、
-/// 本ファイルの SQL 構築関数群がそのまま消費する。
-pub(crate) struct ResolvedDefinition {
+/// 定義アイテム参照の Resolved 段。展開後の木（定義型の `TypedTag` か
+/// `QueryNode::OriginRef`）に registry 照合結果（candidates / reserved）と
+/// name 絞り込み（pattern / exact）を加えたもので、本ファイルの SQL 構築関数群が
+/// そのまま消費する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedDefinition {
     pub kind: ItemKind,
+    pub value: TypedTag,
     pub pattern: String,
     pub exact: bool,
     pub candidates: Vec<Candidate>,
     pub origins: Vec<Origin>,
     pub reserved: Vec<String>,
     pub recorded: bool,
+}
+
+impl ResolvedDefinition {
+    /// 定義型のタグ（`type:"X"` / `tag:"X"`）由来。
+    pub(crate) fn for_tag(
+        kind: ItemKind,
+        value: TypedTag,
+        candidates: Vec<Candidate>,
+        reserved: Vec<String>,
+        default_rank: Rank,
+    ) -> Self {
+        Self::build(kind, value, Vec::new(), true, candidates, reserved, default_rank)
+    }
+
+    /// id 区画の参照（`origin:system`）由来。区画内の型定義を全て指す。
+    pub(crate) fn for_origin(
+        origin: Origin,
+        candidates: Vec<Candidate>,
+        reserved: Vec<String>,
+        default_rank: Rank,
+    ) -> Self {
+        Self::build(
+            ItemKind::Type,
+            TypedTag::new(crate::types::SType::Type, "*"),
+            vec![origin],
+            false,
+            candidates,
+            reserved,
+            default_rank,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        kind: ItemKind,
+        value: TypedTag,
+        origins: Vec<Origin>,
+        recorded: bool,
+        candidates: Vec<Candidate>,
+        reserved: Vec<String>,
+        default_rank: Rank,
+    ) -> Self {
+        // glob メタ文字を含まない名前は完全一致検索(未登録名なら定義作成の候補になる)。
+        let (pattern, exact, candidates) =
+            if let Bitical::String(pattern) = value.value() {
+                if crate::util::is_glob_pattern(&pattern) {
+                    (pattern, false, candidates)
+                } else {
+                    exact_match_candidate(pattern, &candidates, default_rank)
+                }
+            } else {
+                let v = value.value().as_display_name();
+                exact_match_candidate(v, &candidates, default_rank)
+            };
+        Self {
+            kind,
+            value,
+            pattern,
+            exact,
+            candidates,
+            origins,
+            reserved,
+            recorded,
+        }
+    }
+}
+
+/// 完全一致検索用の (pattern, exact=true, candidates) を組み立てる。
+/// candidates に無ければ、未登録・未使用の名前でも合成できるよう
+/// User 区画の Volatile プレースホルダを合成する。
+fn exact_match_candidate(
+    pattern: String,
+    candidates: &[Candidate],
+    default_rank: Rank,
+) -> (String, bool, Vec<Candidate>) {
+    let entry = candidates
+        .iter()
+        .find(|c| c.name == pattern)
+        .cloned()
+        .unwrap_or_else(|| Candidate {
+            name: pattern.clone(),
+            rank: default_rank,
+            id: ItemId::Settling(Origin::User, 0),
+        });
+    (pattern, true, vec![entry])
 }
 
 /// 定義アイテムの行本体（item_id, name, rank, item_kind）。

@@ -1,6 +1,6 @@
 use super::sql::{self, UserTagDelete};
 use crate::db::{Col, Store, TargetTable, Tbl};
-use crate::types::{ItemId, Label, Origin, SType, TagType};
+use crate::types::{ItemId, Origin, SType, TagType, TypedTag};
 use crate::util::{parquet_query, ExecuteSql, IdenExt, ParquetExt, SelectExt};
 use anyhow::Result;
 use sea_query::{Asterisk, Expr, Order, Query};
@@ -19,14 +19,14 @@ pub enum WriteAction {
 
 #[derive(Debug, PartialEq)]
 pub enum TagOp {
-    Append(Label),
-    Replace(Label),
+    Append(TypedTag),
+    Replace(TypedTag),
 }
 
 #[derive(Debug, PartialEq)]
 pub enum DeleteTarget {
     Type(TagType),
-    Tag(Label),
+    Tag(TypedTag),
 }
 
 pub struct WriteResponse {
@@ -77,7 +77,7 @@ pub fn write(
     let mut ir_inserts: Vec<(i64, String, String)> = vec![];
     let mut ir_rank_updates: Vec<(i64, i64)> = vec![];
     let mut fr_rank_updates: Vec<(i64, i64)> = vec![];
-    let mut ut_inserts: Vec<(i64, Label)> = vec![];
+    let mut ut_inserts: Vec<(i64, TypedTag)> = vec![];
     let mut ut_deletes: Vec<UserTagDelete> = vec![];
     let mut user_cascade: Vec<i64> = vec![]; // User/System item_id カスケード削除
     let mut file_cascade: Vec<i64> = vec![]; // File item_id カスケード削除
@@ -90,20 +90,25 @@ pub fn write(
                 let mut content: Option<String> = None;
 
                 for op in tags {
-                    let label = match op {
-                        TagOp::Append(l) | TagOp::Replace(l) => l,
+                    let tag = match op {
+                        TagOp::Append(t) | TagOp::Replace(t) => t,
                     };
-                    match &label {
-                        Label::ItemKind(s) => item_kind = Some(s.clone()),
-                        Label::Content(s) => content = Some(s.clone()),
-                        Label::Rank(new_rank) => {
+                    match tag.tag_type() {
+                        TagType::Base(SType::ItemKind) => {
+                            item_kind = Some(tag.as_str())
+                        }
+                        TagType::Base(SType::Content) => {
+                            content = Some(tag.as_str())
+                        }
+                        TagType::Base(SType::Rank) => {
+                            let new_rank = tag.label.as_i64();
                             if Origin::within(item_id) == Origin::File {
-                                fr_rank_updates.push((item_id, *new_rank));
+                                fr_rank_updates.push((item_id, new_rank));
                             } else {
-                                ir_rank_updates.push((item_id, *new_rank));
+                                ir_rank_updates.push((item_id, new_rank));
                             }
                         }
-                        _ => ut_inserts.push((item_id, label)),
+                        _ => ut_inserts.push((item_id, tag)),
                     }
                 }
 
@@ -133,11 +138,11 @@ pub fn write(
                                 value: None,
                             })
                         }
-                        DeleteTarget::Tag(label) => {
+                        DeleteTarget::Tag(tag) => {
                             ut_deletes.push(UserTagDelete {
                                 item_id,
-                                tag_type: label.tag_type().to_string(),
-                                value: Some(label.value()),
+                                tag_type: tag.tag_type().to_string(),
+                                value: Some(tag.value()),
                             })
                         }
                     }
@@ -341,10 +346,12 @@ fn inject_builtin_definitions(
                     let offset = (id - Origin::Builtin.block_lo()) as u32;
                     if let Some(name) = registry.builtin_name_for_offset(offset)
                     {
-                        tags.push(TagOp::Append(Label::ItemKind(
-                            "type".to_string(),
+                        tags.push(TagOp::Append(TypedTag::new(
+                            SType::ItemKind,
+                            "type",
                         )));
-                        tags.push(TagOp::Append(Label::Content(
+                        tags.push(TagOp::Append(TypedTag::new(
+                            SType::Content,
                             name.to_string(),
                         )));
                     }
@@ -431,19 +438,16 @@ fn update_rank_column(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Bitical, SType, TagType};
+    use crate::types::{SType, TagType};
 
     #[test]
     fn write_action_variants_are_constructible() {
         let add = WriteAction::Add {
             item: ItemId::Volatile(0),
             tags: vec![
-                TagOp::Append(Label::Other(
-                    TagType::from("project"),
-                    Bitical::String("A".to_string()),
-                )),
-                TagOp::Append(Label::ItemKind("tag".to_string())),
-                TagOp::Append(Label::Content("project:A".to_string())),
+                TagOp::Append(TypedTag::new("project", "A")),
+                TagOp::Append(TypedTag::new(SType::ItemKind, "tag")),
+                TagOp::Append(TypedTag::new(SType::Content, "project:A")),
             ],
         };
         assert!(matches!(add, WriteAction::Add { .. }));
@@ -452,10 +456,7 @@ mod tests {
             item: ItemId::Stored(42),
             tags: vec![
                 DeleteTarget::Type(TagType::from("project")),
-                DeleteTarget::Tag(Label::Other(
-                    TagType::from("project"),
-                    Bitical::String("A".to_string()),
-                )),
+                DeleteTarget::Tag(TypedTag::new("project", "A")),
             ],
         };
         assert!(matches!(del, WriteAction::Delete { .. }));

@@ -139,22 +139,22 @@ fn search_core(
     let mut results = fetcher.fetch(n, offset)?;
 
     if let Some(tt) = resolver.get_scalar_result_label_type() {
-        use crate::types::{Bitical, Label, Origin};
+        use crate::types::{Bitical, Origin, SType, TypedTag};
         for result in &mut results {
             let raw = result
                 .tags
                 .entries
                 .iter()
-                .find(|e| e.label.tag_type().as_str() == "value")
-                .and_then(|e| match e.label.value() {
+                .find(|e| e.typed_tag.tag_type().as_str() == "value")
+                .and_then(|e| match e.typed_tag.value() {
                     Bitical::Integer(i) => Some(i.to_string()),
                     Bitical::Double(d) => Some((d as i64).to_string()),
                     _ => None,
                 });
             if let Some(raw) = raw {
                 let formatted = registry.format_display(tt.as_str(), &raw);
-                result.representative = vec![Label::Name(formatted.clone())];
-                result.tags.push(Label::Name(formatted), Origin::Builtin);
+                result.representative = vec![TypedTag::new(SType::Name, formatted.clone())];
+                result.tags.push(TypedTag::new(SType::Name, formatted), Origin::Builtin);
             }
         }
     }
@@ -689,7 +689,7 @@ mod tests {
             search_nowarn(&store, &registry, query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
         assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
-            |e| e.label.tag_type() == crate::types::TagType::from("item")
+            |e| e.typed_tag.tag_type() == crate::types::TagType::from("item")
         )));
         assert!(res_db
             .results
@@ -720,12 +720,12 @@ mod tests {
 
         let db_has_item_tag = res_db.results.iter().any(|r| {
             r.tags.entries.iter().any(|e| {
-                e.label.tag_type() == crate::types::TagType::from("item")
+                e.typed_tag.tag_type() == crate::types::TagType::from("item")
             })
         });
         let cache_has_item_tag = res_cache.results.iter().any(|r| {
             r.tags.entries.iter().any(|e| {
-                e.label.tag_type() == crate::types::TagType::from("item")
+                e.typed_tag.tag_type() == crate::types::TagType::from("item")
             })
         });
         assert_eq!(

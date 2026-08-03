@@ -2,9 +2,10 @@ use super::{
     write::{DeleteTarget, TagOp, WriteAction},
     EditStrategy, QueryType,
 };
+use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::response::Item;
 use crate::tag::TagRegistry;
-use crate::types::{Bitical, ItemId, Label, SType, TagType};
+use crate::types::{Bitical, ItemId, Label, SType, TagType, TypedTag};
 use crate::util::DotOk;
 use anyhow::{bail, Result};
 
@@ -15,9 +16,9 @@ use anyhow::{bail, Result};
 // Tag/Untag と EditStrategy を組み合わせた解決済み編集指示。
 // into_actions がすべての分岐を1段フラットマッチで担う。
 enum Directive {
-    Tag(Label, EditStrategy),
+    Tag(TypedTag, EditStrategy),
     DeleteType(TagType),
-    DeleteTag(Label),
+    DeleteTag(TypedTag),
 }
 
 impl Directive {
@@ -29,40 +30,40 @@ impl Directive {
         item: &Item,
     ) -> Result<Vec<WriteAction>> {
         match self {
-            Directive::Tag(label, EditStrategy::Append) => vec![WriteAction::Add {
+            Directive::Tag(tag, EditStrategy::Append) => vec![WriteAction::Add {
                 item: id.clone(),
-                tags: vec![TagOp::Append(label)],
+                tags: vec![TagOp::Append(tag)],
             }],
-            Directive::Tag(label, EditStrategy::Replace) => vec![
+            Directive::Tag(tag, EditStrategy::Replace) => vec![
                 WriteAction::Delete {
                     item: id.clone(),
-                    tags: vec![DeleteTarget::Type(label.tag_type())],
+                    tags: vec![DeleteTarget::Type(tag.tag_type())],
                 },
                 WriteAction::Add {
                     item: id.clone(),
-                    tags: vec![TagOp::Replace(label)],
+                    tags: vec![TagOp::Replace(tag)],
                 },
             ],
-            Directive::Tag(label, EditStrategy::ModifyInjection) => bail!(
+            Directive::Tag(tag, EditStrategy::ModifyInjection) => bail!(
                 "tag type '{}' cannot be set via EditQuery (ModifyInjection)",
-                label.tag_type()
+                tag.tag_type()
             ),
-            Directive::Tag(label, EditStrategy::Relocate | EditStrategy::SetFileAttr) => bail!(
+            Directive::Tag(tag, EditStrategy::Relocate | EditStrategy::SetFileAttr) => bail!(
                 "tag type '{}' requires fs_operate, not modify (plan contract violation)",
-                label.tag_type()
+                tag.tag_type()
             ),
-            Directive::Tag(label, EditStrategy::RemoveOnly) => bail!(
+            Directive::Tag(tag, EditStrategy::RemoveOnly) => bail!(
                 "tag type '{}' cannot be added, only removed (RemoveOnly)",
-                label.tag_type()
+                tag.tag_type()
             ),
             Directive::DeleteType(tag_type) => vec![WriteAction::Delete {
                 item: id.clone(),
                 tags: vec![DeleteTarget::Type(tag_type)],
             }],
-            Directive::DeleteTag(label) => item.tags.entries.iter().any(|e| e.label == label)
+            Directive::DeleteTag(tag) => item.tags.entries.iter().any(|e| e.typed_tag == tag)
                 .then(|| WriteAction::Delete {
                     item: id.clone(),
-                    tags: vec![DeleteTarget::Tag(label)],
+                    tags: vec![DeleteTarget::Tag(tag)],
                 })
                 .into_iter()
                 .collect(),
@@ -76,7 +77,7 @@ impl QueryType {
     fn to_directive(
         &self,
         tag_type: TagType,
-        value: Option<Bitical>,
+        value: Option<Label>,
         registry: &TagRegistry,
     ) -> Result<Directive> {
         match (self, value) {
@@ -85,9 +86,10 @@ impl QueryType {
                 tag_type.as_str()
             ),
             (QueryType::Tag, Some(v)) => {
-                let label = Label::resolve(tag_type, v);
-                let strategy = get_strategy(&label, registry)?;
-                Ok(Directive::Tag(label, strategy))
+                let tag = TypedTag::retag(tag_type, &v);
+                let strategy = get_strategy(&tag, registry)?;
+                let tag = interpret_tag_value(tag, registry)?;
+                Ok(Directive::Tag(tag, strategy))
             }
             (QueryType::Untag, None) => {
                 check_untag_allowed(&tag_type, registry)?;
@@ -95,7 +97,7 @@ impl QueryType {
             }
             (QueryType::Untag, Some(v)) => {
                 check_untag_allowed(&tag_type, registry)?;
-                Ok(Directive::DeleteTag(Label::resolve(tag_type, v)))
+                Ok(Directive::DeleteTag(TypedTag::retag(tag_type, &v)))
             }
         }
     }
@@ -105,15 +107,54 @@ impl QueryType {
 // ヘルパー
 // ──────────────────────────────────────────────
 
-fn parse_value(s: &str) -> Bitical {
-    if let Ok(i) = s.parse::<i64>() {
-        Bitical::Integer(i)
-    } else {
-        Bitical::String(s.to_string())
+// 引用符で囲まれた値は解釈をバイパスして文字列として確定させる。
+fn parse_value(s: &str) -> Result<Label> {
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        return Label::from(s[1..s.len() - 1].to_string()).to_ok();
+    }
+    if crate::util::is_glob_pattern(s) {
+        bail!("wildcard is not allowed in EditQuery/TagQuery: {s:?}");
+    }
+    use crate::query::format::OperandFormat;
+    match Bitical::parse(s) {
+        Some(Ok(b)) => {
+            crate::query::format::attach_formatted_node(Label::other(b)).to_ok()
+        }
+        Some(Err(e)) => bail!("invalid value {s:?}: {e}"),
+        None => bail!("invalid value {s:?}"),
     }
 }
 
-fn tokenize(query: &str) -> Result<Vec<(TagType, Option<Bitical>)>> {
+fn interpret_tag_value(
+    tag: TypedTag,
+    registry: &TagRegistry,
+) -> Result<TypedTag> {
+    let Some(f) = registry.get(tag.tag_type().as_str()) else {
+        return tag.to_ok();
+    };
+    let predicate = f.query().interpret(
+        &Operand::TypeRef(tag.tag_type()),
+        ComparisonOp::Label(BasicOp::Eq),
+        &tag.label,
+    )?;
+    let not_single = || {
+        crate::query::error::tag_value_not_a_single_value(
+            tag.tag_type().as_str(),
+            &tag.label.as_str(),
+        )
+    };
+    let QueryNode::Comparison(ComparisonNode { rest, .. }) = predicate else {
+        return Err(not_single());
+    };
+    let [(ComparisonOp::Label(BasicOp::Eq), Operand::Literal(value))] =
+        rest.as_slice()
+    else {
+        return Err(not_single());
+    };
+    TypedTag::retag(tag.tag_type(), value).to_ok()
+}
+
+fn tokenize(query: &str) -> Result<Vec<(TagType, Option<Label>)>> {
     let raw: Vec<&str> = query
         .split(|c: char| c == '|' || c.is_whitespace())
         .map(str::trim)
@@ -133,7 +174,11 @@ fn tokenize(query: &str) -> Result<Vec<(TagType, Option<Bitical>)>> {
                 tok.split_once(':').ok_or_else(|| {
                     anyhow::anyhow!("invalid token (no colon): {tok:?}")
                 })?;
-            let value = (!value_str.is_empty()).then(|| parse_value(value_str));
+            let value = if value_str.is_empty() {
+                None
+            } else {
+                Some(parse_value(value_str)?)
+            };
             Ok((TagType::from(type_str), value))
         })
         .collect()
@@ -141,13 +186,16 @@ fn tokenize(query: &str) -> Result<Vec<(TagType, Option<Bitical>)>> {
 
 // registry から label の EditStrategy を取り出す純粋ヘルパー。
 // 未登録のカスタム型はデフォルト Append。登録済みだが edit() 未定義なら Forbidden(即エラー)。
-fn get_strategy(label: &Label, registry: &TagRegistry) -> Result<EditStrategy> {
-    match registry.get(label.tag_type().as_str()) {
+fn get_strategy(
+    tag: &TypedTag,
+    registry: &TagRegistry,
+) -> Result<EditStrategy> {
+    match registry.get(tag.tag_type().as_str()) {
         Some(f) => match f.edit() {
             Some(e) => Ok(e.strategy()),
             None => bail!(
                 "tag type '{}' is registered but not editable (Forbidden)",
-                label.tag_type()
+                tag.tag_type()
             ),
         },
         None => Ok(EditStrategy::Append),
@@ -175,13 +223,13 @@ fn check_untag_allowed(
 // 公開 API
 // ──────────────────────────────────────────────
 
-// name が無い場合に representative または item_kind から Label::Name を out に補完する。
+// name が無い場合に representative または item_kind から name タグを out に補完する。
 // existing は既存タグ（directives 適用済み）、out は注入先（registry ラベルが既にある）。
-fn inject_name(item: &Item, existing: &[Label], out: &mut Vec<Label>) {
+fn inject_name(item: &Item, existing: &[TypedTag], out: &mut Vec<TypedTag>) {
     if existing
         .iter()
         .chain(out.iter())
-        .any(|l| l.tag_type() == TagType::Base(SType::Name))
+        .any(|t| t.tag_type() == TagType::Base(SType::Name))
     {
         return;
     }
@@ -189,46 +237,44 @@ fn inject_name(item: &Item, existing: &[Label], out: &mut Vec<Label>) {
         repr.value().as_display_name()
     } else {
         out.iter()
-            .find_map(|l| {
-                if let Label::ItemKind(k) = l {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            })
+            .find(|t| t.tag_type() == TagType::Base(SType::ItemKind))
+            .map(|t| t.as_str())
             .unwrap_or_default()
     };
     if !name.is_empty() {
-        out.push(Label::Name(name));
+        out.push(TypedTag::new(SType::Name, name));
     }
 }
 
-// Volatile 登録時に item から注入するラベル群。
-// ModifyInjection 戦略のラベル（content / item_kind）と name 補完をまとめて返す。
+// Volatile 登録時に item から注入するタグ群。
+// ModifyInjection 戦略のタグ（content / item_kind）と name 補完をまとめて返す。
 fn injection_labels(
     item: &Item,
-    current_tags: &[Label],
+    current_tags: &[TypedTag],
     registry: &TagRegistry,
-) -> Vec<Label> {
-    let mut labels: Vec<Label> = registry
+) -> Vec<TypedTag> {
+    let mut tags: Vec<TypedTag> = registry
         .iter_arcs()
         .filter_map(|f| {
             let e = f.edit()?;
             matches!(e.strategy(), EditStrategy::ModifyInjection)
-                .then(|| e.inject(item))
+                .then(|| {
+                    e.inject(item)
+                        .map(|l| TypedTag::retag(f.name(), &l))
+                })
                 .flatten()
         })
         .collect();
-    inject_name(item, current_tags, &mut labels);
-    labels
+    inject_name(item, current_tags, &mut tags);
+    tags
 }
 
 // WriteAction（DB の Delete/Add encoding）を原子的なタグ操作へ平坦化したもの。
 // 平坦化後の適用（apply）は完全にフラットな1段 match で済む。
 enum TagDelta {
-    Add(Label),
+    Add(TypedTag),
     DropType(TagType),
-    DropTag(Label),
+    DropTag(TypedTag),
 }
 
 impl TagDelta {
@@ -238,25 +284,25 @@ impl TagDelta {
             WriteAction::Add { tags, .. } => tags
                 .into_iter()
                 .map(|op| match op {
-                    TagOp::Append(l) | TagOp::Replace(l) => TagDelta::Add(l),
+                    TagOp::Append(t) | TagOp::Replace(t) => TagDelta::Add(t),
                 })
                 .collect(),
             WriteAction::Delete { tags, .. } => tags
                 .into_iter()
                 .map(|t| match t {
                     DeleteTarget::Type(tt) => TagDelta::DropType(tt),
-                    DeleteTarget::Tag(l) => TagDelta::DropTag(l),
+                    DeleteTarget::Tag(t) => TagDelta::DropTag(t),
                 })
                 .collect(),
         }
     }
 
     // 作業集合へ適用する（フラットな1段 match）。
-    fn apply(self, tags: &mut Vec<Label>) {
+    fn apply(self, tags: &mut Vec<TypedTag>) {
         match self {
-            TagDelta::Add(l) => tags.push(l),
-            TagDelta::DropType(t) => tags.retain(|l| l.tag_type() != t),
-            TagDelta::DropTag(l) => tags.retain(|x| *x != l),
+            TagDelta::Add(t) => tags.push(t),
+            TagDelta::DropType(tt) => tags.retain(|t| t.tag_type() != tt),
+            TagDelta::DropTag(t) => tags.retain(|x| *x != t),
         }
     }
 }
@@ -269,8 +315,8 @@ fn fold_volatile(
     actions: Vec<WriteAction>,
     registry: &TagRegistry,
 ) -> Vec<WriteAction> {
-    let mut tags: Vec<Label> =
-        item.tags.entries.iter().map(|e| e.label.clone()).collect();
+    let mut tags: Vec<TypedTag> =
+        item.tags.entries.iter().map(|e| e.typed_tag.clone()).collect();
     actions
         .into_iter()
         .flat_map(TagDelta::flatten)
@@ -323,14 +369,14 @@ mod tests {
     use crate::response::Item;
     use crate::tag::TagRegistry;
     use crate::types::{
-        Bitical, ItemId, ItemKind, Label, SType, TagType, Tags,
+        Bitical, ItemId, ItemKind, SType, TagType, Tags,
     };
 
-    fn make_item(item_id: i64, labels: Vec<Label>) -> Item {
+    fn make_item(item_id: i64, typed_tags: Vec<TypedTag>) -> Item {
         use crate::types::{Intrinsic, Origin, Rank};
         let mut tags = Tags::new();
-        for label in labels {
-            tags.push(label, Origin::User);
+        for tag in typed_tags {
+            tags.push(tag, Origin::User);
         }
         Item {
             id: ItemId::Stored(item_id),
@@ -349,9 +395,7 @@ mod tests {
 
     fn make_volatile_item(stype: SType, repr_value: &str) -> Item {
         use crate::types::{Bitical, Intrinsic, Rank};
-        let repr_label = Label::resolve(
-            TagType::Base(stype),
-            Bitical::String(repr_value.to_string()),
+        let repr_label = TypedTag::new(TagType::Base(stype), Bitical::String(repr_value.to_string()),
         );
         Item {
             id: ItemId::Volatile(0),
@@ -379,7 +423,7 @@ mod tests {
         let tokens = tokenize("rank:5").unwrap();
         assert_eq!(
             tokens,
-            vec![(TagType::from("rank"), Some(Bitical::Integer(5)))]
+            vec![(TagType::from("rank"), Some(Label::other(Bitical::Integer(5))))]
         );
     }
 
@@ -388,7 +432,7 @@ mod tests {
         let tokens = tokenize("project:A").unwrap();
         assert_eq!(
             tokens,
-            vec![(TagType::from("project"), Some(Bitical::String("A".into())))]
+            vec![(TagType::from("project"), Some(Label::other(Bitical::String("A".into()))))]
         );
     }
 
@@ -411,6 +455,40 @@ mod tests {
     #[test]
     fn tokenize_empty_is_error() {
         assert!(tokenize("").is_err());
+    }
+
+    // ── 値の表記解釈（Format）─────────
+
+    #[test]
+    fn tokenize_double_value() {
+        let tokens = tokenize("cat:42.1").unwrap();
+        assert_eq!(
+            tokens,
+            vec![(TagType::from("cat"), Some(Label::other(Bitical::Double(42.1))))]
+        );
+    }
+
+    #[test]
+    fn tokenize_boolean_value() {
+        let tokens = tokenize("cat:true").unwrap();
+        assert_eq!(
+            tokens,
+            vec![(TagType::from("cat"), Some(Label::other(Bitical::Boolean(true))))]
+        );
+    }
+
+    #[test]
+    fn tokenize_quoted_value_strips_quotes_and_stays_string() {
+        let tokens = tokenize("cat:\"42\"").unwrap();
+        assert_eq!(
+            tokens,
+            vec![(TagType::from("cat"), Some(Label::other(Bitical::String("42".into()))))]
+        );
+    }
+
+    #[test]
+    fn tokenize_glob_value_is_error() {
+        assert!(tokenize("cat:*").is_err(), "wildcard is not allowed in EditQuery");
     }
 
     // ── modify テスト ─────────────────────────
@@ -450,7 +528,20 @@ mod tests {
             matches!(&actions[0], WriteAction::Delete { tags, .. } if matches!(&tags[0], DeleteTarget::Type(TagType::Base(SType::Rank))))
         );
         assert!(
-            matches!(&actions[1], WriteAction::Add { tags, .. } if matches!(&tags[0], TagOp::Replace(Label::Rank(5))))
+            matches!(&actions[1], WriteAction::Add { tags, .. } if matches!(&tags[0], TagOp::Replace(t) if t.tag_type() == TagType::Base(SType::Rank) && t.label.as_i64() == 5))
+        );
+    }
+
+    #[test]
+    fn interpret_tag_value_applies_tagfn_interpret() {
+        let label = TypedTag::new(TagType::from("size"), Bitical::String("1k".into()),
+        );
+        let interpreted = interpret_tag_value(label, &registry()).unwrap();
+        assert_eq!(
+            interpreted,
+            TypedTag::new(SType::Size, 1024),
+            "TagFn (SizeFn::interpret) must interpret unit-suffixed values, \
+             independent of whether the type is currently editable"
         );
     }
 
@@ -553,9 +644,8 @@ mod tests {
 
     #[test]
     fn modify_untag_existing_label() {
-        let label =
-            Label::Other(TagType::from("project"), Bitical::String("A".into()));
-        let item = make_item(1, vec![label.clone()]);
+        let tag = TypedTag::new("project", Bitical::String("A".into()));
+        let item = make_item(1, vec![tag.clone()]);
         let actions =
             modify(&item, Some("project:A"), QueryType::Untag, &registry())
                 .unwrap();
@@ -588,14 +678,11 @@ mod tests {
 
     #[test]
     fn modify_untag_multiple_gives_separate_deletes() {
-        let labels = vec![
-            Label::Other(TagType::from("project"), Bitical::String("A".into())),
-            Label::Other(
-                TagType::from("status"),
-                Bitical::String("done".into()),
-            ),
+        let tags = vec![
+            TypedTag::new("project", Bitical::String("A".into())),
+            TypedTag::new("status", Bitical::String("done".into())),
         ];
-        let item = make_item(1, labels);
+        let item = make_item(1, tags);
         let actions = modify(
             &item,
             Some("project:A status:done"),
@@ -623,7 +710,7 @@ mod tests {
         };
         tags
     }
-    fn has_append(tags: &[TagOp], pred: impl Fn(&Label) -> bool) -> bool {
+    fn has_append(tags: &[TagOp], pred: impl Fn(&TypedTag) -> bool) -> bool {
         tags.iter()
             .any(|t| matches!(t, TagOp::Append(l) if pred(l)))
     }
@@ -652,7 +739,7 @@ mod tests {
         assert!(
             has_append(
                 tags,
-                |l| matches!(l, Label::Name(s) if s == "project:A")
+                |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "project:A"
             ),
             "name must be injected from representative when no name tag exists"
         );
@@ -663,17 +750,17 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags
-            .push(Label::Name("custom name".to_string()), Origin::User);
+            .push(TypedTag::new(SType::Name, "custom name"), Origin::User);
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         let names: Vec<_> = tags
             .iter()
-            .filter(|t| matches!(t, TagOp::Append(Label::Name(_))))
+            .filter(|t| matches!(t, TagOp::Append(l) if l.tag_type() == TagType::Base(SType::Name)))
             .collect();
         assert_eq!(names.len(), 1, "must not duplicate name tag");
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Name(s) if s == "custom name")
+            |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "custom name"
         ));
     }
 
@@ -694,7 +781,7 @@ mod tests {
                 .unwrap();
         let tags = add_tags(&actions);
         assert!(
-            has_append(tags, |l| matches!(l, Label::Name(s) if s == "note")),
+            has_append(tags, |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "note"),
             "name must fall back to item_kind when representative is empty"
         );
     }
@@ -705,14 +792,14 @@ mod tests {
         let actions =
             modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| matches!(l, Label::Rank(5))));
+        assert!(has_append(tags, |l| l.tag_type() == TagType::Base(SType::Rank) && l.label.as_i64() == 5));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "project:A")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
         ));
     }
 
@@ -721,20 +808,20 @@ mod tests {
     fn modify_volatile_replace_dedups_against_item_tags() {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
-        item.tags.push(Label::Rank(1), Origin::User);
+        item.tags.push(TypedTag::new(SType::Rank, 1), Origin::User);
         let actions =
             modify(&item, Some("rank:5"), QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         let ranks: Vec<_> = tags
             .iter()
-            .filter(|t| matches!(t, TagOp::Append(Label::Rank(_))))
+            .filter(|t| matches!(t, TagOp::Append(l) if l.tag_type() == TagType::Base(SType::Rank)))
             .collect();
         assert_eq!(
             ranks.len(),
             1,
             "old rank dropped, only EditQuery rank remains"
         );
-        assert!(has_append(tags, |l| matches!(l, Label::Rank(5))));
+        assert!(has_append(tags, |l| l.tag_type() == TagType::Base(SType::Rank) && l.label.as_i64() == 5));
     }
 
     #[test]
@@ -746,11 +833,11 @@ mod tests {
         let tags = add_tags(&actions);
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "project:A")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
         ));
     }
 
@@ -763,11 +850,11 @@ mod tests {
         let tags = add_tags(&actions);
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "project")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "type")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "type"
         ));
     }
 
@@ -780,11 +867,11 @@ mod tests {
         let tags = add_tags(&actions);
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "/home/aki/projects")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "/home/aki/projects"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "note")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "note"
         ));
     }
 
@@ -804,11 +891,11 @@ mod tests {
         let tags = add_tags(&actions);
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "project:A")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "tag")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
         ));
     }
 
@@ -824,13 +911,9 @@ mod tests {
     fn modify_volatile_multi_repr_is_note_with_joined_content() {
         use crate::types::{Bitical, Intrinsic, Rank};
         let repr = vec![
-            Label::resolve(
-                TagType::Base(SType::TypedTag),
-                Bitical::String("project:A".to_string()),
+            TypedTag::new(TagType::Base(SType::TypedTag), Bitical::String("project:A".to_string()),
             ),
-            Label::resolve(
-                TagType::Base(SType::TypedTag),
-                Bitical::String("status:done".to_string()),
+            TypedTag::new(TagType::Base(SType::TypedTag), Bitical::String("status:done".to_string()),
             ),
         ];
         let item = Item {
@@ -846,11 +929,11 @@ mod tests {
         let tags = add_tags(&actions);
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::ItemKind(s) if s == "note")
+            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "note"
         ));
         assert!(has_append(
             tags,
-            |l| matches!(l, Label::Content(s) if s == "project:A &: status:done")
+            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A &: status:done"
         ));
     }
 
@@ -860,10 +943,7 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags.push(
-            Label::Other(
-                TagType::Base(SType::Type),
-                Bitical::String("integer".to_string()),
-            ),
+            TypedTag::new(SType::Type, Bitical::String("integer".to_string())),
             Origin::Builtin,
         );
         let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();

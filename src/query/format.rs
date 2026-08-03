@@ -29,7 +29,7 @@ use crate::query::ast::{
     QueryNode,
 };
 use crate::query::logical_schema::LogicalType;
-use crate::types::Label;
+use crate::types::{Bitical, DateTimeRange, Label, SType, TypedTag};
 
 pub trait OperandFormat: Sized {
     fn parse(s: &str) -> Option<Result<Self, String>>;
@@ -131,7 +131,7 @@ pub fn byte_size_range_condition(
             Operand::Calculation(Box::new(CalculationNode {
                 left: operand,
                 op: ArithmeticOp::Mod,
-                right: Operand::Literal(Label::Size(multiplier)),
+                right: Operand::Literal(TypedTag::new(SType::Size, multiplier).label),
             })),
             lo,
             hi,
@@ -140,10 +140,11 @@ pub fn byte_size_range_condition(
     let cmp = |bop: BasicOp, val: i64| {
         QueryNode::Comparison(ComparisonNode {
             first: base.clone(),
-            rest: vec![(ctor(bop), Operand::Literal(Label::Size(val)))],
+            rest: vec![(ctor(bop), Operand::Literal(TypedTag::new(SType::Size, val).label))],
         })
     };
     match op {
+        BasicOp::Eq if lo == hi => cmp(BasicOp::Eq, lo),
         BasicOp::Eq => QueryNode::And(vec![cmp(BasicOp::Ge, lo), cmp(BasicOp::Le, hi)]),
         BasicOp::Ne => QueryNode::Or(vec![cmp(BasicOp::Lt, lo), cmp(BasicOp::Gt, hi)]),
         BasicOp::Gt => cmp(BasicOp::Gt, hi),
@@ -177,8 +178,9 @@ pub struct ItemIdRange {
 }
 
 impl ItemIdRange {
-    /// origin ラベルは `Origin::short()` と一致するリテラルのみ対応し、オフセット部は
-    /// `*`（区画全域）のみ対応。それ以外は自分の形式ではないとして譲る。
+    /// origin ラベルは `Origin::short()` と一致するリテラルのみ対応する。オフセット部が
+    /// `*`（区画全域）なら区画全体を、具体的な整数（`Sys(10)`）なら単一点（`lo == hi`）を
+    /// 返す。それ以外は自分の形式ではないとして譲る。
     pub fn parse(s: &str) -> Option<Result<ItemIdRange, String>> {
         use crate::types::Origin;
         use strum::IntoEnumIterator;
@@ -186,14 +188,16 @@ impl ItemIdRange {
         let label = &s[..open];
         let rest = s.strip_suffix(')')?;
         let offset_pattern = &rest[open + 1..];
-        if offset_pattern != "*" {
-            return None;
-        }
         let origin = Origin::iter().find(|o| o.short() == label)?;
-        Some(Ok(ItemIdRange {
-            lo: origin.block_lo(),
-            hi: origin.block_hi() - 1,
-        }))
+        if offset_pattern == "*" {
+            return Some(Ok(ItemIdRange {
+                lo: origin.block_lo(),
+                hi: origin.block_hi() - 1,
+            }));
+        }
+        let offset: i64 = offset_pattern.parse().ok()?;
+        let id = origin.id_at_offset(offset)?;
+        Some(Ok(ItemIdRange { lo: id, hi: id }))
     }
 }
 
@@ -205,7 +209,7 @@ impl OperandFormat for ByteSizeRange {
     fn to_label(&self, original: &Label) -> Label {
         match self {
             ByteSizeRange::Range { lo, hi } if lo == hi => {
-                original.rekey(original.tag_type(), crate::types::Bitical::Integer(*lo))
+                Label::other(crate::types::Bitical::Integer(*lo))
             }
             _ => original.clone(),
         }
@@ -224,7 +228,7 @@ impl OperandFormat for crate::types::DateTimeRange {
     fn to_label(&self, original: &Label) -> Label {
         match self {
             crate::types::DateTimeRange::Interval { start, .. } => {
-                original.rekey(original.tag_type(), crate::types::Bitical::Integer(*start))
+                Label::other(crate::types::Bitical::Integer(*start))
             }
             crate::types::DateTimeRange::Slots(_) => original.clone(),
         }
@@ -235,9 +239,82 @@ impl OperandFormat for crate::types::DateTimeRange {
     }
 }
 
+impl Formatted {
+    /// 単一の値へ畳める表記なら、その値を返す。判定は各形式の
+    /// `OperandFormat::to_label` が値を書き換える条件と一致させること。
+    pub fn as_point(&self) -> Option<Bitical> {
+        match self {
+            Formatted::ByteSizeRange(ByteSizeRange::Range { lo, hi })
+            | Formatted::ItemIdRange(ItemIdRange { lo, hi })
+                if lo == hi =>
+            {
+                Some(Bitical::Integer(*lo))
+            }
+            Formatted::DateTimeRange(DateTimeRange::Interval { start, .. }) => {
+                Some(Bitical::Integer(*start))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_bitical(&self) -> Option<Bitical> {
+        match self {
+            Formatted::Bitical(b) => Some(b.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn resolve(&self) -> Option<Bitical> {
+        self.as_point().or_else(|| self.as_bitical())
+    }
+}
+
+/// 生テキストから作った引用無しの値に、登録済み `OperandFormat` が主張した解釈を
+/// `LabelNode::Formatted` として付与する。素の値（`label.value()`）は書き換えない。
+/// 引用付きの値には呼ばないこと（node が付かないことがクォート性を運ぶ）。
+pub(crate) fn attach_formatted_node(mut label: Label) -> Label {
+    let formatted = label.value().to_formatted();
+    if !matches!(&formatted, Formatted::Bitical(Bitical::String(_))) {
+        label.set_node(crate::types::LabelNode::Formatted(formatted));
+    }
+    label
+}
+
+impl Label {
+    pub fn as_formatted_point(&self) -> Option<Bitical> {
+        let crate::types::LabelNode::Formatted(formatted) = self.node() else {
+            return None;
+        };
+        formatted.as_point()
+    }
+
+    pub fn as_formatted_bitical(&self) -> Option<Bitical> {
+        let crate::types::LabelNode::Formatted(formatted) = self.node() else {
+            return None;
+        };
+        formatted.as_bitical()
+    }
+
+    pub fn resolved_value(&self) -> Bitical {
+        let crate::types::LabelNode::Formatted(formatted) = self.node() else {
+            return self.value();
+        };
+        formatted.resolve().unwrap_or_else(|| self.value())
+    }
+}
+
 impl OperandFormat for ItemIdRange {
     fn parse(s: &str) -> Option<Result<Self, String>> {
         ItemIdRange::parse(s)
+    }
+
+    fn to_label(&self, original: &Label) -> Label {
+        match self {
+            ItemIdRange { lo, hi } if lo == hi => {
+                Label::other(crate::types::Bitical::Integer(*lo))
+            }
+            _ => original.clone(),
+        }
     }
 
     fn logical_type(&self) -> LogicalType {
@@ -247,9 +324,9 @@ impl OperandFormat for ItemIdRange {
 
 crate::define_operand_formats! {
     ByteSizeRange,
-    crate::types::DateTimeRange,
+    DateTimeRange,
     ItemIdRange,
-    crate::types::Bitical,
+    Bitical,
 }
 
 impl OperandFormat for crate::types::Bitical {
@@ -295,6 +372,22 @@ mod tests {
         assert_eq!(
             ByteSizeRange::parse("1MB"),
             Some(Ok(ByteSizeRange::Range { lo: 1048576, hi: 1048576 }))
+        );
+    }
+
+    #[test]
+    fn test_byte_size_range_parses_space_and_shorthand_units() {
+        assert_eq!(
+            ByteSizeRange::parse("1 kb"),
+            Some(Ok(ByteSizeRange::Range { lo: 1024, hi: 1024 }))
+        );
+        assert_eq!(
+            ByteSizeRange::parse("1KiB"),
+            Some(Ok(ByteSizeRange::Range { lo: 1024, hi: 1024 }))
+        );
+        assert_eq!(
+            ByteSizeRange::parse("1K"),
+            Some(Ok(ByteSizeRange::Range { lo: 1024, hi: 1024 }))
         );
     }
 
@@ -359,20 +452,20 @@ mod tests {
 
     #[test]
     fn test_byte_size_range_operand_format_to_label_point() {
-        use crate::types::{Bitical, TagType};
-        let original = Label::Literal(TagType::Custom("fsize".to_string()), "1MB".to_string());
+        use crate::types::Bitical;
+        let original = Label::from("1MB".to_string());
         let range = ByteSizeRange::parse("1MB").unwrap().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(
             label,
-            original.rekey(original.tag_type(), Bitical::Integer(1_048_576))
+            Label::other(Bitical::Integer(1_048_576))
         );
     }
 
     #[test]
     fn test_byte_size_range_operand_format_to_label_pattern_falls_back_to_default() {
-        use crate::types::TagType;
-        let original = Label::Literal(TagType::Custom("fsize".to_string()), "*MB".to_string());
+
+        let original = Label::from("*MB".to_string());
         let range = ByteSizeRange::parse("*MB").unwrap().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(label, original);
@@ -389,23 +482,23 @@ mod tests {
 
     #[test]
     fn test_date_time_range_operand_format_to_label_point() {
-        use crate::types::{DateTimeRange, TagType};
+        use crate::types::DateTimeRange;
         let original =
-            Label::Literal(TagType::Custom("captured".to_string()), "2026-02-01".to_string());
+            Label::from("2026-02-01".to_string());
         let range = DateTimeRange::parse("2026-02-01").unwrap().unwrap();
         let (start, _) = range.as_interval().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(
             label,
-            original.rekey(original.tag_type(), crate::types::Bitical::Integer(start))
+            Label::other(crate::types::Bitical::Integer(start))
         );
     }
 
     #[test]
     fn test_date_time_range_operand_format_to_label_pattern_falls_back_to_default() {
-        use crate::types::{DateTimeRange, TagType};
+        use crate::types::DateTimeRange;
         let original =
-            Label::Literal(TagType::Custom("captured".to_string()), "*-02-01".to_string());
+            Label::from("*-02-01".to_string());
         let range = DateTimeRange::parse("*-02-01").unwrap().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(label, original);
@@ -422,13 +515,36 @@ mod tests {
     }
 
     #[test]
-    fn test_item_id_range_declines_non_wildcard_offset() {
-        assert_eq!(ItemIdRange::parse("File(5)"), None);
+    fn test_item_id_range_parses_concrete_offset_as_single_point() {
+        use crate::types::Origin;
+        let range = ItemIdRange::parse("Sys(10)").unwrap().unwrap();
+        assert_eq!(range.lo, Origin::Builtin.block_lo() + 10);
+        assert_eq!(range.hi, range.lo);
+    }
+
+    #[test]
+    fn test_item_id_range_declines_non_numeric_non_wildcard_offset() {
+        assert_eq!(ItemIdRange::parse("File(abc)"), None);
+    }
+
+    #[test]
+    fn test_item_id_range_declines_offset_outside_the_block() {
+        use crate::types::Origin;
+        assert_eq!(
+            ItemIdRange::parse(&format!("File({})", i64::MAX)),
+            None,
+            "an offset that overflows must be declined, not panic"
+        );
+        assert_eq!(ItemIdRange::parse("File(-1)"), None);
+        let width = Origin::File.block_hi() - Origin::File.block_lo();
+        assert_eq!(ItemIdRange::parse(&format!("File({width})")), None);
+        assert!(ItemIdRange::parse(&format!("File({})", width - 1)).is_some());
     }
 
     #[test]
     fn test_item_id_range_declines_unknown_origin() {
         assert_eq!(ItemIdRange::parse("Bogus(*)"), None);
+        assert_eq!(ItemIdRange::parse("Bogus(5)"), None);
     }
 
     #[test]
@@ -452,11 +568,20 @@ mod tests {
 
     #[test]
     fn test_item_id_range_operand_format_to_label_defaults_to_clone() {
-        use crate::types::TagType;
-        let original = Label::Literal(TagType::Custom("item_id".to_string()), "File(*)".to_string());
+
+        let original = Label::from("File(*)".to_string());
         let range = ItemIdRange::parse("File(*)").unwrap().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(label, original);
+    }
+
+    #[test]
+    fn test_item_id_range_operand_format_to_label_rekeys_single_point() {
+        use crate::types::Origin;
+        let original = Label::from("Sys(10)".to_string());
+        let range = ItemIdRange::parse("Sys(10)").unwrap().unwrap();
+        let label = OperandFormat::to_label(&range, &original);
+        assert_eq!(label.value(), Bitical::Integer(Origin::Builtin.block_lo() + 10));
     }
 
     // --- Bitical as OperandFormat（最下位。全部が譲ったら文字列のまま） ---
@@ -514,11 +639,40 @@ mod tests {
 
     #[test]
     fn test_bitical_operand_format_to_label_defaults_to_clone() {
-        use crate::types::{Bitical, TagType};
-        let original = Label::Literal(TagType::Custom("custom".to_string()), "42".to_string());
+        use crate::types::Bitical;
+        let original = Label::from("42".to_string());
         let range = Bitical::parse("42").unwrap().unwrap();
         let label = OperandFormat::to_label(&range, &original);
         assert_eq!(label, original);
+    }
+
+    // --- Formatted（to_formatted はディスパッチの値を捨てずに返す） ---
+
+    #[test]
+    fn to_formatted_dispatches_to_first_claiming_format_keeping_its_value() {
+        use crate::types::Bitical;
+        let value = Bitical::String("1MB".to_string());
+        assert_eq!(
+            value.to_formatted(),
+            Formatted::ByteSizeRange(ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 })
+        );
+    }
+
+    #[test]
+    fn to_formatted_falls_back_to_bitical_when_no_format_claims() {
+        use crate::types::Bitical;
+        let value = Bitical::String("hello".to_string());
+        assert_eq!(
+            value.to_formatted(),
+            Formatted::Bitical(Bitical::String("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn to_formatted_wraps_already_typed_bitical_without_parsing() {
+        use crate::types::Bitical;
+        let value = Bitical::Integer(42);
+        assert_eq!(value.to_formatted(), Formatted::Bitical(Bitical::Integer(42)));
     }
 }
 

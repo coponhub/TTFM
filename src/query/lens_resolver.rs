@@ -37,10 +37,14 @@
 
 use crate::db::{BiticalType, Col};
 use crate::query::ast::{
-    ComparisonNode, ComparisonOp, DefinitionRef, Operand, QueryNode,
+    ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
-use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{Bitical, Label, Rank, SType, TagType};
+use crate::query::lens_schema::{
+    definition_candidates, definition_reserved_names, Lens, StorageMapping,
+};
+use crate::query::logical_schema::LogicalSchema;
+use crate::query::sql::definition::ResolvedDefinition;
+use crate::types::{Bitical, ItemKind, Label, Origin, Rank, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
@@ -71,12 +75,9 @@ pub enum ResolvedNode {
     /// item_references の定義行（item_kind=kind, content=value）を参照し、
     /// 未登録なら value を representative とする Volatile を1行合成する。
     DefinitionRef {
-        def: DefinitionRef,
+        def: crate::query::sql::definition::ResolvedDefinition,
         /// representative の型解決用オペランド（value.tag_type() の TagRef）。
         operand: ResolvedOperand,
-        /// 未登録(Volatile)時の rank フォールバック値。
-        /// 参照先タグ型が登録する TagFunction::default_rank()（未登録なら SystemRank::DEFAULT）。
-        default_rank: Rank,
     },
     /// 物理的な条件。
     Match {
@@ -338,12 +339,12 @@ impl ResolvedOperand {
     pub fn resolve_label(&self, lens: &Lens, value: &Value) -> String {
         match self {
             ResolvedOperand::TagRef { tag_type, .. } => {
-                lens.resolve_label(tag_type, value).to_string()
+                lens.resolve_label(tag_type, value).as_str()
             }
             _ => {
                 // Calculation 等の場合はデフォルトの 'nvalue' として解決（数値フォーマット等）。
                 lens.resolve_label(&TagType::from("nvalue"), value)
-                    .to_string()
+                    .as_str()
             }
         }
     }
@@ -352,7 +353,7 @@ impl ResolvedOperand {
     pub fn is_string_type(&self) -> bool {
         match self {
             ResolvedOperand::Literal(label) => {
-                matches!(label.value(), Bitical::String(_))
+                matches!(label.resolved_value(), Bitical::String(_))
             }
             ResolvedOperand::TagRef {
                 tag_type,
@@ -1328,33 +1329,61 @@ fn resolve_aggregation_node(
     }
 }
 
+/// 定義アイテム参照の解決に要る材料（投影先・候補・予約名・既定 rank）を集める。
+fn definition_context(
+    lens: &Lens,
+    tag_type: &TagType,
+    target_name: &str,
+    kind: ItemKind,
+    origins: &[Origin],
+) -> Result<(ResolvedOperand, Vec<crate::query::ast::Candidate>, Vec<String>, Rank)>
+{
+    let operand = resolve_type_ref_operand(lens, tag_type)?;
+    let default_rank = lens
+        .look_up(&TagType::from(target_name))
+        .and_then(|desc| desc.logical_function.as_ref())
+        .map(|f| f.default_rank())
+        .unwrap_or(crate::rank::SystemRank::DEFAULT);
+    let entries = lens.iter_all_for_rank();
+    let candidates = definition_candidates(&entries, kind, origins);
+    let reserved = definition_reserved_names(&entries);
+    Ok((operand, candidates, reserved, default_rank))
+}
+
 pub(crate) fn resolve_query_node(
     lens: &Lens,
     node: QueryNode,
 ) -> Result<ResolvedNode> {
     match node {
         QueryNode::TypedTag(tt) => {
-            let tag_type = tt.label.tag_type();
-            let (storage, bitical_type) = match lens.look_up(&tag_type) {
-                Some(desc) => (
-                    desc.storage.clone(),
-                    desc.logical_type.to_bitical(),
-                ),
-                None => (
-                    StorageMapping::Basic {
-                        column: Col::LabelStr,
-                        tag_type: tag_type.as_str().to_string(),
-                    },
-                    BiticalType::String,
-                ),
+            if let Some(kind) = lens.item_kind(&tt.tag_type()) {
+                let (operand, candidates, reserved, default_rank) =
+                    definition_context(
+                        lens,
+                        &tt.tag_type(),
+                        &tt.value().as_display_name(),
+                        kind,
+                        &[],
+                    )?;
+                return Ok(ResolvedNode::DefinitionRef {
+                    def: ResolvedDefinition::for_tag(
+                        kind,
+                        tt,
+                        candidates,
+                        reserved,
+                        default_rank,
+                    ),
+                    operand,
+                });
+            }
+            let inner = match tt.node().into_owned() {
+                crate::query::Node::Query(qn)
+                | crate::query::Node::Expanded(qn) => *qn,
+                crate::query::Node::Resolved(_) => {
+                    bail!("TypedTag's Node must not already be Resolved before lens resolution")
+                }
             };
-            Ok(ResolvedNode::Match {
-                tag_type,
-                storage,
-                bitical_type,
-                op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
-                label: tt.label,
-            })
+            resolve_query_node(lens, inner)
         }
         QueryNode::ColumnMatch { tag, label } => {
             let tag_type = TagType::Base(tag);
@@ -1369,19 +1398,23 @@ pub(crate) fn resolve_query_node(
                 label,
             })
         }
-        QueryNode::DefinitionRef(def) => {
-            let operand =
-                resolve_type_ref_operand(lens, &def.value.tag_type())?;
-            let target_name = def.value.value().as_display_name();
-            let default_rank = lens
-                .look_up(&TagType::from(target_name.as_str()))
-                .and_then(|desc| desc.logical_function.as_ref())
-                .map(|f| f.default_rank())
-                .unwrap_or(crate::rank::SystemRank::DEFAULT);
+        QueryNode::OriginRef(origin) => {
+            let (operand, candidates, reserved, default_rank) =
+                definition_context(
+                    lens,
+                    &TagType::Base(crate::types::SType::Type),
+                    "*",
+                    ItemKind::Type,
+                    &[origin],
+                )?;
             Ok(ResolvedNode::DefinitionRef {
-                def,
+                def: ResolvedDefinition::for_origin(
+                    origin,
+                    candidates,
+                    reserved,
+                    default_rank,
+                ),
                 operand,
-                default_rank,
             })
         }
         QueryNode::Comparison(cmp) => resolve_comparison(lens, cmp),
@@ -2825,7 +2858,7 @@ impl Resolver {
     /// 2. 論理展開: logical_resolver::expand_query_node()
     /// 3. 物理解決: resolve_query_node() → ResolvedNode
     ///
-    /// 動的登録プラグインの normalize_label / expand_comparison を反映するには
+    /// 動的登録プラグインの interpret / expand_comparison を反映するには
     /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
     /// `&TagRegistry::with_standard()` を渡す。
     ///
@@ -2985,7 +3018,7 @@ mod tests {
     use crate::db::BiticalType;
     use crate::query::ast::ArithmeticOp;
     use crate::query::lens_schema::StorageMapping;
-    use crate::query::lens_schema::{build_int_condition, build_str_condition};
+    use crate::query::lens_schema::build_str_condition;
     use crate::tag::TagRegistry;
     use crate::types::{Label, SType};
 
@@ -3042,21 +3075,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_int_condition() {
-        let cond = build_int_condition(Col::LabelInt, BinOper::Equal, 10, true);
-        let debug_str = format!("{:?}", cond);
-        assert!(!debug_str.is_empty());
-    }
-
-    #[test]
     fn test_build_str_condition() {
-        let cond = build_str_condition(
-            Col::LabelStr,
-            BinOper::Equal,
-            "test_val",
-            BiticalType::String,
-            true,
-        );
+        let cond = build_str_condition(Col::LabelStr, BinOper::Equal, "test_val");
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
     }
@@ -3375,13 +3395,9 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::Bitical::String("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3398,9 +3414,7 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::from(1i64));
 
@@ -3418,13 +3432,9 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::Bitical::String("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3835,6 +3845,16 @@ mod tests_integration {
         );
     }
 
+    fn find_nest(node: &ResolvedNode) -> Option<&ResolvedNode> {
+        match node {
+            ResolvedNode::And(nodes) => {
+                nodes.iter().find(|n| matches!(n, ResolvedNode::Nest { .. }))
+            }
+            n @ ResolvedNode::Nest { .. } => Some(n),
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_resolve_nest_depth2_produces_nest_with_two_keys() {
         let query = "parentdir: &: filename:";
@@ -3842,9 +3862,8 @@ mod tests_integration {
             Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
-                resolver.resolved_query,
-                crate::query::ResolvedNode::Nest { ref keys, .. }
-                    if keys.len() == 2
+                find_nest(&resolver.resolved_query),
+                Some(ResolvedNode::Nest { keys, .. }) if keys.len() == 2
             ),
             "Depth 2 nest should resolve to Nest with 2 keys, got: {:?}",
             resolver.resolved_query
@@ -3858,9 +3877,8 @@ mod tests_integration {
             Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
-                resolver.resolved_query,
-                crate::query::ResolvedNode::Nest { ref keys, .. }
-                    if keys.len() >= 2
+                find_nest(&resolver.resolved_query),
+                Some(ResolvedNode::Nest { keys, .. }) if keys.len() >= 2
             ),
             "Left-is-Nest should produce Nest with 2+ keys, got: {:?}",
             resolver.resolved_query
@@ -4010,20 +4028,17 @@ mod tests_integration {
 
     fn make_definition_ref(value_type: &str, value_str: &str) -> ResolvedNode {
         use crate::query::lens_schema::StorageMapping;
-        let value = crate::types::Label::resolve(
-            crate::types::TagType::from(value_type),
-            crate::types::Bitical::String(value_str.to_string()),
-        );
+        use crate::types::TypedTag;
+        let value = TypedTag::new(crate::types::TagType::from(value_type), crate::types::Bitical::String(value_str.to_string()));
         let tag_type = value.tag_type();
         ResolvedNode::DefinitionRef {
-            def: DefinitionRef {
-                kind: crate::types::ItemKind::Tag,
+            def: ResolvedDefinition::for_tag(
+                ItemKind::Tag,
                 value,
-                candidates: Vec::new(),
-                origins: Vec::new(),
-                reserved: Vec::new(),
-                recorded: true,
-            },
+                Vec::new(),
+                Vec::new(),
+                0,
+            ),
             operand: ResolvedOperand::TagRef {
                 tag_type,
                 storage: StorageMapping::Basic {
@@ -4032,7 +4047,6 @@ mod tests_integration {
                 },
                 bitical_type: crate::db::BiticalType::String,
             },
-            default_rank: 0,
         }
     }
 
@@ -4073,10 +4087,7 @@ mod tests_integration {
             op: crate::query::ast::ComparisonOp::Label(
                 crate::query::ast::BasicOp::Eq,
             ),
-            label: crate::types::Label::resolve(
-                crate::types::TagType::from("path"),
-                crate::types::Bitical::String("/foo/*".to_string()),
-            ),
+            label: crate::types::Label::other(crate::types::Bitical::String("/foo/*".to_string())),
         };
 
         let mut node = ResolvedNode::LabelSetOp {
@@ -4314,15 +4325,12 @@ mod tests_walk_fold {
     use super::*;
     use crate::query::ast::ArithmeticOp;
     use crate::tag::TagRegistry;
-    use crate::types::{Bitical, Label, SType, TagType};
+    use crate::types::{Bitical, Label, SType};
 
     fn leaf(name: &str) -> ResolvedNode {
         ResolvedNode::ColumnMatch {
             tag: SType::Name,
-            label: Label::resolve(
-                TagType::from(name),
-                Bitical::String(name.to_string()),
-            ),
+            label: Label::other(Bitical::String(name.to_string())),
         }
     }
 

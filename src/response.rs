@@ -16,8 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::types::{
-    Bitical, Intrinsic, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
-    Tags,
+    Bitical, Intrinsic, ItemId, ItemKind, Origin, Rank, SType, TagType,
+    Tags, TypedTag,
 };
 
 /// 検索・編集操作の共通アイテム表現。
@@ -28,7 +28,7 @@ pub struct Item {
     /// アイテムの種類
     pub item_kind: ItemKind,
     /// この結果を代表するラベル（Projectionではラベル値、通常はpath/nameなど）
-    pub representative: Vec<Label>,
+    pub representative: Vec<TypedTag>,
     /// アイテムの優先度
     pub rank: Rank,
     /// 固定の固有情報
@@ -180,13 +180,13 @@ impl SearchResponse {
                 keys.insert(TagType::from(SType::Hash));
             }
             keys.insert(TagType::from(SType::ItemKind));
-            for label in &res.representative {
-                keys.insert(label.tag_type());
+            for tag in &res.representative {
+                keys.insert(tag.tag_type());
             }
 
             // 動的タグ
             for entry in &res.tags.entries {
-                keys.insert(entry.label.tag_type());
+                keys.insert(entry.typed_tag.tag_type());
             }
 
             let group_key = (res.item_kind.clone(), keys);
@@ -283,7 +283,7 @@ impl SearchResponse {
     /// `value` タグを持つ Volatile item に `query:` ラベルを注入する。
     /// 計算値の由来保持（EDIT.md §5.7(B)）。
     pub fn query_into_tags(&mut self) {
-        use crate::types::{Bitical, Label, Origin, SType, TagType};
+        use crate::types::{Bitical, Origin, SType, TagType};
         let query_str = self.query.clone();
         let query_tag_type = TagType::Base(SType::Query);
         let value_tag_type = TagType::Base(SType::Value);
@@ -295,10 +295,10 @@ impl SearchResponse {
                 .tags
                 .entries
                 .iter()
-                .any(|e| e.label.tag_type() == value_tag_type);
+                .any(|e| e.typed_tag.tag_type() == value_tag_type);
             if has_value {
                 item.tags.push(
-                    Label::Other(
+                    TypedTag::new(
                         query_tag_type.clone(),
                         Bitical::String(query_str.clone()),
                     ),
@@ -318,7 +318,7 @@ impl SearchResponse {
             .first()
             .map(|r| {
                 r.tags.entries.iter().any(|e| {
-                    e.label.tag_type().as_str() == "item"
+                    e.typed_tag.tag_type().as_str() == "item"
                         && matches!(e.origin, Origin::Builtin)
                 })
             })
@@ -350,21 +350,23 @@ impl Item {
     }
 
     /// 解決済みのタグ情報をアイテムに適用します。
-    pub fn apply_tag(&mut self, label: crate::types::Label, origin: Origin) {
-        use crate::types::Label;
-
-        // 検索結果に必要な基本属性を補完 (パターンマッチングによる直感的な代入)
-        match &label {
-            Label::Rank(i) => self.rank = *i,
-            Label::Size(i) => {
-                self.intrinsic.size = Some(crate::types::FileSize(*i))
+    pub fn apply_tag(&mut self, tag: TypedTag, origin: Origin) {
+        // 検索結果に必要な基本属性を補完
+        match tag.tag_type() {
+            TagType::Base(SType::Rank) => self.rank = tag.label.as_i64(),
+            TagType::Base(SType::Size) => {
+                self.intrinsic.size =
+                    Some(crate::types::FileSize(tag.label.as_i64()))
             }
-            Label::Mtime(i) => {
-                self.intrinsic.mtime = Some(crate::types::FileTimestamp(*i))
+            TagType::Base(SType::Mtime) => {
+                self.intrinsic.mtime =
+                    Some(crate::types::FileTimestamp(tag.label.as_i64()))
             }
-            Label::Hash(s) => self.intrinsic.hash = Some(s.clone()),
-            Label::ItemKind(s) => {
-                if let Ok(k) = s.as_str().parse::<ItemKind>() {
+            TagType::Base(SType::Hash) => {
+                self.intrinsic.hash = Some(tag.as_str())
+            }
+            TagType::Base(SType::ItemKind) => {
+                if let Ok(k) = tag.as_str().parse::<ItemKind>() {
                     self.item_kind = k;
                 }
             }
@@ -372,13 +374,13 @@ impl Item {
         }
 
         // 全てのタグ（特殊属性含む）を Tags にプッシュ
-        self.tags.push(label, origin);
+        self.tags.push(tag, origin);
     }
 
     /// 生のタグ行データをアイテムに適用します (DEPRECATED: 互換性のために維持)。
     #[deprecated(note = "Use apply_tag instead with resolved Label and Origin")]
     pub fn apply_raw_tag(&mut self, row: RawTagRow) {
-        use crate::types::{Bitical, Label, Origin, TagType};
+        use crate::types::{Bitical, Origin, TagType};
 
         // oneview の origin 列は常に小分類 (builtin/user/file/plugin) の妥当な文字列。
         // 想定外の値は安全側 (非User) の Builtin にフォールバックする。
@@ -388,8 +390,8 @@ impl Item {
         let value = row
             .value
             .unwrap_or_else(|| Bitical::String("NULL".to_string()));
-        let label = Label::resolve(TagType::from(row.tag_type), value);
-        self.apply_tag(label, origin);
+        let tag = TypedTag::new(TagType::from(row.tag_type), value);
+        self.apply_tag(tag, origin);
     }
     /// 代表的な値（パスやコンテンツ）を取得するヘルパー。
     /// ファイルならパス、Noteならコンテンツなどを返します。
@@ -400,7 +402,7 @@ impl Item {
         use crate::types::SType;
         self.get_all_labels(&SType::Path.into())
             .first()
-            .map(|l| l.as_str().to_string())
+            .map(|t| t.as_str())
             .or_else(|| self.get_tag_value("content"))
             .or_else(|| self.get_tag_value("value"))
             .or_else(|| self.get_tag_value("filename"))
@@ -415,9 +417,9 @@ impl Item {
             .tags
             .entries
             .iter()
-            .find(|e| e.label.tag_type() == TagType::Base(SType::Origin))
+            .find(|e| e.typed_tag.tag_type() == TagType::Base(SType::Origin))
         {
-            if let Ok(o) = e.label.as_str().parse::<Origin>() {
+            if let Ok(o) = e.typed_tag.as_str().parse::<Origin>() {
                 return o;
             }
         }
@@ -451,17 +453,14 @@ impl Item {
     pub fn get_all_values(&self, key: &str) -> Vec<String> {
         self.get_all_labels(&TagType::from(key))
             .into_iter()
-            .map(|l| l.as_str())
+            .map(|t| t.as_str())
             .collect()
     }
 
     /// 指定されたキーの全てのラベルを Label 型として取得します。
     /// 固定メタデータや仮想ラベルも透過的にアクセス可能です。
-    pub fn get_all_labels(
-        &self,
-        tag_type: &TagType,
-    ) -> Vec<crate::types::Label> {
-        use crate::types::Label;
+    pub fn get_all_labels(&self, tag_type: &TagType) -> Vec<TypedTag> {
+        let of = |t: SType, v: Bitical| TypedTag::new(t, v);
 
         // 1. 固定メタデータの解決
         match &tag_type {
@@ -470,7 +469,7 @@ impl Item {
                     .intrinsic
                     .size
                     .as_ref()
-                    .map(|s| vec![Label::from(s.0)])
+                    .map(|s| vec![of(SType::Size, Bitical::Integer(s.0))])
                     .unwrap_or_default();
             }
             TagType::Base(SType::Mtime) => {
@@ -478,7 +477,7 @@ impl Item {
                     .intrinsic
                     .mtime
                     .as_ref()
-                    .map(|t| vec![Label::from(t.0)])
+                    .map(|t| vec![of(SType::Mtime, Bitical::Integer(t.0))])
                     .unwrap_or_default();
             }
             TagType::Base(SType::Hash) => {
@@ -486,35 +485,38 @@ impl Item {
                     .intrinsic
                     .hash
                     .as_ref()
-                    .map(|h| vec![Label::from(h.clone())])
+                    .map(|h| vec![of(SType::Hash, Bitical::String(h.clone()))])
                     .unwrap_or_default();
             }
             TagType::Base(SType::Rank) => {
-                return vec![Label::from(self.rank)];
+                return vec![of(SType::Rank, Bitical::Integer(self.rank))];
             }
             TagType::Base(SType::ItemKind) => {
-                return vec![Label::from(self.item_kind.clone())];
+                return vec![of(
+                    SType::ItemKind,
+                    Bitical::String(self.item_kind.as_str().to_string()),
+                )];
             }
             TagType::Base(SType::Name) => {
                 return self.representative.clone();
             }
             TagType::Base(SType::Origin) => {
-                return vec![Label::resolve(
-                    TagType::Base(SType::Origin),
+                return vec![of(
+                    SType::Origin,
                     Bitical::String(self.origin().to_string()),
                 )];
             }
             // 仮想ラベル: type: (タグの型一覧)
             TagType::Base(SType::Type) => {
                 // 1. Tags に明示的な type タグがあればそれを優先 (volatile用)
-                let type_values: Vec<Label> = self
+                let type_values: Vec<TypedTag> = self
                     .tags
                     .entries
                     .iter()
                     .filter(|e| {
-                        e.label.tag_type() == TagType::Base(SType::Type)
+                        e.typed_tag.tag_type() == TagType::Base(SType::Type)
                     })
-                    .map(|e| e.label.clone())
+                    .map(|e| e.typed_tag.clone())
                     .collect();
                 if !type_values.is_empty() {
                     return type_values;
@@ -523,70 +525,70 @@ impl Item {
                 // 2. なければ従来の挙動（存在する全てのタグ種を返す）
                 let mut lab_vals = Vec::new();
                 for entry in &self.tags.entries {
-                    lab_vals.push(Label::resolve(
-                        TagType::Base(SType::Type),
-                        Bitical::String(entry.label.tag_type().to_string()),
+                    lab_vals.push(of(
+                        SType::Type,
+                        Bitical::String(entry.typed_tag.tag_type().to_string()),
                     ));
                 }
                 if self.intrinsic.size.is_some() {
-                    lab_vals.push(Label::resolve(
-                        TagType::Base(SType::Type),
-                        Bitical::String("size".to_string()),
-                    ));
+                    lab_vals
+                        .push(of(SType::Type, Bitical::String("size".to_string())));
                 }
                 if self.intrinsic.mtime.is_some() {
-                    lab_vals.push(Label::resolve(
-                        TagType::Base(SType::Type),
+                    lab_vals.push(of(
+                        SType::Type,
                         Bitical::String("mtime".to_string()),
                     ));
                 }
                 // ItemKind 自体も型として含める
-                lab_vals.push(Label::resolve(
-                    TagType::Base(SType::Type),
+                lab_vals.push(of(
+                    SType::Type,
                     Bitical::String(self.item_kind.as_str().to_string()),
                 ));
 
-                lab_vals.sort_by_cached_key(|l| l.to_string());
+                lab_vals.sort_by_cached_key(|t| t.to_string());
                 lab_vals.dedup();
                 return lab_vals;
             }
 
             // 仮想ラベル: label: (アイテムが持つ全てのラベル値)
             TagType::Base(SType::Label) => {
-                let mut labels: Vec<Label> =
-                    self.tags.entries.iter().map(|e| e.label.clone()).collect();
-                labels.sort();
+                let mut labels: Vec<TypedTag> = self
+                    .tags
+                    .entries
+                    .iter()
+                    .map(|e| e.typed_tag.clone())
+                    .collect();
+                labels.sort_by_cached_key(|t| t.as_str());
                 labels.dedup();
                 return labels;
             }
             // 仮想ラベル: tag: (type:label 形式の全タグ)
             TagType::Base(SType::TypedTag) => {
-                let mut labels = Vec::new();
+                let mut labels: Vec<TypedTag> = Vec::new();
                 // 明示的なタグ
                 labels
-                    .extend(self.tags.entries.iter().map(|e| e.label.clone()));
+                    .extend(self.tags.entries.iter().map(|e| e.typed_tag.clone()));
                 // 固定属性
-                labels.push(Label::from(self.item_kind));
+                labels.push(of(
+                    SType::ItemKind,
+                    Bitical::String(self.item_kind.as_str().to_string()),
+                ));
                 if let Some(s) = &self.intrinsic.size {
-                    labels.push(Label::resolve(
-                        TagType::Base(SType::Size),
-                        Bitical::Integer(s.0),
-                    ));
+                    labels.push(of(SType::Size, Bitical::Integer(s.0)));
                 }
                 if let Some(t) = &self.intrinsic.mtime {
-                    labels.push(Label::resolve(
-                        TagType::Base(SType::Mtime),
-                        Bitical::Integer(t.0),
-                    ));
+                    labels.push(of(SType::Mtime, Bitical::Integer(t.0)));
                 }
 
-                let mut tts: Vec<String> = labels
-                    .into_iter()
-                    .map(|l| format!("{}:{}", l.tag_type(), l.as_str()))
-                    .collect();
+                let mut tts: Vec<String> =
+                    labels.into_iter().map(|t| t.to_string()).collect();
                 tts.sort();
                 tts.dedup();
-                return tts.into_iter().map(Label::from).collect();
+                return tts
+                    .into_iter()
+                    .map(|s| TypedTag::new(SType::TypedTag, s))
+                    .collect();
             }
             _ => {}
         }
@@ -595,7 +597,7 @@ impl Item {
         self.tags
             .get_values(tag_type)
             .into_iter()
-            .map(|v| v.label)
+            .map(|v| TypedTag::retag(tag_type.clone(), &v.label))
             .collect()
     }
 }
@@ -604,27 +606,27 @@ impl Item {
 mod tests {
     use super::*;
     use crate::types::Progress;
-    use crate::types::{FileSize, Intrinsic, Label, Origin, TagType};
+    use crate::types::{FileSize, Intrinsic, Origin, TagType, TypedTag};
 
     fn create_test_result() -> Item {
         let mut tags = Tags::new();
         tags.push(
-            Label::resolve(TagType::from("extension"), "rs".into()),
+            TypedTag::new(TagType::from("extension"), "rs"),
             Origin::Builtin,
         );
         tags.push(
-            Label::resolve(TagType::from("project"), "A".into()),
+            TypedTag::new(TagType::from("project"), "A"),
             Origin::User,
         );
         tags.push(
-            Label::resolve(TagType::from("project"), "B".into()),
+            TypedTag::new(TagType::from("project"), "B"),
             Origin::User,
         );
 
         Item {
             id: 1.into(),
             item_kind: ItemKind::File,
-            representative: vec![Label::Name("test.rs".to_string())],
+            representative: vec![TypedTag::new(SType::Name, "test.rs")],
             rank: 1,
             intrinsic: Intrinsic {
                 size: Some(FileSize(100)),
@@ -667,7 +669,7 @@ mod tests {
     fn test_iter_type_groups() {
         let res1 = create_test_result();
         let mut res2 = create_test_result();
-        res2.representative = vec![Label::Name("other.rs".to_string())];
+        res2.representative = vec![TypedTag::new(SType::Name, "other.rs")];
 
         let response = SearchResponse {
             results: vec![res1, res2],
@@ -718,7 +720,7 @@ mod tests {
         let mut item_with_value =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_with_value.tags.push(
-            Label::Other(TagType::Base(SType::Value), Bitical::Integer(42)),
+            TypedTag::new("value", Bitical::Integer(42)),
             Origin::Builtin,
         );
 
@@ -736,7 +738,7 @@ mod tests {
             item.tags
                 .entries
                 .iter()
-                .any(|e| e.label.tag_type() == TagType::Base(SType::Query))
+                .any(|e| e.typed_tag.tag_type() == TagType::Base(SType::Query))
         };
         assert!(has_query(&resp.results[0]), "value item should get query:");
         assert!(
@@ -750,15 +752,12 @@ mod tests {
     // ユーザー命名の item: タグ（User origin）を誤って本物と判定しないことを確認する。
     #[test]
     fn has_projection_results_detects_genuine_projection_via_builtin_origin() {
-        use crate::types::{Bitical, ItemKind, Origin, TagType};
+        use crate::types::{Bitical, ItemKind, Origin};
 
         let item_tag = |origin| {
             let mut it = Item::new_empty(ItemId::Stored(1), ItemKind::Note);
             it.tags.push(
-                Label::Other(
-                    TagType::from("item"),
-                    Bitical::String("foo.txt#User(1)".into()),
-                ),
+                TypedTag::new("item", Bitical::String("foo.txt#User(1)".to_string())),
                 origin,
             );
             it
@@ -790,10 +789,7 @@ mod tests {
         // 1. tags の中に origin タグがある場合
         let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
         item.tags.push(
-            Label::Other(
-                TagType::Base(SType::Origin),
-                Bitical::String("plugin".to_string()),
-            ),
+            TypedTag::new("origin", Bitical::String("plugin".to_string())),
             Origin::Plugin,
         );
         let labels = item.get_all_labels(&TagType::Base(SType::Origin));
@@ -817,7 +813,7 @@ mod tests {
         // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
         let mut item_fallback =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
-        item_fallback.representative = vec![Label::Name("size".to_string())];
+        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")];
         let labels =
             item_fallback.get_all_labels(&TagType::Base(SType::Origin));
         assert_eq!(labels.len(), 1);
@@ -826,15 +822,12 @@ mod tests {
 
     #[test]
     fn test_item_origin() {
-        use crate::types::{Bitical, Origin, SType, TagType};
+        use crate::types::{Bitical, Origin, SType};
 
         // 1. tags の中に origin タグがある場合
         let mut item = Item::new_empty(ItemId::Volatile(0), ItemKind::File);
         item.tags.push(
-            Label::Other(
-                TagType::Base(SType::Origin),
-                Bitical::String("plugin".to_string()),
-            ),
+            TypedTag::new("origin", Bitical::String("plugin".to_string())),
             Origin::Plugin,
         );
         assert_eq!(item.origin(), Origin::Plugin);
@@ -851,13 +844,13 @@ mod tests {
         // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
         let mut item_fallback =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
-        item_fallback.representative = vec![Label::Name("size".to_string())];
+        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")];
         assert_eq!(item_fallback.origin(), Origin::Builtin);
 
         let mut item_fallback_user =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_fallback_user.representative =
-            vec![Label::Name("my_custom_type".to_string())];
+            vec![TypedTag::new(SType::Name, "my_custom_type")];
         assert_eq!(item_fallback_user.origin(), Origin::User);
     }
 

@@ -179,6 +179,6 @@ fn test_system_item_metadata_integration() {
         .tags
         .entries
         .iter()
-        .any(|entry| entry.label.as_str().contains("test.rs"));
+        .any(|entry| entry.typed_tag.as_str().contains("test.rs"));
     assert!(has_test_rs, "rs label should contain reference to test.rs");
 }

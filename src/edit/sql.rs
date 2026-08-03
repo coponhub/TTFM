@@ -1,6 +1,6 @@
 use super::lens_schema;
 use crate::db::{Col, Tbl};
-use crate::types::{Bitical, Label};
+use crate::types::{Bitical, TypedTag};
 use crate::util::parquet_query;
 use sea_query::{
     CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
@@ -34,7 +34,7 @@ pub(crate) fn item_references_write(
 
 pub(crate) fn user_tags_write(
     path: &str,
-    inserts: Vec<(i64, Label)>,
+    inserts: Vec<(i64, TypedTag)>,
     deletes: Vec<UserTagDelete>,
     cascade_ids: &[i64],
 ) -> SelectStatement {
@@ -55,11 +55,11 @@ pub(crate) fn user_tags_write(
         q.and_where(row_match.not());
     }
 
-    for (item_id, label) in inserts {
-        let tag_type = label.tag_type().to_string();
+    for (item_id, tag) in inserts {
+        let tag_type = tag.tag_type().to_string();
         q.union(
             UnionType::All,
-            lens_schema::user_tags_row(item_id, tag_type, label.value())
+            lens_schema::user_tags_row(item_id, tag_type, tag.value())
                 .select(),
         );
     }

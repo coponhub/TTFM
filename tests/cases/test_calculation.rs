@@ -336,8 +336,8 @@ define_cases! {
                 .unwrap_or_else(|| panic!("ラベル値4が積集合に現れるべき: {:?}", reprs));
             // size8.txt と size2.txt の両方がそのグループに含まれるべき
             let item_strs: Vec<String> = item_with_4.tags.entries.iter()
-                .filter(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
-                .map(|e| e.label.as_str())
+                .filter(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("item"))
+                .map(|e| e.typed_tag.as_str())
                 .collect();
             assert!(
                 item_strs.iter().any(|s| s.contains("size8")),

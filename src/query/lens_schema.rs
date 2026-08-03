@@ -16,15 +16,57 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::db::Col;
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    BasicOp, Candidate, ComparisonNode, ComparisonOp, Operand, QueryNode,
+};
 use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
-use crate::types::{Bitical, Label, SType, TagType};
+use crate::types::{
+    Bitical, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
+};
 use duckdb::types::Value;
 use indexmap::IndexMap;
 use sea_query::{BinOper, Condition, Expr, ExprTrait, Func, SimpleExpr};
 use std::sync::Arc;
+
+pub(crate) fn origin_matches(id: &ItemId, target: Origin) -> bool {
+    match id {
+        ItemId::Stored(val) => Origin::within(*val) == target,
+        ItemId::Settling(org, _) => *org == target,
+        ItemId::Volatile(_) => target == Origin::User,
+    }
+}
+
+pub(crate) fn definition_candidates(
+    entries: &[(TagType, Rank, ItemId)],
+    kind: ItemKind,
+    origins: &[Origin],
+) -> Vec<Candidate> {
+    // registry は型のソースなので、tag 定義（`tag:"X"`）の候補にはならない。
+    // Stored 定義行と使用中ペアだけが tag 定義のソース。
+    if kind != ItemKind::Type {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|(_, _, id)| {
+            origins.is_empty()
+                || origins.iter().any(|target| origin_matches(id, *target))
+        })
+        .map(|(t, rank, id)| Candidate {
+            name: t.as_str().to_string(),
+            rank: *rank,
+            id: *id,
+        })
+        .collect()
+}
+
+pub(crate) fn definition_reserved_names(
+    entries: &[(TagType, Rank, ItemId)],
+) -> Vec<String> {
+    entries.iter().map(|(t, _, _)| t.as_str().to_string()).collect()
+}
 
 /// タグの物理的な格納場所
 #[derive(Debug, PartialEq, Clone)]
@@ -94,36 +136,95 @@ pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
     schema_pieces::type_filter(tag_op, tag_type)
 }
 
+fn coerce_plain_bitical(label: &Label, logical_type: LogicalType) -> Label {
+    let Some(resolved) = label.as_formatted_bitical() else {
+        return label.clone();
+    };
+    let matches_type = matches!(
+        (logical_type, &resolved),
+        (LogicalType::Any, _)
+            | (LogicalType::Boolean, Bitical::Boolean(_))
+            | (LogicalType::Integer, Bitical::Integer(_))
+            | (LogicalType::Float, Bitical::Integer(_) | Bitical::Double(_))
+    );
+    if matches_type {
+        Label::other(resolved)
+    } else {
+        label.clone()
+    }
+}
+
+fn coerce_comparison_literals(
+    mut node: ComparisonNode,
+    logical_type: LogicalType,
+) -> ComparisonNode {
+    let coerce_operand = |op: Operand| match op {
+        Operand::Literal(label) => {
+            Operand::Literal(coerce_plain_bitical(&label, logical_type))
+        }
+        other => other,
+    };
+    node.first = coerce_operand(node.first);
+    node.rest = node
+        .rest
+        .into_iter()
+        .map(|(op, operand)| (op, coerce_operand(operand)))
+        .collect();
+    node
+}
+
+fn is_order_op(op: BinOper) -> bool {
+    matches!(
+        op,
+        BinOper::GreaterThan
+            | BinOper::GreaterThanOrEqual
+            | BinOper::SmallerThan
+            | BinOper::SmallerThanOrEqual
+    )
+}
+
 impl Bitical {
-    /// 値の物理型に応じた列一致条件を返す。GLOB/汎用値パース等の型別ルールは
-    /// `build_int_condition`/`build_str_condition` に委譲する。
     pub(crate) fn to_condition(
         &self,
         col: Col,
         op: BinOper,
-        bitical_type: crate::db::BiticalType,
         is_eav_col: bool,
     ) -> Condition {
         match self {
-            Bitical::Integer(i) => build_int_condition(col, op, *i, is_eav_col),
-            Bitical::Boolean(b) => build_str_condition(
-                col,
-                op,
-                &b.to_string(),
-                bitical_type,
-                is_eav_col,
-            ),
-            Bitical::Double(d) => schema_pieces::build_double_condition(op, *d),
-            Bitical::String(s) => {
-                build_str_condition(col, op, s, bitical_type, is_eav_col)
+            Bitical::Integer(i) => {
+                let target = if is_eav_col { Col::LabelInt } else { col };
+                let mut cond =
+                    Condition::any().add(schema_pieces::col_cmp_i64(target, op, *i));
+                if is_eav_col && is_order_op(op) {
+                    cond = cond.add(schema_pieces::col_cmp_f64(
+                        Col::LabelDouble,
+                        op,
+                        *i as f64,
+                    ));
+                }
+                cond
             }
-            Bitical::Uuid(u) => build_str_condition(
-                col,
-                op,
-                &u.to_string(),
-                bitical_type,
-                is_eav_col,
-            ),
+            Bitical::Double(d) => {
+                let target = if is_eav_col { Col::LabelDouble } else { col };
+                let mut cond =
+                    Condition::any().add(schema_pieces::col_cmp_f64(target, op, *d));
+                if is_eav_col && is_order_op(op) {
+                    cond = cond.add(schema_pieces::col_cmp_f64(Col::LabelInt, op, *d));
+                }
+                cond
+            }
+            Bitical::Boolean(b) => {
+                let target = if is_eav_col { Col::LabelBool } else { col };
+                Condition::any().add(schema_pieces::col_cmp_bool(target, op, *b))
+            }
+            Bitical::String(s) => {
+                let target = if is_eav_col { Col::LabelStr } else { col };
+                build_str_condition(target, op, s)
+            }
+            Bitical::Uuid(u) => {
+                let target = if is_eav_col { Col::LabelStr } else { col };
+                build_str_condition(target, op, &u.to_string())
+            }
         }
     }
 }
@@ -145,7 +246,7 @@ fn build_column_condition(
         return match bin_op {
             BinOper::Equal => Condition::all(),
             BinOper::NotEqual => Condition::any(),
-            _ => label.value().to_condition(col, bin_op, bitical_type, is_eav_col),
+            _ => label.value().to_condition(col, bin_op, is_eav_col),
         };
     }
 
@@ -153,9 +254,7 @@ fn build_column_condition(
         return cond;
     }
 
-    label
-        .value()
-        .to_condition(col, bin_op, bitical_type, is_eav_col)
+    label.value().to_condition(col, bin_op, is_eav_col)
 }
 
 /// Double 型の値に対する小数フィールド glob（`*.5` / `2.*` 等）を値ベースの
@@ -236,65 +335,17 @@ fn translate_double_decimal_glob(pattern: &str, col: Col, op: BinOper) -> Option
     }
 }
 
-pub(crate) fn build_int_condition(
-    col: Col,
-    op: BinOper,
-    val: i64,
-    is_generic: bool,
-) -> Condition {
-    let mut cond = Condition::any();
-    if col != Col::LabelStr {
-        cond = cond.add(schema_pieces::col_cmp_i64(col, op, val));
-    }
-    if is_generic {
-        cond = cond.add(schema_pieces::col_cmp_f64(
-            Col::LabelDouble,
-            op,
-            val as f64,
-        ));
-        if col == Col::LabelStr {
-            cond = cond.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, val));
-        }
-    }
-    cond
-}
-
-pub(crate) fn build_str_condition(
-    col: Col,
-    op: BinOper,
-    val: &str,
-    bitical_type: crate::db::BiticalType,
-    is_generic: bool,
-) -> Condition {
-    let string_cond = check_string_match(col, op, val, bitical_type)
-        .map(|expr| Condition::any().add(expr));
-    let generic_conds = if is_generic {
-        try_parse_generic_value_as_cond(col, op, val)
-    } else {
-        None
-    };
-
-    [string_cond, generic_conds]
-        .into_iter()
-        .flatten()
-        .fold(Condition::any(), |acc, cond| acc.add(cond))
+pub(crate) fn build_str_condition(col: Col, op: BinOper, val: &str) -> Condition {
+    check_string_match(col, op, val)
+        .map(|expr| Condition::any().add(expr))
+        .unwrap_or_else(Condition::any)
 }
 
 pub(crate) fn check_string_match(
     col: Col,
     op: BinOper,
     val: &str,
-    bitical_type: crate::db::BiticalType,
 ) -> Option<SimpleExpr> {
-    let is_numeric_field = matches!(
-        bitical_type,
-        crate::db::BiticalType::Integer | crate::db::BiticalType::Double
-    );
-
-    if is_numeric_field {
-        return None;
-    }
-
     let has_glob = crate::util::is_glob_pattern(val);
     if !has_glob {
         return Some(schema_pieces::col_cmp_str(col, op, val));
@@ -308,51 +359,6 @@ pub(crate) fn check_string_match(
     } else {
         glob
     })
-}
-
-pub(crate) fn try_parse_generic_value_as_cond(
-    col: Col,
-    op: BinOper,
-    val: &str,
-) -> Option<Condition> {
-    val.parse::<i64>()
-        .ok()
-        .map(|i| {
-            let mut c = Condition::any()
-                .add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i))
-                .add(schema_pieces::col_cmp_f64(
-                    Col::LabelDouble,
-                    op,
-                    i as f64,
-                ));
-            if col == Col::LabelStr {
-                c = c.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i));
-            }
-            c
-        })
-        .or_else(|| {
-            val.parse::<f64>().ok().map(|f| {
-                Condition::any().add(schema_pieces::col_cmp_f64(
-                    Col::LabelDouble,
-                    op,
-                    f,
-                ))
-            })
-        })
-        .or_else(|| {
-            match val {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            }
-            .map(|b| {
-                Condition::any().add(schema_pieces::col_cmp_bool(
-                    Col::LabelBool,
-                    op,
-                    b,
-                ))
-            })
-        })
 }
 
 /// タグのメタデータ記述
@@ -384,19 +390,23 @@ impl LogicalSchema for Lens {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
                 let q = func.query();
-                // normalize_label を適用してから expand する
-                let normalized = q.normalize_label(label)?;
-                let tag = crate::types::TypedTag::retag(
-                    tag_type.clone(),
-                    &normalized,
-                );
-                return q.expand(tag_type, &normalized, &tag, self);
+                let label = coerce_plain_bitical(label, q.logical_type());
+                let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
+                return q.expand(tag_type, &label, &tag, self);
             }
         }
-        Ok(QueryNode::TypedTag(crate::types::TypedTag::retag(
-            tag_type.clone(),
-            label,
-        )))
+        let label = coerce_plain_bitical(label, self.get_logical_type(tag_type));
+        let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
+        let predicate = QueryNode::Comparison(ComparisonNode {
+            first: Operand::TypeRef(tag_type.clone()),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Eq),
+                Operand::Literal(label),
+            )],
+        });
+        Ok(QueryNode::TypedTag(
+            tag.with_node(crate::query::Node::Expanded(Box::new(predicate))),
+        ))
     }
 
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode {
@@ -408,26 +418,6 @@ impl LogicalSchema for Lens {
         QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
     }
 
-    /// この文脈（推論文脈）は型を決め打ちしないので、ある TagFn が読めなくても次へ譲る。
-    fn normalize_label_any(&self, label: &Label) -> Label {
-        if matches!(label, Label::Literal(..)) {
-            return label.clone();
-        }
-        // TagRegistry と同様に登録の逆順で走査する
-        for desc in self.registry.values().rev() {
-            if let Some(func) = &desc.logical_function {
-                let Ok(normalized) = func.query().normalize_label(label)
-                else {
-                    continue;
-                };
-                if normalized != *label {
-                    return normalized;
-                }
-            }
-        }
-        label.clone()
-    }
-
     fn expand_comparison(
         &self,
         node: ComparisonNode,
@@ -437,10 +427,17 @@ impl LogicalSchema for Lens {
             return Ok(QueryNode::Comparison(node));
         };
         let Some(desc) = self.look_up(&tag_type) else {
-            return Ok(QueryNode::Comparison(node));
+            let logical_type = self.get_logical_type(&tag_type);
+            return Ok(QueryNode::Comparison(coerce_comparison_literals(
+                node,
+                logical_type,
+            )));
         };
         let Some(func) = &desc.logical_function else {
-            return Ok(QueryNode::Comparison(node));
+            return Ok(QueryNode::Comparison(coerce_comparison_literals(
+                node,
+                desc.logical_type,
+            )));
         };
         func.query().expand_comparison(node)
     }
@@ -461,6 +458,14 @@ impl LogicalSchema for Lens {
                 })
             })
             .collect()
+    }
+
+    fn item_kind(&self, tag_type: &TagType) -> Option<ItemKind> {
+        self.look_up(tag_type)?
+            .logical_function
+            .as_ref()?
+            .query()
+            .item_kind()
     }
 }
 
@@ -683,13 +688,17 @@ impl Lens {
             .and_then(from_storage)
             .or_else(from_fallback)?;
 
-        Some(Label::resolve(tag_type.clone(), value))
+        Some(Label::other(value))
     }
 
-    pub fn resolve_label(&self, tag_type: &TagType, value: &Value) -> Label {
+    pub fn resolve_label(
+        &self,
+        tag_type: &TagType,
+        value: &Value,
+    ) -> crate::types::TypedTag {
         let value = Bitical::from_scalar_db_value(value)
             .unwrap_or_else(|| Bitical::String(String::new()));
-        Label::resolve(tag_type.clone(), value)
+        crate::types::TypedTag::new(tag_type.clone(), value)
     }
 }
 
@@ -839,10 +848,8 @@ mod tests {
     }
 
     fn double_glob_sql_with_op(pattern: &str, op: crate::query::ast::BasicOp) -> String {
-        use crate::types::{Bitical, Label, TagType};
-        let label = Label::Other(
-            TagType::Custom("score".to_string()),
-            Bitical::String(pattern.to_string()),
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String(pattern.to_string()),
         );
         cond_where_sql(build_column_condition(
             Col::LabelDouble,
@@ -965,10 +972,8 @@ mod tests {
     /// 全一致 glob（`*`）は数値カラム型でも値条件を出さない（そのタグを持つ全アイテム）。
     #[test]
     fn test_build_column_condition_full_match_glob_eq_drops_value_condition() {
-        use crate::types::{Bitical, Label, TagType};
-        let label = Label::Other(
-            TagType::Base(SType::Rank),
-            Bitical::String("*".to_string()),
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String("*".to_string()),
         );
         let cond = build_column_condition(
             Col::LabelInt,
@@ -987,10 +992,8 @@ mod tests {
     /// 全一致 glob（`*`）の不一致は FALSE（すべての値が一致するため）。
     #[test]
     fn test_build_column_condition_full_match_glob_ne_becomes_false() {
-        use crate::types::{Bitical, Label, TagType};
-        let label = Label::Other(
-            TagType::Base(SType::Rank),
-            Bitical::String("*".to_string()),
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String("*".to_string()),
         );
         let cond = build_column_condition(
             Col::LabelInt,
@@ -1011,13 +1014,8 @@ mod tests {
     /// 不一致が「一致」に反転していた。
     #[test]
     fn test_check_string_match_ne_with_glob_becomes_negation() {
-        let expr = check_string_match(
-            Col::LabelStr,
-            BinOper::NotEqual,
-            "*.rs",
-            crate::db::BiticalType::String,
-        )
-        .expect("文字列カラムなので式が生成される");
+        let expr = check_string_match(Col::LabelStr, BinOper::NotEqual, "*.rs")
+            .expect("文字列カラムなので式が生成される");
         assert_eq!(
             expr_sql(expr),
             r#"SELECT NOT ("label_str" GLOB '*.rs')"#,
@@ -1028,26 +1026,16 @@ mod tests {
     /// 一致（`:=`）は従来どおり GLOB のまま。
     #[test]
     fn test_check_string_match_eq_with_glob_stays_glob() {
-        let expr = check_string_match(
-            Col::LabelStr,
-            BinOper::Equal,
-            "*.rs",
-            crate::db::BiticalType::String,
-        )
-        .expect("文字列カラムなので式が生成される");
+        let expr = check_string_match(Col::LabelStr, BinOper::Equal, "*.rs")
+            .expect("文字列カラムなので式が生成される");
         assert_eq!(expr_sql(expr), r#"SELECT "label_str" GLOB '*.rs'"#);
     }
 
     /// glob 文字を含まない不一致は素の `<>` のまま（既存の挙動）。
     #[test]
     fn test_check_string_match_ne_without_glob_stays_ne() {
-        let expr = check_string_match(
-            Col::LabelStr,
-            BinOper::NotEqual,
-            "foo",
-            crate::db::BiticalType::String,
-        )
-        .expect("文字列カラムなので式が生成される");
+        let expr = check_string_match(Col::LabelStr, BinOper::NotEqual, "foo")
+            .expect("文字列カラムなので式が生成される");
         assert_eq!(expr_sql(expr), r#"SELECT "label_str" <> 'foo'"#);
     }
 
@@ -1076,22 +1064,19 @@ mod tests {
             ArithmeticOp, BasicOp, CalculationNode, ComparisonNode,
             ComparisonOp,
         };
-        use crate::types::{DateTime, Label};
-        use chrono::NaiveDate;
+        use crate::types::{Label, TypedTag};
 
         let lens = Lens::base_standard();
         let calc = Operand::Calculation(Box::new(CalculationNode {
             left: Operand::TypeRef(TagType::Base(SType::Mtime)),
             op: ArithmeticOp::Add,
-            right: Operand::Literal(Label::Size(3600)),
+            right: Operand::Literal(TypedTag::new(SType::Size, 3600).label),
         }));
         let node = ComparisonNode {
             first: calc.clone(),
             rest: vec![(
                 ComparisonOp::Label(BasicOp::Gt),
-                Operand::Literal(Label::Date(DateTime::Date(
-                    NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
-                ))),
+                Operand::Literal(Label::from("2026-02-01")),
             )],
         };
 
@@ -1117,8 +1102,7 @@ mod tests {
             AggregationNode, ArithmeticAggOp, BasicOp, ComparisonNode,
             ComparisonOp, NestNode,
         };
-        use crate::types::{DateTime, Label};
-        use chrono::NaiveDate;
+        use crate::types::Label;
 
         let lens = Lens::base_standard();
         let max_mtime = AggregationNode::Arithmetic {
@@ -1137,9 +1121,7 @@ mod tests {
             first: nest.clone(),
             rest: vec![(
                 ComparisonOp::Label(BasicOp::Gt),
-                Operand::Literal(Label::Date(DateTime::Date(
-                    NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
-                ))),
+                Operand::Literal(Label::from("2026-02-01")),
             )],
         };
 
@@ -1342,28 +1324,9 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_label_any_item_id_not_shadowed_by_extension_catch_all() {
-        let lens = Lens::base_standard();
-        let label = Label::from("User(0)");
-        let normalized = lens.normalize_label_any(&label);
-        assert_eq!(
-            normalized,
-            Label::ItemId(crate::db::identifier::parse("User(0)").unwrap()),
-            "ItemId's normalize_label must run before ExtensionFn's catch-all claims \
-             the same literal, got: {:?}",
-            normalized
-        );
-    }
-
-    #[test]
     fn test_check_string_match_caret_is_literal_not_prefix_glob() {
-        let expr = check_string_match(
-            Col::LabelStr,
-            BinOper::Equal,
-            "^foo",
-            crate::db::BiticalType::String,
-        )
-        .unwrap();
+        let expr = check_string_match(Col::LabelStr, BinOper::Equal, "^foo")
+            .unwrap();
         let sql = sea_query::Query::select()
             .expr(expr)
             .to_string(sea_query::PostgresQueryBuilder);

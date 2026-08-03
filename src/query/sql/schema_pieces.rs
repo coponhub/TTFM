@@ -16,7 +16,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::db::{Col, Pronoun::Representative, Src};
-use sea_query::{BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
+use sea_query::{BinOper, Expr, Query, SelectStatement, SimpleExpr};
 
 // ── to_label_select 用 ────────────────────────────────────────────────────
 
@@ -82,10 +82,6 @@ pub(crate) fn type_filter(op: BinOper, tag_type: &str) -> SimpleExpr {
 }
 
 /// 浮動小数点値条件の `Condition` を生成。
-pub(crate) fn build_double_condition(op: BinOper, val: f64) -> Condition {
-    Condition::any().add(col_cmp_f64(Col::LabelDouble, op, val))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

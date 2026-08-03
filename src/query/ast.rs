@@ -16,8 +16,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::types::{
-    DateTimeRange, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
-    TypedTag,
+    DateTimeRange, ItemId, Label, Origin, Rank, SType, TagType, TypedTag,
 };
 use std::collections::HashSet;
 
@@ -130,17 +129,6 @@ pub struct Candidate {
     pub id: ItemId,
 }
 
-/// 定義アイテム参照 (`tag:"X"` / `type:"X"`) のペイロード。
-#[derive(Debug, PartialEq, Clone)]
-pub struct DefinitionRef {
-    pub kind: ItemKind,
-    pub value: Label,
-    pub candidates: Vec<Candidate>,
-    pub origins: Vec<Origin>,
-    pub reserved: Vec<String>,
-    pub recorded: bool,
-}
-
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
 /// 論理演算（AND, OR, NOT）や検索語（単語、型付きタグ）を保持します。
 #[derive(Debug, PartialEq, Clone)]
@@ -163,8 +151,8 @@ pub enum QueryNode {
     Aggregation(AggregationNode),
     /// ネスト演算 (`Projection &: Projection` 等)
     Nest(NestNode),
-    /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
-    DefinitionRef(DefinitionRef),
+    /// ある id 区画に属する型定義アイテムの参照 (`origin:system`)。
+    OriginRef(Origin),
     /// 日付の絞り込み（区間 or 周期的なスロット制約）。
     /// `first` は比較対象（TypeRef=直接タグ / Aggregation=集約 / Calculation=算術ラップ /
     /// Query(Nest)=Nest 内集約比較）。
@@ -217,7 +205,7 @@ impl QueryNode {
                 }
             }
             QueryNode::TypedTag(tt) => {
-                types.insert(tt.label.tag_type().as_str().to_string());
+                types.insert(tt.tag_type().as_str().to_string());
             }
             QueryNode::Projection(op) => {
                 op.collect_types(types);
@@ -229,8 +217,8 @@ impl QueryNode {
                 nest.left.collect_types(types);
                 nest.right.collect_types(types);
             }
-            QueryNode::DefinitionRef(def) => {
-                types.insert(def.value.tag_type().as_str().to_string());
+            QueryNode::OriginRef(_) => {
+                types.insert(SType::Type.as_str().to_string());
             }
             QueryNode::DateTimeRange { first, .. } => {
                 first.collect_types(types);

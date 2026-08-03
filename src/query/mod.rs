@@ -35,6 +35,13 @@ pub use lens_resolver::*;
 pub use parser::*;
 pub use sql::*;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Query(Box<QueryNode>),
+    Expanded(Box<QueryNode>),
+    Resolved(Box<ResolvedNode>),
+}
+
 impl QueryNode {
     pub fn to_tag_condition(&self) -> sea_query::Condition {
         sql::to_tag_condition(self)
@@ -50,8 +57,8 @@ mod tests {
     fn test_query_types() {
         let node = parse_nowarn("extension:rs").expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs");
         } else {
             panic!("Should be a TypedTag");
         }
@@ -62,8 +69,8 @@ mod tests {
         let q = "extension:rs";
         let node = parse_nowarn(q).expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs");
         } else {
             panic!("Expected TypedTag");
         }
@@ -122,8 +129,8 @@ mod tests {
         // Without spaces: parsed as TypedTag (label contains &)
         let q1 = parse_nowarn("type:file&project:ttfm").unwrap();
         if let QueryNode::TypedTag(tt) = q1 {
-            assert_eq!(tt.label.tag_type().as_str(), "type");
-            assert_eq!(tt.label.as_str(), "file&project:ttfm");
+            assert_eq!(tt.tag_type().as_str(), "type");
+            assert_eq!(tt.as_str(), "file&project:ttfm");
         } else {
             panic!("Expected TypedTag, got {:?}", q1);
         }
@@ -131,8 +138,8 @@ mod tests {
         // Without spaces: parsed as TypedTag (label contains |)
         let q2 = parse_nowarn("extension:rs|txt").unwrap();
         if let QueryNode::TypedTag(tt) = q2 {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs|txt");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs|txt");
         } else {
             panic!("Expected TypedTag, got {:?}", q2);
         }

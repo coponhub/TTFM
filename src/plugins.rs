@@ -25,7 +25,7 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::db::{BiticalType, TargetTable};
-use crate::query::ast::{Operand, QueryNode};
+use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode};
 use crate::tag::{
     Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query,
     ScanRole, TagFunction,
@@ -356,7 +356,12 @@ impl Query for WasmPluginAdapter {
         crate::query::lens_schema::sql_to_logical(self.bitical_type)
     }
 
-    fn normalize_label(&self, label: &Label) -> Result<Label> {
+    fn interpret(
+        &self,
+        first: &Operand,
+        op: ComparisonOp,
+        label: &Label,
+    ) -> Result<QueryNode> {
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
             let mut cache = cache.borrow_mut();
@@ -379,10 +384,14 @@ impl Query for WasmPluginAdapter {
             )?;
             Ok(r)
         });
-        match result {
+        let normalized = match result {
             Ok(Some(s)) => Label::from(s),
             _ => label.clone(),
-        }.to_ok()
+        };
+        QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(op, Operand::Literal(normalized))],
+        }).to_ok()
     }
 
     fn expand(
@@ -417,7 +426,16 @@ impl Query for WasmPluginAdapter {
         });
         match result {
             Ok(Some(ttql)) => crate::tag::ttql_parse(&ttql),
-            _ => QueryNode::TypedTag(tag.clone()),
+            _ => {
+                let predicate = self.interpret(
+                    &Operand::TypeRef(tagtype.clone()),
+                    ComparisonOp::Label(BasicOp::Eq),
+                    label,
+                )?;
+                QueryNode::TypedTag(tag.clone().with_node(
+                    crate::query::Node::Expanded(Box::new(predicate)),
+                ))
+            }
         }.to_ok()
     }
 

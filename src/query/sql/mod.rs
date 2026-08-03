@@ -18,7 +18,7 @@
 mod agg_pieces;
 mod boolean;
 mod calc_pieces;
-pub(crate) mod definition;
+pub mod definition;
 mod low_dispatcher;
 mod nest;
 mod order;
@@ -649,16 +649,42 @@ mod tests {
     }
 
     #[test]
+    fn test_build_resolved_literal_expr_reads_formatted_byte_size_point() {
+        use crate::query::format::{ByteSizeRange, Formatted};
+        use crate::types::{Bitical, LabelNode};
+
+        // 生の値は書き換えず "1MB" のまま、解釈は Formatted 側に持たせる
+        // （build_label が本番でやるのと同じ形）。
+        let mut label = Label::other(Bitical::String("1MB".to_string()));
+        label.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
+            ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 },
+        )));
+
+        let expr = build_resolved_literal_expr(&label);
+        let sql_str = sea_query::Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql_str.contains("1048576"),
+            "Should read Formatted byte size point, got: {}",
+            sql_str
+        );
+        assert!(
+            !sql_str.contains("1MB"),
+            "Should not fall back to raw string '1MB': {}",
+            sql_str
+        );
+    }
+
+    #[test]
     fn test_build_resolved_operand_expr_for_arithmetic_boolean_cast() {
         use crate::db::BiticalType;
         use crate::query::lens_resolver::ResolvedOperand;
         use crate::types::TagType;
 
         // 1. Boolean Literal -> CAST(... AS BIGINT)
-        let lit_bool = ResolvedOperand::Literal(crate::types::Label::resolve(
-            TagType::from("is_dir"),
-            crate::types::Bitical::Boolean(true),
-        ));
+        let lit_bool = ResolvedOperand::Literal(crate::types::Label::other(crate::types::Bitical::Boolean(true)));
         let expr_lit = build_resolved_operand_expr_for_arithmetic(
             &lit_bool,
             &AggregationContext::new(),

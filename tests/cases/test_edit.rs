@@ -373,8 +373,8 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
         .results
         .iter()
         .flat_map(|g| g.tags.entries.iter())
-        .filter(|e| e.label.tag_type() == TagType::from("item"))
-        .map(|e| e.label.value().as_display_name())
+        .filter(|e| e.typed_tag.tag_type() == TagType::from("item"))
+        .map(|e| e.typed_tag.value().as_display_name())
         .collect();
     assert!(
         item_names.iter().any(|v| v.starts_with("project:A#")),
@@ -432,7 +432,8 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
     )?;
     assert_eq!(r.results.len(), 1);
     let name = r.results[0].representative.iter().find_map(|l| {
-        if let ttfm::types::Label::Name(s) = l {
+        if l.tag_type() == ttfm::types::TagType::Base(ttfm::types::SType::Name) {
+            let s = l.as_str();
             Some(s.clone())
         } else {
             None

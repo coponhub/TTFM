@@ -433,7 +433,7 @@ fn print_results(
         r.id.is_volatile()
             && !r.representative.is_empty()
             && r.tags.entries.iter().any(|e| {
-                e.label.tag_type().as_str() == "value"
+                e.typed_tag.tag_type().as_str() == "value"
                     && matches!(e.origin, ttfm::types::Origin::Builtin)
             })
     }) {
@@ -612,8 +612,8 @@ fn print_compact_projections(
             .tags
             .entries
             .iter()
-            .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
-            .map(|e| e.label.as_str());
+            .find(|e| e.typed_tag.tag_type() == ttfm::TagType::from("nvalue"))
+            .map(|e| e.typed_tag.as_str());
 
         let repr_display = format_representative(registry, label_item);
 
@@ -643,7 +643,7 @@ fn print_compact_projections(
                 all_items_str.push_str(", ");
             }
             // タグは "item:name#id" 形式
-            all_items_str.push_str(&tag_entry.label.as_str());
+            all_items_str.push_str(&tag_entry.typed_tag.as_str());
             if all_items_str.chars().count() > term_width + 10 {
                 break;
             }
@@ -699,8 +699,8 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
         .tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
-        .map(|e| e.label.as_str().to_string());
+        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.typed_tag.as_str().to_string());
 
     let repr = format_representative(registry, res);
     if let Some(nv) = nvalue_str {
@@ -714,7 +714,9 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use ttfm::types::{Bitical, ItemId, ItemKind, Label, Origin, TagType};
+    use ttfm::types::{
+        Bitical, ItemId, ItemKind, Origin, SType, TypedTag,
+    };
     use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
@@ -736,9 +738,9 @@ mod tests {
         let mut res_with_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_with_nvalue.representative =
-            vec![Label::Name("test_label".to_string())];
+            vec![TypedTag::new(SType::Name, "test_label")];
         res_with_nvalue.apply_tag(
-            Label::resolve(TagType::from("nvalue"), Bitical::Integer(9986)),
+            TypedTag::new("nvalue", Bitical::Integer(9986)),
             Origin::Builtin,
         );
 
@@ -752,7 +754,7 @@ mod tests {
         let mut res_without_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_without_nvalue.representative =
-            vec![Label::Name("test_label_no_nv".to_string())];
+            vec![TypedTag::new(SType::Name, "test_label_no_nv")];
 
         let registry = TagRegistry::with_standard();
         let output = format_short_result(&registry, &res_without_nvalue);

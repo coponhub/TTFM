@@ -174,10 +174,7 @@ impl ToSql for ItemKind {
 
 impl From<ItemKind> for Label {
     fn from(kind: ItemKind) -> Self {
-        Label::resolve(
-            TagType::from(crate::types::SType::ItemKind),
-            Bitical::String(kind.to_string()),
-        )
+        Label::other(Bitical::String(kind.to_string()))
     }
 }
 
@@ -264,6 +261,12 @@ impl Origin {
             .filter(|&l| l > lo)
             .min()
             .unwrap_or(i64::MAX)
+    }
+
+    /// 区画内オフセットから item_id を求める。区画外に出るオフセットは `None`。
+    pub fn id_at_offset(self, offset: i64) -> Option<i64> {
+        let id = self.block_lo().checked_add(offset)?;
+        (self.block_lo()..self.block_hi()).contains(&id).then_some(id)
     }
 
     /// origin の短縮ラベル。Builtin→"Sys"、User→"User"、File→"File"。
@@ -698,32 +701,53 @@ impl From<&str> for TagType {
     }
 }
 
-/// タグの「値」部分（例: "rs", "1024"）。
-/// 物理的な型だけでなく、ドメイン上の意味（SType）を宿しています。
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub enum Label {
-    // --- ドメイン特化型 (Standard Types) ---
-    Name(String),
-    Rank(i64),
-    Size(i64),
-    Mtime(i64),
-    Hash(String),
-    ItemKind(String),
-    Content(String), // write 専用。item_references.content 固定カラムへの書き込みを表現する。
-    Extension(String),
-    Path(String),
-    ItemId(i64),
-    FileId(Uuid),
-    IsDir(bool),
-    /// 日付リテラル（normalize_label で生成される中間表現）
-    Date(DateTime),
-    /// 引用符付き文字列リテラル（値を解釈しない）。
-    Literal(TagType, String),
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelNode {
+    DefaultLabelNode,
+    Formatted(crate::query::format::Formatted),
+}
 
-    // --- 汎用・未解決型 ---
-    /// 標準外のタグ、または明示的にドメインを特定しない汎用値。
-    /// タグの型（TagType）を自律的に保持します。
-    Other(TagType, Bitical),
+/// タグの「値」部分（例: "rs", "1024"）。
+/// 型は持たない。値がどの型のものかは、それを包む `TypedTag` が決める。
+#[derive(Debug, Clone)]
+pub struct Label {
+    pub(crate) value: Bitical,
+    node: LabelNode,
+}
+
+impl PartialEq for Label {
+    /// `node` は比較しない（決定 14）。
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for Label {}
+
+impl PartialOrd for Label {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Label {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+impl Label {
+    pub(crate) fn other(v: impl Into<Bitical>) -> Self {
+        Self { value: v.into(), node: LabelNode::DefaultLabelNode }
+    }
+
+    pub fn node(&self) -> &LabelNode {
+        &self.node
+    }
+
+    pub(crate) fn set_node(&mut self, node: LabelNode) {
+        self.node = node;
+    }
 }
 
 /// 日付リテラルの精度を保持する中間型。
@@ -845,8 +869,8 @@ impl DateTime {
 
 impl DateTime {
     /// 構造化日付（YYYY-MM-DD / YYYY-MM / M/D今年 / YYYY 単体）のみを解釈する。
-    /// 自然言語・相対日付は対象外。`normalize_label`（型固有の解釈。tag.rs）が
-    /// 自然言語まで拾わないよう、`FromStr::from_str` から独立して呼べる形にしている。
+    /// 自然言語・相対日付は対象外。`DateTimeRange::parse` がここを先に試してから
+    /// 自然言語（`FromStr::from_str`）へ落ちるよう、独立して呼べる形にしている。
     /// `None` = 構造化日付の形をしていない（呼び出し元は他の解釈を試してよい）、
     /// `Some(Err(()))` = 形はしているが値が不正（例: 存在しない日付）。
     pub(crate) fn parse_structured(s: &str) -> Option<Result<DateTime, ()>> {
@@ -1149,64 +1173,21 @@ impl std::fmt::Display for Label {
 impl Label {
     /// 文字列としての表現を取得します。
     pub fn as_str(&self) -> String {
-        match self {
-            Label::Name(s)
-            | Label::Hash(s)
-            | Label::ItemKind(s)
-            | Label::Content(s)
-            | Label::Extension(s)
-            | Label::Path(s) => s.clone(),
-            Label::Rank(i) | Label::Size(i) | Label::Mtime(i) => i.to_string(),
-            Label::ItemId(i) => {
-                let o = Origin::within(*i);
-                format!("{}({})", o.short(), i - o.block_lo())
-            }
-            Label::FileId(u) => u.to_string(),
-            Label::IsDir(b) => Bitical::Boolean(*b).as_display_name(),
-            Label::Date(dt) => dt.as_display_str(),
-            Label::Literal(_, s) => s.clone(),
-            Label::Other(_, val) => val.as_display_name(),
-        }
+        self.value.as_display_name()
     }
 
     /// 数値としての値を取得します（数値でない場合は 0）。
     pub fn as_i64(&self) -> i64 {
-        match self {
-            Label::Rank(i)
-            | Label::Size(i)
-            | Label::Mtime(i)
-            | Label::ItemId(i) => *i,
-            Label::Other(_, Bitical::Integer(i)) => *i,
-            Label::Other(_, Bitical::Double(d)) => *d as i64,
-            Label::Date(_) => 0,
+        match &self.value {
+            Bitical::Integer(i) => *i,
+            Bitical::Double(d) => *d as i64,
             _ => self.as_str().parse::<i64>().unwrap_or_default(),
         }
     }
 
-    /// この Label が代表するタグの型（TagType）を返します。
-    pub fn tag_type(&self) -> TagType {
-        match self {
-            Label::Name(_) => TagType::Base(SType::Name),
-            Label::Rank(_) => TagType::Base(SType::Rank),
-            Label::Size(_) => TagType::Base(SType::Size),
-            Label::Mtime(_) => TagType::Base(SType::Mtime),
-            Label::Hash(_) => TagType::Base(SType::Hash),
-            Label::ItemKind(_) => TagType::Base(SType::ItemKind),
-            Label::Content(_) => TagType::Base(SType::Content),
-            Label::Extension(_) => TagType::Base(SType::Extension),
-            Label::Path(_) => TagType::Base(SType::Path),
-            Label::ItemId(_) => TagType::Base(SType::ItemId),
-            Label::FileId(_) => TagType::Base(SType::FileId),
-            Label::IsDir(_) => TagType::Base(SType::IsDir),
-            Label::Date(_) => TagType::Base(SType::Mtime),
-            Label::Literal(tt, _) => tt.clone(),
-            Label::Other(tt, _) => tt.clone(),
-        }
-    }
-
-    /// データベースの行から指定されたオフセットのカラム（LabelStr, LabelInt 等）を Label として物理デコードし、
-    /// その後ドメインへの格上げ（Promotion）を試みます。
-    pub fn from_raw_row(tag: TagType, r: &duckdb::Row, offset: usize) -> Self {
+    /// データベースの行から指定されたオフセットのカラム（LabelStr, LabelInt 等）を
+    /// Label として物理デコードします。
+    pub fn from_raw_row(r: &duckdb::Row, offset: usize) -> Self {
         let value = if let Ok(i) = r.get::<_, i64>(offset + 1) {
             Bitical::Integer(i)
         } else if let Ok(s) = r.get::<_, String>(offset) {
@@ -1218,108 +1199,63 @@ impl Label {
         } else {
             Bitical::String(String::new())
         };
-        Self::resolve(tag, value)
+        Label::other(value)
     }
 
-    /// `Literal` は「値を解釈しない」意味論を運ぶ専用 variant のため、
-    /// この呼び出しを経由すると通常の `String` と区別できなくなる点に注意
-    /// （区別が必要な呼び出し元は `.value()` を経由せず `Label::Literal` に直接 match すること）。
     pub fn value(&self) -> Bitical {
-        match self {
-            Label::Name(s)
-            | Label::Hash(s)
-            | Label::ItemKind(s)
-            | Label::Content(s)
-            | Label::Extension(s)
-            | Label::Path(s) => Bitical::String(s.clone()),
-            Label::Rank(i)
-            | Label::Size(i)
-            | Label::Mtime(i)
-            | Label::ItemId(i) => Bitical::Integer(*i),
-            Label::FileId(u) => Bitical::String(u.to_string()),
-            Label::IsDir(b) => Bitical::Boolean(*b),
-            Label::Date(dt) => Bitical::Integer(dt.to_timestamp()),
-            Label::Literal(_, s) => Bitical::String(s.clone()),
-            Label::Other(_, val) => val.clone(),
-        }
-    }
-
-    /// 物理的な型とタグの種類から、適切なドメイン指向 Label を構築（Promote）します。
-    pub fn resolve(tag: TagType, value: Bitical) -> Self {
-        let TagType::Base(stype) = &tag else {
-            return Label::Other(tag, value);
-        };
-
-        match (stype, &value) {
-            (SType::Name, Bitical::String(s)) => Label::Name(s.clone()),
-            (SType::Rank, Bitical::Integer(i)) => Label::Rank(*i),
-            (SType::Size, Bitical::Integer(i)) => Label::Size(*i),
-            (SType::Mtime, Bitical::Integer(i)) => Label::Mtime(*i),
-            (SType::Hash, Bitical::String(s)) => Label::Hash(s.clone()),
-            (SType::ItemKind, Bitical::String(s)) => Label::ItemKind(s.clone()),
-            (SType::Extension, Bitical::String(s)) => {
-                Label::Extension(s.clone())
-            }
-            (SType::Path, Bitical::String(s)) => Label::Path(s.clone()),
-            (SType::ItemId, Bitical::Integer(i)) => Label::ItemId(*i),
-            (SType::IsDir, Bitical::Boolean(b)) => Label::IsDir(*b),
-            _ => Label::Other(tag, value),
-        }
-    }
-
-    /// TagType と値を変えつつ、元が `Literal` なら `Literal` のまま Label を作り直します。
-    /// `resolve` を経由すると Literal 性（値を解釈しない）が失われるため、
-    /// タグ再解決（正規化・DefinitionRef 化など）で値を保ったまま TagType だけ変える箇所で使います。
-    pub fn rekey(&self, tag: TagType, value: Bitical) -> Self {
-        match (self, value) {
-            (Label::Literal(..), Bitical::String(s)) => Label::Literal(tag, s),
-            (_, value) => Label::resolve(tag, value),
-        }
+        self.value.clone()
     }
 }
 
 impl From<String> for Label {
     fn from(s: String) -> Self {
-        Label::Other(TagType::Custom(String::new()), Bitical::String(s))
+        Label::other(Bitical::String(s))
     }
 }
 
 impl From<&str> for Label {
     fn from(s: &str) -> Self {
-        Label::Other(
-            TagType::Custom(String::new()),
-            Bitical::String(s.to_string()),
-        )
+        Label::other(Bitical::String(s.to_string()))
     }
 }
 
 impl From<bool> for Label {
     fn from(b: bool) -> Self {
-        Label::Other(TagType::Custom(String::new()), Bitical::Boolean(b))
+        Label::other(Bitical::Boolean(b))
     }
 }
 
 impl From<i64> for Label {
     fn from(i: i64) -> Self {
-        Label::Other(TagType::Custom(String::new()), Bitical::Integer(i))
+        Label::other(Bitical::Integer(i))
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedTagNode {
+    DefaultTypedTag,
+    Node(crate::query::Node),
+}
+
 /// 「キー:値」のペアを表す構造体。
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct TypedTag {
-    /// タグの値（型情報を内包）
+    /// タグの値
     pub label: Label,
+    tag_type: TagType,
+    node: TypedTagNode,
+}
+
+impl PartialEq for TypedTag {
+    /// `node` は比較しない（Node 込みの一致は名前付きメソッドで行う）。
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label && self.tag_type == other.tag_type
+    }
 }
 
 impl std::fmt::Display for TypedTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}:{}",
-            self.label.tag_type().as_str(),
-            self.label.as_str()
-        )
+        write!(f, "{}:{}", self.tag_type.as_str(), self.as_str())
     }
 }
 
@@ -1327,16 +1263,68 @@ impl TypedTag {
     /// 新しい `TypedTag` を作成します。
     pub fn new(tagtype: impl Into<TagType>, value: impl Into<Bitical>) -> Self {
         Self {
-            label: Label::resolve(tagtype.into(), value.into()),
+            label: Label::other(value.into()),
+            tag_type: tagtype.into(),
+            node: TypedTagNode::DefaultTypedTag,
         }
     }
 
-    /// 既存の `Label` の値を保ったまま TagType だけ変えて `TypedTag` を作ります。
-    /// `label` が `Literal` の場合、`Literal` 性（値を解釈しない）を保ちます
-    /// （`new` は `impl Into<Bitical>` 経由のため Literal 性を失います。`Label::rekey` 参照）。
+    /// 既存の `Label` を（解釈の段も含めて）そのまま持たせて TagType だけ変えます。
+    /// `new` は `impl Into<Bitical>` 経由なので素の値しか渡せず、段が落ちます。
     pub fn retag(tagtype: impl Into<TagType>, label: &Label) -> Self {
         Self {
-            label: label.rekey(tagtype.into(), label.value()),
+            label: label.clone(),
+            tag_type: tagtype.into(),
+            node: TypedTagNode::DefaultTypedTag,
+        }
+    }
+
+    pub(crate) fn with_node(mut self, node: crate::query::Node) -> Self {
+        self.node = TypedTagNode::Node(node);
+        self
+    }
+
+    pub fn tag_type(&self) -> TagType {
+        self.tag_type.clone()
+    }
+
+    pub fn value(&self) -> Bitical {
+        self.label.value()
+    }
+
+    pub fn is_default_node(&self) -> bool {
+        matches!(self.node, TypedTagNode::DefaultTypedTag)
+    }
+
+    /// 名札が指す既定形（`Type: := Label` の比較）。
+    pub(crate) fn default_form(&self) -> crate::query::ast::QueryNode {
+        crate::query::ast::QueryNode::Comparison(crate::query::ast::ComparisonNode {
+            first: crate::query::ast::Operand::TypeRef(self.tag_type.clone()),
+            rest: vec![(
+                crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Eq),
+                crate::query::ast::Operand::Literal(self.label.clone()),
+            )],
+        })
+    }
+
+    pub fn node(&self) -> std::borrow::Cow<'_, crate::query::Node> {
+        match &self.node {
+            TypedTagNode::DefaultTypedTag => std::borrow::Cow::Owned(
+                crate::query::Node::Query(Box::new(self.default_form())),
+            ),
+            TypedTagNode::Node(n) => std::borrow::Cow::Borrowed(n),
+        }
+    }
+
+    /// 表示用の文字列。item_id のようにローカル形式を持つ型はここで解釈する
+    /// （値そのものは `Label` が保持し、型に応じた読み方は `TypedTag` が決める）。
+    pub fn as_str(&self) -> String {
+        match (&self.tag_type, &self.label.value) {
+            (TagType::Base(SType::ItemId), Bitical::Integer(i)) => {
+                let o = Origin::within(*i);
+                format!("{}({})", o.short(), i - o.block_lo())
+            }
+            _ => self.label.as_str(),
         }
     }
 }
@@ -1376,7 +1364,7 @@ pub struct Tags {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct TagEntry {
-    pub label: Label,
+    pub typed_tag: TypedTag,
     pub origin: Origin,
 }
 
@@ -1388,24 +1376,22 @@ impl Tags {
     }
 
     /// 新しいタグを追加します。
-    pub fn push(&mut self, label: Label, origin: Origin) {
-        self.entries.push(TagEntry { label, origin });
+    pub fn push(&mut self, typed_tag: TypedTag, origin: Origin) {
+        self.entries.push(TagEntry { typed_tag, origin });
     }
 
     /// 「型:値」のペアを生成するイテレータを返します。
     pub fn iter_typed_tags(&self) -> impl Iterator<Item = TypedTag> + '_ {
-        self.entries.iter().map(|e| TypedTag {
-            label: e.label.clone(),
-        })
+        self.entries.iter().map(|e| e.typed_tag.clone())
     }
 
     /// 指定された型のタグ値をリストとして取得します（リニアスキャン）。
     pub fn get_values(&self, key: &TagType) -> Vec<TagValue> {
         self.entries
             .iter()
-            .filter(|e| e.label.tag_type() == *key)
+            .filter(|e| e.typed_tag.tag_type() == *key)
             .map(|e| TagValue {
-                label: e.label.clone(),
+                label: e.typed_tag.label.clone(),
                 origin: e.origin,
             })
             .collect()
@@ -1431,10 +1417,10 @@ impl IntoIterator for Tags {
         let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
             std::collections::HashMap::new();
         for entry in self.entries {
-            map.entry(entry.label.tag_type())
+            map.entry(entry.typed_tag.tag_type())
                 .or_default()
                 .push(TagValue {
-                    label: entry.label,
+                    label: entry.typed_tag.label,
                     origin: entry.origin,
                 });
         }
@@ -1451,10 +1437,10 @@ impl<'a> IntoIterator for &'a Tags {
         let mut map: std::collections::HashMap<TagType, Vec<TagValue>> =
             std::collections::HashMap::new();
         for entry in &self.entries {
-            map.entry(entry.label.tag_type())
+            map.entry(entry.typed_tag.tag_type())
                 .or_default()
                 .push(TagValue {
-                    label: entry.label.clone(),
+                    label: entry.typed_tag.label.clone(),
                     origin: entry.origin,
                 });
         }
@@ -1745,12 +1731,62 @@ mod tests_types {
 
     #[test]
     fn test_label_derives_ord_from_bitical() {
-        // Label::Other(_, Bitical) の Ord は Bitical::cmp に委譲される
-        let tt = TagType::Custom("x".to_string());
+        // Label::other(Bitical) の Ord は Bitical::cmp に委譲される
         assert!(
-            Label::Other(tt.clone(), Bitical::Integer(1))
-                < Label::Other(tt, Bitical::Integer(2))
+            Label::other(Bitical::Integer(1))
+                < Label::other(Bitical::Integer(2))
         );
+    }
+
+    #[test]
+    fn typed_tag_is_default_node_true_for_fresh_tag() {
+        let tt = TypedTag::new(SType::Size, 1024i64);
+        assert!(tt.is_default_node());
+    }
+
+    #[test]
+    fn typed_tag_node_builds_default_comparison_form_for_name_tag() {
+        let tt = TypedTag::new(SType::Size, 1024i64);
+        let expected = crate::query::Node::Query(Box::new(
+            crate::query::ast::QueryNode::Comparison(crate::query::ast::ComparisonNode {
+                first: crate::query::ast::Operand::TypeRef(tt.tag_type()),
+                rest: vec![(
+                    crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Eq),
+                    crate::query::ast::Operand::Literal(tt.label.clone()),
+                )],
+            }),
+        ));
+        assert_eq!(tt.node().as_ref(), &expected);
+    }
+
+    #[test]
+    fn typed_tag_node_returns_real_node_unchanged_when_not_default() {
+        let mut tt = TypedTag::new(SType::Size, 1024i64);
+        let real = crate::query::Node::Query(Box::new(
+            crate::query::ast::QueryNode::ColumnMatch {
+                tag: SType::Size,
+                label: tt.label.clone(),
+            },
+        ));
+        tt.node = TypedTagNode::Node(real.clone());
+        assert!(!tt.is_default_node());
+        assert_eq!(tt.node().as_ref(), &real);
+    }
+
+    #[test]
+    fn label_node_is_default_for_fresh_label() {
+        let label = Label::from("x");
+        assert_eq!(label.node(), &LabelNode::DefaultLabelNode);
+    }
+
+    #[test]
+    fn label_node_returns_formatted_when_set() {
+        let mut label = Label::from("1MB");
+        let formatted = LabelNode::Formatted(
+            crate::query::format::Formatted::Bitical(Bitical::Integer(1)),
+        );
+        label.node = formatted.clone();
+        assert_eq!(label.node(), &formatted);
     }
 
     #[test]
@@ -1876,15 +1912,12 @@ mod tests_types {
     }
 
     #[test]
-    fn test_label_literal_variant() {
-        let tt = TagType::Custom("mytype".to_string());
-        let label = Label::Literal(tt.clone(), "hello".to_string());
+    fn test_label_from_string() {
+        let label = Label::from("hello".to_string());
         assert_eq!(label.as_str(), "hello");
-        assert_eq!(label.tag_type(), tt);
         assert_eq!(label.value(), Bitical::String("hello".to_string()));
 
-        let numeric =
-            Label::Literal(TagType::Custom(String::new()), "42".to_string());
+        let numeric = Label::from("42".to_string());
         assert_eq!(numeric.as_i64(), 42);
     }
 
@@ -1898,20 +1931,21 @@ mod tests_types {
     }
 
     #[test]
+    fn test_typed_tag_retag_keeps_value_and_changes_type() {
+        let tt = TypedTag::new("extension", "rs");
+        assert_eq!(tt.tag_type(), TagType::from("extension"));
+
+        let retagged = TypedTag::retag("category", &tt.label);
+        assert_eq!(retagged.tag_type(), TagType::from("category"));
+        assert_eq!(retagged.label, tt.label);
+    }
+
+    #[test]
     fn test_tags_iter_typed_tags() {
         let mut tags = Tags::new();
-        tags.push(
-            Label::resolve(TagType::from("project"), "A".into()),
-            Origin::User,
-        );
-        tags.push(
-            Label::resolve(TagType::from("project"), "B".into()),
-            Origin::User,
-        );
-        tags.push(
-            Label::resolve(TagType::from("extension"), "rs".into()),
-            Origin::User,
-        );
+        tags.push(TypedTag::new("project", "A"), Origin::User);
+        tags.push(TypedTag::new("project", "B"), Origin::User);
+        tags.push(TypedTag::new("extension", "rs"), Origin::User);
 
         let mut results: Vec<String> =
             tags.iter_typed_tags().map(|tt| tt.to_string()).collect();
@@ -1925,9 +1959,19 @@ mod tests_types {
 
     #[test]
     fn label_content_has_correct_tag_type_and_str() {
-        let label = Label::Content("hello".to_string());
-        assert_eq!(label.tag_type(), TagType::Base(SType::Content));
+        let label = TypedTag::new(SType::Content, "hello").label;
         assert_eq!(label.as_str(), "hello");
+    }
+
+    #[test]
+    fn label_no_longer_carries_type_identity() {
+        let size = TypedTag::new(SType::Size, 1024).label;
+        let rank = TypedTag::new(SType::Rank, 1024).label;
+        assert_eq!(
+            size, rank,
+            "Label must not distinguish types by itself; only the enclosing \
+             TypedTag's tag_type does"
+        );
     }
 
     #[test]
@@ -2228,29 +2272,6 @@ mod tests_types {
             .as_display_str(),
             "2026-02"
         );
-    }
-
-    #[test]
-    fn test_label_date_value_returns_integer_timestamp() {
-        use chrono::NaiveDate;
-        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let dt = DateTime::Date(d);
-        let label = Label::Date(dt.clone());
-        assert_eq!(label.value(), Bitical::Integer(dt.to_timestamp()));
-    }
-
-    #[test]
-    fn test_label_date_as_str() {
-        use chrono::NaiveDate;
-        let d = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
-        let label = Label::Date(DateTime::Date(d));
-        assert_eq!(label.as_str(), "2026-02-01");
-    }
-
-    #[test]
-    fn test_label_date_as_i64_returns_zero() {
-        let label = Label::Date(DateTime::Year(2026));
-        assert_eq!(label.as_i64(), 0);
     }
 
     #[test]
