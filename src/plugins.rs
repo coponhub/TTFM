@@ -464,7 +464,7 @@ impl Query for WasmPluginAdapter {
         });
         match result {
             Ok(Some(ttql)) => crate::tag::ttql_parse(&ttql),
-            _ => QueryNode::Projection(Operand::from(tagtype.clone())),
+            _ => QueryNode::base_nest(Operand::from(tagtype.clone())),
         }
     }
 }

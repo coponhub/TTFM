@@ -37,7 +37,7 @@
 
 use crate::db::{BiticalType, Col};
 use crate::query::ast::{
-    ComparisonNode, ComparisonOp, Operand, QueryNode,
+    ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
 };
 use crate::query::lens_schema::{
     definition_candidates, definition_reserved_names, Lens, StorageMapping,
@@ -1517,12 +1517,12 @@ pub(crate) fn resolve_query_node(
 
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
         // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
-        QueryNode::Projection(Operand::Calculation(calc))
+        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) })
             if calc_has_nest_operands(&calc) =>
         {
             resolve_projection_arithmetic(lens, *calc)
         }
-        QueryNode::Projection(op) => {
+        QueryNode::Nest(NestNode { left: None, right: op }) => {
             let resolved_op = resolve_operand(lens, &op)?;
             Ok(ResolvedNode::Nest {
                 keys: vec![resolved_op],
@@ -1657,8 +1657,8 @@ fn resolve_nest(
     if std::env::var("TTFM_DEBUG").is_ok() {
         println!("DEBUG resolve_nest: entering");
     }
-    let left = resolve_query_node(lens, *nest.left)?;
-    let right_node = *nest.right;
+    let left = resolve_query_node(lens, *nest.left.unwrap())?;
+    let right_node = nest.right.into_node();
 
     let (keys, context) = extract_projection_operand_with_context(left)?;
 
@@ -1673,7 +1673,7 @@ fn resolve_nest(
             })
         }
         // 深さ1: 右辺が Projection(Literal) → nvalue にスカラー値を付与
-        QueryNode::Projection(Operand::Literal(label)) => {
+        QueryNode::Nest(NestNode { left: None, right: Operand::Literal(label) }) => {
             Ok(ResolvedNode::Nest {
                 keys,
                 nvalue: Some(ResolvedOperand::Literal(label)),
@@ -1681,7 +1681,7 @@ fn resolve_nest(
             })
         }
         // 深さ1: 右辺が Projection(Calculation)
-        QueryNode::Projection(Operand::Calculation(calc)) => {
+        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) }) => {
             let resolved_calc = resolve_calculation(lens, *calc)?;
             let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
 
@@ -1997,11 +1997,11 @@ fn resolve_projection_arithmetic(
             // 左辺 Nest の keys に演算結果を追加して1段深い Nest を返す
             let left_nest = match calc.left {
                 Operand::Query(node) => resolve_query_node(lens, *node)?,
-                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+                op => resolve_query_node(lens, QueryNode::base_nest(op))?,
             };
             let right_nest = match calc.right {
                 Operand::Query(node) => resolve_query_node(lens, *node)?,
-                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+                op => resolve_query_node(lens, QueryNode::base_nest(op))?,
             };
             resolve_mixed_key_arithmetic(left_nest, right_nest, arith_op)
         }
@@ -3238,7 +3238,7 @@ mod tests {
         // sum(size:) のAggregationNode
         let agg_node = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::Base(SType::Size),
             ))),
         };

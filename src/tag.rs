@@ -249,7 +249,7 @@ pub trait Query: Send + Sync {
     /// Projection（type:形式）を QueryNode へ展開する。
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         compose_projection_implication(
-            QueryNode::Projection(Operand::from(tagtype.clone())),
+            QueryNode::base_nest(Operand::from(tagtype.clone())),
             self.implies(),
         )
     }
@@ -716,7 +716,7 @@ impl Query for DirectoryFn {
     }
     fn expand_projection(&self, _tt: &TagType) -> QueryNode {
         compose_projection_implication(
-            QueryNode::Projection(Operand::from(TagType::Base(SType::Filename))),
+            QueryNode::base_nest(Operand::from(TagType::Base(SType::Filename))),
             self.implies(),
         )
     }
@@ -1531,7 +1531,7 @@ impl Query for MtimeFn {
         Err(crate::query::error::tag_value_not_interpretable("mtime", &s))
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
-        QueryNode::Projection(Operand::from(tagtype.clone()))
+        QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
 }
 impl Display for MtimeFn {
@@ -1640,7 +1640,7 @@ impl Query for ItemIdFn {
         }).to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
-        QueryNode::Projection(Operand::from(tagtype.clone()))
+        QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
 }
 
@@ -1817,7 +1817,7 @@ impl Query for OriginFn {
         }.to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
-        QueryNode::Projection(Operand::from(tagtype.clone()))
+        QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
 }
 
@@ -1885,7 +1885,7 @@ impl Query for LabelFn {
         }.to_ok()
     }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
-        QueryNode::Projection(Operand::from(tagtype.clone()))
+        QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
 }
 
@@ -2668,7 +2668,7 @@ mod tests {
         use crate::types::{Bitical, SType, TagType};
         let agg = Operand::Aggregation(Box::new(AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Max,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::from(SType::Size),
             ))),
         }));
@@ -2955,7 +2955,7 @@ mod tests {
         let dt = DateTime::Date(date);
         let agg = Operand::Aggregation(Box::new(AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Max,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::from(SType::Mtime),
             ))),
         }));

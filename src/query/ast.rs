@@ -115,10 +115,10 @@ pub struct ComparisonNode {
 /// ネスト演算ノード (`Projection &: Projection` 等)
 #[derive(Debug, PartialEq, Clone)]
 pub struct NestNode {
-    /// 左辺: Projection または Nest
-    pub left: Box<QueryNode>,
+    /// 左辺: ベースキーの場合は None、それ以外は Projection または Nest
+    pub left: Option<Box<QueryNode>>,
     /// 右辺: Projection, Scalar, Comparison, Aggregation, Nest
-    pub right: Box<QueryNode>,
+    pub right: Operand,
 }
 
 /// 定義アイテムの候補（レジストリ登録済み型/タグ名 1件分）。
@@ -145,8 +145,6 @@ pub enum QueryNode {
     TypedTag(TypedTag),
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
     ColumnMatch { tag: SType, label: Label },
-    /// ラベル取得 (Projection)
-    Projection(Operand),
     /// 集約演算 (count(query), sum(size:) など)
     Aggregation(AggregationNode),
     /// ネスト演算 (`Projection &: Projection` 等)
@@ -164,6 +162,33 @@ pub enum QueryNode {
 }
 
 impl QueryNode {
+    /// ベースキー（左辺のない Nest）を構築します。
+    pub fn base_nest(op: Operand) -> QueryNode {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: op,
+        })
+    }
+
+    /// 自身がベースキーであれば、その Operand を返します。
+    pub fn as_base_projection(&self) -> Option<&Operand> {
+        match self {
+            QueryNode::Nest(n) if n.left.is_none() => Some(&n.right),
+            _ => None,
+        }
+    }
+
+    /// Nest の右辺として格納するため、自身を Operand に変換します。
+    /// ベースキーはその Operand をそのまま返し、Aggregation は `Operand::Aggregation`
+    /// に、それ以外は `Operand::Query` に包みます。
+    pub fn into_operand(self) -> Operand {
+        match self {
+            QueryNode::Nest(n) if n.left.is_none() => n.right,
+            QueryNode::Aggregation(agg) => Operand::Aggregation(Box::new(agg)),
+            other => Operand::Query(Box::new(other)),
+        }
+    }
+
     /// このノードおよび子ノードに含まれるすべてのタグの型（`key`）を収集します。
     pub fn get_all_types(&self) -> Vec<String> {
         let mut types = HashSet::new();
@@ -207,14 +232,13 @@ impl QueryNode {
             QueryNode::TypedTag(tt) => {
                 types.insert(tt.tag_type().as_str().to_string());
             }
-            QueryNode::Projection(op) => {
-                op.collect_types(types);
-            }
             QueryNode::Aggregation(agg) => {
                 agg.collect_types(types);
             }
             QueryNode::Nest(nest) => {
-                nest.left.collect_types(types);
+                if let Some(left) = &nest.left {
+                    left.collect_types(types);
+                }
                 nest.right.collect_types(types);
             }
             QueryNode::OriginRef(_) => {
@@ -236,14 +260,13 @@ impl QueryNode {
             QueryNode::Difference(l, _) => {
                 l.collect_projections(projections);
             }
-            QueryNode::Projection(op) => {
-                op.collect_projections(projections);
-            }
             QueryNode::Aggregation(agg) => {
                 agg.collect_projections(projections);
             }
             QueryNode::Nest(nest) => {
-                nest.left.collect_projections(projections);
+                if let Some(left) = &nest.left {
+                    left.collect_projections(projections);
+                }
                 nest.right.collect_projections(projections);
             }
             _ => {}
@@ -322,6 +345,16 @@ impl Operand {
             }
         }
     }
+
+    /// Nest の右辺から取り出すため、自身を QueryNode に変換します。
+    /// `QueryNode::into_operand` の逆変換です。
+    pub fn into_node(self) -> QueryNode {
+        match self {
+            Operand::Query(node) => *node,
+            Operand::Aggregation(agg) => QueryNode::Aggregation(*agg),
+            other => QueryNode::base_nest(other),
+        }
+    }
 }
 
 impl From<TagType> for Operand {
@@ -351,7 +384,7 @@ mod tests {
 
         // Projection
         let node =
-            QueryNode::Projection(Operand::TypeRef(TagType::from("rank")));
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("rank")));
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
         assert!(types.contains(&"rank".to_string()));
@@ -404,7 +437,7 @@ mod tests {
     fn test_get_projections() {
         // Projection only
         let node =
-            QueryNode::Projection(Operand::TypeRef(TagType::from("path")));
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("path")));
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
         assert!(projs.contains(&"path".to_string()));
@@ -413,7 +446,7 @@ mod tests {
         // name:foo AND project:size
         let node = QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new("name", "foo")),
-            QueryNode::Projection(Operand::TypeRef(TagType::from("size"))),
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("size"))),
         ]);
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
@@ -428,7 +461,7 @@ mod tests {
             op: ArithmeticOp::Mul,
             right: Operand::TypeRef(TagType::from("height")),
         };
-        let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
+        let node = QueryNode::base_nest(Operand::Calculation(Box::new(calc)));
 
         let types = node.get_all_types();
         assert!(types.contains(&"width".to_string()));

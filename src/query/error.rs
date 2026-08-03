@@ -19,7 +19,7 @@
 
 use crate::query::ast::{
     AggregationNode, ArithmeticAggOp, BasicOp, CalculationNode, ComparisonNode,
-    ComparisonOp, Operand, QueryNode,
+    ComparisonOp, NestNode, Operand, QueryNode,
 };
 
 // =========================================================================
@@ -134,7 +134,7 @@ impl QueryNode {
     /// 解決前の生 AST 上で「この子は解決後 Projection 的に振る舞うか」を判定するために使う）。
     fn is_projection_recursive(&self) -> bool {
         match self {
-            QueryNode::Projection(_) | QueryNode::Nest(_) => true,
+            QueryNode::Nest(_) => true,
             QueryNode::And(nodes) | QueryNode::Or(nodes) => {
                 nodes.iter().any(|n| n.is_projection_recursive())
             }
@@ -190,7 +190,7 @@ fn node_to_simple_string(node: &QueryNode) -> String {
         QueryNode::TypedTag(tt) => {
             format!("{}:{}", tt.tag_type().as_str(), tt.as_str())
         }
-        QueryNode::Projection(Operand::TypeRef(tt)) => {
+        QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) }) => {
             format!("{}:", tt.as_str())
         }
         QueryNode::Aggregation(agg) => match agg {
@@ -780,7 +780,9 @@ fn operand_is_agg_or_literal(operand: &Operand) -> bool {
                 && operand_is_agg_or_literal(&c.right)
         }
         Operand::Query(q) => match q.as_ref() {
-            QueryNode::Projection(op) => operand_is_agg_or_literal(op),
+            QueryNode::Nest(NestNode { left: None, right: op }) => {
+                operand_is_agg_or_literal(op)
+            }
             QueryNode::Aggregation(_) => true,
             _ => false,
         },

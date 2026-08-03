@@ -155,14 +155,7 @@ pub enum QueryType { Tag, Untag }  // EditQuery (Tag) / TagQuery (Untag) の二�
 - `Projection` 指定 (`project:`) の場合: 条件を満たす具体ラベルを取得し、per-entry で `modify` を呼ぶ。
 `WriteAction` の生成はあくまで `modify` の責務。
 
-### 4.1 modify — EditStrategy を WriteAction へ展開
-`EditStrategy` は実行ロジックではなく、ユーザーの編集意図を `Vec<WriteAction>` へ**展開する規則**である。
-`modify` がこの展開を担う純関数で、`write` は戦略を知らず出来上がった action 列を実行するだけ。
-削除も独立したエンジンではなく単に `WriteAction::Delete` である。
-
-`modify` は `Relocate` / `SetFileAttr` を受け取った場合はエラーにする (`plan` がこれらを `fs_operate` 側に振り分けた後に呼ぶ前提のため、受け取ること自体が `plan` の実装バグを示す)。
-
-#### EditQuery / TagQuery の構文とパース
+### EditQuery / TagQuery の構文とパース
 EditQuery (`QueryType::Tag`) と TagQuery (`QueryType::Untag`) のテキストは、共通の制限付き TTQL サブセットを使う。
 
 - `|` とスペース区切りは**同義**（「列挙された全要素を処理する」和集合）。`project:A status:done` と `project:A | status:done` は同じ意味。
@@ -170,6 +163,13 @@ EditQuery (`QueryType::Tag`) と TagQuery (`QueryType::Untag`) のテキスト�
 - TagQuery (Untag 方向) 許可: `TypedTag`、`Projection`、`|`・スペース
 - TagCondition 許可: ラベル比較式 (`tagged_at:>T`、`rank:>5` 等。エントリのメタ属性のみ)
 - 禁止 (エラー): `&`、Nest、集約、算術演算、`type:/label:/tag:` (EditQuery §1.2)。ラベル比較は TagQuery/EditQuery に書けず TagCondition として分離する
+
+### 4.1 modify — EditStrategy を WriteAction へ展開
+`EditStrategy` は実行ロジックではなく、ユーザーの編集意図を `Vec<WriteAction>` へ**展開する規則**である。
+`modify` がこの展開を担う純関数で、`write` は戦略を知らず出来上がった action 列を実行するだけ。
+削除も独立したエンジンではなく単に `WriteAction::Delete` である。
+
+`modify` は `Relocate` / `SetFileAttr` を受け取った場合はエラーにする (`plan` がこれらを `fs_operate` 側に振り分けた後に呼ぶ前提のため、受け取ること自体が `plan` の実装バグを示す)。
 
 #### 条件付き Delete の in-memory 評価
 `tag_condition` が指定された場合、`modify` は `TagQuery` にマッチしたエントリを `tag_condition` で

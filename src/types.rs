@@ -669,6 +669,11 @@ impl TagType {
             TagType::LiteralCustom(s) => s.as_str(),
         }
     }
+
+    /// `Nest`（`&:`）の単位元となるワイルドカードキー（`*:`）かどうかを判定します。
+    pub fn is_base_key(&self) -> bool {
+        crate::util::is_full_match_glob(self.as_str())
+    }
 }
 
 impl std::fmt::Display for TagType {

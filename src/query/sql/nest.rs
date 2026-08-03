@@ -1796,6 +1796,27 @@ mod tests {
     }
 
     #[test]
+    fn base_key_is_never_materialized() {
+        let resolver = Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
+            .expect("Failed to resolve");
+
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
+            .expect("Failed to build SQL");
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql_str.contains("'extension'"),
+            "SQL should filter on the concrete key type: {}",
+            sql_str
+        );
+        assert!(
+            !sql_str.contains("'*'"),
+            "base key must never be materialized as a literal '*': {}",
+            sql_str
+        );
+    }
+
+    #[test]
     fn test_nvalue_count_projection_sql() {
         let resolver = Resolver::new_nowarn(
             "parentdir: &: count(extension:jpg)",

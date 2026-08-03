@@ -319,7 +319,7 @@ fn test_wasm_adapter_expand_projection_default() {
     let query = adapter.query();
     let tag_type = TagType::from("sample");
     let node = query.expand_projection(&tag_type);
-    let expected = QueryNode::Projection(Operand::from(tag_type));
+    let expected = QueryNode::base_nest(Operand::from(tag_type));
     assert_eq!(node, expected);
 }
 

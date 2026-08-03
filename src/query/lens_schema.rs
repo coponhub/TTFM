@@ -415,7 +415,7 @@ impl LogicalSchema for Lens {
                 return func.query().expand_projection(tag_type);
             }
         }
-        QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
+        QueryNode::base_nest(Operand::TypeRef(tag_type.clone()))
     }
 
     fn expand_comparison(
@@ -495,7 +495,12 @@ fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
     }
     fn from_query_node(node: &QueryNode) -> Option<TagType> {
         match node {
-            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt.clone()),
+            QueryNode::Nest(nest) if nest.left.is_none() => {
+                match &nest.right {
+                    Operand::TypeRef(tt) => Some(tt.clone()),
+                    _ => None,
+                }
+            }
             QueryNode::And(ns) | QueryNode::Or(ns) => {
                 ns.iter().find_map(from_query_node)
             }
@@ -503,7 +508,7 @@ fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
             QueryNode::Aggregation(agg) => from_aggregation(agg),
             // 比較の対象になっているのは Nest の結果（右辺）。左辺は
             // グループ化のための Projection なので見ない。
-            QueryNode::Nest(nest) => from_query_node(&nest.right),
+            QueryNode::Nest(nest) => from_operand(&nest.right),
             _ => None,
         }
     }
@@ -1107,15 +1112,15 @@ mod tests {
         let lens = Lens::base_standard();
         let max_mtime = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Max,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::Base(SType::Mtime),
             ))),
         };
         let nest = Operand::Query(Box::new(QueryNode::Nest(NestNode {
-            left: Box::new(QueryNode::Projection(Operand::TypeRef(
+            left: Some(Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::Base(SType::Parentdir),
-            ))),
-            right: Box::new(QueryNode::Aggregation(max_mtime)),
+            )))),
+            right: Operand::Aggregation(Box::new(max_mtime)),
         })));
         let node = ComparisonNode {
             first: nest.clone(),

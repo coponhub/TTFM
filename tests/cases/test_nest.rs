@@ -2308,12 +2308,15 @@ fn test_nest_parse_basic() {
     let node = ttfm::query::parse_nowarn("extension: &: parentdir:").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
-            matches!(*nest.left, ttfm::query::QueryNode::Projection(_)),
+            matches!(
+                nest.left.as_deref(),
+                Some(ttfm::query::QueryNode::Nest(n)) if n.left.is_none()
+            ),
             "left=Projection"
         );
         assert!(
-            matches!(*nest.right, ttfm::query::QueryNode::Projection(_)),
-            "right=Projection"
+            matches!(nest.right, ttfm::query::Operand::TypeRef(_)),
+            "right=TypeRef"
         );
     } else {
         panic!("Expected Nest, got {:?}", node);
@@ -2325,12 +2328,12 @@ fn test_nest_parse_chain() {
     let node = ttfm::query::parse_nowarn("extension: &: parentdir: &: name:").unwrap();
     if let ttfm::query::QueryNode::Nest(outer) = &node {
         assert!(
-            matches!(*outer.left, ttfm::query::QueryNode::Nest(_)),
+            matches!(outer.left.as_deref(), Some(ttfm::query::QueryNode::Nest(_))),
             "left=Nest"
         );
         assert!(
-            matches!(*outer.right, ttfm::query::QueryNode::Projection(_)),
-            "right=Projection"
+            matches!(outer.right, ttfm::query::Operand::TypeRef(_)),
+            "right=TypeRef"
         );
     } else {
         panic!("Expected Nest, got {:?}", node);
@@ -2354,7 +2357,7 @@ fn test_nest_parse_with_aggregation() {
         ttfm::query::parse_nowarn("parentdir: &: count(extension:jpg)").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
-            matches!(*nest.right, ttfm::query::QueryNode::Aggregation(_)),
+            matches!(nest.right, ttfm::query::Operand::Aggregation(_)),
             "right=Aggregation"
         );
     } else {
