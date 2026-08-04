@@ -251,7 +251,11 @@ pub(super) fn apply_tags_batch(
         };
         actions.extend(ttfm::edit::modify::modify(
             &item,
-            Some(tags),
+            Some(&ttfm::edit::parse::parse_edit_query(
+                tags,
+                ttfm::edit::QueryType::Tag,
+                registry,
+            )?),
             ttfm::edit::QueryType::Tag,
             registry,
         )?);

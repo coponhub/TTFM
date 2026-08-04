@@ -1,7 +1,9 @@
 mod confirm;
 mod fs_operate;
+pub(crate) mod glob_capture;
 mod lens_schema;
 pub mod modify;
+pub mod parse;
 mod search_and_apply_captures;
 pub(crate) mod sql;
 mod tag_filter;
@@ -41,11 +43,14 @@ pub fn edit(
     options: WriteOptions,
     sink: &mut dyn WarningSink,
 ) -> Result<EditResponse> {
+    let parsed = edit_query
+        .map(|q| parse::parse_edit_query(q, query_type, registry))
+        .transpose()?;
     let item_edits = search_and_apply_captures::search_and_apply_captures(
         store,
         registry,
         search_query,
-        edit_query,
+        parsed.as_ref(),
         sink,
     )?;
     let (fs_ops_list, actions) = plan(
@@ -74,7 +79,7 @@ pub fn edit(
 fn plan(
     _store: &Store,
     registry: &TagRegistry,
-    item_edits: Vec<(crate::response::Item, Option<String>)>,
+    item_edits: Vec<(crate::response::Item, Option<parse::EditQuery>)>,
     query_type: QueryType,
     tag_condition: Option<&str>,
 ) -> Result<(
@@ -94,7 +99,7 @@ fn plan(
             if tag_filter::eval_tag_predicate(node, None)? {
                 actions.extend(modify::modify(
                     item,
-                    tag_query.as_deref(),
+                    tag_query.as_ref(),
                     query_type,
                     registry,
                 )?);
@@ -102,7 +107,7 @@ fn plan(
         } else {
             actions.extend(modify::modify(
                 item,
-                tag_query.as_deref(),
+                tag_query.as_ref(),
                 query_type,
                 registry,
             )?);

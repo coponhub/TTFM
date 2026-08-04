@@ -1,6 +1,3 @@
-// --- Whitespace handling ---
-WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
-
 // --- Main entry point ---
 // --- Main entry point ---
 // Try scalar_arithmetic_query first to handle top-level arithmetic like "count() - count()" or "size: * 2".
@@ -156,12 +153,6 @@ aggregator = @{ "sum" | "count" | "avg" | "max" | "min" }
 // Tag Label (permissive, allows ^)
 tag_label = { quoted_string | number | unquoted_tag_string }
 
-// Unquoted tag string: allows ^ and set operators (&, |) without spaces
-// DESIGN.md:26 - "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
-unquoted_tag_string = @{
-    (escape | (!(WHITESPACE | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+
-}
-
 // ... existing unquoted_string ...
 
 
@@ -205,9 +196,6 @@ tag_type = ${ quoted_string | identifier }
 // --- Labels and Literals ---
 label = { quoted_string | number | (!type_ref ~ unquoted_string) }
 
-// Identifiers (boundary is :)
-identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
-
 // Numbers
 number = @{ "-"? ~ ASCII_DIGIT+ ~ &(WHITESPACE | EOI | ")") }
 
@@ -222,16 +210,4 @@ inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 // Unquoted strings: Allow colons in labels.
 unquoted_string = @{
     !number ~ (escape | (!(WHITESPACE | ":" | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
-}
-
-escape = @{ "\\" ~ ANY }
-
-// Reserved characters are only those that trigger higher-level rules or separators.
-// Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
-reserved_chars = _{
-    WHITESPACE
-  | "&" | "|" | "(" | ")" | "\"" | "'"
-  | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
-  | "," | ";" | "{" | "}"
-  | ":"
 }

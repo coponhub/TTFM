@@ -1,0 +1,23 @@
+// --- Whitespace handling ---
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+escape = @{ "\\" ~ ANY }
+
+// Identifiers (boundary is :)
+identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
+
+// Reserved characters are only those that trigger higher-level rules or separators.
+// Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
+reserved_chars = _{
+    WHITESPACE
+  | "&" | "|" | "(" | ")" | "\"" | "'"
+  | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
+  | "," | ";" | "{" | "}"
+  | ":"
+}
+
+// Unquoted tag string: allows ^ and set operators (&, |) without spaces
+// DESIGN.md:26 - "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
+unquoted_tag_string = @{
+    (escape | (!(WHITESPACE | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+
+}

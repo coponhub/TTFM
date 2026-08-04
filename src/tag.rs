@@ -22,7 +22,7 @@ use crate::query::ast::{
 use crate::response::Item;
 use crate::types::{
     Bitical, BiticalAssociate, Biticals, ItemKind, Label, LargeOrigin, Origin,
-    Rank, SType, TagType, TypedTag,
+    Rank, SType, TagEntry, TagType, TypedTag,
 };
 use crate::util::{DotOk, SafeMetadata};
 use anyhow::Result;
@@ -325,6 +325,75 @@ pub trait Query: Send + Sync {
             1 => conditions.remove(0),
             _ => QueryNode::And(conditions),
         }.to_ok()
+    }
+
+    /// SearchQuery が書いた notation へ自分の値を嵌め込み、`{n}` の穴を読む。
+    /// 既定は自分自身の型のエントリへ glob を適用する。値の在り処や嵌め方が
+    /// 既定と異なる型（name/type/tag/rank/label/mtime）のみ上書きする。
+    fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        default_capture(tagtype, pattern, item)
+    }
+}
+
+pub(crate) fn entries_of<'a, 'b>(
+    item: &'a Item,
+    tagtype: &'b TagType,
+) -> impl Iterator<Item = &'a TagEntry> + use<'a, 'b> {
+    item.tags
+        .entries
+        .iter()
+        .filter(move |e| e.typed_tag.tag_type() == *tagtype)
+}
+
+fn repr_of<'a, 'b>(
+    item: &'a Item,
+    tagtype: &'b TagType,
+) -> impl Iterator<Item = &'a TypedTag> + use<'a, 'b> {
+    item.representative
+        .iter()
+        .filter(move |t| t.tag_type() == *tagtype)
+}
+
+fn fit(pattern: &str, text: &str) -> Vec<Vec<String>> {
+    crate::edit::glob_capture::glob_captures(pattern, text)
+        .into_iter()
+        .collect()
+}
+
+fn fit_each<'a>(
+    pattern: &str,
+    tags: impl Iterator<Item = &'a TypedTag>,
+) -> Vec<Vec<String>> {
+    tags.flat_map(|t| fit(pattern, &t.as_str())).collect()
+}
+
+pub(crate) fn default_capture(
+    tagtype: &TagType,
+    pattern: &str,
+    item: &Item,
+) -> Vec<Vec<String>> {
+    fit_each(pattern, entries_of(item, tagtype).map(|e| &e.typed_tag))
+}
+
+fn local_calendar_fields(local_epoch: i64) -> [u32; crate::types::DateField::COUNT] {
+    use chrono::{Datelike, Timelike};
+    // local_epoch は utc_epoch_to_local_epoch 適用済み。ここで chrono::Local を
+    // 通すとオフセットが二重に載るため、UTC として読む。
+    let dt = chrono::DateTime::from_timestamp(local_epoch, 0).unwrap_or_default();
+    [
+        dt.year() as u32,
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+    ]
+}
+
+fn zero_pad(field: crate::types::DateField, value: u32) -> String {
+    match field {
+        crate::types::DateField::Year => format!("{value:04}"),
+        _ => format!("{value:02}"),
     }
 }
 
@@ -1274,6 +1343,9 @@ impl Query for NameFn {
     ) -> Result<QueryNode> {
         QueryNode::TypedTag(TypedTag::retag(SType::Name, label)).to_ok()
     }
+    fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fit_each(pattern, repr_of(item, tagtype))
+    }
 }
 
 // --- SizeFn ---
@@ -1530,6 +1602,24 @@ impl Query for MtimeFn {
         }
         Err(crate::query::error::tag_value_not_interpretable("mtime", &s))
     }
+    fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        let Some(fields) = crate::types::DateTimeRange::split_slot_fields(pattern) else {
+            return default_capture(tagtype, pattern, item);
+        };
+        entries_of(item, tagtype)
+            .map(|e| {
+                let local = crate::types::DateTime::utc_epoch_to_local_epoch(
+                    e.typed_tag.label.as_i64(),
+                );
+                let cal = local_calendar_fields(local);
+                fields
+                    .iter()
+                    .filter(|(_, txt)| *txt == "*")
+                    .map(|(f, _)| zero_pad(*f, cal[*f as usize]))
+                    .collect()
+            })
+            .collect()
+    }
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
@@ -1747,6 +1837,9 @@ impl Query for RankFn {
             rest: vec![(op, Operand::Literal(normalized))],
         }).to_ok()
     }
+    fn capture(&self, _tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fit(pattern, &item.rank.to_string())
+    }
 }
 
 // --- OriginFn ---
@@ -1844,6 +1937,9 @@ impl Query for TypeFn {
     fn item_kind(&self) -> Option<ItemKind> {
         Some(ItemKind::Type)
     }
+    fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fit_each(pattern, repr_of(item, tagtype))
+    }
 }
 impl Display for TypeFn {
     // 型定義アイテムは item_id 降順（区画をまたぐ生 id 順）で表示する
@@ -1887,6 +1983,16 @@ impl Query for LabelFn {
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         QueryNode::base_nest(Operand::from(tagtype.clone()))
     }
+    fn capture(&self, _tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fit_each(
+            pattern,
+            item.tags
+                .entries
+                .iter()
+                .filter(|e| e.typed_tag.label.value.to_col_value().0 == SType::LabelStr)
+                .map(|e| &e.typed_tag),
+        )
+    }
 }
 
 // --- TypedTagFn ---
@@ -1908,6 +2014,9 @@ impl Query for TypedTagFn {
     }
     fn item_kind(&self) -> Option<ItemKind> {
         Some(ItemKind::Tag)
+    }
+    fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fit_each(pattern, repr_of(item, tagtype))
     }
 }
 
@@ -3311,6 +3420,233 @@ mod tests {
                 !tt.is_default_node(),
                 "{stype:?}: expand must stamp the stage"
             );
+        }
+    }
+
+    // --- Query::capture ---
+
+    fn item_with(entries: Vec<TypedTag>) -> Item {
+        let mut tags = crate::types::Tags::new();
+        for t in entries {
+            tags.push(t, Origin::User);
+        }
+        Item {
+            id: crate::types::ItemId::Stored(1),
+            item_kind: ItemKind::File,
+            representative: vec![],
+            rank: 0,
+            intrinsic: crate::types::Intrinsic::default(),
+            tags,
+            item_count: None,
+        }
+    }
+
+    fn mtime_item(local: chrono::DateTime<chrono::Local>) -> Item {
+        item_with(vec![TypedTag::new(SType::Mtime, local.timestamp())])
+    }
+
+    fn local_at(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<chrono::Local> {
+        chrono::Local.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    fn capture_of(fun: &dyn Query, stype: SType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
+        fun.capture(&TagType::from(stype), pattern, item)
+    }
+
+    #[test]
+    fn slot_star_binds_that_slot_only() {
+        let item = mtime_item(local_at(2026, 8, 3, 12));
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "2026-*", &item),
+            vec![vec!["08".to_string()]]
+        );
+    }
+
+    #[test]
+    fn leading_slot_star_binds_year() {
+        let item = mtime_item(local_at(2026, 8, 3, 12));
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "*-08-03", &item),
+            vec![vec!["2026".to_string()]]
+        );
+    }
+
+    #[test]
+    fn two_slot_stars_bind_left_to_right() {
+        let item = mtime_item(local_at(2026, 8, 3, 12));
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "*-*-03", &item),
+            vec![vec!["2026".to_string(), "08".to_string()]]
+        );
+    }
+
+    #[test]
+    fn implicit_free_slots_bind_nothing() {
+        let item = mtime_item(local_at(2026, 8, 3, 12));
+        // `2026-*` writes only year and month; day is unwritten, so not a hole.
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "2026-*", &item)[0].len(),
+            1
+        );
+    }
+
+    #[test]
+    fn year_pads_to_four_others_pad_to_two() {
+        let item = mtime_item(local_at(2026, 8, 3, 4));
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "*-*-*T*", &item),
+            vec![vec![
+                "2026".to_string(),
+                "08".to_string(),
+                "03".to_string(),
+                "04".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn slot_capture_uses_local_calendar() {
+        use chrono::Datelike as _;
+        let local = local_at(2026, 8, 3, 0);
+        let item = mtime_item(local);
+        let day = capture_of(MtimeFn.query(), SType::Mtime, "2026-08-*", &item);
+        assert_eq!(day, vec![vec![format!("{:02}", local.day())]]);
+    }
+
+    #[test]
+    fn mtime_full_match_star_falls_back_to_default() {
+        let local = local_at(2026, 8, 3, 12);
+        let item = mtime_item(local);
+        assert_eq!(
+            capture_of(MtimeFn.query(), SType::Mtime, "*", &item),
+            vec![vec![local.timestamp().to_string()]]
+        );
+    }
+
+    #[test]
+    fn name_fn_binds_from_representative() {
+        let mut item = item_with(vec![]);
+        item.representative = vec![TypedTag::new(SType::Name, "proj_alpha")];
+        assert_eq!(
+            capture_of(NameFn.query(), SType::Name, "proj_*", &item),
+            vec![vec!["alpha".to_string()]]
+        );
+    }
+
+    #[test]
+    fn type_fn_binds_from_representative() {
+        let mut item = item_with(vec![]);
+        item.representative = vec![TypedTag::new(SType::Type, "extension")];
+        assert_eq!(
+            capture_of(TypeFn.query(), SType::Type, "ext*", &item),
+            vec![vec!["ension".to_string()]]
+        );
+    }
+
+    #[test]
+    fn tag_fn_binds_from_representative() {
+        let mut item = item_with(vec![]);
+        item.representative = vec![TypedTag::new(SType::TypedTag, "proj_alpha")];
+        assert_eq!(
+            capture_of(TypedTagFn.query(), SType::TypedTag, "proj_*", &item),
+            vec![vec!["alpha".to_string()]]
+        );
+    }
+
+    #[test]
+    fn rank_fn_binds_from_item_rank() {
+        let mut item = item_with(vec![]);
+        item.rank = 120;
+        assert_eq!(
+            capture_of(RankFn.query(), SType::Rank, "1*", &item),
+            vec![vec!["20".to_string()]]
+        );
+    }
+
+    #[test]
+    fn label_fn_binds_string_and_uuid_labels() {
+        let uuid = uuid::Uuid::nil();
+        let item = item_with(vec![
+            TypedTag::new("project", "alpha"),
+            TypedTag::new("file_id", uuid),
+        ]);
+        assert_eq!(
+            capture_of(LabelFn.query(), SType::Label, "*", &item),
+            vec![vec!["alpha".to_string()], vec![uuid.to_string()]]
+        );
+    }
+
+    #[test]
+    fn label_fn_skips_non_str_column_labels() {
+        let item = item_with(vec![
+            TypedTag::new(SType::Size, 1024i64),
+            TypedTag::new(SType::IsDir, false),
+            TypedTag::new("project", "alpha"),
+        ]);
+        assert_eq!(
+            capture_of(LabelFn.query(), SType::Label, "*", &item),
+            vec![vec!["alpha".to_string()]]
+        );
+    }
+
+    #[test]
+    fn multi_valued_tag_yields_one_set_per_entry() {
+        let item = item_with(vec![
+            TypedTag::new("project", "proj_alpha"),
+            TypedTag::new("project", "proj_beta"),
+        ]);
+        assert_eq!(
+            default_capture(&TagType::from("project"), "proj_*", &item),
+            vec![vec!["alpha".to_string()], vec!["beta".to_string()]]
+        );
+    }
+
+    #[test]
+    fn string_type_uses_default_capture() {
+        let item = item_with(vec![TypedTag::new(SType::Filename, "proj_alpha.txt")]);
+        let tagtype = TagType::from(SType::Filename);
+        assert_eq!(
+            FilenameFn.query().capture(&tagtype, "proj_*.txt", &item),
+            default_capture(&tagtype, "proj_*.txt", &item)
+        );
+    }
+
+    #[test]
+    fn every_impl_returns_one_binding_per_metachar() {
+        let local = local_at(2026, 8, 3, 12);
+        let mut item = item_with(vec![
+            TypedTag::new(SType::Mtime, local.timestamp()),
+            TypedTag::new("project", "proj_alpha"),
+        ]);
+        item.representative = vec![
+            TypedTag::new(SType::Name, "proj_alpha"),
+            TypedTag::new(SType::Type, "extension"),
+            TypedTag::new(SType::TypedTag, "proj_alpha"),
+        ];
+        item.rank = 120;
+
+        let cases: [(&dyn Query, SType, &str); 6] = [
+            (NameFn.query(), SType::Name, "proj_*"),
+            (TypeFn.query(), SType::Type, "ext*"),
+            (TypedTagFn.query(), SType::TypedTag, "proj_?lpha"),
+            (RankFn.query(), SType::Rank, "1*"),
+            (LabelFn.query(), SType::Label, "proj_*"),
+            (MtimeFn.query(), SType::Mtime, "*-*-03"),
+        ];
+        for (fun, stype, pattern) in cases {
+            let metachars = crate::edit::glob_capture::lex(pattern)
+                .iter()
+                .filter(|a| a.is_metachar())
+                .count();
+            let bindings = capture_of(fun, stype, pattern, &item);
+            assert!(!bindings.is_empty(), "{stype:?} pattern={pattern:?}");
+            for binding in bindings {
+                assert_eq!(
+                    binding.len(),
+                    metachars,
+                    "{stype:?} pattern={pattern:?} binding={binding:?}"
+                );
+            }
         }
     }
 }

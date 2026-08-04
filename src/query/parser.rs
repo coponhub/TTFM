@@ -32,6 +32,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 #[derive(Parser)]
+#[grammar = "query/lexical.pest"]
 #[grammar = "query/query.pest"]
 pub struct PestQueryParser;
 
@@ -715,7 +716,7 @@ fn build_operand_calc(
     }
 }
 
-fn unescape_glob_string(s: &str) -> Result<String> {
+pub(crate) fn unescape_glob_string(s: &str) -> Result<String> {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
 

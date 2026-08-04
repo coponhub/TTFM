@@ -2,7 +2,8 @@ use tempfile::TempDir;
 use ttfm::{
     db::{Store, TargetTable},
     edit::{
-        edit, modify::modify, write::write_and_refresh, QueryType, WriteOptions,
+        edit, modify::modify, parse::parse_edit_query, write::write_and_refresh,
+        QueryType, WriteOptions,
     },
     indexing::Indexer,
     tag::TagRegistry,
@@ -25,6 +26,260 @@ fn setup() -> (Store, TagRegistry, TempDir) {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     (store, registry, dir)
+}
+
+fn setup_with_files(names: &[&str]) -> (Store, TagRegistry, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    for name in names {
+        std::fs::write(root.join(name), "content").unwrap();
+    }
+
+    let db_dir = base.join("db");
+    let registry = TagRegistry::with_standard();
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run(&root, None::<&fn(usize)>, false)
+        .unwrap();
+    (store, registry, dir)
+}
+
+// EditQuery の `{1}` に、SearchQuery のグロブ `proj_*.txt` が捕捉した部分文字列が束縛される。
+#[test]
+fn capture_binds_filename_fragment_into_tag() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["proj_alpha.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:proj_*.txt",
+        Some("project:{1}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let results = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "project:alpha",
+        SearchOptions::default(),
+    )?;
+    assert_eq!(results.results.len(), 1);
+    Ok(())
+}
+
+// 束縛値に空白が含まれても、そのまま1つの値としてタグ付けされる。
+#[test]
+fn capture_keeps_space_inside_bound_value() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["my draft.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:my*.txt",
+        Some("note:{1}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let results = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "note:\" draft\"",
+        SearchOptions::default(),
+    )?;
+    assert_eq!(results.results.len(), 1);
+    Ok(())
+}
+
+// 1アイテムが同 type の複数ラベルを持ち、Replace 戦略のタグへ捕捉すると
+// 複数の distinct Replace が積まれ confirm が曖昧としてエラーにする。
+#[test]
+fn product_replace_conflict_on_same_type_is_error() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["foo.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project:1"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project:2"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let result = edit(
+        &store,
+        &registry,
+        "project:*",
+        Some("rank:{1}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+// 同じ捕捉が Append 戦略のタグへ展開されると、曖昧にはならず全 distinct 値が書き込まれる。
+#[test]
+fn product_append_on_same_type_writes_every_value() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["foo.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project:1"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project:2"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    edit(
+        &store,
+        &registry,
+        "project:*",
+        Some("note:{1}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let n1 = ttfm::search::search_nowarn(&store, &registry, "note:1", SearchOptions::default())?;
+    let n2 = ttfm::search::search_nowarn(&store, &registry, "note:2", SearchOptions::default())?;
+    assert_eq!(n1.results.len(), 1);
+    assert_eq!(n2.results.len(), 1);
+    Ok(())
+}
+
+// EditQuery 内の未エスケープなワイルドカードは、SearchQuery が1件もヒット
+// しなくてもエラーになる。
+#[test]
+fn glob_in_edit_query_errors_even_with_no_search_hits() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["foo.txt"]);
+
+    let result = edit(
+        &store,
+        &registry,
+        "project:nomatch*",
+        Some("cat:*"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+// 1回のマッチが異なる番号を同時に束縛し、複数ノードの EditQuery が
+// 1個の Volatile な tag 定義アイテムへ畳み込まれて1回だけ登録される。
+#[test]
+fn tag_definition_binds_two_numbers_from_one_match() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["foo.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project_x:A"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    edit(
+        &store,
+        &registry,
+        "tag:\"project_*:*\"",
+        Some("ta:{1} tb:{2}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let r1 = ttfm::search::search_nowarn(&store, &registry, "ta:x", SearchOptions::default())?;
+    let r2 = ttfm::search::search_nowarn(&store, &registry, "tb:A", SearchOptions::default())?;
+    assert_eq!(r1.results.len(), 1);
+    assert_eq!(r2.results.len(), 1);
+    assert_eq!(
+        r1.results[0].id, r2.results[0].id,
+        "both captures must land on the same, single registered item"
+    );
+    Ok(())
+}
+
+// 同じ番号を複数の EditQuery ノードから参照しても、それぞれ独立に
+// 同じ値へ展開され、1個の Volatile item が1回だけ登録される。
+#[test]
+fn tag_definition_reuses_same_number_across_nodes() -> anyhow::Result<()> {
+    let (store, registry, _dir) = setup_with_files(&["foo.txt"]);
+
+    edit(
+        &store,
+        &registry,
+        "filename:foo.txt",
+        Some("project:B"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    edit(
+        &store,
+        &registry,
+        "tag:\"project:*\"",
+        Some("ta:{1} tb:{1}"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let r1 = ttfm::search::search_nowarn(&store, &registry, "ta:B", SearchOptions::default())?;
+    let r2 = ttfm::search::search_nowarn(&store, &registry, "tb:B", SearchOptions::default())?;
+    assert_eq!(r1.results.len(), 1);
+    assert_eq!(r2.results.len(), 1);
+    assert_eq!(
+        r1.results[0].id, r2.results[0].id,
+        "both nodes must land on the same, single registered item"
+    );
+    Ok(())
 }
 
 // edit → tag: filename:foo.txt に project:A を付与し、search で確認できる
@@ -90,7 +345,8 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     );
 
     // modify → write で登録 + rank 付与
-    let actions = modify(item, Some("rank:100"), QueryType::Tag, &registry)?;
+    let eq = parse_edit_query("rank:100", QueryType::Tag, &registry)?;
+    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // Stored になり rank が付いている
@@ -129,8 +385,8 @@ fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
     );
 
     // modify → write で note として登録 + project:archived 付与
-    let actions =
-        modify(item, Some("project:archived"), QueryType::Tag, &registry)?;
+    let eq = parse_edit_query("project:archived", QueryType::Tag, &registry)?;
+    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // item_references に note 行が存在する
@@ -359,7 +615,8 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
         !item.id.is_stored(),
         "tag def must not be Stored before registration"
     );
-    let actions = modify(item, Some("rank:77"), QueryType::Tag, &registry)?;
+    let eq = parse_edit_query("rank:77", QueryType::Tag, &registry)?;
+    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // rank: projection の item 表示が 'unknown' でなく 'project:A' を含む

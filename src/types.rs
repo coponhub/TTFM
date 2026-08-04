@@ -1097,7 +1097,9 @@ impl DateTimeRange {
     /// ものは時刻のみのパターン（`12:*` は各日の12時台）。
     ///
     /// glob を含まないパターンは通常の日付解釈に任せるため None を返す。
-    pub fn parse_slot_glob(pattern: &str) -> Option<Self> {
+    /// フィールド単位の glob を `(DateField, 生の値文字列)` の列へ分割する。
+    /// 書かれたフィールドのみを返す（欠けた末尾フィールドは含まない）。
+    pub(crate) fn split_slot_fields(pattern: &str) -> Option<Vec<(DateField, &str)>> {
         if !pattern.contains('*') {
             return None;
         }
@@ -1110,7 +1112,7 @@ impl DateTimeRange {
             None => (Some(pattern), None),
         };
 
-        let mut slots = [DateSlot::Free; DateField::COUNT];
+        let mut pairs = Vec::new();
         for (part, fields, sep) in [
             (date_part, DateField::DATE_PART, '-'),
             (time_part, DateField::TIME_PART, ':'),
@@ -1121,8 +1123,17 @@ impl DateTimeRange {
                 return None;
             }
             for (field, value) in fields.iter().zip(values) {
-                slots[*field as usize] = Self::parse_slot_field(value)?;
+                pairs.push((*field, value));
             }
+        }
+        Some(pairs)
+    }
+
+    pub fn parse_slot_glob(pattern: &str) -> Option<Self> {
+        let fields = Self::split_slot_fields(pattern)?;
+        let mut slots = [DateSlot::Free; DateField::COUNT];
+        for (field, value) in fields {
+            slots[field as usize] = Self::parse_slot_field(value)?;
         }
         Some(DateTimeRange::Slots(slots))
     }
@@ -2450,6 +2461,29 @@ mod tests_types {
                 "壊れたパターンは拒否されるべき: {pattern}"
             );
         }
+    }
+
+    /// 欠けた末尾フィールドはペアとして返らない（パディングしない）。
+    #[test]
+    fn test_split_slot_fields_omits_trailing_free_fields() {
+        assert_eq!(
+            DateTimeRange::split_slot_fields("2026-*"),
+            Some(vec![(DateField::Year, "2026"), (DateField::Month, "*")])
+        );
+    }
+
+    #[test]
+    fn test_split_slot_fields_returns_written_values_only() {
+        assert_eq!(
+            DateTimeRange::split_slot_fields("*-02-01T12:*"),
+            Some(vec![
+                (DateField::Year, "*"),
+                (DateField::Month, "02"),
+                (DateField::Day, "01"),
+                (DateField::Hour, "12"),
+                (DateField::Minute, "*"),
+            ])
+        );
     }
 
     #[test]
