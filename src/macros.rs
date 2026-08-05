@@ -206,33 +206,3 @@ macro_rules! define_operand_formats {
     };
 }
 
-/// テーブル行のカラム順序を一元管理するマクロ。
-/// 構造体定義、SELECTプロジェクション、カラムリスト生成を一度の定義で行います。
-#[macro_export]
-macro_rules! define_item_schema {
-    ($name:ident { $($field:ident => $col:ident),* $(,)? }) => {
-        pub(crate) struct $name {
-            $(pub $field: ::sea_query::SimpleExpr,)*
-        }
-
-        impl $name {
-            pub fn select(self) -> ::sea_query::SelectStatement {
-                let mut q = ::sea_query::Query::select();
-                $(q.expr_as(self.$field, $crate::db::Col::$col);)*
-                q
-            }
-
-            pub fn all_columns() -> Vec<$crate::db::Col> {
-                vec![$($crate::db::Col::$col),*]
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self {
-                    $($field: ::sea_query::Expr::cust("NULL").into(),)*
-                }
-            }
-        }
-    };
-}
