@@ -1168,6 +1168,33 @@ impl DateTimeRange {
             Err(()) => None,
         }
     }
+
+    pub fn slots_min_timestamp(slots: &[DateSlot; DateField::COUNT]) -> i64 {
+        use chrono::{Datelike, Days, Duration, Months, NaiveDate};
+
+        let field = |f: DateField, min: i64| match slots[f as usize] {
+            DateSlot::Value(n) => n,
+            DateSlot::Free => min,
+        };
+        let year = field(DateField::Year, NaiveDate::MIN.year() as i64);
+        let months = (field(DateField::Month, 1).max(1) - 1).clamp(0, u32::MAX as i64) as u32;
+        let days = (field(DateField::Day, 1).max(1) - 1).clamp(0, i64::MAX) as u64;
+        let hours = field(DateField::Hour, 0);
+        let minutes = field(DateField::Minute, 0);
+        let seconds = field(DateField::Second, 0);
+
+        i32::try_from(year)
+            .ok()
+            .and_then(|y| NaiveDate::from_ymd_opt(y, 1, 1))
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .and_then(|dt| dt.checked_add_months(Months::new(months)))
+            .and_then(|dt| dt.checked_add_days(Days::new(days)))
+            .and_then(|dt| dt.checked_add_signed(Duration::hours(hours)))
+            .and_then(|dt| dt.checked_add_signed(Duration::minutes(minutes)))
+            .and_then(|dt| dt.checked_add_signed(Duration::seconds(seconds)))
+            .map(|dt| dt.and_utc().timestamp())
+            .unwrap_or(i64::MAX)
+    }
 }
 
 fn last_day_of_month(year: i32, month: u32) -> Option<u32> {

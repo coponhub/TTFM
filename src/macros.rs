@@ -203,6 +203,22 @@ macro_rules! define_operand_formats {
         pub enum Formatted {
             $( $name($name), )+
         }
+
+        impl Formatted {
+            pub fn is_point(&self) -> bool {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::is_point(v), )+
+                }
+            }
+
+            pub fn as_bitical(&self) -> $crate::types::Bitical {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::as_bitical(v), )+
+                }
+            }
+        }
     };
 }
 

@@ -23,7 +23,7 @@ use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
 use crate::types::{
-    Bitical, ItemId, ItemKind, Label, Origin, Rank, SType, TagType,
+    Bitical, ItemId, ItemKind, Label, LabelNode, Origin, Rank, SType, TagType,
 };
 use duckdb::types::Value;
 use indexmap::IndexMap;
@@ -137,18 +137,19 @@ pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
 }
 
 fn coerce_plain_bitical(label: &Label, logical_type: LogicalType) -> Label {
-    let Some(resolved) = label.as_formatted_bitical() else {
+    let LabelNode::Formatted(crate::query::format::Formatted::Bitical(resolved)) = label.node()
+    else {
         return label.clone();
     };
     let matches_type = matches!(
-        (logical_type, &resolved),
+        (logical_type, resolved),
         (LogicalType::Any, _)
             | (LogicalType::Boolean, Bitical::Boolean(_))
             | (LogicalType::Integer, Bitical::Integer(_))
             | (LogicalType::Float, Bitical::Integer(_) | Bitical::Double(_))
     );
     if matches_type {
-        Label::other(resolved)
+        Label::other(resolved.clone())
     } else {
         label.clone()
     }
