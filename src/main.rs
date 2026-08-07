@@ -437,7 +437,7 @@ fn print_results(
                     && matches!(e.origin, ttfm::types::Origin::Builtin)
             })
     }) {
-        let repr = format_representative(registry, res);
+        let repr = res.representative.display_keys(registry);
         writeln!(writer, "\x1b[1m{}\x1b[0m", repr).unwrap_or(());
     }
 
@@ -579,15 +579,6 @@ fn print_results(
     }
 }
 
-/// representative の各 Label を型に応じたフォーマットで表示用文字列にします。
-fn format_representative(registry: &TagRegistry, res: &ttfm::Item) -> String {
-    res.representative
-        .iter()
-        .map(|l| registry.format_display(l.tag_type().as_str(), &l.as_str()))
-        .collect::<Vec<_>>()
-        .join(" &: ")
-}
-
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
 fn print_compact_projections(
     registry: &TagRegistry,
@@ -607,32 +598,14 @@ fn print_compact_projections(
             .and_then(|l| l.as_str().parse::<usize>().ok())
             .unwrap_or(label_item.tags.entries.len());
 
-        // nvalue タグの取得
-        let nvalue_str = label_item
-            .tags
-            .entries
-            .iter()
-            .find(|e| e.typed_tag.tag_type() == ttfm::TagType::from("nvalue"))
-            .map(|e| e.typed_tag.as_str());
+        let repr_display = label_item.representative.display(registry);
 
-        let repr_display = format_representative(registry, label_item);
-
-        // 1行目: ヘッダー (ラベル値 - nvalue (X items))
-        if let Some(nv) = &nvalue_str {
-            writeln!(
-                writer,
-                "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
-                repr_display, nv, total_count
-            )
-            .unwrap_or(());
-        } else {
-            writeln!(
-                writer,
-                "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-                repr_display, total_count
-            )
-            .unwrap_or(());
-        }
+        writeln!(
+            writer,
+            "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
+            repr_display, total_count
+        )
+        .unwrap_or(());
 
         // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
         let mut all_items_str = String::new();
@@ -702,7 +675,7 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
         .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
         .map(|e| e.typed_tag.as_str().to_string());
 
-    let repr = format_representative(registry, res);
+    let repr = res.representative.display_keys(registry);
     if let Some(nv) = nvalue_str {
         format!("{} {}", repr, nv)
     } else {
@@ -738,7 +711,7 @@ mod tests {
         let mut res_with_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_with_nvalue.representative =
-            vec![TypedTag::new(SType::Name, "test_label")];
+            vec![TypedTag::new(SType::Name, "test_label")].into();
         res_with_nvalue.apply_tag(
             TypedTag::new("nvalue", Bitical::Integer(9986)),
             Origin::Builtin,
@@ -754,7 +727,7 @@ mod tests {
         let mut res_without_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_without_nvalue.representative =
-            vec![TypedTag::new(SType::Name, "test_label_no_nv")];
+            vec![TypedTag::new(SType::Name, "test_label_no_nv")].into();
 
         let registry = TagRegistry::with_standard();
         let output = format_short_result(&registry, &res_without_nvalue);

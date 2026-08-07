@@ -15,10 +15,49 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use crate::tag::TagRegistry;
 use crate::types::{
-    Bitical, Intrinsic, ItemId, ItemKind, Origin, Rank, SType, TagType,
-    Tags, TypedTag,
+    Bitical, Intrinsic, ItemId, ItemKind, Label, Origin, Rank, SType,
+    TagType, Tags, TypedTag,
 };
+
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct Representative {
+    pub tags: Vec<TypedTag>,
+    pub nvalue: Option<Label>,
+}
+
+impl Representative {
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
+    pub fn display_keys(&self, registry: &TagRegistry) -> String {
+        self.tags
+            .iter()
+            .map(|l| registry.format_display(l.tag_type().as_str(), &l.as_str()))
+            .collect::<Vec<_>>()
+            .join(" &: ")
+    }
+
+    pub fn display_nvalue(&self) -> Option<String> {
+        self.nvalue.as_ref().map(|l| l.as_str())
+    }
+
+    pub fn display(&self, registry: &TagRegistry) -> String {
+        let keys = self.display_keys(registry);
+        match self.display_nvalue() {
+            Some(nv) => format!("{} - {}", keys, nv),
+            None => keys,
+        }
+    }
+}
+
+impl From<Vec<TypedTag>> for Representative {
+    fn from(tags: Vec<TypedTag>) -> Self {
+        Self { tags, nvalue: None }
+    }
+}
 
 /// 検索・編集操作の共通アイテム表現。
 #[derive(Debug, PartialEq, Clone)]
@@ -28,7 +67,7 @@ pub struct Item {
     /// アイテムの種類
     pub item_kind: ItemKind,
     /// この結果を代表するラベル（Projectionではラベル値、通常はpath/nameなど）
-    pub representative: Vec<TypedTag>,
+    pub representative: Representative,
     /// アイテムの優先度
     pub rank: Rank,
     /// 固定の固有情報
@@ -180,7 +219,7 @@ impl SearchResponse {
                 keys.insert(TagType::from(SType::Hash));
             }
             keys.insert(TagType::from(SType::ItemKind));
-            for tag in &res.representative {
+            for tag in &res.representative.tags {
                 keys.insert(tag.tag_type());
             }
 
@@ -332,7 +371,7 @@ impl Item {
         Self {
             id,
             item_kind: kind,
-            representative: vec![],
+            representative: Representative::default(),
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
@@ -343,6 +382,7 @@ impl Item {
     /// representative の全ラベルを " &: " で結合した文字列を返します。
     pub fn raw_repr(&self) -> String {
         self.representative
+            .tags
             .iter()
             .map(|l| l.as_str())
             .collect::<Vec<_>>()
@@ -498,7 +538,7 @@ impl Item {
                 )];
             }
             TagType::Base(SType::Name) => {
-                return self.representative.clone();
+                return self.representative.tags.clone();
             }
             TagType::Base(SType::Origin) => {
                 return vec![of(
@@ -626,7 +666,7 @@ mod tests {
         Item {
             id: 1.into(),
             item_kind: ItemKind::File,
-            representative: vec![TypedTag::new(SType::Name, "test.rs")],
+            representative: vec![TypedTag::new(SType::Name, "test.rs")].into(),
             rank: 1,
             intrinsic: Intrinsic {
                 size: Some(FileSize(100)),
@@ -669,7 +709,7 @@ mod tests {
     fn test_iter_type_groups() {
         let res1 = create_test_result();
         let mut res2 = create_test_result();
-        res2.representative = vec![TypedTag::new(SType::Name, "other.rs")];
+        res2.representative = vec![TypedTag::new(SType::Name, "other.rs")].into();
 
         let response = SearchResponse {
             results: vec![res1, res2],
@@ -813,7 +853,7 @@ mod tests {
         // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
         let mut item_fallback =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
-        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")];
+        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")].into();
         let labels =
             item_fallback.get_all_labels(&TagType::Base(SType::Origin));
         assert_eq!(labels.len(), 1);
@@ -844,13 +884,13 @@ mod tests {
         // 4. なければ、簡易判定（代表名がビルトイン型名かどうか）
         let mut item_fallback =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
-        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")];
+        item_fallback.representative = vec![TypedTag::new(SType::Name, "size")].into();
         assert_eq!(item_fallback.origin(), Origin::Builtin);
 
         let mut item_fallback_user =
             Item::new_empty(ItemId::Volatile(0), ItemKind::Volatile);
         item_fallback_user.representative =
-            vec![TypedTag::new(SType::Name, "my_custom_type")];
+            vec![TypedTag::new(SType::Name, "my_custom_type")].into();
         assert_eq!(item_fallback_user.origin(), Origin::User);
     }
 

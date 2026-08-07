@@ -340,7 +340,7 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
         "tag def should not be Stored before registration"
     );
     assert_eq!(
-        item.representative.first().map(|l| l.tag_type()),
+        item.representative.tags.first().map(|l| l.tag_type()),
         Some(TagType::Base(SType::TypedTag))
     );
 
@@ -478,7 +478,7 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
         "unregistered tag def must not be Stored"
     );
     assert_eq!(
-        r.results[0].representative.first().map(|l| l.tag_type()),
+        r.results[0].representative.tags.first().map(|l| l.tag_type()),
         Some(TagType::Base(SType::TypedTag))
     );
 
@@ -688,7 +688,7 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
         SearchOptions::default(),
     )?;
     assert_eq!(r.results.len(), 1);
-    let name = r.results[0].representative.iter().find_map(|l| {
+    let name = r.results[0].representative.tags.iter().find_map(|l| {
         if l.tag_type() == ttfm::types::TagType::Base(ttfm::types::SType::Name) {
             let s = l.as_str();
             Some(s.clone())

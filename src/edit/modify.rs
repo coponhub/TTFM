@@ -201,7 +201,7 @@ fn inject_name(item: &Item, existing: &[TypedTag], out: &mut Vec<TypedTag>) {
     {
         return;
     }
-    let name = if let Some(repr) = item.representative.first() {
+    let name = if let Some(repr) = item.representative.tags.first() {
         repr.value().as_display_name()
     } else {
         out.iter()
@@ -355,7 +355,7 @@ mod tests {
         Item {
             id: ItemId::Stored(item_id),
             item_kind: ItemKind::File,
-            representative: vec![],
+            representative: vec![].into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags,
@@ -388,7 +388,7 @@ mod tests {
         Item {
             id: ItemId::Volatile(0),
             item_kind: ItemKind::Volatile,
-            representative: vec![repr_label],
+            representative: vec![repr_label].into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
@@ -733,7 +733,7 @@ mod tests {
         let item = Item {
             id: ItemId::Volatile(0),
             item_kind: ItemKind::Volatile,
-            representative: vec![],
+            representative: vec![].into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
@@ -912,7 +912,7 @@ mod tests {
         let item = Item {
             id: ItemId::Volatile(0),
             item_kind: ItemKind::Volatile,
-            representative: repr,
+            representative: repr.into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),

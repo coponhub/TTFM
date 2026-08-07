@@ -153,9 +153,26 @@ fn search_core(
                 });
             if let Some(raw) = raw {
                 let formatted = registry.format_display(tt.as_str(), &raw);
-                result.representative = vec![TypedTag::new(SType::Name, formatted.clone())];
+                result.representative = vec![TypedTag::new(SType::Name, formatted.clone())].into();
                 result.tags.push(TypedTag::new(SType::Name, formatted), Origin::Builtin);
             }
+        }
+    }
+
+    let nvalue_tag_type = resolver.get_scalar_result_label_type();
+    for result in &mut results {
+        if let Some(raw) = result
+            .tags
+            .entries
+            .iter()
+            .find(|e| e.typed_tag.tag_type().as_str() == "nvalue")
+            .map(|e| e.typed_tag.as_str())
+        {
+            let display = nvalue_tag_type
+                .as_ref()
+                .map(|tt| registry.format_display(tt.as_str(), &raw))
+                .unwrap_or(raw);
+            result.representative.nvalue = Some(crate::types::Label::from(display));
         }
     }
 

@@ -173,6 +173,10 @@ pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
         .map(|e| e.typed_tag.as_str().to_string())
 }
 
+pub(super) fn get_nvalue_display(item: &ttfm::Item) -> Option<String> {
+    item.representative.nvalue.as_ref().map(|l| l.as_str())
+}
+
 pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
@@ -243,7 +247,7 @@ pub(super) fn apply_tags_batch(
         let item = ttfm::Item {
             id: ItemId::Stored(id),
             item_kind: ttfm::ItemKind::File,
-            representative: vec![],
+            representative: vec![].into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),

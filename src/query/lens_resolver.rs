@@ -1000,6 +1000,9 @@ impl ResolvedNode {
     /// count() / Literal は型を伝播しない。
     pub fn get_scalar_result_label_type(&self) -> Option<TagType> {
         match self {
+            ResolvedNode::And(nodes) => {
+                nodes.iter().find_map(|n| n.get_scalar_result_label_type())
+            }
             ResolvedNode::Aggregation(ResolvedAggregationNode::Count(_)) => {
                 None
             }
@@ -1009,6 +1012,19 @@ impl ResolvedNode {
                 let (_, _, operand) = inner.extract_agg_parts();
                 let operand = operand?;
                 let mut types = collect_tag_types_from_operand(operand);
+                types.sort();
+                types.dedup();
+                if types.len() == 1 {
+                    Some(types.remove(0))
+                } else {
+                    None
+                }
+            }
+            ResolvedNode::Nest {
+                nvalue: Some(nvalue),
+                ..
+            } => {
+                let mut types = collect_tag_types_from_operand(nvalue);
                 types.sort();
                 types.dedup();
                 if types.len() == 1 {

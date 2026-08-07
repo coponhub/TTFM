@@ -350,6 +350,7 @@ fn repr_of<'a, 'b>(
     tagtype: &'b TagType,
 ) -> impl Iterator<Item = &'a TypedTag> + use<'a, 'b> {
     item.representative
+        .tags
         .iter()
         .filter(move |t| t.tag_type() == *tagtype)
 }
@@ -1755,7 +1756,7 @@ impl Edit for ItemKindFn {
         EditStrategy::ModifyInjection
     }
     fn inject(&self, item: &Item) -> Option<Label> {
-        let kind = match item.representative.as_slice() {
+        let kind = match item.representative.tags.as_slice() {
             [l] if l.tag_type() == TagType::Base(SType::TypedTag) => {
                 ItemKind::Tag
             }
@@ -3433,7 +3434,7 @@ mod tests {
         Item {
             id: crate::types::ItemId::Stored(1),
             item_kind: ItemKind::File,
-            representative: vec![],
+            representative: vec![].into(),
             rank: 0,
             intrinsic: crate::types::Intrinsic::default(),
             tags,
@@ -3526,7 +3527,7 @@ mod tests {
     #[test]
     fn name_fn_binds_from_representative() {
         let mut item = item_with(vec![]);
-        item.representative = vec![TypedTag::new(SType::Name, "proj_alpha")];
+        item.representative = vec![TypedTag::new(SType::Name, "proj_alpha")].into();
         assert_eq!(
             capture_of(NameFn.query(), SType::Name, "proj_*", &item),
             vec![vec!["alpha".to_string()]]
@@ -3536,7 +3537,7 @@ mod tests {
     #[test]
     fn type_fn_binds_from_representative() {
         let mut item = item_with(vec![]);
-        item.representative = vec![TypedTag::new(SType::Type, "extension")];
+        item.representative = vec![TypedTag::new(SType::Type, "extension")].into();
         assert_eq!(
             capture_of(TypeFn.query(), SType::Type, "ext*", &item),
             vec![vec!["ension".to_string()]]
@@ -3546,7 +3547,7 @@ mod tests {
     #[test]
     fn tag_fn_binds_from_representative() {
         let mut item = item_with(vec![]);
-        item.representative = vec![TypedTag::new(SType::TypedTag, "proj_alpha")];
+        item.representative = vec![TypedTag::new(SType::TypedTag, "proj_alpha")].into();
         assert_eq!(
             capture_of(TypedTagFn.query(), SType::TypedTag, "proj_*", &item),
             vec![vec!["alpha".to_string()]]
@@ -3622,7 +3623,8 @@ mod tests {
             TypedTag::new(SType::Name, "proj_alpha"),
             TypedTag::new(SType::Type, "extension"),
             TypedTag::new(SType::TypedTag, "proj_alpha"),
-        ];
+        ]
+        .into();
         item.rank = 120;
 
         let cases: [(&dyn Query, SType, &str); 6] = [

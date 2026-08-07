@@ -584,7 +584,7 @@ mod tests {
         Item {
             id: ItemId::Stored(1),
             item_kind: ItemKind::File,
-            representative: vec![],
+            representative: vec![].into(),
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags,
@@ -860,7 +860,7 @@ mod tests {
         let item = Item {
             id: ItemId::Stored(1),
             item_kind: ItemKind::File,
-            representative: vec![TypedTag::new(SType::Type, "project")],
+            representative: vec![TypedTag::new(SType::Type, "project")].into(),
             rank: 0,
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),

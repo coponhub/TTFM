@@ -17,8 +17,8 @@
 
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
-    default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
-    inject_path_scope, scope_path_from_dir,
+    default_scope, get_nvalue, get_nvalue_display, get_nvalue_f64,
+    has_item_tags, inject_path_scope, scope_path_from_dir,
 };
 use tempfile::tempdir;
 use ttfm::tag::TagRegistry;
@@ -69,6 +69,42 @@ define_cases! {
             assert!(has_item_tags(&res.results));
             let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
             assert_eq!(get_nvalue(sub).as_deref(), Some("300"), "sub sum=300");
+            Ok(())
+        },
+    },
+    sum_nvalue_formats_by_single_tag_type: {
+        setup: |dir| {
+            let sub = dir.join("sub");
+            std::fs::create_dir_all(&sub)?;
+            std::fs::write(sub.join("a.bin"), vec![0u8; 1024])?;
+            std::fs::write(sub.join("b.bin"), vec![0u8; 1024])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: sum(size:)",
+        assert: |res, _dir| {
+            assert!(has_item_tags(&res.results));
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
+            assert_eq!(get_nvalue(sub).as_deref(), Some("2048"), "raw nvalue stays untouched");
+            assert_eq!(get_nvalue_display(sub).as_deref(), Some("2.00KB"), "display nvalue is size-formatted");
+            Ok(())
+        },
+    },
+    count_nvalue_stays_unformatted: {
+        setup: |dir| {
+            let sub = dir.join("sub");
+            std::fs::create_dir_all(&sub)?;
+            std::fs::write(sub.join("a.jpg"), "jpg1")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: count(extension:jpg)",
+        assert: |res, _dir| {
+            assert!(has_item_tags(&res.results));
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
+            assert_eq!(get_nvalue_display(sub).as_deref(), Some("1"), "count has no type to format, stays raw");
             Ok(())
         },
     },

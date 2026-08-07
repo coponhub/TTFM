@@ -138,7 +138,7 @@ impl<'a> Fetcher<'a> {
                     let s = bitical.as_display_name();
                     let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
-                    res.representative = vec![TypedTag::new(SType::Name, s)];
+                    res.representative = vec![TypedTag::new(SType::Name, s)].into();
                 }
             } else {
                 #[allow(deprecated)]
@@ -191,7 +191,7 @@ impl<'a> Fetcher<'a> {
                 // 型情報が不明な場合は Name タグとして扱う (Lv.1 互換)
                 representative.push(TypedTag::new(SType::Name, lv.as_display_name()));
             }
-            res.representative = representative;
+            res.representative = representative.into();
         }
 
         // 揮発アイテムに origin タグが付与されていれば、区画（Origin）だけ
@@ -231,7 +231,7 @@ impl<'a> Fetcher<'a> {
                                 .parse::<f64>()
                                 .map(|f| f.to_string())
                                 .unwrap_or(s);
-                            res.representative = vec![TypedTag::new(SType::Name, s)];
+                            res.representative = vec![TypedTag::new(SType::Name, s)].into();
                         }
                     }
                     #[allow(deprecated)]
