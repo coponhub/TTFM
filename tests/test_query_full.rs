@@ -41,7 +41,7 @@ fn test_binder_error() -> anyhow::Result<()> {
     )?;
 
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 1"#;
-    match search::search(&store, &registry, q, Default::default()) {
+    match search::search_nowarn(&store, &registry, q, Default::default()) {
         Ok(res) => eprintln!("SUCCESS: {:?}", res),
         Err(e) => {
             eprintln!("ERROR: {}", e);

@@ -114,7 +114,7 @@ define_cases! {
 #[test]
 fn test_full_resolution() {
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 1"#;
-    match Resolver::new(q, &TagRegistry::with_standard()) {
+    match Resolver::new_nowarn(q, &TagRegistry::with_standard()) {
         Ok(resolver) => {
             eprintln!("SUCCESS: {:?}", resolver.get_projection())
         }
@@ -171,7 +171,7 @@ fn test_calculation_nvalue_label_groups() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"(((parentdir: &: count(extension:rs)) / (parentdir: &: count())) * 10) :> 5"#;
-    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
+    let resolver = Resolver::new_nowarn(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results
@@ -242,7 +242,7 @@ fn test_calculation_nvalue_gt_zero() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 0"#;
-    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
+    let resolver = Resolver::new_nowarn(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results

@@ -130,7 +130,7 @@ impl<'a> Fetcher<'a> {
 
     /// DuckDB の Row から Item を構築します（通常アイテム用）。
     fn decode_item_from_row(&self, row: &duckdb::Row) -> duckdb::Result<Item> {
-        use crate::types::Label;
+        use crate::types::TypedTag;
         let (mut res, raw_tags) = read_base_from_row(row)?;
         for tag_row in raw_tags {
             if tag_row.tag_type == "name" {
@@ -138,7 +138,7 @@ impl<'a> Fetcher<'a> {
                     let s = bitical.as_display_name();
                     let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
-                    res.representative = vec![Label::Name(s)];
+                    res.representative = vec![TypedTag::new(SType::Name, s)].into();
                 }
             } else {
                 #[allow(deprecated)]
@@ -155,7 +155,7 @@ impl<'a> Fetcher<'a> {
         &self,
         row: &duckdb::Row,
     ) -> duckdb::Result<Item> {
-        use crate::types::{Bitical, Label, TagType};
+        use crate::types::{Bitical, Label, TypedTag};
         use duckdb::types::Value;
 
         let (mut res, raw_tags) = read_base_from_row(row)?;
@@ -183,15 +183,15 @@ impl<'a> Fetcher<'a> {
                         } = op
                         {
                             // 型情報がある場合はそれを尊重する
-                            representative.push(Label::resolve(tag_type.clone(), lv));
+                            representative.push(TypedTag::new(tag_type.clone(), lv));
                             continue;
                         }
                     }
                 }
                 // 型情報が不明な場合は Name タグとして扱う (Lv.1 互換)
-                representative.push(Label::Name(lv.as_display_name()));
+                representative.push(TypedTag::new(SType::Name, lv.as_display_name()));
             }
-            res.representative = representative;
+            res.representative = representative.into();
         }
 
         // 揮発アイテムに origin タグが付与されていれば、区画（Origin）だけ
@@ -219,10 +219,7 @@ impl<'a> Fetcher<'a> {
                 "origin" => {}
                 "item_count" => {
                     if let Some(bitical) = tag_row.value {
-                        res.item_count = Some(Label::resolve(
-                            TagType::from("item_count"),
-                            bitical,
-                        ));
+                        res.item_count = Some(Label::other(bitical));
                     }
                 }
                 "name" => {
@@ -234,7 +231,7 @@ impl<'a> Fetcher<'a> {
                                 .parse::<f64>()
                                 .map(|f| f.to_string())
                                 .unwrap_or(s);
-                            res.representative = vec![Label::Name(s)];
+                            res.representative = vec![TypedTag::new(SType::Name, s)].into();
                         }
                     }
                     #[allow(deprecated)]
@@ -324,30 +321,31 @@ mod tests {
     use crate::query::lens_resolver::ResolvedNode;
     use crate::query::lens_schema::StorageMapping;
     use crate::tag::TagRegistry;
-    use crate::types::{Label, SType, TagType};
+    use crate::types::{SType, TagType};
 
     #[test]
     fn test_expand_query_recursive() {
         // Focused Lens 生成（ここでパース・展開・解決が行われる）
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "directory:docs",
             &TagRegistry::with_standard(),
         )
         .unwrap();
         let expanded = &resolver.expanded_query;
 
-        let _target_label = Label::from("docs");
-
-        // 少なくとも TypedTag(Directory) ではなくなっているはず
-        if let QueryNode::TypedTag(tt) = &expanded {
-            assert_ne!(tt.label.tag_type(), TagType::Base(SType::Directory));
+        match expanded {
+            QueryNode::TypedTag(tt) => {
+                assert_eq!(tt.tag_type(), TagType::Base(SType::Directory));
+                assert!(!tt.is_default_node());
+            }
+            other => panic!("expected a single annotated TypedTag, got {other:?}"),
         }
     }
 
     #[test]
     fn test_resolve_query_physical_mapping() {
         // Focused Lens 生成
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "size:100",
             &TagRegistry::with_standard(),
         )
@@ -408,7 +406,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -444,7 +442,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -511,7 +509,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -539,7 +537,7 @@ mod tests {
 
         // 1. max(mtime:) < 2026-02-01 (should be TRUE if we have appropriate data)
         // データがない -> fetch_boolean は FALSE (0) を返すはず
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "max(mtime:) < 2026-02-01",
             &TagRegistry::with_standard(),
         )
@@ -637,7 +635,7 @@ mod tests {
         std::env::set_var("TTFM_DEBUG", "1");
 
         // parentdir: &: count(extension:jpg) → src=1, docs=1
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "parentdir: &: count(extension:jpg)",
             &TagRegistry::with_standard(),
         )
@@ -652,7 +650,7 @@ mod tests {
         // 各グループに nvalue タグがあることを確認
         for item in &results {
             let nvalue_tag = item.tags.entries.iter().find(|e| {
-                e.label.tag_type() == crate::types::TagType::from("nvalue")
+                e.typed_tag.tag_type() == crate::types::TagType::from("nvalue")
             });
             assert!(
                 nvalue_tag.is_some(),
@@ -668,11 +666,11 @@ mod tests {
             .entries
             .iter()
             .find(|e| {
-                e.label.tag_type() == crate::types::TagType::from("nvalue")
+                e.typed_tag.tag_type() == crate::types::TagType::from("nvalue")
             })
             .unwrap();
         assert_eq!(
-            docs_nvalue.label.as_str(),
+            docs_nvalue.typed_tag.as_str(),
             "1",
             "docs should have 1 jpg file"
         );
@@ -683,11 +681,11 @@ mod tests {
             .entries
             .iter()
             .find(|e| {
-                e.label.tag_type() == crate::types::TagType::from("nvalue")
+                e.typed_tag.tag_type() == crate::types::TagType::from("nvalue")
             })
             .unwrap();
         assert_eq!(
-            src_nvalue.label.as_str(),
+            src_nvalue.typed_tag.as_str(),
             "1",
             "src should have 1 jpg file"
         );
@@ -717,7 +715,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:",
             &TagRegistry::with_standard(),
         )
@@ -729,7 +727,7 @@ mod tests {
 
         // nvalue タグがないことを確認
         let has_nvalue = results[0].tags.entries.iter().any(|e| {
-            e.label.tag_type() == crate::types::TagType::from("nvalue")
+            e.typed_tag.tag_type() == crate::types::TagType::from("nvalue")
         });
         assert!(!has_nvalue, "Normal projection should NOT have nvalue tag");
     }
@@ -791,7 +789,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "txt");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -803,7 +801,7 @@ mod tests {
         // item: タグは注入されないはず（items パス）
         let has_item_tag =
             results[0].tags.entries.iter().any(|e| {
-                e.label.tag_type() == crate::types::TagType::from("item")
+                e.typed_tag.tag_type() == crate::types::TagType::from("item")
             });
         assert!(!has_item_tag, "Items path should not have item: tags");
     }
@@ -817,7 +815,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "txt");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "extension:",
             &TagRegistry::with_standard(),
         )
@@ -829,7 +827,7 @@ mod tests {
         // item: タグが注入されているはず（projection パス）
         for r in &results {
             let has_item_tag = r.tags.entries.iter().any(|e| {
-                e.label.tag_type() == crate::types::TagType::from("item")
+                e.typed_tag.tag_type() == crate::types::TagType::from("item")
             });
             assert!(
                 has_item_tag,
@@ -854,7 +852,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "sum(size:)",
             &TagRegistry::with_standard(),
         )
@@ -880,7 +878,7 @@ mod tests {
         insert_row(&conn, 2, 5, "extension", "md");
         insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
 
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             "parentdir: &: (count(extension:rs) > 0)",
             &TagRegistry::with_standard(),
         )
@@ -898,7 +896,7 @@ mod tests {
         // items パスを通るので item: タグは存在しない
         let has_item_tag =
             results[0].tags.entries.iter().any(|e| {
-                e.label.tag_type() == crate::types::TagType::from("item")
+                e.typed_tag.tag_type() == crate::types::TagType::from("item")
             });
         assert!(!has_item_tag, "Flat list result should NOT have item: tags");
     }

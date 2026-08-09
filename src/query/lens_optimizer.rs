@@ -16,7 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::query::lens_resolver::{
-    NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
+    NestMatchCondition, NestMatchOp, NestMatchRhs, NvalueRhs,
+    ResolvedAggregationNode,
 };
 use crate::query::{ResolvedNode, ResolvedOperand};
 
@@ -65,22 +66,27 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             && matches!(right_nvalue, ResolvedOperand::Literal(_)) =>
         {
             // Convert self-comparing NestNestMatch into a MergedNestMatch
+            let ResolvedOperand::Literal(right_label) = right_nvalue else {
+                unreachable!("right_nvalue はガード節で Literal に限定済み")
+            };
             ResolvedNode::MergedNestMatch {
                 keys: left_keys,
                 matches: vec![NestMatchCondition {
                     nvalue: left_nvalue,
                     op,
-                    right: right_nvalue,
+                    right: NestMatchRhs::Operand(ResolvedOperand::Literal(
+                        right_label,
+                    )),
                     context: left_context,
                 }],
                 is_or: false,
             }
         }
-        ResolvedNode::AggregationMatch { agg, op, label } => {
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
             ResolvedNode::AggregationMatch {
                 agg: flatten_aggregation(agg),
                 op,
-                label,
+                rhs,
             }
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
@@ -114,14 +120,19 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             keys,
             nvalue,
             op,
-            label,
+            rhs,
             context,
         } if nvalue.contains_aggregation() => ResolvedNode::MergedNestMatch {
             keys: keys.clone(),
             matches: vec![NestMatchCondition {
                 nvalue,
                 op: NestMatchOp::Comparison(op),
-                right: ResolvedOperand::Literal(label),
+                right: match rhs {
+                    NvalueRhs::Label(label) => {
+                        NestMatchRhs::Operand(ResolvedOperand::Literal(label))
+                    }
+                    NvalueRhs::DateTime(range) => NestMatchRhs::DateTime(range),
+                },
                 context,
             }],
             is_or: false,
@@ -211,7 +222,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                     let cond = NestMatchCondition {
                         nvalue: left_nvalue,
                         op,
-                        right: right_nvalue,
+                        right: NestMatchRhs::Operand(right_nvalue),
                         context: left_context.clone(),
                     };
 
@@ -245,13 +256,19 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 keys,
                 nvalue,
                 op,
-                label,
+                rhs,
                 context,
             } => {
+                let right = match rhs {
+                    NvalueRhs::Label(label) => NestMatchRhs::Operand(
+                        crate::query::ResolvedOperand::Literal(label),
+                    ),
+                    NvalueRhs::DateTime(range) => NestMatchRhs::DateTime(range),
+                };
                 let cond = NestMatchCondition {
                     nvalue,
                     op: NestMatchOp::Comparison(op),
-                    right: crate::query::ResolvedOperand::Literal(label),
+                    right,
                     context: context.clone(),
                 };
 
@@ -288,7 +305,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 }
 
                 if !found {
-                    groups.push((keys, None, matches));
+                    groups.push((keys, matches_context, matches));
                 }
             }
             _ => remaining.push(child),
@@ -311,25 +328,39 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 .next()
                 .expect("matches should have at least one element");
             let NestMatchOp::Comparison(op) = cond.op;
-            if let crate::query::ResolvedOperand::Literal(label) = cond.right {
-                remaining.push(ResolvedNode::NestMatch {
-                    keys: operand.clone(),
-                    nvalue: cond.nvalue,
-                    op,
+            match cond.right {
+                NestMatchRhs::DateTime(range) => {
+                    remaining.push(ResolvedNode::NestMatch {
+                        keys: operand.clone(),
+                        nvalue: cond.nvalue,
+                        op,
+                        rhs: NvalueRhs::DateTime(range),
+                        context: cond.context,
+                    });
+                }
+                NestMatchRhs::Operand(crate::query::ResolvedOperand::Literal(
                     label,
-                    context: cond.context,
-                });
-            } else {
-                // right is Calculation or other non-Literal: keep as NestNestMatch
-                remaining.push(ResolvedNode::NestNestMatch {
-                    left_keys: operand.clone(),
-                    left_nvalue: cond.nvalue,
-                    left_context: cond.context.clone(),
-                    op: NestMatchOp::Comparison(op),
-                    right_keys: operand,
-                    right_nvalue: cond.right,
-                    right_context: cond.context,
-                });
+                )) => {
+                    remaining.push(ResolvedNode::NestMatch {
+                        keys: operand.clone(),
+                        nvalue: cond.nvalue,
+                        op,
+                        rhs: NvalueRhs::Label(label),
+                        context: cond.context,
+                    });
+                }
+                NestMatchRhs::Operand(right_nvalue) => {
+                    // right is Calculation or other non-Literal: keep as NestNestMatch
+                    remaining.push(ResolvedNode::NestNestMatch {
+                        left_keys: operand.clone(),
+                        left_nvalue: cond.nvalue,
+                        left_context: cond.context.clone(),
+                        op: NestMatchOp::Comparison(op),
+                        right_keys: operand,
+                        right_nvalue,
+                        right_context: cond.context,
+                    });
+                }
             }
         }
     }
@@ -348,7 +379,7 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_logical() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
 
@@ -384,7 +415,7 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_or() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) | parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
 
@@ -429,7 +460,7 @@ mod tests {
         // フィルタ（非 Projection ノード）が nest context に押し込まれることを確認する。
         // 旧 `type:file` は定義参照になったため、`X:*` ルールに従い `file:*` を使用する。
         let query_str = "parentdir: &: (count(*:*) > 0) & file:*";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -473,7 +504,7 @@ mod tests {
         // Query: sum(parentdir: &: sum(size:)) > 0
         // Outer sum should be flattened to essentially sum(size:) > 0.
         let query_str = "sum(parentdir: &: sum(size:)) > 0";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -481,7 +512,7 @@ mod tests {
         // Compare with explicitly flat sum(size:) > 0
         let flat_query_str = "sum(size:) > 0";
         let flat_resolved =
-            Resolver::new(flat_query_str, &TagRegistry::with_standard())
+            Resolver::new_nowarn(flat_query_str, &TagRegistry::with_standard())
                 .unwrap()
                 .resolved_query;
 
@@ -506,7 +537,7 @@ mod tests {
         // (フラットリストを返すべき比較演算のため、MergedNestMatch には変換しない)
         let query_str =
             "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -552,7 +583,7 @@ mod tests {
         // 同一キーの算術演算 nvalue → Calculation を持つ MergedNestMatch に変換されること
         let query_str =
             "((parentdir: &: count(ext:rs)) / (parentdir: &: count())) :> 100";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -588,11 +619,45 @@ mod tests {
     }
 
     #[test]
+    fn test_optimize_same_key_merge_with_shared_context() {
+        // 同じ context (path:) を持つ2条件は、他の And 兄弟があってもマージされること
+        let query_str = "(parentdir: &: (count(cat:rs) > 0) & parentdir: &: (count(dog:rs) > 0)) & path:/tmp/foo/*";
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+            .unwrap()
+            .resolved_query;
+        let optimized = optimize(resolved);
+
+        let ResolvedNode::And(children) = &optimized else {
+            panic!("Expected And as root, got: {:?}", optimized)
+        };
+        let merged = children
+            .iter()
+            .find(|c| matches!(c, ResolvedNode::MergedNestMatch { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected a MergedNestMatch child, got: {:?}",
+                    optimized
+                )
+            });
+        match merged {
+            ResolvedNode::MergedNestMatch { matches, .. } => {
+                assert_eq!(
+                    matches.len(),
+                    2,
+                    "Same key + same context should merge into 2 conditions, got: {:?}",
+                    optimized
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_optimize_different_key_no_merge() {
         // parentdir と extension は異なるキーなのでマージされないこと
         let query_str =
             "parentdir: &: (count(ext:rs) > 0) & extension: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -615,7 +680,7 @@ mod tests {
         // extension: の And ラッパーなしのシンプルな異なるキー同士はマージされないこと
         let query_str =
             "parentdir: &: (sum(size:) > 0) & stem: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
@@ -635,14 +700,14 @@ mod tests {
     fn test_optimize_no_flatten_avg_avg() {
         // avg(parentdir: &: avg(size:)) は sum と違いフラット化されないこと
         let query_str = "avg(parentdir: &: avg(size:)) > 0";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolved = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .unwrap()
             .resolved_query;
         let optimized = optimize(resolved);
 
         // 比較対象: avg(size:) > 0 (フラット版)
         let flat_resolved =
-            Resolver::new("avg(size:) > 0", &TagRegistry::with_standard())
+            Resolver::new_nowarn("avg(size:) > 0", &TagRegistry::with_standard())
                 .unwrap()
                 .resolved_query;
 

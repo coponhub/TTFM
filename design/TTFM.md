@@ -94,8 +94,8 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
         - **To Process**: 新規、または Mtime/Size が変化したファイル。
         - **Moved**: `FileId` は一致するが、Path が異なるファイル。
           - アクション: **Location (path, parentdir, filename, extension) の情報を再生成する。**
-        - **Unchanged**: 全てのメタデータが一致、または上位ディレクトリの `mtime` 判定でスキップされたファイル。
-        - **Deleted**: 既存インデックスにあるが、今回の走査で見つからず、かつ親ディレクトリが「不一致 (Modified)」判定されていたファイル。
+        - **Unchanged**: 全てのメタデータが一致したファイル。
+        - **Deleted**: 既存インデックスにあるが、今回の走査で見つからなかったファイル。
 
 3.  **Triage Phase (Selection & Assembly)**:
     - **ItemTriager** を実行し、抽出されたメタデータを各テーブルへ振り分ける。

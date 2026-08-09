@@ -232,8 +232,14 @@ fn main() -> Result<()> {
                 cid: cid.clone(),
                 ..Default::default()
             };
-            let response =
-                ttfm::search::search(&store, &registry, query, opts)?;
+            let mut stdout = std::io::stdout();
+            let response = ttfm::search::search(
+                &store,
+                &registry,
+                query,
+                opts,
+                &mut ColorWarningSink { writer: &mut stdout },
+            )?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -262,7 +268,14 @@ fn main() -> Result<()> {
                 cid: cid.clone(),
                 ..Default::default()
             };
-            let response = ttfm::search::search(&store, &registry, "", opts)?;
+            let mut stdout = std::io::stdout();
+            let response = ttfm::search::search(
+                &store,
+                &registry,
+                "",
+                opts,
+                &mut ColorWarningSink { writer: &mut stdout },
+            )?;
             if *short {
                 print_simple_results(&registry, &response);
             } else {
@@ -280,6 +293,7 @@ fn main() -> Result<()> {
             search_query,
             edit_query,
         } => {
+            let mut stdout = std::io::stdout();
             let resp = edit(
                 &store,
                 &registry,
@@ -288,6 +302,7 @@ fn main() -> Result<()> {
                 QueryType::Tag,
                 None,
                 WriteOptions { yes: cli.yes },
+                &mut ColorWarningSink { writer: &mut stdout },
             )?;
             safe_println!("Updated {} tag(s).", resp.updated);
         }
@@ -296,6 +311,7 @@ fn main() -> Result<()> {
             tag_query,
             condition,
         } => {
+            let mut stdout = std::io::stdout();
             let resp = edit(
                 &store,
                 &registry,
@@ -304,6 +320,7 @@ fn main() -> Result<()> {
                 QueryType::Untag,
                 condition.as_deref(),
                 WriteOptions { yes: cli.yes },
+                &mut ColorWarningSink { writer: &mut stdout },
             )?;
             safe_println!("Deleted {} tag(s).", resp.deleted);
         }
@@ -364,9 +381,13 @@ fn get_terminal_width() -> usize {
     100 // default fallback
 }
 
-fn print_warnings(warnings: &[String], writer: &mut dyn std::io::Write) {
-    for w in warnings {
-        writeln!(writer, "\x1b[1;33mWarning: {}\x1b[0m", w).unwrap_or(());
+struct ColorWarningSink<'a> {
+    writer: &'a mut dyn std::io::Write,
+}
+
+impl ttfm::query::error::WarningSink for ColorWarningSink<'_> {
+    fn warn(&mut self, warning: ttfm::query::error::Warning) {
+        writeln!(self.writer, "\x1b[1;33m{}\x1b[0m", warning).unwrap_or(());
     }
 }
 
@@ -379,8 +400,6 @@ fn print_results(
     current_n: usize,
     writer: &mut dyn std::io::Write,
 ) {
-    print_warnings(&response.warnings, writer);
-
     // 続きがある場合のみ、進捗状況（キャッシュ生成待ち）をチェックして表示
     if response.has_more && !response.progress.is_finished() {
         writeln!(
@@ -414,11 +433,11 @@ fn print_results(
         r.id.is_volatile()
             && !r.representative.is_empty()
             && r.tags.entries.iter().any(|e| {
-                e.label.tag_type().as_str() == "value"
+                e.typed_tag.tag_type().as_str() == "value"
                     && matches!(e.origin, ttfm::types::Origin::Builtin)
             })
     }) {
-        let repr = format_representative(registry, res);
+        let repr = res.representative.display_keys(registry);
         writeln!(writer, "\x1b[1m{}\x1b[0m", repr).unwrap_or(());
     }
 
@@ -560,15 +579,6 @@ fn print_results(
     }
 }
 
-/// representative の各 Label を型に応じたフォーマットで表示用文字列にします。
-fn format_representative(registry: &TagRegistry, res: &ttfm::Item) -> String {
-    res.representative
-        .iter()
-        .map(|l| registry.format_display(l.tag_type().as_str(), &l.as_str()))
-        .collect::<Vec<_>>()
-        .join(" &: ")
-}
-
 /// 投影クエリの結果をラベルごとに集約してコンパクトに表示します。
 fn print_compact_projections(
     registry: &TagRegistry,
@@ -588,32 +598,14 @@ fn print_compact_projections(
             .and_then(|l| l.as_str().parse::<usize>().ok())
             .unwrap_or(label_item.tags.entries.len());
 
-        // nvalue タグの取得
-        let nvalue_str = label_item
-            .tags
-            .entries
-            .iter()
-            .find(|e| e.label.tag_type() == ttfm::TagType::from("nvalue"))
-            .map(|e| e.label.as_str());
+        let repr_display = label_item.representative.display(registry);
 
-        let repr_display = format_representative(registry, label_item);
-
-        // 1行目: ヘッダー (ラベル値 - nvalue (X items))
-        if let Some(nv) = &nvalue_str {
-            writeln!(
-                writer,
-                "\x1b[1;34m:{}\x1b[0m - {} \x1b[2m({} items)\x1b[0m",
-                repr_display, nv, total_count
-            )
-            .unwrap_or(());
-        } else {
-            writeln!(
-                writer,
-                "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-                repr_display, total_count
-            )
-            .unwrap_or(());
-        }
+        writeln!(
+            writer,
+            "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
+            repr_display, total_count
+        )
+        .unwrap_or(());
 
         // 2行目: アイテムリスト (tagsから抽出: item:name#id, ...)
         let mut all_items_str = String::new();
@@ -624,7 +616,7 @@ fn print_compact_projections(
                 all_items_str.push_str(", ");
             }
             // タグは "item:name#id" 形式
-            all_items_str.push_str(&tag_entry.label.as_str());
+            all_items_str.push_str(&tag_entry.typed_tag.as_str());
             if all_items_str.chars().count() > term_width + 10 {
                 break;
             }
@@ -680,10 +672,10 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
         .tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
-        .map(|e| e.label.as_str().to_string());
+        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.typed_tag.as_str().to_string());
 
-    let repr = format_representative(registry, res);
+    let repr = res.representative.display_keys(registry);
     if let Some(nv) = nvalue_str {
         format!("{} {}", repr, nv)
     } else {
@@ -695,7 +687,9 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use ttfm::types::{Bitical, ItemId, ItemKind, Label, Origin, TagType};
+    use ttfm::types::{
+        Bitical, ItemId, ItemKind, Origin, SType, TypedTag,
+    };
     use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
@@ -717,9 +711,9 @@ mod tests {
         let mut res_with_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_with_nvalue.representative =
-            vec![Label::Name("test_label".to_string())];
+            vec![TypedTag::new(SType::Name, "test_label")].into();
         res_with_nvalue.apply_tag(
-            Label::resolve(TagType::from("nvalue"), Bitical::Integer(9986)),
+            TypedTag::new("nvalue", Bitical::Integer(9986)),
             Origin::Builtin,
         );
 
@@ -733,7 +727,7 @@ mod tests {
         let mut res_without_nvalue =
             Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
         res_without_nvalue.representative =
-            vec![Label::Name("test_label_no_nv".to_string())];
+            vec![TypedTag::new(SType::Name, "test_label_no_nv")].into();
 
         let registry = TagRegistry::with_standard();
         let output = format_short_result(&registry, &res_without_nvalue);
@@ -759,7 +753,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "name:sized.bin",
@@ -787,8 +781,8 @@ mod tests {
 
         let output = String::from_utf8(out).unwrap();
         assert!(
-            output.contains("1.0KB"),
-            "size should show '1.0KB', got:\n{}",
+            output.contains("1.00KB"),
+            "size should show '1.00KB', got:\n{}",
             output
         );
     }
@@ -808,7 +802,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "name:dated.txt",
@@ -853,7 +847,7 @@ mod tests {
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "sum(size:)",
@@ -891,7 +885,7 @@ mod tests {
         std::fs::create_dir_all(&db_dir).unwrap();
         let (store, registry) = make_store_and_registry(&db_dir);
 
-        let response = ttfm::search::search(
+        let response = ttfm::search::search_nowarn(
             &store,
             &registry,
             "type:*",
@@ -914,14 +908,15 @@ mod tests {
     }
 
     #[test]
-    fn test_print_warnings_outputs_warning_lines() {
-        let warnings = vec![
-            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
-        ];
+    fn test_color_warning_sink_writes_immediately() {
+        use ttfm::query::error::{Warning, WarningSink};
         let mut out = Vec::<u8>::new();
-        print_warnings(&warnings, &mut out);
+        let mut sink = ColorWarningSink { writer: &mut out };
+        sink.warn(Warning(
+            "Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string(),
+        ));
         let text = String::from_utf8(out).unwrap();
-        assert!(!text.is_empty(), "print_warnings should produce output");
+        assert!(!text.is_empty(), "ColorWarningSink should produce output");
         assert!(text.contains("&:"), "output should contain '&:' suggestion");
     }
 }

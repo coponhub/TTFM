@@ -21,17 +21,17 @@ use super::{
     build_aggregation_context_for_operand, build_calculation_eav_expr,
     build_calculation_expr, build_nest_pivot_cte, build_nest_pivot_cte_no_agg,
     build_nvalue_cte, build_nvalue_cte_nest, build_nvalue_standalone_subquery,
-    build_pick, label_to_simple_expr, label_to_unit_aware_expr,
-    wrap_to_item_ids, AggregationContext, BuildPick, NestContext, PickNode,
+    build_pick, label_to_simple_expr, nvalue_rhs_condition, wrap_to_item_ids,
+    AggregationContext, BuildPick, NestContext, PickNode,
 };
 use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, Src, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
-    LabelSetOpKind, NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
-    ResolvedNode, ResolvedOperand,
+    LabelSetOpKind, NestMatchCondition, NestMatchOp, NestMatchRhs, NvalueRhs,
+    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use crate::types::{Label, SType, TagType};
+use crate::types::{SType, TagType};
 use sea_query::{
     Alias, Condition, DynIden, Expr, ExprTrait, Func, IntoIden, Order, Query,
     SelectStatement, SimpleExpr,
@@ -257,14 +257,21 @@ fn resolve_simple_filter_condition<T: sea_query::Iden + Clone + 'static>(
         ResolvedNode::Match { storage, label, .. } => {
             if let StorageMapping::Basic { tag_type, .. } = storage {
                 let s_val = label.as_str();
+                let type_is_glob = crate::util::is_glob_pattern(tag_type);
+                let val_is_glob = crate::util::is_glob_pattern(&s_val);
+                if (type_is_glob && !crate::util::is_full_match_glob(tag_type))
+                    || (val_is_glob && !crate::util::is_full_match_glob(&s_val))
+                {
+                    return None;
+                }
                 let mut cond = Condition::all();
-                if tag_type.as_str() != "*" {
+                if !crate::util::is_full_match_glob(tag_type) {
                     cond = cond.add(
                         Expr::col((table.clone(), Col::Type))
                             .eq(tag_type.as_str()),
                     );
                 }
-                if s_val != "*" && s_val != "" {
+                if s_val != "" && !crate::util::is_full_match_glob(&s_val) {
                     cond = cond.add(
                         Expr::col((table.clone(), Col::LabelStr)).eq(s_val),
                     );
@@ -500,11 +507,12 @@ pub(super) fn build_nest_match_sql(
     keys: &[ResolvedOperand],
     nvalue: &ResolvedOperand,
     comparison_op: ComparisonOp,
-    label: &Label,
+    rhs: &NvalueRhs,
     context: &Option<Box<ResolvedNode>>,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SelectStatement {
+    let is_string = nvalue.is_string_type();
     if keys.len() == 1 {
         let nvalue_sub = build_nvalue_standalone_subquery(
             src,
@@ -515,13 +523,16 @@ pub(super) fn build_nest_match_sql(
             agg_ctx,
             Some(nest_ctx),
         );
-        let bin_op = to_bin_op(comparison_op);
-        let label_expr = label_to_unit_aware_expr(label);
 
         let mut nfilter = Query::select();
         nfilter.column(Group);
         nfilter.from_subquery(nvalue_sub, Filter);
-        nfilter.and_where(Expr::col(Nvalue).binary(bin_op, label_expr));
+        nfilter.cond_where(nvalue_rhs_condition(
+            Expr::col(Nvalue).into(),
+            comparison_op,
+            rhs,
+            is_string,
+        ));
 
         let (proj_col, proj_tag_type) = match keys[0].get_storage() {
             Some(StorageMapping::Basic { column, tag_type }) => {
@@ -553,9 +564,6 @@ pub(super) fn build_nest_match_sql(
         let partition_keys: Vec<SimpleExpr> = (0..keys.len())
             .map(|i| Expr::col(Alias::new(&format!("key{}", i))).into())
             .collect();
-
-        let bin_op = to_bin_op(comparison_op);
-        let label_expr = label_to_unit_aware_expr(label);
 
         let agg_func = match nvalue {
             ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(_)) => {
@@ -602,7 +610,12 @@ pub(super) fn build_nest_match_sql(
         final_stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
         final_stmt.distinct();
         final_stmt.from_subquery(stmt, Sub);
-        final_stmt.and_where(Expr::col(Val).binary(bin_op, label_expr));
+        final_stmt.cond_where(nvalue_rhs_condition(
+            Expr::col(Val).into(),
+            comparison_op,
+            rhs,
+            is_string,
+        ));
         final_stmt
     }
 }
@@ -692,6 +705,86 @@ pub(super) fn build_nest_nest_match_sql(
     }
 }
 
+/// `NestMatchCondition` の HAVING 条件を組む（`build_nest_having_sql` は
+/// `ResolvedOperand` 同士の比較専用のため、`NestMatchRhs::DateTime` を扱えない）。
+fn build_merged_nest_having_sql(
+    src: &Src,
+    key: &ResolvedOperand,
+    matches: &[NestMatchCondition],
+    is_or: bool,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    let (proj_col, proj_tag_type) = match key.get_storage() {
+        Some(StorageMapping::Basic { column, tag_type }) => {
+            (*column, Some(tag_type.as_str()))
+        }
+        Some(StorageMapping::Fixed(col)) => (*col, None),
+        _ => panic!("NestMatch key must have Basic or Fixed storage"),
+    };
+
+    let mut nfilter = Query::select();
+    nfilter.expr_as(
+        CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+        Group,
+    );
+    nfilter.from_as(src, Proj);
+    nfilter.join_as(
+        sea_query::JoinType::InnerJoin,
+        Tbl::OneView,
+        View,
+        Expr::col((Proj, Col::ItemId)).equals((View, Col::ItemId)),
+    );
+    if let Some(tag_type) = proj_tag_type {
+        nfilter.and_where(Expr::col((Proj, Col::Type)).eq(tag_type));
+    }
+    nfilter.group_by_col((Proj, proj_col));
+
+    let mut having_cond = if is_or {
+        Condition::any()
+    } else {
+        Condition::all()
+    };
+    for m in matches {
+        let NestMatchOp::Comparison(cmp_op) = m.op;
+        let lhs = build_merged_nvalue_agg_expr(&m.nvalue, agg_ctx);
+        let is_string = m.nvalue.is_string_type();
+        let cond = match &m.right {
+            NestMatchRhs::DateTime(range) => NvalueRhs::DateTime(range.clone()),
+            NestMatchRhs::Operand(ResolvedOperand::Literal(label)) => {
+                NvalueRhs::Label(label.clone())
+            }
+            NestMatchRhs::Operand(op) => {
+                let rhs_expr = build_merged_nvalue_agg_expr(op, agg_ctx);
+                having_cond = having_cond.add(
+                    Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr),
+                );
+                continue;
+            }
+        };
+        having_cond =
+            having_cond.add(nvalue_rhs_condition(lhs, cmp_op, &cond, is_string));
+    }
+    nfilter.cond_having(having_cond);
+
+    let group_label_sub = Query::select()
+        .column(Group)
+        .from_subquery(nfilter, Filter)
+        .to_owned();
+
+    let mut stmt = Query::select();
+    stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
+    stmt.distinct();
+    stmt.from(src);
+    if let Some(tag_type) = proj_tag_type {
+        stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+    }
+    stmt.and_where(
+        CustomFunc::as_representative(Expr::col(proj_col))
+            .in_subquery(group_label_sub),
+    );
+    stmt
+}
+
 pub(super) fn build_merged_nest_match_sql(
     src: &Src,
     keys: &[ResolvedOperand],
@@ -700,23 +793,18 @@ pub(super) fn build_merged_nest_match_sql(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     if keys.len() == 1 {
-        let conditions: Vec<_> = matches
-            .iter()
-            .map(|m| {
-                let NestMatchOp::Comparison(cmp_op) = m.op;
-                (&m.nvalue, cmp_op, &m.right)
-            })
-            .collect();
-        build_nest_having_sql(src, &keys[0], &conditions, is_or, agg_ctx)
+        build_merged_nest_having_sql(src, &keys[0], matches, is_or, agg_ctx)
     } else {
         let mut all_nv_ops: Vec<&ResolvedOperand> = Vec::new();
         for m in matches {
             if !all_nv_ops.iter().any(|&o| o == &m.nvalue) {
                 all_nv_ops.push(&m.nvalue);
             }
-            if let ResolvedOperand::Aggregation(_) = &m.right {
-                if !all_nv_ops.iter().any(|&o| o == &m.right) {
-                    all_nv_ops.push(&m.right);
+            if let NestMatchRhs::Operand(right_op @ ResolvedOperand::Aggregation(_)) =
+                &m.right
+            {
+                if !all_nv_ops.iter().any(|&o| o == right_op) {
+                    all_nv_ops.push(right_op);
                 }
             }
         }
@@ -792,19 +880,42 @@ pub(super) fn build_merged_nest_match_sql(
             let left_group_nv = &group_nv_aliases[left_idx];
 
             let NestMatchOp::Comparison(cmp_op) = m.op;
-            let bin_op = to_bin_op(cmp_op);
+            let lhs: SimpleExpr = Expr::col(Alias::new(left_group_nv)).into();
+            let is_string = m.nvalue.is_string_type();
 
-            let right_expr = if let ResolvedOperand::Aggregation(_) = &m.right {
-                let right_idx =
-                    all_nv_ops.iter().position(|&o| o == &m.right).unwrap();
-                Expr::col(Alias::new(&group_nv_aliases[right_idx])).into()
-            } else {
-                build_agg_operand_eav_expr(&m.right, agg_ctx)
+            let cond = match &m.right {
+                NestMatchRhs::DateTime(range) => nvalue_rhs_condition(
+                    lhs,
+                    cmp_op,
+                    &NvalueRhs::DateTime(range.clone()),
+                    is_string,
+                ),
+                NestMatchRhs::Operand(ResolvedOperand::Literal(label)) => {
+                    nvalue_rhs_condition(
+                        lhs,
+                        cmp_op,
+                        &NvalueRhs::Label(label.clone()),
+                        is_string,
+                    )
+                }
+                NestMatchRhs::Operand(right_op @ ResolvedOperand::Aggregation(_)) => {
+                    let right_idx =
+                        all_nv_ops.iter().position(|&o| o == right_op).unwrap();
+                    let rhs_expr: SimpleExpr =
+                        Expr::col(Alias::new(&group_nv_aliases[right_idx])).into();
+                    Condition::all().add(
+                        Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr),
+                    )
+                }
+                NestMatchRhs::Operand(op) => {
+                    let rhs_expr = build_agg_operand_eav_expr(op, agg_ctx);
+                    Condition::all().add(
+                        Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr),
+                    )
+                }
             };
 
-            filter_cond = filter_cond.add(
-                Expr::col(Alias::new(left_group_nv)).binary(bin_op, right_expr),
-            );
+            filter_cond = filter_cond.add(cond);
         }
 
         stmt.from_subquery(pivot_sub, Sub);
@@ -967,14 +1078,17 @@ pub(super) fn nest(
                     &computed_agg_ctx,
                 )
             };
-            if let Some((op, value)) = nvalue_condition {
-                let bin_op = to_bin_op(*op);
-                let val = label_to_simple_expr(value);
-                let cond = Expr::col(Nvalue).binary(bin_op, val);
+            if let Some((op, value)) = &nvalue_condition {
+                let cond = nvalue_rhs_condition(
+                    Expr::col(Nvalue).into(),
+                    *op,
+                    value,
+                    nv.is_string_type(),
+                );
                 if matches!(nv, ResolvedOperand::Calculation(_)) {
-                    nvalue_sql.and_where(cond);
+                    nvalue_sql.cond_where(cond);
                 } else {
-                    nvalue_sql.and_having(cond);
+                    nvalue_sql.cond_having(cond);
                 }
             }
             let nvalue_cte = CommonTableExpression::new()
@@ -1657,7 +1771,7 @@ mod tests {
     #[test]
     fn test_build_fetch_nest_sql_generates_concat() {
         let query_str = "extension:";
-        let resolver = Resolver::new(query_str, &TagRegistry::with_standard())
+        let resolver = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
             .expect("Failed to resolve");
 
         let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
@@ -1682,8 +1796,29 @@ mod tests {
     }
 
     #[test]
+    fn base_key_is_never_materialized() {
+        let resolver = Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
+            .expect("Failed to resolve");
+
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
+            .expect("Failed to build SQL");
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql_str.contains("'extension'"),
+            "SQL should filter on the concrete key type: {}",
+            sql_str
+        );
+        assert!(
+            !sql_str.contains("'*'"),
+            "base key must never be materialized as a literal '*': {}",
+            sql_str
+        );
+    }
+
+    #[test]
     fn test_nvalue_count_projection_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: count(extension:jpg)",
             &TagRegistry::with_standard(),
         )
@@ -1717,7 +1852,7 @@ mod tests {
 
     #[test]
     fn test_nvalue_sum_projection_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: sum(size:)",
             &TagRegistry::with_standard(),
         )
@@ -1751,7 +1886,7 @@ mod tests {
     #[test]
     fn test_fetch_projection_no_nvalue_regression() {
         let resolver =
-            Resolver::new("extension:", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("extension:", &TagRegistry::with_standard()).unwrap();
 
         assert!(
             resolver.get_nvalue().is_none(),
@@ -1771,7 +1906,7 @@ mod tests {
 
     #[test]
     fn test_nvalue_condition_having_sql() {
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "parentdir: &: (count(extension:jpg) > 1)",
             &TagRegistry::with_standard(),
         )
@@ -1808,7 +1943,7 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()
@@ -1866,7 +2001,7 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
 
             let sql =
                 build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
@@ -1906,7 +2041,7 @@ mod tests {
         for (query_body, expected_keywords) in test_cases {
             let query = format!("parentdir: &: ({})", query_body);
             let resolver =
-                Resolver::new(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()
@@ -1948,7 +2083,7 @@ mod tests {
     #[test]
     fn test_print_sql_for_debugging_nest_bug() {
         let query_str = "(((parentdir: &: count(extension:rs))) / ((parentdir: &: count()))) :> 1";
-        let resolver = crate::query::lens_resolver::Resolver::new(
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
             query_str,
             &TagRegistry::with_standard(),
         )
@@ -1962,7 +2097,7 @@ mod tests {
         );
 
         if optimized.get_projection().is_some() {
-            let resolver2 = crate::query::lens_resolver::Resolver::new(
+            let resolver2 = crate::query::lens_resolver::Resolver::new_nowarn(
                 query_str,
                 &TagRegistry::with_standard(),
             )

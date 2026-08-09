@@ -48,7 +48,7 @@ fn test_metadata_error_recovery_integration() {
     // 3. エラー値がセットされたアイテムを検索して検証
     // 数値型のエラー値 (-1) で検索
     let results =
-        search::search(&store, &registry, "size:-1", Default::default())
+        search::search_nowarn(&store, &registry, "size:-1", Default::default())
             .expect("Search for size:-1 should succeed");
 
     // 検証: loop_link がエラー値で登録されてヒットするはず

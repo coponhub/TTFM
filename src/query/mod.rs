@@ -18,6 +18,7 @@
 pub mod ast;
 pub mod error;
 pub mod fetcher;
+pub mod format;
 pub mod lens_builder;
 pub mod lens_optimizer;
 pub mod lens_reader;
@@ -34,6 +35,13 @@ pub use lens_resolver::*;
 pub use parser::*;
 pub use sql::*;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Query(Box<QueryNode>),
+    Expanded(Box<QueryNode>),
+    Resolved(Box<ResolvedNode>),
+}
+
 impl QueryNode {
     pub fn to_tag_condition(&self) -> sea_query::Condition {
         sql::to_tag_condition(self)
@@ -47,10 +55,10 @@ mod tests {
 
     #[test]
     fn test_query_types() {
-        let node = parse("extension:rs").expect("Failed to parse");
+        let node = parse_nowarn("extension:rs").expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs");
         } else {
             panic!("Should be a TypedTag");
         }
@@ -59,10 +67,10 @@ mod tests {
     #[test]
     fn test_basic_structure() {
         let q = "extension:rs";
-        let node = parse(q).expect("Failed to parse");
+        let node = parse_nowarn(q).expect("Failed to parse");
         if let QueryNode::TypedTag(tt) = node {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs");
         } else {
             panic!("Expected TypedTag");
         }
@@ -86,7 +94,7 @@ mod tests {
         ];
 
         for q in queries {
-            parse(q)
+            parse_nowarn(q)
                 .map_err(|e| panic!("Failed to parse query '{}': {}", q, e))
                 .unwrap();
         }
@@ -102,7 +110,7 @@ mod tests {
         ];
         for q in fail_queries {
             assert!(
-                parse(q).is_err(),
+                parse_nowarn(q).is_err(),
                 "Query '{}' should fail due to space constraints",
                 q
             );
@@ -110,7 +118,7 @@ mod tests {
 
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
-        assert!(parse(q_unary).is_ok(), "Unary minus should be valid now");
+        assert!(parse_nowarn(q_unary).is_ok(), "Unary minus should be valid now");
     }
 
     #[test]
@@ -119,25 +127,25 @@ mod tests {
         // "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
 
         // Without spaces: parsed as TypedTag (label contains &)
-        let q1 = parse("type:file&project:ttfm").unwrap();
+        let q1 = parse_nowarn("type:file&project:ttfm").unwrap();
         if let QueryNode::TypedTag(tt) = q1 {
-            assert_eq!(tt.label.tag_type().as_str(), "type");
-            assert_eq!(tt.label.as_str(), "file&project:ttfm");
+            assert_eq!(tt.tag_type().as_str(), "type");
+            assert_eq!(tt.as_str(), "file&project:ttfm");
         } else {
             panic!("Expected TypedTag, got {:?}", q1);
         }
 
         // Without spaces: parsed as TypedTag (label contains |)
-        let q2 = parse("extension:rs|txt").unwrap();
+        let q2 = parse_nowarn("extension:rs|txt").unwrap();
         if let QueryNode::TypedTag(tt) = q2 {
-            assert_eq!(tt.label.tag_type().as_str(), "extension");
-            assert_eq!(tt.label.as_str(), "rs|txt");
+            assert_eq!(tt.tag_type().as_str(), "extension");
+            assert_eq!(tt.as_str(), "rs|txt");
         } else {
             panic!("Expected TypedTag, got {:?}", q2);
         }
 
         // With spaces: parsed as set AND operation
-        let q3 = parse("type:file & project:ttfm").unwrap();
+        let q3 = parse_nowarn("type:file & project:ttfm").unwrap();
         if let QueryNode::And(_) = q3 {
             // OK
         } else {
@@ -145,7 +153,7 @@ mod tests {
         }
 
         // With spaces: parsed as set OR operation
-        let q4 = parse("extension:rs | extension:txt").unwrap();
+        let q4 = parse_nowarn("extension:rs | extension:txt").unwrap();
         if let QueryNode::Or(_) = q4 {
             // OK
         } else {
@@ -157,7 +165,7 @@ mod tests {
     fn test_pest_grammar_complex_math() {
         // Multi-level math and negative numbers
         let q = "(size: - -100) :> (width: * (height: / 2))";
-        parse(q)
+        parse_nowarn(q)
             .map_err(|e| panic!("Failed to parse math query '{}': {}", q, e))
             .unwrap();
     }
@@ -169,7 +177,7 @@ mod tests {
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
         let resolver =
-            Resolver::new("extension:rs", &TagRegistry::with_standard())
+            Resolver::new_nowarn("extension:rs", &TagRegistry::with_standard())
                 .unwrap();
         let sql = PickNode::new(&Src::OneView, &resolver.resolved_query)
             .build_pick()
@@ -198,7 +206,7 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::query::sql::{BuildPick, PickNode};
         use sea_query::PostgresQueryBuilder;
-        let resolver = Resolver::new(
+        let resolver = Resolver::new_nowarn(
             "type:file & extension:rs",
             &TagRegistry::with_standard(),
         )
@@ -225,41 +233,35 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_type_limitation() {
-        // 数字のみの type はエラーになるべき
-        assert!(parse("123:foo").is_err(), "Numeric-only type should fail");
+    fn test_numeric_type_name_is_allowed() {
+        assert!(parse_nowarn("123:foo").is_ok(), "Numeric-only type should parse");
 
-        // 引用符があればOK
         assert!(
-            parse("\"123\":foo").is_ok(),
+            parse_nowarn("\"123\":foo").is_ok(),
             "Quoted numeric type should pass"
         );
 
-        // 文字が混じっていればOK
         assert!(
-            parse("type123:foo").is_ok(),
+            parse_nowarn("type123:foo").is_ok(),
             "Alphanumeric type should pass"
         );
         assert!(
-            parse("123a:foo").is_ok(),
+            parse_nowarn("123a:foo").is_ok(),
             "Type starting with numbers but containing non-digits should pass"
         );
 
-        // 50:< (スペースなし、数字のみのType不可) はエラーになるべき
         assert!(
-            parse("50:<").is_err(),
+            parse_nowarn("50:<").is_err(),
             "Invalid fragment '50:<' should fail"
         );
 
-        // 改めて、size:50:< もエラーになることを確認 (右辺のパースが途中で止まるため)
         assert!(
-            parse("size:50:<").is_err(),
+            parse_nowarn("size:50:<").is_err(),
             "Tag with invalid stuck operator suffix should fail"
         );
 
-        // 正しい汎用比較 (Rule 80遵守) はOK
         assert!(
-            parse("50 :< size:").is_ok(),
+            parse_nowarn("50 :< size:").is_ok(),
             "Valid label comparison '50 :< size:' should pass"
         );
     }

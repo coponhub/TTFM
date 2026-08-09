@@ -103,12 +103,21 @@ fn test_plugin_normalize_label_applied_in_search() {
         }
     }
     impl ttfm::tag::Query for ShortLabelTag {
-        fn normalize_label(&self, label: &Label) -> Label {
-            match label.as_str().as_str() {
+        fn interpret(
+            &self,
+            first: &ttfm::query::ast::Operand,
+            op: ttfm::query::ast::ComparisonOp,
+            label: &Label,
+        ) -> anyhow::Result<ttfm::QueryNode> {
+            let normalized = match label.as_str().as_str() {
                 "m" => Label::from("modified"),
                 "c" => Label::from("clean"),
                 _ => label.clone(),
-            }
+            };
+            Ok(ttfm::QueryNode::Comparison(ttfm::query::ast::ComparisonNode {
+                first: first.clone(),
+                rest: vec![(op, ttfm::query::ast::Operand::Literal(normalized))],
+            }))
         }
     }
 
@@ -130,7 +139,7 @@ fn test_plugin_normalize_label_applied_in_search() {
         .unwrap();
 
     // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
-    let results = search::search(
+    let results = search::search_nowarn(
         &store,
         &registry,
         "my_status:m",
@@ -202,7 +211,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
-        search::search(
+        search::search_nowarn(
             &store,
             &registry,
             "mimetype:application/x-test-override",
@@ -224,7 +233,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         ttfm::indexing::Indexer::new(&store, &registry)
             .run(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
-        search::search(
+        search::search_nowarn(
             &store,
             &registry,
             "mimetype:application/x-test-override",
@@ -264,10 +273,24 @@ fn test_wasm_adapter_display_is_some() {
 /// プラグインが normalize-label で None を返す場合、ラベルは変更されない
 #[test]
 fn test_wasm_adapter_normalize_label_default() {
+    use ttfm::query::ast::{ComparisonOp, Operand};
     let adapter = load_sample_adapter();
     let query = adapter.query();
     let label = Label::from("hello");
-    assert_eq!(query.normalize_label(&label).as_str(), "hello");
+    let result = query
+        .interpret(
+            &Operand::TypeRef("mimetype".into()),
+            ComparisonOp::Label(ttfm::query::ast::BasicOp::Eq),
+            &label,
+        )
+        .unwrap();
+    let ttfm::QueryNode::Comparison(node) = result else {
+        panic!("expected Comparison, got {:?}", result)
+    };
+    let Operand::Literal(normalized) = &node.rest[0].1 else {
+        panic!("expected Literal operand, got {:?}", node.rest[0].1)
+    };
+    assert_eq!(normalized.as_str(), "hello");
 }
 
 /// プラグインが expand で None を返す場合、TypedTag のデフォルト動作を使う
@@ -278,12 +301,14 @@ fn test_wasm_adapter_expand_default_returns_typed_tag() {
     let tag_type = TagType::from("sample");
     let label = Label::from("foo");
     let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
-    let node = query.expand(
-        &tag_type,
-        &label,
-        &typed_tag,
-        &ttfm::query::lens_schema::Lens::base_standard(),
-    );
+    let node = query
+        .expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &ttfm::query::lens_schema::Lens::base_standard(),
+        )
+        .unwrap();
     assert_eq!(node, QueryNode::TypedTag(typed_tag));
 }
 
@@ -294,7 +319,7 @@ fn test_wasm_adapter_expand_projection_default() {
     let query = adapter.query();
     let tag_type = TagType::from("sample");
     let node = query.expand_projection(&tag_type);
-    let expected = QueryNode::Projection(Operand::from(tag_type));
+    let expected = QueryNode::base_nest(Operand::from(tag_type));
     assert_eq!(node, expected);
 }
 
@@ -323,12 +348,14 @@ fn test_wasm_adapter_query_available_without_query_export() {
     let tag_type = TagType::from("mimetype");
     let label = Label::from("text/plain");
     let typed_tag = ttfm::types::TypedTag::new(tag_type.clone(), label.clone());
-    let node = query.expand(
-        &tag_type,
-        &label,
-        &typed_tag,
-        &ttfm::query::lens_schema::Lens::base_standard(),
-    );
+    let node = query
+        .expand(
+            &tag_type,
+            &label,
+            &typed_tag,
+            &ttfm::query::lens_schema::Lens::base_standard(),
+        )
+        .unwrap();
     assert_eq!(node, QueryNode::TypedTag(typed_tag));
 }
 
@@ -392,11 +419,12 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
         QueryType::Tag,
         None,
         WriteOptions::default(),
+        &mut Vec::new(),
     )
     .expect("edit should materialize the plugin type definition");
 
     let results =
-        search::search(&store, &registry, "type:*", SearchOptions::default())
+        search::search_nowarn(&store, &registry, "type:*", SearchOptions::default())
             .unwrap();
     let plugin_item = results
         .results

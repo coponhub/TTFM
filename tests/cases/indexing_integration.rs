@@ -43,14 +43,14 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, all_files, Default::default())
+        search::search_nowarn(&store, &registry, all_files, Default::default())
             .unwrap()
             .results
             .len(),
         2
     );
     assert_eq!(
-        search::search(&store, &registry, "filename:a.txt", Default::default())
+        search::search_nowarn(&store, &registry, "filename:a.txt", Default::default())
             .unwrap()
             .results
             .len(),
@@ -62,7 +62,7 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, all_files, Default::default())
+        search::search_nowarn(&store, &registry, all_files, Default::default())
             .unwrap()
             .results
             .len(),
@@ -76,14 +76,14 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let res = search::search(&store, &registry, all_files, Default::default())
+    let res = search::search_nowarn(&store, &registry, all_files, Default::default())
         .unwrap();
     assert_eq!(res.results.len(), 3);
 
     // 4. 更新: a.txt の内容を変更 (サイズ変更)
     // 実体(ID)が変わらないことを確認
     let old_id =
-        search::search(&store, &registry, "filename:a.txt", Default::default())
+        search::search_nowarn(&store, &registry, "filename:a.txt", Default::default())
             .unwrap()
             .results[0]
             .id
@@ -94,7 +94,7 @@ fn test_incremental_indexing_full_flow() {
         .unwrap();
 
     let res_edit =
-        search::search(&store, &registry, "filename:a.txt", Default::default())
+        search::search_nowarn(&store, &registry, "filename:a.txt", Default::default())
             .unwrap();
     let files_edit: Vec<_> = res_edit
         .results
@@ -113,7 +113,7 @@ fn test_incremental_indexing_full_flow() {
         .run(&root, None::<&fn(usize)>, false)
         .unwrap();
     assert_eq!(
-        search::search(&store, &registry, all_files, Default::default())
+        search::search_nowarn(&store, &registry, all_files, Default::default())
             .unwrap()
             .results
             .len(),
@@ -121,7 +121,7 @@ fn test_incremental_indexing_full_flow() {
     );
 
     let res_b_del =
-        search::search(&store, &registry, "filename:b.rs", Default::default())
+        search::search_nowarn(&store, &registry, "filename:b.rs", Default::default())
             .unwrap();
     let files_b_del: Vec<_> = res_b_del
         .results
@@ -164,7 +164,7 @@ fn test_incremental_indexing_full_flow() {
     let query = format!("file_id:\"{}\"", uuid_str);
 
     let _res_inode =
-        search::search(&store, &registry, &query, Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, &query, Default::default()).unwrap();
     let _files_inode: Vec<_> = _res_inode
         .results
         .iter()
@@ -203,7 +203,7 @@ fn test_system_items_registration() {
 
     // 1. item_entities に extension:txt 関連のItemがあるか確認
     // 変更後: 自動生成されなくなったため、物理的なアイテムは存在しないはず
-    let results_physical = search::search(
+    let results_physical = search::search_nowarn(
         &store,
         &registry,
         "item_kind:tag & name:extension:txt",
@@ -218,7 +218,7 @@ fn test_system_items_registration() {
     // 2. しかし、プロジェクション（oneview）経由では検索できること
     // 「typedtag:」で検索（プロジェクションクエリ）を行い、動的にタグが生成・投影されることを確認
     let results_projection =
-        search::search(&store, &registry, "tag:", Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, "tag:", Default::default()).unwrap();
 
     // プロジェクション配下に typedtag が含まれているか確認
     assert!(has_item_tags(&results_projection.results));
@@ -238,7 +238,7 @@ fn test_system_items_registration() {
 
     // 3. origin のプロジェクションも確認
     let results_origin =
-        search::search(&store, &registry, "origin:", Default::default())
+        search::search_nowarn(&store, &registry, "origin:", Default::default())
             .unwrap();
     assert!(has_item_tags(&results_origin.results));
     assert!(!results_origin.results.is_empty());
@@ -260,7 +260,7 @@ fn test_system_items_registration() {
         .tags
         .entries
         .iter()
-        .any(|entry| entry.label.as_str().contains("hello.txt"));
+        .any(|entry| entry.typed_tag.as_str().contains("hello.txt"));
     assert!(
         has_hello_txt,
         "file origin label should contain reference to hello.txt"
@@ -287,7 +287,7 @@ fn test_typedtag_listing_via_type_query() {
 
     // 1. type:extension で検索 -> extension:txt アイテムが見つかるはず
     let results =
-        search::search(&store, &registry, "type:extension", Default::default())
+        search::search_nowarn(&store, &registry, "type:extension", Default::default())
             .unwrap();
     let tt_items: Vec<_> = results
         .results
@@ -306,7 +306,7 @@ fn test_typedtag_listing_via_type_query() {
     // 2. extension:txt で検索 -> ファイルだけが見つかるはず（ノイズがないこと）
     // オリジナル通りのフィルタロジックに戻す
     let results =
-        search::search(&store, &registry, "extension:txt", Default::default())
+        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
             .unwrap();
     let files: Vec<_> = results
         .results
@@ -345,7 +345,7 @@ fn test_no_empty_extension_system_item() {
         .run(root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let results = search::search(
+    let results = search::search_nowarn(
         &store,
         &registry,
         "item_kind:tag & name:\"extension:\"",
@@ -377,7 +377,7 @@ fn test_definition_only_items_not_registered() {
         .unwrap();
 
     // 初期登録が廃止されたため、type 定義専用アイテムは自動生成されない。
-    assert!(search::search(
+    assert!(search::search_nowarn(
         &store,
         &registry,
         "item_kind:type & name:name",
@@ -386,7 +386,7 @@ fn test_definition_only_items_not_registered() {
     .unwrap()
     .results
     .is_empty());
-    assert!(search::search(
+    assert!(search::search_nowarn(
         &store,
         &registry,
         "item_kind:type & name:item_kind",

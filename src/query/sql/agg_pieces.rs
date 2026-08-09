@@ -18,15 +18,16 @@
 use super::{
     apply_arithmetic_agg, apply_arithmetic_op, build_calculation_eav_expr,
     build_resolved_literal_expr, build_storage_column_expr,
-    build_tag_value_agg_expr, fold_simple_operand, label_to_simple_expr,
-    subquery, wrap_to_item_ids, AggregationContext, NestContext,
+    build_tag_value_agg_expr, coalesce_label_columns_as_string,
+    fold_simple_operand, label_to_simple_expr, nvalue_rhs_condition, subquery,
+    wrap_to_item_ids, AggregationContext, NestContext,
 };
 use crate::db::{Col, CustomFunc, Pronoun::*, Src, Tbl};
 use crate::query::ast::ArithmeticAggOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
-use crate::query::lens_schema::{to_bin_op, StorageMapping};
+use crate::query::lens_schema::StorageMapping;
 use sea_query::{
     Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement,
     SimpleExpr,
@@ -369,7 +370,7 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                     StorageMapping::Basic { column, .. }
                         if *column == Col::LabelStr =>
                     {
-                        CustomFunc::try_cast_double(Expr::col(*column))
+                        CustomFunc::try_cast_double(coalesce_label_columns_as_string())
                     }
                     StorageMapping::Basic { column, .. } => {
                         Expr::col(*column).into()
@@ -1081,13 +1082,17 @@ fn build_agg_over_nvalue(
             agg_ctx,
             nest_ctx,
         );
-        if let Some((op, value)) = nvalue_condition {
-            let bin_op = to_bin_op(*op);
-            let val = label_to_simple_expr(value);
+        if let Some((op, value)) = &nvalue_condition {
+            let cond = nvalue_rhs_condition(
+                Expr::col(Nvalue).into(),
+                *op,
+                value,
+                nvalue.is_string_type(),
+            );
             Query::select()
                 .column(Nvalue)
                 .from_subquery(pivot_agg, Sub)
-                .and_where(Expr::col(Nvalue).binary(bin_op, val))
+                .cond_where(cond)
                 .to_owned()
         } else {
             pivot_agg
@@ -1102,10 +1107,14 @@ fn build_agg_over_nvalue(
             agg_ctx,
             nest_ctx,
         );
-        if let Some((op, value)) = nvalue_condition {
-            let bin_op = to_bin_op(*op);
-            let val = label_to_simple_expr(value);
-            nvalue_sub.and_where(Expr::col(Nvalue).binary(bin_op, val));
+        if let Some((op, value)) = &nvalue_condition {
+            let cond = nvalue_rhs_condition(
+                Expr::col(Nvalue).into(),
+                *op,
+                value,
+                nvalue.is_string_type(),
+            );
+            nvalue_sub.cond_where(cond);
         }
         Query::select()
             .column(Group)

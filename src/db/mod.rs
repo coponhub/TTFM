@@ -51,6 +51,11 @@ pub struct ColumnDef {
     pub target_table: TargetTable,
 }
 
+pub fn open_connection() -> duckdb::Result<Connection> {
+    let config = duckdb::Config::default().enable_autoload_extension(false)?;
+    Connection::open_in_memory_with_flags(config)
+}
+
 /// DB接続とParquetファイルのパスを管理する構造体（設計書4.4 IndexStore）。
 pub struct Store {
     pub conn: Connection,
@@ -67,7 +72,7 @@ impl Store {
                 format!("Failed to create db dir: {:?}", db_dir)
             })?;
         }
-        let conn = Connection::open_in_memory()
+        let conn = open_connection()
             .context("Failed to open in-memory DuckDB connection")?;
         Ok(Self { conn, db_dir })
     }
@@ -423,12 +428,7 @@ impl Bitical {
                 } else {
                     tag
                 };
-                let val_str = if s.starts_with('^') {
-                    format!("{}*", &s[1..])
-                } else {
-                    s.clone()
-                };
-                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(val_str))
+                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(s.clone()))
             }
             Bitical::Boolean(b) => Expr::col(Col::LabelBool).eq(*b),
             Bitical::Double(d) => Expr::col(Col::LabelDouble).eq(*d),
@@ -492,27 +492,6 @@ impl sea_query::Iden for QueryResultCol {
 /// 共通で使用されるカラム名を表す識別子。
 pub use crate::types::SType as Col;
 
-crate::define_item_schema! {
-    ItemRefRow {
-        item_id   => ItemId,
-        rank      => Rank,
-        name      => Name,
-        item_kind => ItemKind,
-        content   => Content,
-    }
-}
-
-crate::define_item_schema! {
-    UserTagsRow {
-        item_id    => ItemId,
-        tag_type   => Type,
-        label_str  => LabelStr,
-        label_int  => LabelInt,
-        label_dbl  => LabelDouble,
-        label_bool => LabelBool,
-    }
-}
-
 impl sea_query::Iden for Col {
     fn unquoted(&self, s: &mut dyn std::fmt::Write) {
         let val: &'static str = (*self).into();
@@ -525,8 +504,14 @@ impl Col {
         <Self as std::str::FromStr>::from_str(s).ok()
     }
 
-    pub fn item_references_columns() -> Vec<Self> {
-        ItemRefRow::all_columns()
+    pub fn item_references_columns() -> [Self; 5] {
+        [
+            Self::ItemId,
+            Self::Rank,
+            Self::Name,
+            Self::ItemKind,
+            Self::Content,
+        ]
     }
 
     pub fn tag_value_columns() -> Vec<Self> {
@@ -617,7 +602,9 @@ impl Schema {
                 }
                 create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
             }
-            TargetTable::BaseTags => {
+            TargetTable::BaseTags
+            | TargetTable::SystemTags
+            | TargetTable::UserTags => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Type).string());
@@ -629,13 +616,6 @@ impl Schema {
             }
             TargetTable::ItemReferences => {
                 for col in Col::item_references_columns() {
-                    let mut def = SeaColumnDef::new(col);
-                    BiticalType::from_col(col).prepare_column(&mut def);
-                    create.col(&mut def);
-                }
-            }
-            TargetTable::SystemTags | TargetTable::UserTags => {
-                for col in UserTagsRow::all_columns() {
                     let mut def = SeaColumnDef::new(col);
                     BiticalType::from_col(col).prepare_column(&mut def);
                     create.col(&mut def);
@@ -655,6 +635,23 @@ impl Schema {
 mod tests {
     use super::*;
     use sea_query::{Expr, PostgresQueryBuilder, Query};
+
+    #[test]
+    fn test_store_open_disables_extension_autoload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        for setting in ["autoinstall_known_extensions", "autoload_known_extensions"] {
+            let value: String = store
+                .conn
+                .query_row(
+                    &format!("SELECT current_setting('{setting}')::VARCHAR"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "false", "{setting} は無効であるべき");
+        }
+    }
 
     #[test]
     fn test_bitical_type_repr_values() {
@@ -786,6 +783,24 @@ mod tests {
         assert_eq!(
             Bitical::Uuid(id).to_col_value(),
             (Col::LabelStr, Bitical::String(id.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_to_column_match_expr_caret_is_literal_not_prefix_glob() {
+        let expr =
+            Bitical::String("^foo".into()).to_column_match_expr(Col::Label);
+        let sql =
+            Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("'^foo'"),
+            "value should stay literal '^foo': {}",
+            sql
+        );
+        assert!(
+            !sql.contains("'foo*'"),
+            "must not convert to prefix glob 'foo*': {}",
+            sql
         );
     }
 

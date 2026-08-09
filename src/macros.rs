@@ -160,33 +160,65 @@ macro_rules! define_scan_entry {
     };
 }
 
-/// テーブル行のカラム順序を一元管理するマクロ。
-/// 構造体定義、SELECTプロジェクション、カラムリスト生成を一度の定義で行います。
+/// `OperandFormat` を宣言順で試す推論レジストリを生成するマクロ。
+/// 宣言順は「全形式が譲ったら最後の形式に落ちる」という最下位保証のためだけに使う。
 #[macro_export]
-macro_rules! define_item_schema {
-    ($name:ident { $($field:ident => $col:ident),* $(,)? }) => {
-        pub(crate) struct $name {
-            $(pub $field: ::sea_query::SimpleExpr,)*
-        }
-
-        impl $name {
-            pub fn select(self) -> ::sea_query::SelectStatement {
-                let mut q = ::sea_query::Query::select();
-                $(q.expr_as(self.$field, $crate::db::Col::$col);)*
-                q
+macro_rules! define_operand_formats {
+    ( $( $name:ident ),+ $(,)? ) => {
+        impl $crate::types::Bitical {
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式が報告する
+            /// `LogicalType` を返す。どれも主張しなければ文字列のまま。
+            pub fn infer_logical_type_with_range(
+                &self,
+            ) -> $crate::query::logical_schema::LogicalType {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return self.logical_type();
+                };
+                $(
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return <$name as OperandFormat>::logical_type(&value);
+                    }
+                )+
+                self.logical_type()
             }
 
-            pub fn all_columns() -> Vec<$crate::db::Col> {
-                vec![$($crate::db::Col::$col),*]
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式のパース結果を
+            /// 型ごと保つ。どれも主張しなければ `Formatted::Bitical` のまま。
+            pub fn to_formatted(&self) -> $crate::query::format::Formatted {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return $crate::query::format::Formatted::Bitical(self.clone());
+                };
+                $(
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return $crate::query::format::Formatted::$name(value);
+                    }
+                )+
+                $crate::query::format::Formatted::Bitical(self.clone())
             }
         }
 
-        impl Default for $name {
-            fn default() -> Self {
-                Self {
-                    $($field: ::sea_query::Expr::cust("NULL").into(),)*
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum Formatted {
+            $( $name($name), )+
+        }
+
+        impl Formatted {
+            pub fn is_point(&self) -> bool {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::is_point(v), )+
+                }
+            }
+
+            pub fn as_bitical(&self) -> $crate::types::Bitical {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::as_bitical(v), )+
                 }
             }
         }
     };
 }
+

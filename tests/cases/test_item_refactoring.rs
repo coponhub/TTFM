@@ -84,7 +84,7 @@ fn test_item_id_and_kind_refactoring() {
         .run(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "count(item_id:)",
@@ -104,7 +104,7 @@ fn test_item_id_and_kind_refactoring() {
     assert!(res.results[0].id.is_volatile());
 
     // 4. Projection which should return volatile label items
-    let res_proj = search::search(
+    let res_proj = search::search_nowarn(
         &store,
         &registry,
         "extension:",
@@ -142,7 +142,7 @@ fn item_id_display_uses_local_form() {
     assert!(disp.ends_with(')'), "expected User(N), got {disp}");
 
     // Item が同じ id を返す
-    let results = search::search(
+    let results = search::search_nowarn(
         &store,
         &registry,
         &format!("item_id:{raw_id}"),
@@ -168,10 +168,10 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let q_local = format!("item_id:\"{disp}\"");
 
     let r_raw =
-        search::search(&store, &registry, &q_raw, SearchOptions::default())
+        search::search_nowarn(&store, &registry, &q_raw, SearchOptions::default())
             .unwrap();
     let r_local =
-        search::search(&store, &registry, &q_local, SearchOptions::default())
+        search::search_nowarn(&store, &registry, &q_local, SearchOptions::default())
             .unwrap();
 
     assert_eq!(r_raw.results.len(), 1, "raw id query should find item");

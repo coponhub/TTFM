@@ -1,0 +1,16 @@
+edit_query = ${ SOI ~ WHITESPACE* ~ tag_tpl ~ (separator ~ tag_tpl)* ~ WHITESPACE* ~ EOI }
+separator  = _{ WHITESPACE+ ~ ("|" ~ WHITESPACE+)? }
+tag_tpl    = ${ type_tpl ~ ":" ~ label_tpl? }
+type_tpl   = ${ quoted_tpl | (braced | identifier)+ }
+label_tpl  = ${ quoted_tpl | (braced | unquoted_tag_string)+ }
+
+quoted_tpl = ${ ("\"" ~ part_d* ~ "\"") | ("'" ~ part_s* ~ "'") }
+part_d     = _{ braced_d | escape | text_d | lbrace }
+part_s     = _{ braced_s | escape | text_s | lbrace }
+
+braced     = ${ "{" ~ (!"}" ~ ANY)* ~ "}" }
+braced_d   = ${ "{" ~ (!("}" | "\"") ~ ANY)* ~ "}" }
+braced_s   = ${ "{" ~ (!("}" | "'") ~ ANY)* ~ "}" }
+text_d     = @{ (!("\"" | "\\" | "{") ~ ANY)+ }
+text_s     = @{ (!("'" | "\\" | "{") ~ ANY)+ }
+lbrace     = @{ "{" }

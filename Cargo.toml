@@ -6,7 +6,7 @@ license = "GPL-3.0-only"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-duckdb = { version = "1.10504.0", features = ["bundled", "uuid"] }
+duckdb = { version = "1.10504.0", features = ["bundled", "parquet", "uuid"] }
 walkdir = "2.4"
 anyhow = "1.0"
 chrono = "0.4"

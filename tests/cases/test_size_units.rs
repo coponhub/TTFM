@@ -77,11 +77,13 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         ("size: :^= 0B & is_dir:false", 3),
         ("size: := 10m & is_dir:false", 1),
         ("size: := 512k & is_dir:false", 1),
+        ("size: :< \"1MB\" & is_dir:false", 2),
+        ("size: :>= \"512KB\" & is_dir:false", 3),
     ];
 
     for (query, expected) in cases {
         let results =
-            search::search(&store, &registry, query, Default::default())?;
+            search::search_nowarn(&store, &registry, query, Default::default())?;
         assert_eq!(
             results.results.len(),
             expected,

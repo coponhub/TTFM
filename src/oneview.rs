@@ -280,14 +280,8 @@ fn apply_label_columns(
 ) {
     let label_col = bitical_type.to_column();
 
-    // LabelStr は常に設定（値をVARCHARにキャスト）
-    q.expr_as(
-        Expr::col((tbl, iden.clone())).cast_as(BiticalType::String),
-        Col::LabelStr,
-    );
-
-    // 型付きカラムは該当する型のみ値を設定、他はNULL
     let label_columns = [
+        (Col::LabelStr, BiticalType::String),
         (Col::LabelInt, BiticalType::Integer),
         (Col::LabelDouble, BiticalType::Double),
         (Col::LabelBool, BiticalType::Boolean),
@@ -295,7 +289,12 @@ fn apply_label_columns(
 
     for (col, null_type) in label_columns {
         if col == label_col {
-            q.expr_as(Expr::col((tbl, iden.clone())), col);
+            let expr = Expr::col((tbl, iden.clone()));
+            if col == Col::LabelStr {
+                q.expr_as(expr.cast_as(BiticalType::String), col);
+            } else {
+                q.expr_as(expr, col);
+            }
         } else {
             q.expr_as(crate::util::null_as(null_type), col);
         }
@@ -360,11 +359,10 @@ fn build_tag_query(
     path_fn: impl Fn(TargetTable) -> String,
 ) -> String {
     let tbl = source.table;
-    let label_str = build_label_str_expr(tbl);
 
     let mut q = Query::select();
     q.column((tbl, Col::ItemId))
-        .expr_as(label_str, Col::LabelStr)
+        .column((tbl, Col::LabelStr))
         .column((tbl, Col::LabelInt))
         .column((tbl, Col::LabelDouble))
         .column((tbl, Col::LabelBool));
@@ -515,6 +513,7 @@ mod tests {
             crate::edit::QueryType::Tag,
             None,
             crate::edit::WriteOptions { yes: true },
+            &mut Vec::new(),
         )
         .unwrap();
 

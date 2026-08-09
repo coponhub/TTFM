@@ -16,7 +16,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::Result;
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike};
 use duckdb::Connection;
 use sea_query::{
     ColumnDef, DeleteStatement, Expr, Iden, InsertStatement, IntoIden,
@@ -288,225 +287,27 @@ pub fn parquet_query(path: &str) -> SelectStatement {
         .to_owned()
 }
 
-/// 単位付きのサイズ文字列（例: "1.5MB", "100KiB", "2PB"）をバイト数に変換します。
-/// 単位は B, KB, MB, GB, TB, PB (1024累乗) をサポートします。
-pub fn parse_size(s: &str) -> Option<i64> {
-    let s = s.trim().to_uppercase();
-    if s.is_empty() {
-        return None;
+/// サイズ単位（B, KB, MB, GB, TB, PB とその別名。1024累乗）の1バイトあたり倍率。
+/// 空文字列・`B` は等倍（生バイト）。未知の単位は None。
+pub fn size_unit_multiplier(unit: &str) -> Option<i64> {
+    match unit {
+        "" | "B" => Some(1),
+        "KB" | "KIB" | "K" => Some(1024),
+        "MB" | "MIB" | "M" => Some(1024 * 1024),
+        "GB" | "GIB" | "G" => Some(1024 * 1024 * 1024),
+        "TB" | "TIB" | "T" => Some(1024 * 1024 * 1024 * 1024),
+        "PB" | "PIB" | "P" => Some(1024 * 1024 * 1024 * 1024 * 1024),
+        _ => None,
     }
-
-    // 数値部分と単位部分を分離
-    let unit_start = s.find(|c: char| !c.is_numeric() && c != '.');
-
-    let (num_part, unit_part) = match unit_start {
-        Some(idx) => s.split_at(idx),
-        None => (s.as_str(), ""),
-    };
-
-    let val: f64 = num_part.trim().parse().ok()?;
-    let unit = unit_part.trim();
-
-    let multiplier: i64 = match unit {
-        "" | "B" => 1,
-        "KB" | "KIB" | "K" => 1024,
-        "MB" | "MIB" | "M" => 1024 * 1024,
-        "GB" | "GIB" | "G" => 1024 * 1024 * 1024,
-        "TB" | "TIB" | "T" => 1024 * 1024 * 1024 * 1024,
-        "PB" | "PIB" | "P" => 1024 * 1024 * 1024 * 1024 * 1024,
-        _ => return None,
-    };
-
-    Some((val * multiplier as f64) as i64)
 }
 
-/// パースされた日時の範囲を表します（開始時刻と終了時刻を UNIX タイムスタンプで保持）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DatetimeRange {
-    pub start: i64,
-    pub end: i64,
-}
+use crate::types::DateTimeRange;
 
 /// 様々な形式の日時文字列をパースし、対応する時間範囲を返します。
-pub fn parse_datetime(s: &str) -> Option<DatetimeRange> {
-    let s_trimmed = s.trim();
-    let s_lower = s_trimmed.to_lowercase();
-    let now = Local::now();
-
-    // 1. 特殊な範囲指定 (YYYY, YYYY/M) の優先処理 (検索エンジンとしての利便性)
-    let parts: Vec<&str> = s_trimmed
-        .split(|c| c == '/' || c == '-' || c == '.' || c == ' ')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    match parts.len() {
-        1 if parts[0].len() == 4
-            && parts[0].chars().all(|c| c.is_ascii_digit()) =>
-        {
-            return handle_date_yyyy(&parts);
-        }
-        2 if (parts[0].len() == 4
-            || parts[0].parse::<i32>().unwrap_or(0) > 12)
-            && parts[0].chars().all(|c| c.is_ascii_digit())
-            && parts[1].chars().all(|c| c.is_ascii_digit()) =>
-        {
-            return handle_date_ym_md(s_trimmed, &parts, now);
-        }
-        3 if parts[0].len() == 4
-            && parts[0].chars().all(|c| c.is_ascii_digit())
-            && parts[1].chars().all(|c| c.is_ascii_digit())
-            && parts[2].chars().all(|c| c.is_ascii_digit()) =>
-        {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d: u32 = parts[2].parse().ok()?;
-            let start =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)?;
-            let end =
-                NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(23, 59, 59)?;
-            return make_range(start, end);
-        }
-        _ => {}
-    }
-
-    // 2. chrono_english によるパース
-    // 相対（ago含む）と自然言語を試行
-    if let Ok(dt) = chrono_english::parse_date_string(
-        &s_lower,
-        now,
-        chrono_english::Dialect::Uk,
-    ) {
-        // 時刻指定を含む場合は精度を確認
-        if s_lower.contains(':') {
-            // コロンが1つの場合は1分間の範囲とする (HH:MM)
-            if s_lower.matches(':').count() == 1 {
-                let start = dt.with_second(0).unwrap_or(dt);
-                let end = dt.with_second(59).unwrap_or(dt);
-                return Some(DatetimeRange {
-                    start: start.timestamp(),
-                    end: end.timestamp(),
-                });
-            }
-            // コロンが2つの場合は時点として扱う (HH:MM:SS)
-            return Some(DatetimeRange {
-                start: dt.timestamp(),
-                end: dt.timestamp(),
-            });
-        }
-        // それ以外（"today", "next friday"等）は1日の範囲とする
-        let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
-        let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
-        return make_range(start, end);
-    }
-
-    // ago 指定の明示的試行 (chrono_english::parse_duration)
-    if s_lower.contains("ago") {
-        if let Ok(interval) = chrono_english::parse_duration(&s_lower) {
-            use chrono_english::Interval;
-            let past = match interval {
-                Interval::Seconds(s) => {
-                    now + chrono::Duration::seconds(s.into())
-                }
-                Interval::Days(d) => now + chrono::Duration::days(d as i64),
-                Interval::Months(m) => {
-                    let mut y = now.year();
-                    let mut mo = now.month() as i32 + m;
-                    while mo <= 0 {
-                        y -= 1;
-                        mo += 12;
-                    }
-                    now.with_year(y)
-                        .and_then(|d| d.with_month(mo as u32))
-                        .unwrap_or(now)
-                }
-            };
-            return Some(DatetimeRange {
-                start: past.timestamp(),
-                end: past.timestamp(),
-            });
-        }
-    }
-
-    // 3. dateparser による多様な絶対パース
-    if let Ok(dt) = dateparser::parse_with_timezone(s_trimmed, &Local) {
-        if s_trimmed.contains(':') {
-            // コロンが1つの場合は1分間の範囲とする
-            if s_trimmed.matches(':').count() == 1 {
-                let start = dt.with_second(0).unwrap_or(dt);
-                let end = dt.with_second(59).unwrap_or(dt);
-                return Some(DatetimeRange {
-                    start: start.timestamp(),
-                    end: end.timestamp(),
-                });
-            }
-            return Some(DatetimeRange {
-                start: dt.timestamp(),
-                end: dt.timestamp(),
-            });
-        }
-        let start = dt.date_naive().and_hms_opt(0, 0, 0)?;
-        let end = dt.date_naive().and_hms_opt(23, 59, 59)?;
-        return make_range(start, end);
-    }
-
-    None
-}
-
-/// 1パーツ（YYYY等）の処理。
-fn handle_date_yyyy(parts: &[&str]) -> Option<DatetimeRange> {
-    let y: i32 = parts[0].parse().ok()?;
-    if (1000..=9999).contains(&y) {
-        let start = NaiveDate::from_ymd_opt(y, 1, 1)?.and_hms_opt(0, 0, 0)?;
-        let end =
-            NaiveDate::from_ymd_opt(y, 12, 31)?.and_hms_opt(23, 59, 59)?;
-        make_range(start, end)
-    } else {
-        None
-    }
-}
-
-/// 2パーツ（YYYY/M or M/D）の処理。
-fn handle_date_ym_md(
-    _s: &str,
-    parts: &[&str],
-    now: DateTime<Local>,
-) -> Option<DatetimeRange> {
-    let (p1, p2): (i32, u32) = (parts[0].parse().ok()?, parts[1].parse().ok()?);
-    if p1 >= 1000 || p1 > 12 {
-        // YYYY/M と判定
-        let start = NaiveDate::from_ymd_opt(p1, p2, 1)?.and_hms_opt(0, 0, 0)?;
-        make_range(start, get_month_end_hms(p1, p2))
-    } else {
-        // 今年の M/D と判定
-        let start = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?
-            .and_hms_opt(0, 0, 0)?;
-        let end = NaiveDate::from_ymd_opt(now.year(), p1 as u32, p2)?
-            .and_hms_opt(23, 59, 59)?;
-        make_range(start, end)
-    }
-}
-
-/// ヘルパー: 指定年月の末日（23:59:59）を取得します。
-fn get_month_end_hms(y: i32, m: u32) -> chrono::NaiveDateTime {
-    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-    NaiveDate::from_ymd_opt(next_y, next_m, 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(y, m, 28).unwrap()) // 安全策
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        - chrono::Duration::seconds(1)
-}
-
-/// ヘルパー: NaiveDateTime のペアから DatetimeRange を生成します。
-fn make_range(
-    start: chrono::NaiveDateTime,
-    end: chrono::NaiveDateTime,
-) -> Option<DatetimeRange> {
-    let ts_start = Local.from_local_datetime(&start).earliest()?.timestamp();
-    let ts_end = Local.from_local_datetime(&end).earliest()?.timestamp();
-    Some(DatetimeRange {
-        start: ts_start,
-        end: ts_end,
-    })
+/// パース自体は `DateTime::from_str`（types.rs）に一本化されており、
+/// ここではその結果の Eq 相当区間（floor..ceiling）を求めるだけ。
+pub fn parse_datetime(s: &str) -> Option<DateTimeRange> {
+    s.parse::<crate::types::DateTime>().ok()?.to_interval()
 }
 
 /// メタデータ取得エラー時にエラー値を返すためのラッパー。
@@ -582,6 +383,36 @@ impl CustomExpr {
     }
 }
 
+/// パターンが `*` のみで構成される全一致 glob（`**` も含む）かどうかを判定します。
+/// この場合、逆像はどの値域でも全域になります。
+pub fn is_full_match_glob(pattern: &str) -> bool {
+    !pattern.is_empty() && pattern.chars().all(|c| c == '*')
+}
+
+/// パターンが glob メタ文字（`*`, `?`, `[`）を1つ以上含むかどうかを判定します。
+pub fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+/// 数値部の1フィールド（整数部 or 小数部）。フィールド単位でしか自由にできないため
+/// `*`（自由）か数字リテラルのみを表し、フィールド内の部分 glob は無い。
+pub enum NumericField<'a> {
+    Free,
+    Literal(&'a str),
+}
+
+/// 数値部の1フィールドをパースする。`*` は自由、全桁が数字ならリテラル、
+/// フィールド内の部分 glob 等それ以外は None。
+pub fn parse_numeric_field(s: &str) -> Option<NumericField<'_>> {
+    if s == "*" {
+        Some(NumericField::Free)
+    } else if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        Some(NumericField::Literal(s))
+    } else {
+        None
+    }
+}
+
 /// GLOB パターンマッチングを行います（`*`, `?`, `[...]`, `[!...]` に対応、
 /// `glob` crate の `Pattern` に委譲）。
 pub fn glob_match(pattern: &str, text: &str) -> bool {
@@ -598,6 +429,39 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_full_match_glob() {
+        assert!(is_full_match_glob("*"));
+        assert!(is_full_match_glob("**"));
+        assert!(!is_full_match_glob("*.rs"));
+        assert!(!is_full_match_glob("o*"));
+        assert!(!is_full_match_glob("?"));
+        assert!(!is_full_match_glob("[abc]"));
+        assert!(!is_full_match_glob(""));
+        assert!(!is_full_match_glob("foo"));
+    }
+
+    #[test]
+    fn test_is_glob_pattern() {
+        assert!(is_glob_pattern("*"));
+        assert!(is_glob_pattern("o*"));
+        assert!(is_glob_pattern("?"));
+        assert!(is_glob_pattern("[abc]"));
+        assert!(!is_glob_pattern("foo"));
+        assert!(!is_glob_pattern(""));
+    }
+
+    #[test]
+    fn test_parse_numeric_field() {
+        assert!(matches!(parse_numeric_field("*"), Some(NumericField::Free)));
+        assert!(
+            matches!(parse_numeric_field("123"), Some(NumericField::Literal("123")))
+        );
+        assert!(parse_numeric_field("").is_none());
+        assert!(parse_numeric_field("1*").is_none());
+        assert!(parse_numeric_field("abc").is_none());
+    }
 
     #[test]
     fn test_glob_match() {
@@ -638,33 +502,21 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_size() {
-        // 標準単位 (大文字小文字・スペース混在)
-        assert_eq!(parse_size("1024"), Some(1024));
-        assert_eq!(parse_size("1KB"), Some(1024));
-        assert_eq!(parse_size("1 kb"), Some(1024));
-        assert_eq!(parse_size("1.5MB"), Some(1572864));
-        assert_eq!(parse_size("1GB"), Some(1073741824));
-
-        // 巨大サイズ (TB, PB)
-        assert_eq!(parse_size("1TB"), Some(1099511627776));
-        assert_eq!(parse_size("1PB"), Some(1125899906842624));
-
-        // バイナリ接頭辞 (KiB, MiB, ...)
-        assert_eq!(parse_size("1KiB"), Some(1024));
-        assert_eq!(parse_size("1.5MiB"), Some(1572864));
-        assert_eq!(parse_size("1GiB"), Some(1073741824));
-        assert_eq!(parse_size("1 TiB"), Some(1099511627776));
-        assert_eq!(parse_size("1 PiB"), Some(1125899906842624));
-
-        // ショートハンド (K, M, G, ...)
-        assert_eq!(parse_size("1K"), Some(1024));
-        assert_eq!(parse_size("1M"), Some(1048576));
-
-        // 異常系
-        assert_eq!(parse_size(""), None);
-        assert_eq!(parse_size("abc"), None);
-        assert_eq!(parse_size("100XYZ"), None);
+    fn test_size_unit_multiplier() {
+        assert_eq!(size_unit_multiplier(""), Some(1));
+        assert_eq!(size_unit_multiplier("B"), Some(1));
+        assert_eq!(size_unit_multiplier("KB"), Some(1024));
+        assert_eq!(size_unit_multiplier("KIB"), Some(1024));
+        assert_eq!(size_unit_multiplier("K"), Some(1024));
+        assert_eq!(size_unit_multiplier("MB"), Some(1024 * 1024));
+        assert_eq!(size_unit_multiplier("MIB"), Some(1024 * 1024));
+        assert_eq!(size_unit_multiplier("M"), Some(1024 * 1024));
+        assert_eq!(size_unit_multiplier("GB"), Some(1024 * 1024 * 1024));
+        assert_eq!(size_unit_multiplier("TB"), Some(1024i64.pow(4)));
+        assert_eq!(size_unit_multiplier("TIB"), Some(1024i64.pow(4)));
+        assert_eq!(size_unit_multiplier("PB"), Some(1024i64.pow(5)));
+        assert_eq!(size_unit_multiplier("PIB"), Some(1024i64.pow(5)));
+        assert_eq!(size_unit_multiplier("XYZ"), None);
     }
 
     #[test]
@@ -679,32 +531,35 @@ mod tests {
         assert!(parse_datetime("30min ago").is_some());
 
         // 部分的指定 (M/D, HH:MM)
-        let md = parse_datetime("1/10").unwrap();
-        assert_ne!(md.start, md.end);
-        let hm = parse_datetime("12:30").unwrap();
-        assert_ne!(hm.start, hm.end);
+        let (md_start, md_end) = parse_datetime("1/10").unwrap().as_interval().unwrap();
+        assert_ne!(md_start, md_end);
+        let (hm_start, hm_end) = parse_datetime("12:30").unwrap().as_interval().unwrap();
+        assert_ne!(hm_start, hm_end);
 
         // 絶対指定 (YYYY/M/D)
-        let ymd = parse_datetime("2024/01/01").unwrap();
-        assert!(ymd.start < ymd.end);
+        let (ymd_start, ymd_end) =
+            parse_datetime("2024/01/01").unwrap().as_interval().unwrap();
+        assert!(ymd_start < ymd_end);
 
         // 秒まで指定 (開始 == 終了)
-        let hms = parse_datetime("12:30:05").unwrap();
-        assert_eq!(hms.start, hms.end);
+        let (hms_start, hms_end) =
+            parse_datetime("12:30:05").unwrap().as_interval().unwrap();
+        assert_eq!(hms_start, hms_end);
 
-        let ymd_hms = parse_datetime("2024/01/01 12:30:05").unwrap();
-        assert_eq!(ymd_hms.start, ymd_hms.end);
+        let (ymd_hms_start, ymd_hms_end) = parse_datetime("2024/01/01 12:30:05")
+            .unwrap()
+            .as_interval()
+            .unwrap();
+        assert_eq!(ymd_hms_start, ymd_hms_end);
 
         // 各種区切り文字
         assert!(parse_datetime("2024-01-01").is_some());
         assert!(parse_datetime("2024.01.01").is_some()); // dateparserによりサポート済み
 
-        // 新規サポート形式 (YYYY, YYYY/M)
-        let yyyy = parse_datetime("2024").unwrap();
-        assert!(yyyy.start < yyyy.end);
+        assert!(parse_datetime("2024").is_none());
 
-        let ym = parse_datetime("2013/1").unwrap();
-        assert!(ym.start < ym.end);
+        let (ym_start, ym_end) = parse_datetime("2013/1").unwrap().as_interval().unwrap();
+        assert!(ym_start < ym_end);
         // 2013/1/1 00:00:00 〜 2013/1/31 23:59:59 のはず
     }
 }

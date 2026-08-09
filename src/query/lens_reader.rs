@@ -105,7 +105,11 @@ impl ReadResolution {
             }
         }
         picked.order_by_expr(
-            Expr::col(Col::LabelStr).is_null().into(),
+            Expr::col(Col::LabelStr)
+                .is_null()
+                .and(Expr::col(Col::LabelInt).is_null())
+                .and(Expr::col(Col::LabelDouble).is_null())
+                .and(Expr::col(Col::LabelBool).is_null()),
             Order::Asc,
         );
 
@@ -121,7 +125,7 @@ impl ReadResolution {
 /// `Prefer(TypedTag)` の一致式 `col = val` を構築する（列・値は lens で解決）。
 fn prefer_match_expr(lens: &Lens, tt: &TypedTag) -> Option<SimpleExpr> {
     let plabel = &tt.label;
-    let pcol = match lens.look_up_or_default(&plabel.tag_type()).storage {
+    let pcol = match lens.look_up_or_default(&tt.tag_type()).storage {
         StorageMapping::Fixed(c) => c,
         StorageMapping::Basic { column, .. } => column,
         StorageMapping::Composite => return None,

@@ -16,15 +16,57 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::db::Col;
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    BasicOp, Candidate, ComparisonNode, ComparisonOp, Operand, QueryNode,
+};
 use crate::query::logical_schema::{LogicalSchema, LogicalType};
 use crate::query::sql::schema_pieces;
 use crate::tag::{LogicalRole, TagFunction};
-use crate::types::{Bitical, Label, SType, TagType};
+use crate::types::{
+    Bitical, ItemId, ItemKind, Label, LabelNode, Origin, Rank, SType, TagType,
+};
 use duckdb::types::Value;
 use indexmap::IndexMap;
-use sea_query::{BinOper, Condition, SimpleExpr};
+use sea_query::{BinOper, Condition, Expr, ExprTrait, Func, SimpleExpr};
 use std::sync::Arc;
+
+pub(crate) fn origin_matches(id: &ItemId, target: Origin) -> bool {
+    match id {
+        ItemId::Stored(val) => Origin::within(*val) == target,
+        ItemId::Settling(org, _) => *org == target,
+        ItemId::Volatile(_) => target == Origin::User,
+    }
+}
+
+pub(crate) fn definition_candidates(
+    entries: &[(TagType, Rank, ItemId)],
+    kind: ItemKind,
+    origins: &[Origin],
+) -> Vec<Candidate> {
+    // registry は型のソースなので、tag 定義（`tag:"X"`）の候補にはならない。
+    // Stored 定義行と使用中ペアだけが tag 定義のソース。
+    if kind != ItemKind::Type {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|(_, _, id)| {
+            origins.is_empty()
+                || origins.iter().any(|target| origin_matches(id, *target))
+        })
+        .map(|(t, rank, id)| Candidate {
+            name: t.as_str().to_string(),
+            rank: *rank,
+            id: *id,
+        })
+        .collect()
+}
+
+pub(crate) fn definition_reserved_names(
+    entries: &[(TagType, Rank, ItemId)],
+) -> Vec<String> {
+    entries.iter().map(|(t, _, _)| t.as_str().to_string()).collect()
+}
 
 /// タグの物理的な格納場所
 #[derive(Debug, PartialEq, Clone)]
@@ -86,10 +128,7 @@ impl StorageMapping {
 }
 
 pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
-    let tag_op = if tag_type.contains('*')
-        || tag_type.contains('?')
-        || tag_type.contains('[')
-    {
+    let tag_op = if crate::util::is_glob_pattern(tag_type) {
         BinOper::Custom("GLOB")
     } else {
         BinOper::Equal
@@ -97,36 +136,96 @@ pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
     schema_pieces::type_filter(tag_op, tag_type)
 }
 
+fn coerce_plain_bitical(label: &Label, logical_type: LogicalType) -> Label {
+    let LabelNode::Formatted(crate::query::format::Formatted::Bitical(resolved)) = label.node()
+    else {
+        return label.clone();
+    };
+    let matches_type = matches!(
+        (logical_type, resolved),
+        (LogicalType::Any, _)
+            | (LogicalType::Boolean, Bitical::Boolean(_))
+            | (LogicalType::Integer, Bitical::Integer(_))
+            | (LogicalType::Float, Bitical::Integer(_) | Bitical::Double(_))
+    );
+    if matches_type {
+        Label::other(resolved.clone())
+    } else {
+        label.clone()
+    }
+}
+
+fn coerce_comparison_literals(
+    mut node: ComparisonNode,
+    logical_type: LogicalType,
+) -> ComparisonNode {
+    let coerce_operand = |op: Operand| match op {
+        Operand::Literal(label) => {
+            Operand::Literal(coerce_plain_bitical(&label, logical_type))
+        }
+        other => other,
+    };
+    node.first = coerce_operand(node.first);
+    node.rest = node
+        .rest
+        .into_iter()
+        .map(|(op, operand)| (op, coerce_operand(operand)))
+        .collect();
+    node
+}
+
+fn is_order_op(op: BinOper) -> bool {
+    matches!(
+        op,
+        BinOper::GreaterThan
+            | BinOper::GreaterThanOrEqual
+            | BinOper::SmallerThan
+            | BinOper::SmallerThanOrEqual
+    )
+}
+
 impl Bitical {
-    /// 値の物理型に応じた列一致条件を返す。GLOB/汎用値パース等の型別ルールは
-    /// `build_int_condition`/`build_str_condition` に委譲する。
     pub(crate) fn to_condition(
         &self,
         col: Col,
         op: BinOper,
-        bitical_type: crate::db::BiticalType,
         is_eav_col: bool,
     ) -> Condition {
         match self {
-            Bitical::Integer(i) => build_int_condition(col, op, *i, is_eav_col),
-            Bitical::Boolean(b) => build_str_condition(
-                col,
-                op,
-                &b.to_string(),
-                bitical_type,
-                is_eav_col,
-            ),
-            Bitical::Double(d) => schema_pieces::build_double_condition(op, *d),
-            Bitical::String(s) => {
-                build_str_condition(col, op, s, bitical_type, is_eav_col)
+            Bitical::Integer(i) => {
+                let target = if is_eav_col { Col::LabelInt } else { col };
+                let mut cond =
+                    Condition::any().add(schema_pieces::col_cmp_i64(target, op, *i));
+                if is_eav_col && is_order_op(op) {
+                    cond = cond.add(schema_pieces::col_cmp_f64(
+                        Col::LabelDouble,
+                        op,
+                        *i as f64,
+                    ));
+                }
+                cond
             }
-            Bitical::Uuid(u) => build_str_condition(
-                col,
-                op,
-                &u.to_string(),
-                bitical_type,
-                is_eav_col,
-            ),
+            Bitical::Double(d) => {
+                let target = if is_eav_col { Col::LabelDouble } else { col };
+                let mut cond =
+                    Condition::any().add(schema_pieces::col_cmp_f64(target, op, *d));
+                if is_eav_col && is_order_op(op) {
+                    cond = cond.add(schema_pieces::col_cmp_f64(Col::LabelInt, op, *d));
+                }
+                cond
+            }
+            Bitical::Boolean(b) => {
+                let target = if is_eav_col { Col::LabelBool } else { col };
+                Condition::any().add(schema_pieces::col_cmp_bool(target, op, *b))
+            }
+            Bitical::String(s) => {
+                let target = if is_eav_col { Col::LabelStr } else { col };
+                build_str_condition(target, op, s)
+            }
+            Bitical::Uuid(u) => {
+                let target = if is_eav_col { Col::LabelStr } else { col };
+                build_str_condition(target, op, &u.to_string())
+            }
         }
     }
 }
@@ -143,149 +242,124 @@ fn build_column_condition(
     // 汎用ラベルカラムか？ (Basic タグの EAV カラム)
     let is_eav_col = crate::db::BiticalType::to_columns().contains(&col);
 
-    // `Label::Literal`（quoted）は完全一致検索、それ以外の String は通常検索。
-    // `.value()` 経由だと Literal 性が失われる（Bitical に Literal 変種が無い）ため、
-    // まず `label` 自体で判定する。
-    if let Label::Literal(_, s) = label {
-        return build_literal_condition(col, bin_op, s, is_eav_col);
+    // 全一致 glob（`*` のみで構成されるパターン）の逆像はどの値域でも全域になる。
+    if crate::util::is_full_match_glob(&label.as_str()) {
+        return match bin_op {
+            BinOper::Equal => Condition::all(),
+            BinOper::NotEqual => Condition::any(),
+            _ => label.value().to_condition(col, bin_op, is_eav_col),
+        };
     }
 
-    label
-        .value()
-        .to_condition(col, bin_op, bitical_type, is_eav_col)
+    if let Some(cond) = double_decimal_glob_condition(bitical_type, col, label, bin_op) {
+        return cond;
+    }
+
+    label.value().to_condition(col, bin_op, is_eav_col)
 }
 
-pub(crate) fn build_int_condition(
-    col: Col,
-    op: BinOper,
-    val: i64,
-    is_generic: bool,
-) -> Condition {
-    let mut cond = Condition::any();
-    if col != Col::LabelStr {
-        cond = cond.add(schema_pieces::col_cmp_i64(col, op, val));
-    }
-    if is_generic {
-        cond = cond.add(schema_pieces::col_cmp_f64(
-            Col::LabelDouble,
-            op,
-            val as f64,
-        ));
-        if col == Col::LabelStr {
-            cond = cond.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, val));
-        }
-    }
-    cond
-}
-
-pub(crate) fn build_str_condition(
-    col: Col,
-    op: BinOper,
-    val: &str,
+/// Double 型の値に対する小数フィールド glob（`*.5` / `2.*` 等）を値ベースの
+/// 範囲・周期条件へ翻訳する。対象外（Double 以外・glob でない・フィールド内
+/// 部分 glob 等）は None を返し、呼び出し元で既存の GLOB 照合にフォールバックする。
+/// size（tag.rs の `SizeFn::expand_comparison`）と同じ区間の境界行列を順序演算子にも
+/// 適用する（size 専用ではなく小数値一般で同じ挙動にするため）。
+fn double_decimal_glob_condition(
     bitical_type: crate::db::BiticalType,
-    is_generic: bool,
-) -> Condition {
-    let string_cond = check_string_match(col, op, val, bitical_type)
-        .map(|expr| Condition::any().add(expr));
-    let generic_conds = if is_generic {
-        try_parse_generic_value_as_cond(col, op, val)
-    } else {
-        None
+    col: Col,
+    label: &Label,
+    bin_op: BinOper,
+) -> Option<Condition> {
+    if bitical_type != crate::db::BiticalType::Double {
+        return None;
+    }
+    let s = label.as_str();
+    if !crate::util::is_glob_pattern(&s) {
+        return None;
+    }
+    let expr = translate_double_decimal_glob(&s, col, bin_op)?;
+    Some(Condition::any().add(expr))
+}
+
+/// `(expr, lo, hi)` の半開区間 `[lo, hi)` に演算子ごとの境界行列を適用する
+/// （size の `size_glob_condition` と同じ行列）: Eq→区間内 / Ne→区間外 /
+/// Gt・Ge→上限・下限側 / Lt・Le→下限・上限側。
+fn range_op_condition(expr: SimpleExpr, op: BinOper, lo: f64, hi: f64) -> Option<SimpleExpr> {
+    Some(match op {
+        BinOper::Equal => expr.clone().gte(lo).and(expr.lt(hi)),
+        BinOper::NotEqual => expr.clone().lt(lo).or(expr.gte(hi)),
+        BinOper::GreaterThan => expr.gte(hi),
+        BinOper::GreaterThanOrEqual => expr.gte(lo),
+        BinOper::SmallerThan => expr.lt(lo),
+        BinOper::SmallerThanOrEqual => expr.lt(hi),
+        _ => return None,
+    })
+}
+
+/// 小数部リテラル `digits`（桁数は不問）1つに対応する値の範囲
+/// `[digits/10^k, (digits+1)/10^k)` を返す。
+fn decimal_literal_band(digits: &str) -> (f64, f64) {
+    let k = digits.len() as i32;
+    let v: f64 = digits.parse().unwrap_or(0.0);
+    let base = 10f64.powi(k);
+    (v / base, (v + 1.0) / base)
+}
+
+/// Double カラムの値に対する数値部フィールド glob（整数部/小数部の2フィールド）を
+/// SQL 条件式へ翻訳する。値ベース（表示・丸めではない）で、桁数の上限はない。
+/// 小数部リテラルは負値も一致するよう絶対値の剰余で判定し、f64 の表現誤差を
+/// 帯幅に比例した許容で吸収する。
+fn translate_double_decimal_glob(pattern: &str, col: Col, op: BinOper) -> Option<SimpleExpr> {
+    use crate::util::NumericField;
+    let (int_str, dec_str) = match pattern.split_once('.') {
+        Some((i, d)) => (i, Some(d)),
+        None => (pattern, None),
+    };
+    let int_field = crate::util::parse_numeric_field(int_str)?;
+    let dec_field = match dec_str {
+        None => None,
+        Some(d) => Some(crate::util::parse_numeric_field(d)?),
     };
 
-    [string_cond, generic_conds]
-        .into_iter()
-        .flatten()
-        .fold(Condition::any(), |acc, cond| acc.add(cond))
+    match (int_field, dec_field) {
+        (NumericField::Literal(n_str), Some(NumericField::Free)) => {
+            let n: f64 = n_str.parse().ok()?;
+            range_op_condition(Expr::col(col).into(), op, n, n + 1.0)
+        }
+        (NumericField::Free, Some(NumericField::Literal(digits))) => {
+            let (lo, hi) = decimal_literal_band(digits);
+            let eps = (hi - lo) / 1000.0;
+            let frac: SimpleExpr =
+                Func::abs(Expr::col(col)).binary(BinOper::Custom("%"), Expr::val(1.0_f64));
+            range_op_condition(frac, op, lo - eps, hi + eps)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn build_str_condition(col: Col, op: BinOper, val: &str) -> Condition {
+    check_string_match(col, op, val)
+        .map(|expr| Condition::any().add(expr))
+        .unwrap_or_else(Condition::any)
 }
 
 pub(crate) fn check_string_match(
     col: Col,
     op: BinOper,
     val: &str,
-    bitical_type: crate::db::BiticalType,
 ) -> Option<SimpleExpr> {
-    let is_numeric_field = matches!(
-        bitical_type,
-        crate::db::BiticalType::Integer | crate::db::BiticalType::Double
-    );
-
-    if is_numeric_field {
-        return None;
+    let has_glob = crate::util::is_glob_pattern(val);
+    if !has_glob {
+        return Some(schema_pieces::col_cmp_str(col, op, val));
     }
 
-    let (val_str, effective_op) = if val.starts_with('^') {
-        (format!("{}*", &val[1..]), BinOper::Custom("GLOB"))
-    } else if val.contains('*') || val.contains('?') || val.contains('[') {
-        (val.to_string(), BinOper::Custom("GLOB"))
+    // glob パターンは GLOB で照合する。不一致（`:^` / `:^=`）はその否定 —
+    // op を捨てて GLOB に差し替えると不一致が「一致」に反転してしまう。
+    let glob = schema_pieces::col_cmp_str(col, BinOper::Custom("GLOB"), val);
+    Some(if op == BinOper::NotEqual {
+        glob.not()
     } else {
-        (val.to_string(), op)
-    };
-
-    Some(schema_pieces::col_cmp_str(col, effective_op, &val_str))
-}
-
-pub(crate) fn try_parse_generic_value_as_cond(
-    col: Col,
-    op: BinOper,
-    val: &str,
-) -> Option<Condition> {
-    val.parse::<i64>()
-        .ok()
-        .map(|i| {
-            let mut c = Condition::any()
-                .add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i))
-                .add(schema_pieces::col_cmp_f64(
-                    Col::LabelDouble,
-                    op,
-                    i as f64,
-                ));
-            if col == Col::LabelStr {
-                c = c.add(schema_pieces::col_cmp_i64(Col::LabelInt, op, i));
-            }
-            c
-        })
-        .or_else(|| {
-            val.parse::<f64>().ok().map(|f| {
-                Condition::any().add(schema_pieces::col_cmp_f64(
-                    Col::LabelDouble,
-                    op,
-                    f,
-                ))
-            })
-        })
-        .or_else(|| {
-            match val {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            }
-            .map(|b| {
-                Condition::any().add(schema_pieces::col_cmp_bool(
-                    Col::LabelBool,
-                    op,
-                    b,
-                ))
-            })
-        })
-}
-
-pub(crate) fn build_literal_condition(
-    col: Col,
-    op: BinOper,
-    val: &str,
-    is_generic: bool,
-) -> Condition {
-    let literal_cond = schema_pieces::col_cmp_str(col, op, val);
-    let generic_conds = if is_generic {
-        try_parse_generic_value_as_cond(col, op, val)
-    } else {
-        None
-    };
-
-    std::iter::once(Condition::any().add(literal_cond))
-        .chain(generic_conds)
-        .fold(Condition::any(), |acc, cond| acc.add(cond))
+        glob
+    })
 }
 
 /// タグのメタデータ記述
@@ -309,22 +383,30 @@ impl LogicalSchema for Lens {
         self.look_up_or_default(tag).logical_type
     }
 
-    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode {
+    fn expand_tag(
+        &self,
+        tag_type: &TagType,
+        label: &Label,
+    ) -> anyhow::Result<QueryNode> {
         if let Some(desc) = self.look_up(tag_type) {
             if let Some(func) = &desc.logical_function {
                 let q = func.query();
-                // normalize_label を適用してから expand する
-                let normalized = q.normalize_label(label);
-                let tag = crate::types::TypedTag::retag(
-                    tag_type.clone(),
-                    &normalized,
-                );
-                return q.expand(tag_type, &normalized, &tag, self);
+                let label = coerce_plain_bitical(label, q.logical_type());
+                let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
+                return q.expand(tag_type, &label, &tag, self);
             }
         }
-        QueryNode::TypedTag(crate::types::TypedTag::retag(
-            tag_type.clone(),
-            label,
+        let label = coerce_plain_bitical(label, self.get_logical_type(tag_type));
+        let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
+        let predicate = QueryNode::Comparison(ComparisonNode {
+            first: Operand::TypeRef(tag_type.clone()),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Eq),
+                Operand::Literal(label),
+            )],
+        });
+        Ok(QueryNode::TypedTag(
+            tag.with_node(crate::query::Node::Expanded(Box::new(predicate))),
         ))
     }
 
@@ -334,35 +416,29 @@ impl LogicalSchema for Lens {
                 return func.query().expand_projection(tag_type);
             }
         }
-        QueryNode::Projection(Operand::TypeRef(tag_type.clone()))
+        QueryNode::base_nest(Operand::TypeRef(tag_type.clone()))
     }
 
-    fn normalize_label_any(&self, label: &Label) -> Label {
-        if matches!(label, Label::Literal(..)) {
-            return label.clone();
-        }
-        // TagRegistry と同様に登録の逆順で走査する
-        for desc in self.registry.values().rev() {
-            if let Some(func) = &desc.logical_function {
-                let normalized = func.query().normalize_label(label);
-                if normalized != *label {
-                    return normalized;
-                }
-            }
-        }
-        label.clone()
-    }
-
-    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode {
+    fn expand_comparison(
+        &self,
+        node: ComparisonNode,
+    ) -> anyhow::Result<QueryNode> {
         let tag_type = find_tag_type_in_comparison(&node);
         let Some(tag_type) = tag_type else {
-            return QueryNode::Comparison(node);
+            return Ok(QueryNode::Comparison(node));
         };
         let Some(desc) = self.look_up(&tag_type) else {
-            return QueryNode::Comparison(node);
+            let logical_type = self.get_logical_type(&tag_type);
+            return Ok(QueryNode::Comparison(coerce_comparison_literals(
+                node,
+                logical_type,
+            )));
         };
         let Some(func) = &desc.logical_function else {
-            return QueryNode::Comparison(node);
+            return Ok(QueryNode::Comparison(coerce_comparison_literals(
+                node,
+                desc.logical_type,
+            )));
         };
         func.query().expand_comparison(node)
     }
@@ -384,31 +460,56 @@ impl LogicalSchema for Lens {
             })
             .collect()
     }
+
+    fn item_kind(&self, tag_type: &TagType) -> Option<ItemKind> {
+        self.look_up(tag_type)?
+            .logical_function
+            .as_ref()?
+            .query()
+            .item_kind()
+    }
 }
 
 /// 比較ノード内の TypeRef から TagType を探す。
+///
+/// 算術（`(mtime: + 3600) :> X`）や Nest（`parentdir: &: max(mtime:) :> X`）で
+/// ラップされていても見つける必要がある。ここで見つけられないと TagFn の
+/// 値解釈に到達せず、同じクエリの意味が Nest の内と外で変わってしまう。
 fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
+    use crate::query::ast::AggregationNode;
     fn from_operand(op: &Operand) -> Option<TagType> {
-        use crate::query::ast::AggregationNode;
         match op {
             Operand::TypeRef(tt) => Some(tt.clone()),
-            Operand::Aggregation(agg) => {
-                let inner = match agg.as_ref() {
-                    AggregationNode::Count(q) => q.as_ref(),
-                    AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
-                };
-                from_query_node(inner)
-            }
-            _ => None,
+            Operand::Aggregation(agg) => from_aggregation(agg),
+            Operand::Calculation(calc) => from_operand(&calc.left)
+                .or_else(|| from_operand(&calc.right)),
+            Operand::Query(q) => from_query_node(q),
+            Operand::Literal(_) => None,
         }
+    }
+    fn from_aggregation(agg: &AggregationNode) -> Option<TagType> {
+        let inner = match agg {
+            AggregationNode::Count(q) => q.as_ref(),
+            AggregationNode::Arithmetic { inner, .. } => inner.as_ref(),
+        };
+        from_query_node(inner)
     }
     fn from_query_node(node: &QueryNode) -> Option<TagType> {
         match node {
-            QueryNode::Projection(Operand::TypeRef(tt)) => Some(tt.clone()),
+            QueryNode::Nest(nest) if nest.left.is_none() => {
+                match &nest.right {
+                    Operand::TypeRef(tt) => Some(tt.clone()),
+                    _ => None,
+                }
+            }
             QueryNode::And(ns) | QueryNode::Or(ns) => {
                 ns.iter().find_map(from_query_node)
             }
             QueryNode::Difference(l, _) => from_query_node(l),
+            QueryNode::Aggregation(agg) => from_aggregation(agg),
+            // 比較の対象になっているのは Nest の結果（右辺）。左辺は
+            // グループ化のための Projection なので見ない。
+            QueryNode::Nest(nest) => from_operand(&nest.right),
             _ => None,
         }
     }
@@ -435,10 +536,6 @@ impl Lens {
     /// FileManager など、すでに TagRegistry を保持している場合に使用します。
     pub fn from_registry(registry: &crate::tag::TagRegistry) -> Self {
         let mut lens = Self::new_empty();
-        // Fixed タグ: 専用 DB カラム定義（手動管理のまま）
-        for desc in base_column_descriptors() {
-            lens.register(desc);
-        }
         // Composite / Basic / Fixed タグ: TagRegistry から自動生成
         for func in registry.iter_arcs() {
             let q = func.query();
@@ -469,7 +566,7 @@ impl Lens {
                     }
                 }
                 LogicalRole::Fixed => TagDescriptor {
-                    // 物理ストレージは base_column_descriptors で登録済み
+                    // 物理ストレージは後続の base_column_descriptors で登録する
                     // Composite として登録することで Fixed 定義を上書きしない
                     tag_type,
                     storage: StorageMapping::Composite,
@@ -478,6 +575,10 @@ impl Lens {
                     sys_id,
                 },
             };
+            lens.register(desc);
+        }
+        // Fixed タグ: 専用 DB カラム定義（手動管理のまま）
+        for desc in base_column_descriptors() {
             lens.register(desc);
         }
         lens
@@ -593,13 +694,17 @@ impl Lens {
             .and_then(from_storage)
             .or_else(from_fallback)?;
 
-        Some(Label::resolve(tag_type.clone(), value))
+        Some(Label::other(value))
     }
 
-    pub fn resolve_label(&self, tag_type: &TagType, value: &Value) -> Label {
+    pub fn resolve_label(
+        &self,
+        tag_type: &TagType,
+        value: &Value,
+    ) -> crate::types::TypedTag {
         let value = Bitical::from_scalar_db_value(value)
             .unwrap_or_else(|| Bitical::String(String::new()));
-        Label::resolve(tag_type.clone(), value)
+        crate::types::TypedTag::new(tag_type.clone(), value)
     }
 }
 
@@ -730,6 +835,315 @@ pub(crate) fn sql_to_logical(st: crate::db::BiticalType) -> LogicalType {
 mod tests {
     use super::*;
     use crate::types::SType;
+
+    fn expr_sql(expr: SimpleExpr) -> String {
+        use sea_query::{PostgresQueryBuilder, Query};
+        Query::select().expr(expr).to_string(PostgresQueryBuilder)
+    }
+
+    fn cond_where_sql(cond: Condition) -> String {
+        use sea_query::{PostgresQueryBuilder, Query};
+        Query::select()
+            .expr(sea_query::Expr::val(1))
+            .cond_where(cond)
+            .to_string(PostgresQueryBuilder)
+    }
+
+    fn double_glob_sql(pattern: &str) -> String {
+        double_glob_sql_with_op(pattern, crate::query::ast::BasicOp::Eq)
+    }
+
+    fn double_glob_sql_with_op(pattern: &str, op: crate::query::ast::BasicOp) -> String {
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String(pattern.to_string()),
+        );
+        cond_where_sql(build_column_condition(
+            Col::LabelDouble,
+            ComparisonOp::Scalar(op),
+            &label,
+            crate::db::BiticalType::Double,
+            true,
+        ))
+    }
+
+    /// 小数部フィールド glob は Double カラムで剰余の周期条件になる。値ベースの
+    /// 境界（帯幅に比例した許容込み）で、指定された桁までが一致し、それより
+    /// 下の桁は自由。
+    #[test]
+    fn test_double_decimal_field_glob_becomes_periodic_condition() {
+        let sql = double_glob_sql("*.5");
+        assert!(
+            !sql.contains("FALSE"),
+            "小数部 glob が値条件ゼロに落ちてはいけない: {sql}"
+        );
+        let (lo, hi) = decimal_literal_band("5");
+        let eps = (hi - lo) / 1000.0;
+        assert!(
+            sql.contains(&format!("{}", lo - eps)) && sql.contains(&format!("{}", hi + eps)),
+            "小数部が [0.5, 0.6) 相当（表現誤差の許容込み）の周期条件になるべき: {sql}"
+        );
+    }
+
+    /// 2桁指定は第2位まで絞る。
+    #[test]
+    fn test_double_two_digit_decimal_field_glob_narrows_range() {
+        let sql = double_glob_sql("*.55");
+        let (lo, hi) = decimal_literal_band("55");
+        let eps = (hi - lo) / 1000.0;
+        assert!(
+            sql.contains(&format!("{}", lo - eps)) && sql.contains(&format!("{}", hi + eps)),
+            "小数部が [0.55, 0.56) 相当（表現誤差の許容込み）に狭まるべき: {sql}"
+        );
+    }
+
+    /// 負値も絶対値で照合するので `-2.5` が `*.5` に一致する。
+    #[test]
+    fn test_double_decimal_field_glob_uses_absolute_value() {
+        let sql = double_glob_sql("*.5");
+        assert!(
+            sql.to_uppercase().contains("ABS"),
+            "負値のために絶対値を取るべき: {sql}"
+        );
+    }
+
+    /// 整数部リテラル・小数部自由は単一区間になる。
+    #[test]
+    fn test_double_integer_literal_decimal_free_becomes_single_range() {
+        let sql = double_glob_sql("2.*");
+        assert!(
+            !sql.contains("FALSE"),
+            "整数部リテラルの glob が値条件ゼロに落ちてはいけない: {sql}"
+        );
+        assert!(
+            sql.contains('2') && sql.contains('3'),
+            "[2.0, 3.0) の区間になるべき: {sql}"
+        );
+    }
+
+    /// 範囲形（整数部リテラル・小数部自由）は size と同じ区間の境界行列を順序演算子にも
+    /// 適用する: Gt→上限以上 / Ge→下限以上 / Lt→下限未満 / Le→上限未満。
+    #[test]
+    fn test_double_range_glob_order_ops_use_interval_bounds() {
+        use crate::query::ast::BasicOp;
+        let gt = double_glob_sql_with_op("2.*", BasicOp::Gt);
+        assert!(
+            gt.to_uppercase().contains(">= 3") || gt.contains(">=3"),
+            "Gt は上限(3.0)以上になるべき: {gt}"
+        );
+
+        let ge = double_glob_sql_with_op("2.*", BasicOp::Ge);
+        assert!(
+            ge.contains(">= 2") && !ge.contains(">= 3"),
+            "Ge は下限(2.0)以上になるべき: {ge}"
+        );
+
+        let lt = double_glob_sql_with_op("2.*", BasicOp::Lt);
+        assert!(lt.contains("< 2") && !lt.contains("< 3"), "Lt は下限(2.0)未満になるべき: {lt}");
+
+        let le = double_glob_sql_with_op("2.*", BasicOp::Le);
+        assert!(le.contains("< 3") && !le.contains("< 2"), "Le は上限(3.0)未満になるべき: {le}");
+    }
+
+    /// 範囲形の Ne は区間外（OR）になる。
+    #[test]
+    fn test_double_range_glob_ne_becomes_outside_range() {
+        use crate::query::ast::BasicOp;
+        let ne = double_glob_sql_with_op("2.*", BasicOp::Ne);
+        assert!(
+            ne.contains("< 2") && (ne.contains(">= 3") || ne.contains(">=3")),
+            "Ne は [2.0, 3.0) の外側（OR）になるべき: {ne}"
+        );
+    }
+
+    /// 周期形（整数部自由・小数部リテラル）も同じ境界行列を、剰余（ABS(v) % 1）に適用する。
+    #[test]
+    fn test_double_periodic_glob_order_ops_wrap_modulo() {
+        use crate::query::ast::BasicOp;
+        let gt = double_glob_sql_with_op("*.5", BasicOp::Gt);
+        assert!(gt.to_uppercase().contains("ABS"), "周期形は絶対値を使うべき: {gt}");
+        let (lo, hi) = decimal_literal_band("5");
+        let eps = (hi - lo) / 1000.0;
+        assert!(
+            gt.contains(&format!("{}", hi + eps)),
+            "Gt は帯の上限側になるべき: {gt}"
+        );
+
+        let ge = double_glob_sql_with_op("*.5", BasicOp::Ge);
+        assert!(
+            ge.contains(&format!("{}", lo - eps)),
+            "Ge は帯の下限側になるべき: {ge}"
+        );
+    }
+
+    /// 全一致 glob（`*`）は数値カラム型でも値条件を出さない（そのタグを持つ全アイテム）。
+    #[test]
+    fn test_build_column_condition_full_match_glob_eq_drops_value_condition() {
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String("*".to_string()),
+        );
+        let cond = build_column_condition(
+            Col::LabelInt,
+            ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
+            &label,
+            crate::db::BiticalType::Integer,
+            true,
+        );
+        assert_eq!(
+            cond_where_sql(cond),
+            "SELECT 1 WHERE TRUE",
+            "全一致 glob の一致は無条件（TRUE）になるべき"
+        );
+    }
+
+    /// 全一致 glob（`*`）の不一致は FALSE（すべての値が一致するため）。
+    #[test]
+    fn test_build_column_condition_full_match_glob_ne_becomes_false() {
+        use crate::types::{Bitical, Label};
+        let label = Label::other(Bitical::String("*".to_string()),
+        );
+        let cond = build_column_condition(
+            Col::LabelInt,
+            ComparisonOp::Scalar(crate::query::ast::BasicOp::Ne),
+            &label,
+            crate::db::BiticalType::Integer,
+            true,
+        );
+        assert_eq!(
+            cond_where_sql(cond),
+            "SELECT 1 WHERE FALSE",
+            "全一致 glob の不一致は FALSE になるべき"
+        );
+    }
+
+    /// 不一致（`:^` / `:^=`）に glob パターンを与えたら**否定**になること。
+    /// glob 文字を見ると op を無条件に GLOB へ差し替えていたため、
+    /// 不一致が「一致」に反転していた。
+    #[test]
+    fn test_check_string_match_ne_with_glob_becomes_negation() {
+        let expr = check_string_match(Col::LabelStr, BinOper::NotEqual, "*.rs")
+            .expect("文字列カラムなので式が生成される");
+        assert_eq!(
+            expr_sql(expr),
+            r#"SELECT NOT ("label_str" GLOB '*.rs')"#,
+            "不一致 × glob は GLOB の否定になるべき"
+        );
+    }
+
+    /// 一致（`:=`）は従来どおり GLOB のまま。
+    #[test]
+    fn test_check_string_match_eq_with_glob_stays_glob() {
+        let expr = check_string_match(Col::LabelStr, BinOper::Equal, "*.rs")
+            .expect("文字列カラムなので式が生成される");
+        assert_eq!(expr_sql(expr), r#"SELECT "label_str" GLOB '*.rs'"#);
+    }
+
+    /// glob 文字を含まない不一致は素の `<>` のまま（既存の挙動）。
+    #[test]
+    fn test_check_string_match_ne_without_glob_stays_ne() {
+        let expr = check_string_match(Col::LabelStr, BinOper::NotEqual, "foo")
+            .expect("文字列カラムなので式が生成される");
+        assert_eq!(expr_sql(expr), r#"SELECT "label_str" <> 'foo'"#);
+    }
+
+    /// テスト内で独立に計算した、指定日のローカル 23:59:59 の UTC 秒。
+    /// `:>` は「その日を含まない」ので Gt の境界はこれになる。
+    fn local_end_of_day(y: i32, m: u32, d: u32) -> i64 {
+        use chrono::{Local, NaiveDate, TimeZone};
+        let naive = NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(23, 59, 59)
+            .unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    /// 算術でラップされた mtime 比較（文脈 D）でも TagFn に到達し、
+    /// `:>` の境界が ceiling（その日の 23:59:59）になること。
+    /// 到達しないと右辺が `Label::Date` のまま残り、SQL 段で floor（00:00:00）と
+    /// 比較されて 2026-02-01 12:00 のファイルが「2月1日より後」と判定される。
+    #[test]
+    fn test_expand_comparison_reaches_tagfn_through_calculation() {
+        use crate::query::ast::{
+            ArithmeticOp, BasicOp, CalculationNode, ComparisonNode,
+            ComparisonOp,
+        };
+        use crate::types::{Label, TypedTag};
+
+        let lens = Lens::base_standard();
+        let calc = Operand::Calculation(Box::new(CalculationNode {
+            left: Operand::TypeRef(TagType::Base(SType::Mtime)),
+            op: ArithmeticOp::Add,
+            right: Operand::Literal(TypedTag::new(SType::Size, 3600).label),
+        }));
+        let node = ComparisonNode {
+            first: calc.clone(),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(Label::from("2026-02-01")),
+            )],
+        };
+
+        let result = lens.expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("算術ラップは DateTimeRange を保つべき: {result:?}")
+        };
+        assert_eq!(first, calc, "算術の構造が保持されているべき");
+        assert_eq!(op, BasicOp::Gt);
+        let (_, end) = range.as_interval().unwrap();
+        assert_eq!(
+            end,
+            local_end_of_day(2026, 2, 1),
+            "右辺が ceiling へ翻訳されているべき"
+        );
+    }
+
+    /// Nest でラップされた mtime 比較（文脈 F）でも TagFn に到達し、
+    /// `:>` の境界が Nest の外（文脈 C）と一致すること。
+    #[test]
+    fn test_expand_comparison_reaches_tagfn_through_nest() {
+        use crate::query::ast::{
+            AggregationNode, ArithmeticAggOp, BasicOp, ComparisonNode,
+            ComparisonOp, NestNode,
+        };
+        use crate::types::Label;
+
+        let lens = Lens::base_standard();
+        let max_mtime = AggregationNode::Arithmetic {
+            op: ArithmeticAggOp::Max,
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
+                TagType::Base(SType::Mtime),
+            ))),
+        };
+        let nest = Operand::Query(Box::new(QueryNode::Nest(NestNode {
+            left: Some(Box::new(QueryNode::base_nest(Operand::TypeRef(
+                TagType::Base(SType::Parentdir),
+            )))),
+            right: Operand::Aggregation(Box::new(max_mtime)),
+        })));
+        let node = ComparisonNode {
+            first: nest.clone(),
+            rest: vec![(
+                ComparisonOp::Label(BasicOp::Gt),
+                Operand::Literal(Label::from("2026-02-01")),
+            )],
+        };
+
+        let result = lens.expand_comparison(node).unwrap();
+        let QueryNode::DateTimeRange { first, op, range } = result else {
+            panic!("Nest ラップは DateTimeRange を保つべき: {result:?}")
+        };
+        assert_eq!(first, nest, "Nest の構造が保持されているべき");
+        assert_eq!(op, BasicOp::Gt);
+        let (_, end) = range.as_interval().unwrap();
+        assert_eq!(
+            end,
+            local_end_of_day(2026, 2, 1),
+            "右辺が ceiling へ翻訳されているべき（Nest の外と同じ境界）"
+        );
+    }
 
     #[test]
     fn test_lens_with_standard_includes_rank() {
@@ -912,6 +1326,25 @@ mod tests {
         assert_eq!(
             lens.get_logical_type(&TagType::Base(SType::IsDir)),
             LogicalType::Boolean
+        );
+    }
+
+    #[test]
+    fn test_check_string_match_caret_is_literal_not_prefix_glob() {
+        let expr = check_string_match(Col::LabelStr, BinOper::Equal, "^foo")
+            .unwrap();
+        let sql = sea_query::Query::select()
+            .expr(expr)
+            .to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains("'^foo'"),
+            "value should stay literal '^foo': {}",
+            sql
+        );
+        assert!(
+            !sql.contains("GLOB"),
+            "must not convert to GLOB prefix match: {}",
+            sql
         );
     }
 }

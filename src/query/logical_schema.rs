@@ -58,21 +58,14 @@ impl LogicalType {
 }
 
 impl Bitical {
-    /// この値が推定される LogicalType（サイズ単位付き文字列は Integer 扱い）。
+    /// この値の変種が表す LogicalType。表記の解釈は行わない
+    /// （`"1MB"` のような文字列の読み取りは `OperandFormat` の担当）。
     pub(crate) fn infer_logical_type(&self) -> LogicalType {
         match self {
             Bitical::Integer(_) => LogicalType::Integer,
             Bitical::Boolean(_) => LogicalType::Boolean,
             Bitical::Double(_) => LogicalType::Float,
-            Bitical::Uuid(_) => LogicalType::String,
-            Bitical::String(s) => {
-                // "1MB" などのサイズ単位付きリテラルは数値として扱う
-                if crate::util::parse_size(s).is_some() {
-                    LogicalType::Integer
-                } else {
-                    LogicalType::String
-                }
-            }
+            Bitical::Uuid(_) | Bitical::String(_) => LogicalType::String,
         }
     }
 }
@@ -80,18 +73,27 @@ impl Bitical {
 /// 論理的なスキーマ情報を提供するインターフェース。
 pub trait LogicalSchema {
     fn get_logical_type(&self, tag: &TagType) -> LogicalType;
-    fn expand_tag(&self, tag_type: &TagType, label: &Label) -> QueryNode;
+    /// 値がその型として解釈できない場合はエラーを返す。
+    fn expand_tag(
+        &self,
+        tag_type: &TagType,
+        label: &Label,
+    ) -> anyhow::Result<QueryNode>;
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode;
-    /// リテラル値（サイズ単位・日付文字列等）を正規化する。Literal は変換しない。
-    fn normalize_label_any(&self, label: &Label) -> Label;
     /// 比較ノードを展開する（日付範囲化・ラベル正規化等）。
-    fn expand_comparison(&self, node: ComparisonNode) -> QueryNode;
+    /// 値がその型として解釈できない場合はエラーを返す。
+    fn expand_comparison(
+        &self,
+        node: ComparisonNode,
+    ) -> anyhow::Result<QueryNode>;
     /// 登録済みタグの型名と default_rank を列挙する。
     /// 3要素目は出所を表す ItemId: 組み込み（`with_standard` の Rust
     /// TagFunction）は固定 Sys id を持つ `Stored`、プラグイン登録型は
     /// `Settling(Origin::Plugin, _)`（未確定の counter はダミー値で構わない。
     /// このリストは SQL 生成の使い捨てで write の実解決には流れない）。
     fn iter_all_for_rank(&self) -> Vec<(TagType, Rank, ItemId)>;
+    /// その型が定義アイテムを指すなら、その ItemKind を返す。
+    fn item_kind(&self, tag_type: &TagType) -> Option<crate::types::ItemKind>;
 }
 
 #[cfg(test)]

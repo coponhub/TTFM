@@ -19,7 +19,7 @@
 
 use crate::query::ast::{
     AggregationNode, ArithmeticAggOp, BasicOp, CalculationNode, ComparisonNode,
-    ComparisonOp, Operand, QueryNode,
+    ComparisonOp, NestNode, Operand, QueryNode,
 };
 
 // =========================================================================
@@ -59,13 +59,138 @@ pub fn invalid_scalar_comparison_msg(
     )
 }
 
+// =========================================================================
+// Warning Sink
+// =========================================================================
+
+/// パース時・論理展開時に検出された警告の発出先。
+/// 発生した層が発生時に直接発出するための抽象で、どの構造体にも
+/// 保持させず、処理の実行中だけ `&mut dyn WarningSink` として借用で通す。
+pub trait WarningSink {
+    fn warn(&mut self, warning: Warning);
+}
+
+impl WarningSink for Vec<Warning> {
+    fn warn(&mut self, warning: Warning) {
+        self.push(warning);
+    }
+}
+
+#[derive(Debug)]
+pub struct Warning(pub String);
+
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Warning: {}", self.0)
+    }
+}
+
+pub struct ImmediateWarningSink<'a> {
+    pub writer: &'a mut dyn std::io::Write,
+}
+
+impl WarningSink for ImmediateWarningSink<'_> {
+    fn warn(&mut self, warning: Warning) {
+        writeln!(self.writer, "{}", warning).unwrap_or(());
+    }
+}
+
+// =========================================================================
+// Parser Warnings
+// =========================================================================
+
+pub fn stuck_comparison_unquoted_colon_msg(
+    lhs: &str,
+    op: &str,
+    rhs: &str,
+) -> Warning {
+    Warning(format!(
+        "'{rhs}' was parsed as a literal string because there is no space before ':'. \nDid you mean: '{lhs} :{op} {rhs}'?"
+    ))
+}
+
+pub fn label_set_intersect_warning_msg() -> Warning {
+    Warning("Projection intersection ('&') found. Did you mean '&:' (Nest) to group results?".to_string())
+}
+
+pub fn definition_count_in_nest_warning_msg() -> Warning {
+    Warning(
+        "count(type:*) inside a Nest ('&:') counts the type definitions, \
+         which is the same for every group. Did you mean count(type:) \
+         to count the types actually attached in each group?"
+            .to_string(),
+    )
+}
+
+// =========================================================================
+// Parser Warnings: 検出専用ヘルパー
+// warning 検出にしか使わない QueryNode 走査はここに置き、ast.rs は
+// 汎用の構造アクセサのみを保持する。
+// =========================================================================
+
+impl QueryNode {
+    /// 自身、または入れ子のいずれかに Projection / Nest を含むかどうかを判定します
+    /// （lens_resolver::ResolvedNode::is_projection_recursive の QueryNode 版。
+    /// 解決前の生 AST 上で「この子は解決後 Projection 的に振る舞うか」を判定するために使う）。
+    fn is_projection_recursive(&self) -> bool {
+        match self {
+            QueryNode::Nest(_) => true,
+            QueryNode::And(nodes) | QueryNode::Or(nodes) => {
+                nodes.iter().any(|n| n.is_projection_recursive())
+            }
+            QueryNode::Difference(l, r) => {
+                l.is_projection_recursive() || r.is_projection_recursive()
+            }
+            _ => false,
+        }
+    }
+
+    /// And 直下に Projection 的な子が2つ以上あるノードが木の中に存在するかどうかを判定します
+    /// （lens_resolver 解決後に生成される `ResolvedNode::LabelSetOp{Intersect}` が現れる条件の
+    /// パース時ミラー。`ResolvedNode::get_label_set_op` と同様、And による透過ラップのみを辿り、
+    /// Or / Difference / Nest の内側までは踏み込まない）。
+    pub fn has_projection_intersection(&self) -> bool {
+        match self {
+            QueryNode::And(nodes) => {
+                let projection_children = nodes
+                    .iter()
+                    .filter(|n| n.is_projection_recursive())
+                    .count();
+                projection_children >= 2
+                    || nodes.iter().any(|n| n.has_projection_intersection())
+            }
+            _ => false,
+        }
+    }
+
+    /// ルートから Or だけを辿って定義アイテム参照に到達できるかどうかを判定します
+    /// （lens_resolver::ResolvedNode::has_definition_branch の QueryNode 版。
+    /// `type:*` のような定義アイテム参照が候補の Or に展開された場合も検出する）。
+    /// 展開後の定義参照は素の `TypedTag` と見分けが付かないため schema に問う。
+    pub fn has_definition_branch(
+        &self,
+        schema: &dyn crate::query::logical_schema::LogicalSchema,
+    ) -> bool {
+        match self {
+            QueryNode::OriginRef(_) => true,
+            QueryNode::TypedTag(tt) => {
+                schema.item_kind(&tt.tag_type()).is_some()
+            }
+            QueryNode::Or(nodes) => {
+                nodes.iter().any(|n| n.has_definition_branch(schema))
+            }
+            _ => false,
+        }
+    }
+}
+
 /// QueryNodeを簡易的に文字列化（提案生成用）
 fn node_to_simple_string(node: &QueryNode) -> String {
     match node {
         QueryNode::TypedTag(tt) => {
-            format!("{}:{}", tt.label.tag_type().as_str(), tt.label.as_str())
+            format!("{}:{}", tt.tag_type().as_str(), tt.as_str())
         }
-        QueryNode::Projection(Operand::TypeRef(tt)) => {
+        QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) }) => {
             format!("{}:", tt.as_str())
         }
         QueryNode::Aggregation(agg) => match agg {
@@ -655,7 +780,9 @@ fn operand_is_agg_or_literal(operand: &Operand) -> bool {
                 && operand_is_agg_or_literal(&c.right)
         }
         Operand::Query(q) => match q.as_ref() {
-            QueryNode::Projection(op) => operand_is_agg_or_literal(op),
+            QueryNode::Nest(NestNode { left: None, right: op }) => {
+                operand_is_agg_or_literal(op)
+            }
             QueryNode::Aggregation(_) => true,
             _ => false,
         },
@@ -733,9 +860,64 @@ pub fn unsupported_string_aggregation(op: &str) -> anyhow::Error {
     anyhow::anyhow!("{}: '{}'", AGGREGATION_STRING_UNSUPPORTED, op)
 }
 
+pub const ORDER_OP_PARTIAL_GLOB_UNSUPPORTED: &str =
+    "Order operator against a partial glob pattern is not supported \
+     (only full-match glob '*' is allowed; use Eq/Ne for other patterns)";
+
+pub fn order_op_partial_glob(op: &str, pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        ORDER_OP_PARTIAL_GLOB_UNSUPPORTED,
+        op,
+        pattern
+    )
+}
+
+pub const TAG_VALUE_NOT_INTERPRETABLE: &str =
+    "Value cannot be interpreted for this tag's type";
+
+pub fn tag_value_not_interpretable(tag_type: &str, pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        TAG_VALUE_NOT_INTERPRETABLE,
+        tag_type,
+        pattern
+    )
+}
+
+pub const TAG_VALUE_NOT_A_SINGLE_VALUE: &str =
+    "Value does not resolve to a single value";
+
+pub fn tag_value_not_a_single_value(
+    tag_type: &str,
+    pattern: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: '{}' '{}'",
+        TAG_VALUE_NOT_A_SINGLE_VALUE,
+        tag_type,
+        pattern
+    )
+}
+
+pub fn comparison_operand_not_a_single_value(pattern: &str) -> anyhow::Error {
+    anyhow::anyhow!("{}: '{}'", TAG_VALUE_NOT_A_SINGLE_VALUE, pattern)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vec_warning_sink_collects_pushed_messages() {
+        let mut sink: Vec<Warning> = Vec::new();
+        sink.warn(Warning("first".to_string()));
+        sink.warn(Warning("second".to_string()));
+        assert_eq!(
+            sink.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
 
     #[test]
     fn test_error_suggestion_no_double_colon() {

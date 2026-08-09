@@ -43,14 +43,14 @@ mod tests {
             .run(index_dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
-        let res_comp = search::search(&store, &registry, "count()", SearchOptions::default()).unwrap();
+        let res_comp = search::search_nowarn(&store, &registry, "count()", SearchOptions::default()).unwrap();
         println!("count() result: {}", res_comp.results[0].raw_repr());
 
         let res_wild =
-            search::search(&store, &registry, "count(*:*)", SearchOptions::default()).unwrap();
+            search::search_nowarn(&store, &registry, "count(*:*)", SearchOptions::default()).unwrap();
         println!("count(*:*) result: {}", res_wild.results[0].raw_repr());
 
-        let items = search::search(&store, &registry, "path:", SearchOptions::default()).unwrap();
+        let items = search::search_nowarn(&store, &registry, "path:", SearchOptions::default()).unwrap();
         println!(
             "Total items found by path: projection: {}",
             items.results.len()

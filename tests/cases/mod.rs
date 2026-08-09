@@ -42,6 +42,9 @@ pub(super) struct QueryTestCase {
     pub format_query: fn(&str, &Path) -> String,
     pub query: &'static str,
     pub assert: fn(&SearchResponse, &Path) -> anyhow::Result<()>,
+    /// 警告を検証したいケースのみ上書きする。デフォルトは無検証。
+    pub assert_warnings:
+        fn(&[ttfm::query::error::Warning]) -> anyhow::Result<()>,
 }
 
 impl QueryTestCase {
@@ -55,6 +58,7 @@ impl QueryTestCase {
         format_query: default_scope,
         query: "",
         assert: |_, _| Ok(()),
+        assert_warnings: |_| Ok(()),
     };
 }
 
@@ -136,13 +140,16 @@ macro_rules! define_cases {
             let case = CASES.iter().find(|c| c.name == name).unwrap();
             let case_dir = fix.root.path().join(case.name);
             let query = (case.format_query)(case.query, &case_dir);
+            let mut warnings: Vec<ttfm::query::error::Warning> = Vec::new();
             let res = ttfm::search::search(
                 &store,
                 &fix.registry,
                 &query,
                 ttfm::SearchOptions::default(),
+                &mut warnings,
             )?;
-            (case.assert)(&res, &case_dir)
+            (case.assert)(&res, &case_dir)?;
+            (case.assert_warnings)(&warnings)
         }
 
         $(
@@ -162,16 +169,20 @@ pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
-        .map(|e| e.label.as_str().to_string())
+        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .map(|e| e.typed_tag.as_str().to_string())
+}
+
+pub(super) fn get_nvalue_display(item: &ttfm::Item) -> Option<String> {
+    item.representative.nvalue.as_ref().map(|l| l.as_str())
 }
 
 pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type().as_str() == "nvalue")
-        .map(|e| match e.label.value() {
+        .find(|e| e.typed_tag.tag_type().as_str() == "nvalue")
+        .map(|e| match e.typed_tag.value() {
             ttfm::types::Bitical::Double(d) => d,
             ttfm::types::Bitical::Integer(i) => i as f64,
             _ => panic!("Unexpected nvalue type"),
@@ -184,7 +195,7 @@ pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
         r.tags
             .entries
             .iter()
-            .any(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+            .any(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("item"))
     })
 }
 
@@ -236,7 +247,7 @@ pub(super) fn apply_tags_batch(
         let item = ttfm::Item {
             id: ItemId::Stored(id),
             item_kind: ttfm::ItemKind::File,
-            representative: vec![],
+            representative: vec![].into(),
             rank: Rank::default(),
             intrinsic: Intrinsic::default(),
             tags: Tags::new(),
@@ -244,7 +255,11 @@ pub(super) fn apply_tags_batch(
         };
         actions.extend(ttfm::edit::modify::modify(
             &item,
-            Some(tags),
+            Some(&ttfm::edit::parse::parse_edit_query(
+                tags,
+                ttfm::edit::QueryType::Tag,
+                registry,
+            )?),
             ttfm::edit::QueryType::Tag,
             registry,
         )?);
@@ -269,6 +284,7 @@ pub(super) fn tag_item_id(
         ttfm::edit::QueryType::Tag,
         None,
         ttfm::edit::WriteOptions { yes: true },
+        &mut Vec::new(),
     )?;
     Ok(())
 }
@@ -414,6 +430,7 @@ pub mod test_date_regression;
 pub mod test_discrepancy;
 pub mod test_edit;
 pub mod test_errors;
+pub mod test_glob_values;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
 pub mod test_literal_ops;
@@ -421,7 +438,9 @@ pub mod test_nest;
 pub mod test_null_propagation;
 pub mod test_optimize_sql;
 pub mod test_projection;
+pub mod test_projection_as_nest;
 pub mod test_query_full;
+pub mod test_quoted_glob;
 pub mod test_reverse_patterns;
 pub mod test_scalar_format;
 pub mod test_search_order;
@@ -429,6 +448,7 @@ pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
 pub mod test_type_definitions;
+pub mod test_typedtag_label_node;
 pub mod test_validation;
 pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;

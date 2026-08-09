@@ -1,6 +1,3 @@
-// --- Whitespace handling ---
-WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
-
 // --- Main entry point ---
 // --- Main entry point ---
 // Try scalar_arithmetic_query first to handle top-level arithmetic like "count() - count()" or "size: * 2".
@@ -107,7 +104,7 @@ label_op_to_proj = ${ colon ~ label_basic_op ~ WHITESPACE+ ~ (type_ref | calcula
 // DESIGN.md:86,91 - Stuck comparison does NOT have = or == since TypedTag achieves same result
 // DESIGN.md:88 - NO whitespace allowed between operator and operand
 stuck_op_step = ${ stuck_basic_op ~ stuck_operand }
-stuck_operand = { quoted_string | number | type_ref | calculation | unquoted_tag_string }
+stuck_operand = { quoted_string | number | scalar_calculation | unquoted_tag_string }
 
 colon = { ":" }
 
@@ -156,12 +153,6 @@ aggregator = @{ "sum" | "count" | "avg" | "max" | "min" }
 // Tag Label (permissive, allows ^)
 tag_label = { quoted_string | number | unquoted_tag_string }
 
-// Unquoted tag string: allows ^ and set operators (&, |) without spaces
-// DESIGN.md:26 - "type:file&project:ttfm" is NOT a set operation, parsed as TypedTag
-unquoted_tag_string = @{
-    (escape | (!(WHITESPACE | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "," | ";" | "{" | "}") ~ ANY))+
-}
-
 // ... existing unquoted_string ...
 
 
@@ -200,13 +191,10 @@ parenthesized_expr = { "(" ~ expr ~ ")" }
 // Type Reference (trailing colon)
 type_ref = ${ tag_type ~ ":" }
 
-tag_type = ${ quoted_string | (!(ASCII_DIGIT+ ~ (WHITESPACE | EOI | ":")) ~ identifier) }
+tag_type = ${ quoted_string | identifier }
 
 // --- Labels and Literals ---
 label = { quoted_string | number | (!type_ref ~ unquoted_string) }
-
-// Identifiers (boundary is :)
-identifier = @{ (escape | (!reserved_chars ~ ANY))+ }
 
 // Numbers
 number = @{ "-"? ~ ASCII_DIGIT+ ~ &(WHITESPACE | EOI | ")") }
@@ -222,16 +210,4 @@ inner_str_single = @{ (!("'" | "\\") ~ ANY | "\\" ~ ANY)* }
 // Unquoted strings: Allow colons in labels.
 unquoted_string = @{
     !number ~ (escape | (!(WHITESPACE | ":" | "&" | "|" | "(" | ")" | "\"" | "'" | "=" | ">" | "<" | "^" | "," | ";" | "{" | "}") ~ ANY))+
-}
-
-escape = @{ "\\" ~ ANY }
-
-// Reserved characters are only those that trigger higher-level rules or separators.
-// Arithmetic ops (+, *, /, %) are allowed in unquoted strings UNLESS they are in a math context.
-reserved_chars = _{
-    WHITESPACE
-  | "&" | "|" | "(" | ")" | "\"" | "'"
-  | "=" | ">" | "<" | "^" // Comparison and assignment-like chars
-  | "," | ";" | "{" | "}"
-  | ":"
 }

@@ -17,7 +17,7 @@
 
 use super::{
     apply_arithmetic_op, build_agg, build_resolved_literal_expr,
-    build_tag_value_agg_expr, label_to_unit_aware_expr, resolve_count_target,
+    build_tag_value_agg_expr, nvalue_rhs_condition, resolve_count_target,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
 use crate::db::{Col, Src};
@@ -321,16 +321,17 @@ fn build_filter_node_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
     // build_filter_operand_expr はタグを EAV で、集約をスカラーサブクエリで展開する。
     let agg_ctx = build_aggregation_context(src, node);
     match node {
-        ResolvedNode::CalculationMatch { calc, op, label } => {
+        ResolvedNode::CalculationMatch { calc, op, rhs } => {
             let mut stmt = Query::select();
             stmt.column(Col::ItemId)
                 .from(src)
                 .group_by_col(Col::ItemId);
             let calc_expr = build_filter_calc_expr(src, calc, &agg_ctx);
-            let label_expr = label_to_unit_aware_expr(label);
-            stmt.and_having(
-                Expr::expr(calc_expr).binary(to_bin_op(*op), label_expr),
-            );
+            let is_string =
+                calc.left.is_string_type() && calc.right.is_string_type();
+            stmt.cond_having(nvalue_rhs_condition(
+                calc_expr, *op, rhs, is_string,
+            ));
             stmt
         }
         ResolvedNode::TagCalculationMatch {

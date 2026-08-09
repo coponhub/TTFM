@@ -17,8 +17,8 @@
 
 /// ネスト演算子 (`&:`) の統合テスト
 use super::{
-    default_scope, get_nvalue, get_nvalue_f64, has_item_tags,
-    inject_path_scope, scope_path_from_dir,
+    default_scope, get_nvalue, get_nvalue_display, get_nvalue_f64,
+    has_item_tags, inject_path_scope, scope_path_from_dir,
 };
 use tempfile::tempdir;
 use ttfm::tag::TagRegistry;
@@ -72,6 +72,42 @@ define_cases! {
             Ok(())
         },
     },
+    sum_nvalue_formats_by_single_tag_type: {
+        setup: |dir| {
+            let sub = dir.join("sub");
+            std::fs::create_dir_all(&sub)?;
+            std::fs::write(sub.join("a.bin"), vec![0u8; 1024])?;
+            std::fs::write(sub.join("b.bin"), vec![0u8; 1024])?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: sum(size:)",
+        assert: |res, _dir| {
+            assert!(has_item_tags(&res.results));
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
+            assert_eq!(get_nvalue(sub).as_deref(), Some("2048"), "raw nvalue stays untouched");
+            assert_eq!(get_nvalue_display(sub).as_deref(), Some("2.00KB"), "display nvalue is size-formatted");
+            Ok(())
+        },
+    },
+    count_nvalue_stays_unformatted: {
+        setup: |dir| {
+            let sub = dir.join("sub");
+            std::fs::create_dir_all(&sub)?;
+            std::fs::write(sub.join("a.jpg"), "jpg1")?;
+            Ok(())
+        },
+        modify: None,
+        format_query: default_scope,
+        query: "parentdir: &: count(extension:jpg)",
+        assert: |res, _dir| {
+            assert!(has_item_tags(&res.results));
+            let sub = res.results.iter().find(|r| r.raw_repr().contains("sub")).expect("sub");
+            assert_eq!(get_nvalue_display(sub).as_deref(), Some("1"), "count has no type to format, stays raw");
+            Ok(())
+        },
+    },
     no_regression_plain_projection: {
         setup: |dir| {
             std::fs::write(dir.join("a.rs"), "")?;
@@ -87,7 +123,7 @@ define_cases! {
             assert!(res.results.iter().any(|r| r.raw_repr() == "txt"));
             for item in &res.results {
                 let has_nvalue = item.tags.entries.iter()
-                    .any(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"));
+                    .any(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"));
                 assert!(!has_nvalue, "Plain projection should NOT have nvalue for '{}'", item.raw_repr());
             }
             Ok(())
@@ -352,8 +388,8 @@ define_cases! {
             assert!(!has_item_tags(&res.results));
             let parentdirs: Vec<String> = res.results.iter()
                 .flat_map(|r| r.tags.entries.iter()
-                    .filter(|e| e.label.tag_type().as_str() == "parentdir")
-                    .map(|e| e.label.as_str().to_string()))
+                    .filter(|e| e.typed_tag.tag_type().as_str() == "parentdir")
+                    .map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(parentdirs.iter().any(|p| p.contains("dirA")),
                 "dirA should appear: {:?}", parentdirs);
@@ -721,7 +757,7 @@ define_cases! {
             assert!(!has_item_tags(&res.results));
             let files: Vec<_> = res.results.iter().filter(|r| {
                 !r.tags.entries.iter().any(|e| {
-                    e.label.tag_type().to_string() == "is_dir" && e.label.as_str() == "true"
+                    e.typed_tag.tag_type().to_string() == "is_dir" && e.typed_tag.as_str() == "true"
                 })
             }).collect();
             assert_eq!(files.len(), 4, "4 files: {:?}", files);
@@ -1311,11 +1347,11 @@ define_cases! {
                 res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>()
             );
             assert_eq!(res.results[0].raw_repr(), "one");
-            assert!(res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")));
+            assert!(res.results[0].tags.entries.iter().any(|r| r.typed_tag.as_str().contains("a.txt")));
             let all_names: Vec<String> = res
                 .results
                 .iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(!all_names.iter().any(|n| n.contains("b.txt")));
             assert!(!all_names.iter().any(|n| n.contains("c.txt")));
@@ -1356,10 +1392,10 @@ define_cases! {
                 .expect("Should have 'alpha' group");
             let beta  = res.results.iter().find(|r| r.raw_repr() == "beta")
                 .expect("Should have 'beta' group");
-            assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("a.txt")));
-            assert!(alpha.tags.entries.iter().any(|e| e.label.as_str().contains("c.txt")));
-            assert!(beta.tags.entries.iter().any(|e| e.label.as_str().contains("b.txt")));
-            assert!(beta.tags.entries.iter().any(|e| e.label.as_str().contains("c.txt")));
+            assert!(alpha.tags.entries.iter().any(|e| e.typed_tag.as_str().contains("a.txt")));
+            assert!(alpha.tags.entries.iter().any(|e| e.typed_tag.as_str().contains("c.txt")));
+            assert!(beta.tags.entries.iter().any(|e| e.typed_tag.as_str().contains("b.txt")));
+            assert!(beta.tags.entries.iter().any(|e| e.typed_tag.as_str().contains("c.txt")));
             Ok(())
         },
     },
@@ -1427,7 +1463,7 @@ define_cases! {
             for r in &res.results {
                 let group = r.raw_repr();
                 for e in &r.tags.entries {
-                    let label_str = e.label.as_str();
+                    let label_str = e.typed_tag.as_str();
                     let file_name = label_str.split('#').next().unwrap().to_string();
                     if group == dir_a {
                         a_tags.push(file_name);
@@ -1477,7 +1513,7 @@ define_cases! {
             Ok(())
         },
     },
-    // ケース⑧ Proj & Proj → SearchResponse.warnings に警告を生成する
+    // ケース⑧ Proj & Proj → 警告を生成する
     label_set_intersect_warns: {
         setup: |dir| {
             std::fs::write(dir.join("a.txt"), "a")?;
@@ -1490,14 +1526,34 @@ define_cases! {
         ],
         format_query: default_scope,
         query: "cat: & flavor:",
-        assert: |res, _dir| {
+        assert_warnings: |warnings| {
             assert!(
-                !res.warnings.is_empty(),
+                !warnings.is_empty(),
                 "Proj & Proj should generate a warning"
             );
             assert!(
-                res.warnings.iter().any(|w| w.contains("&:")),
+                warnings.iter().any(|w| w.0.contains("&:")),
                 "Warning should suggest using '&:'"
+            );
+            Ok(())
+        },
+    },
+    definition_count_in_nest_warns: {
+        setup: |dir| {
+            std::fs::write(dir.join("a.txt"), "a")?;
+            Ok(())
+        },
+        tags: &[
+            ("a.txt", "cat:one"),
+        ],
+        format_query: default_scope,
+        query: "cat: &: count(type:*)",
+        assert_warnings: |warnings| {
+            assert!(
+                warnings.iter().any(|w| w.0.contains("count(type:)")),
+                "count() over a definition reference inside a Nest should \
+                 suggest count(type:), got: {:?}",
+                warnings
             );
             Ok(())
         },
@@ -1565,17 +1621,17 @@ define_cases! {
             let rs_group = res.results.iter().find(|r| r.raw_repr() == "rs").expect("'rs' group");
             assert!(
                 rs_group.tags.entries.len() == 1
-                    && rs_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("a.rs")),
+                    && rs_group.tags.entries.iter().any(|e| e.typed_tag.as_str().starts_with("a.rs")),
                 "rs group must contain only a.rs, got: {:?}",
-                rs_group.tags.entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
+                rs_group.tags.entries.iter().map(|e| e.typed_tag.as_str()).collect::<Vec<_>>()
             );
             // txt グループ: include/b.txt のみ（exclude/d.txt は除外済み）
             let txt_group = res.results.iter().find(|r| r.raw_repr() == "txt").expect("'txt' group");
             assert!(
                 txt_group.tags.entries.len() == 1
-                    && txt_group.tags.entries.iter().any(|e| e.label.as_str().starts_with("b.txt")),
+                    && txt_group.tags.entries.iter().any(|e| e.typed_tag.as_str().starts_with("b.txt")),
                 "txt group must contain only b.txt, got: {:?}",
-                txt_group.tags.entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
+                txt_group.tags.entries.iter().map(|e| e.typed_tag.as_str()).collect::<Vec<_>>()
             );
             Ok(())
         },
@@ -1610,12 +1666,12 @@ define_cases! {
             assert_eq!(res.results[0].raw_repr(), "one");
             // a.txt が含まれる（grade:A あり）
             assert!(
-                res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("a.txt")),
+                res.results[0].tags.entries.iter().any(|r| r.typed_tag.as_str().contains("a.txt")),
                 "a.txt (grade:A) should be in the result"
             );
             // b.txt は除外される（grade:A なし）
             assert!(
-                !res.results[0].tags.entries.iter().any(|r| r.label.as_str().contains("b.txt")),
+                !res.results[0].tags.entries.iter().any(|r| r.typed_tag.as_str().contains("b.txt")),
                 "b.txt (no grade:A) must not appear"
             );
             Ok(())
@@ -1783,7 +1839,7 @@ define_cases! {
                 has_item_tags(&res.results),
                 "Proj & Nest should produce LabelSetOp (with type_for_projection)"
             );
-            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 !all_items.iter().any(|n| n.contains("b.txt")),
@@ -1814,7 +1870,7 @@ define_cases! {
                 has_item_tags(&res.results),
                 "Nest & Nest should produce LabelSetOp (with type_for_projection)"
             );
-            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+            let all_items: Vec<String> = res.results.iter().flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -1855,7 +1911,7 @@ define_cases! {
                 "Nest2 & Nest3 should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -1914,7 +1970,7 @@ define_cases! {
                 "size: & size: should produce Projection (with item: tags)"
             );
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("small.txt")),
@@ -1947,7 +2003,7 @@ define_cases! {
                 "Proj | Nest should produce LabelSetOp (with type_for_projection)"
             );
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -1984,7 +2040,7 @@ define_cases! {
             // LabelSetOp SQL はラベル値グループを返すため r.raw_repr() はラベル値
             // ファイルパスは各グループの entries に格納される
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(
                 all_items.iter().any(|n| n.contains("a.txt")),
@@ -2036,7 +2092,7 @@ define_cases! {
             );
             // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
             assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
@@ -2078,7 +2134,7 @@ define_cases! {
             );
             // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be in result");
             assert!(!all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be excluded");
@@ -2118,7 +2174,7 @@ define_cases! {
             );
             // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
             assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
@@ -2157,7 +2213,7 @@ define_cases! {
             // "x" グループに a.txt のみ（b.txt は grade: で除外）
             let x_group = res.results.iter().find(|r| r.raw_repr() == "x").unwrap();
             let x_items: Vec<_> = x_group.tags.entries.iter()
-                .map(|e| e.label.as_str())
+                .map(|e| e.typed_tag.as_str())
                 .collect();
             assert!(x_items.iter().any(|n| n.contains("a.txt")), "a.txt must be in 'x' group");
             assert!(!x_items.iter().any(|n| n.contains("b.txt")), "b.txt must not be in 'x' group");
@@ -2194,7 +2250,7 @@ define_cases! {
             assert!(res.results.iter().any(|r| r.raw_repr() == "x"), "'x' group must remain");
             // アイテムの確認（サブ）
             let all_items: Vec<String> = res.results.iter()
-                .flat_map(|r| r.tags.entries.iter().map(|e| e.label.as_str().to_string()))
+                .flat_map(|r| r.tags.entries.iter().map(|e| e.typed_tag.as_str().to_string()))
                 .collect();
             assert!(all_items.iter().any(|n| n.contains("b.txt")), "b.txt must be in result");
             assert!(!all_items.iter().any(|n| n.contains("a.txt")), "a.txt must be excluded");
@@ -2269,8 +2325,8 @@ define_cases! {
                 res.results.iter().map(|r| r.raw_repr()).collect::<Vec<_>>());
             let group = &res.results[0];
             let item_vals: Vec<String> = group.tags.entries.iter()
-                .filter(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
-                .map(|e| e.label.value().as_display_name())
+                .filter(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("item"))
+                .map(|e| e.typed_tag.value().as_display_name())
                 .collect();
             assert_eq!(item_vals.len(), 1,
                 "rank=50 group must have exactly 1 item (no duplicates), got: {:?}", item_vals);
@@ -2285,15 +2341,18 @@ define_cases! {
 
 #[test]
 fn test_nest_parse_basic() {
-    let node = ttfm::query::parse("extension: &: parentdir:").unwrap();
+    let node = ttfm::query::parse_nowarn("extension: &: parentdir:").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
-            matches!(*nest.left, ttfm::query::QueryNode::Projection(_)),
+            matches!(
+                nest.left.as_deref(),
+                Some(ttfm::query::QueryNode::Nest(n)) if n.left.is_none()
+            ),
             "left=Projection"
         );
         assert!(
-            matches!(*nest.right, ttfm::query::QueryNode::Projection(_)),
-            "right=Projection"
+            matches!(nest.right, ttfm::query::Operand::TypeRef(_)),
+            "right=TypeRef"
         );
     } else {
         panic!("Expected Nest, got {:?}", node);
@@ -2302,15 +2361,15 @@ fn test_nest_parse_basic() {
 
 #[test]
 fn test_nest_parse_chain() {
-    let node = ttfm::query::parse("extension: &: parentdir: &: name:").unwrap();
+    let node = ttfm::query::parse_nowarn("extension: &: parentdir: &: name:").unwrap();
     if let ttfm::query::QueryNode::Nest(outer) = &node {
         assert!(
-            matches!(*outer.left, ttfm::query::QueryNode::Nest(_)),
+            matches!(outer.left.as_deref(), Some(ttfm::query::QueryNode::Nest(_))),
             "left=Nest"
         );
         assert!(
-            matches!(*outer.right, ttfm::query::QueryNode::Projection(_)),
-            "right=Projection"
+            matches!(outer.right, ttfm::query::Operand::TypeRef(_)),
+            "right=TypeRef"
         );
     } else {
         panic!("Expected Nest, got {:?}", node);
@@ -2320,7 +2379,7 @@ fn test_nest_parse_chain() {
 #[test]
 fn test_nest_priority_over_and() {
     let node =
-        ttfm::query::parse("extension: &: parentdir: & extension:rs").unwrap();
+        ttfm::query::parse_nowarn("extension: &: parentdir: & extension:rs").unwrap();
     assert!(
         matches!(node, ttfm::query::QueryNode::And(_)),
         "top-level And, got {:?}",
@@ -2331,10 +2390,10 @@ fn test_nest_priority_over_and() {
 #[test]
 fn test_nest_parse_with_aggregation() {
     let node =
-        ttfm::query::parse("parentdir: &: count(extension:jpg)").unwrap();
+        ttfm::query::parse_nowarn("parentdir: &: count(extension:jpg)").unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
-            matches!(*nest.right, ttfm::query::QueryNode::Aggregation(_)),
+            matches!(nest.right, ttfm::query::Operand::Aggregation(_)),
             "right=Aggregation"
         );
     } else {
@@ -2348,7 +2407,7 @@ fn test_nest_parse_with_aggregation() {
 
 #[test]
 fn test_nest_left_must_be_projection() {
-    let result = ttfm::query::lens_resolver::Resolver::new(
+    let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:rs &: name:",
         &TagRegistry::with_standard(),
     );
@@ -2361,7 +2420,7 @@ fn test_nest_left_must_be_projection() {
 
 #[test]
 fn test_nest_resolves_to_projection_with_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: count(extension:jpg)",
         &TagRegistry::with_standard(),
     )
@@ -2372,7 +2431,7 @@ fn test_nest_resolves_to_projection_with_nvalue() {
 
 #[test]
 fn test_nest_resolves_sum_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: sum(size:)",
         &TagRegistry::with_standard(),
     )
@@ -2383,7 +2442,7 @@ fn test_nest_resolves_sum_nvalue() {
 
 #[test]
 fn test_plain_projection_no_nvalue() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:",
         &TagRegistry::with_standard(),
     )
@@ -2401,7 +2460,7 @@ fn test_plain_projection_no_nvalue() {
 
 #[test]
 fn test_nest_error_typed_tag_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "extension:rs &: count(*:*)",
         &TagRegistry::with_standard()
     )
@@ -2410,7 +2469,7 @@ fn test_nest_error_typed_tag_left() {
 
 #[test]
 fn test_nest_error_aggregation_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "count(*:*) &: extension:",
         &TagRegistry::with_standard()
     )
@@ -2419,7 +2478,7 @@ fn test_nest_error_aggregation_left() {
 
 #[test]
 fn test_nest_error_comparison_left() {
-    assert!(ttfm::query::lens_resolver::Resolver::new(
+    assert!(ttfm::query::lens_resolver::Resolver::new_nowarn(
         "(size: > 100) &: extension:",
         &TagRegistry::with_standard()
     )
@@ -2428,7 +2487,7 @@ fn test_nest_error_comparison_left() {
 
 #[test]
 fn test_nest_right_comparison_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: (count(extension:jpg) > 1)",
         &TagRegistry::with_standard(),
     )
@@ -2460,7 +2519,7 @@ fn test_nest_resolver_all_aggregations() {
         "filename: &: sum(size:)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2482,7 +2541,7 @@ fn test_nest_resolver_all_aggregations() {
 
 #[test]
 fn test_nest_scalar_right_resolves() {
-    let resolver = ttfm::query::lens_resolver::Resolver::new(
+    let resolver = ttfm::query::lens_resolver::Resolver::new_nowarn(
         "parentdir: &: 100",
         &TagRegistry::with_standard(),
     )
@@ -2502,7 +2561,7 @@ fn test_nest_comparison_resolver_patterns() {
         "extension: &: (count(*:*) > 2)",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2535,7 +2594,7 @@ fn test_nest_query_vs_calc_resolves() {
         "parentdir: &: (avg(size:) > (sum(size:) / count()))",
     ];
     for query in &queries {
-        let result = ttfm::query::lens_resolver::Resolver::new(
+        let result = ttfm::query::lens_resolver::Resolver::new_nowarn(
             query,
             &TagRegistry::with_standard(),
         );
@@ -2571,7 +2630,7 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "parentdir: &: extension:",
@@ -2600,7 +2659,7 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "parentdir: &: (size: * 2)",
@@ -2634,7 +2693,7 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     )?;
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "type: & parentdir:",
@@ -2643,7 +2702,7 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     assert!(res.results.is_empty(), "type: & parentdir: should be empty");
 
     // type: | extension: は Union。type ラベル値と extension ラベル値の両方が返るため非空
-    let res = search::search(
+    let res = search::search_nowarn(
         &store,
         &registry,
         "type: | extension:",

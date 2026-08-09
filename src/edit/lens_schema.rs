@@ -1,7 +1,4 @@
 use crate::types::{Bitical, SType};
-use sea_query::Expr;
-
-pub(crate) use crate::db::{ItemRefRow, UserTagsRow};
 
 impl Bitical {
     /// 書込境界: 保存先の EAV 4 カラムへ分解します。`None` は全カラム `None`。
@@ -28,35 +25,6 @@ impl Bitical {
             }
             _ => (None, None, None, None),
         }
-    }
-}
-
-pub(crate) fn item_ref_row(
-    item_id: i64,
-    item_kind: String,
-    content: String,
-) -> ItemRefRow {
-    ItemRefRow {
-        item_id: Expr::val(item_id).into(),
-        item_kind: Expr::val(item_kind).into(),
-        content: Expr::val(content).into(),
-        ..Default::default()
-    }
-}
-
-pub(crate) fn user_tags_row(
-    item_id: i64,
-    tag_type: String,
-    value: Bitical,
-) -> UserTagsRow {
-    let (ls, li, ld, lb) = Bitical::to_eav_columns(Some(value));
-    UserTagsRow {
-        item_id: Expr::val(item_id).into(),
-        tag_type: Expr::val(tag_type).into(),
-        label_str: Expr::val(ls).into(),
-        label_int: Expr::val(li).into(),
-        label_dbl: Expr::val(ld).into(),
-        label_bool: Expr::val(lb).into(),
     }
 }
 
