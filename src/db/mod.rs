@@ -174,7 +174,6 @@ pub enum Tbl {
     ItemReferences,
     SystemTags,
     UserTags,
-    UserRank,
     DataTypes,
     RemovedFiles,
     #[iden = "oneview"]
@@ -312,9 +311,11 @@ impl BiticalType {
     pub fn from_col(col: Col) -> Self {
         match col {
             Col::LabelStr => BiticalType::String,
-            Col::LabelInt | Col::ItemId | Col::Rank | Col::ScanHash => {
-                BiticalType::Integer
-            }
+            Col::LabelInt
+            | Col::ItemId
+            | Col::Rank
+            | Col::ScanHash
+            | Col::BasenameScanHash => BiticalType::Integer,
             Col::LabelDouble => BiticalType::Double,
             Col::LabelBool => BiticalType::Boolean,
             _ => BiticalType::String,
@@ -615,6 +616,8 @@ impl Schema {
                     create.col(&mut def);
                 }
                 create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
+                create
+                    .col(SeaColumnDef::new(Col::BasenameScanHash).big_integer());
             }
             TargetTable::BaseTags
             | TargetTable::SystemTags
@@ -643,8 +646,12 @@ impl Schema {
             TargetTable::RemovedFiles => {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::Rank).big_integer())
                     .col(SeaColumnDef::new(Col::FileId).custom(BiticalType::Uuid))
                     .col(SeaColumnDef::new(Col::ScanHash).big_integer())
+                    .col(
+                        SeaColumnDef::new(Col::BasenameScanHash).big_integer(),
+                    )
                     .col(SeaColumnDef::new(Col::Path).string())
                     .col(SeaColumnDef::new(Col::Size).big_integer())
                     .col(SeaColumnDef::new(Col::Mtime).big_integer())

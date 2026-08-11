@@ -96,40 +96,10 @@ fn build_label_str_expr(tbl: Tbl) -> sea_query::SimpleExpr {
         .into()
 }
 
-/// user_tags 上の rank 行を item ごとに1行へ畳んだソース
-fn user_rank_source(user_tags_path: &str) -> sea_query::SelectStatement {
-    Query::select()
-        .column(Col::ItemId)
-        .expr_as(Expr::col(Col::LabelInt).max(), Col::Rank)
-        .from_subquery(
-            crate::util::parquet_query(user_tags_path),
-            Tbl::UserTags,
-        )
-        .and_where(Expr::col(Col::Type).eq(Col::Rank.as_str()))
-        .group_by_col(Col::ItemId)
-        .to_owned()
-}
-
-/// user rank を base テーブルへ LEFT JOIN する
-fn join_user_rank(
-    q: &mut sea_query::SelectStatement,
-    base: Tbl,
-    user_tags_path: &str,
-) {
-    q.join_subquery(
-        sea_query::JoinType::LeftJoin,
-        user_rank_source(user_tags_path),
-        Tbl::UserRank,
-        Expr::col((base, Col::ItemId))
-            .eq(Expr::col((Tbl::UserRank, Col::ItemId))),
-    );
-}
-
 /// rank の COALESCE 式を生成
 fn build_rank_expr() -> sea_query::SimpleExpr {
     Func::cust(crate::db::DuckDbFunc::Coalesce)
         .args([
-            Expr::col((Tbl::UserRank, Col::Rank)).into(),
             Expr::col((Tbl::FileReferences, Col::Rank)).into(),
             Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
             Expr::val(0).into(),
@@ -138,12 +108,10 @@ fn build_rank_expr() -> sea_query::SimpleExpr {
 }
 
 /// item_kind の CASE 式を生成
-/// 注意: これは FileReferences・ItemReferences・RemovedFiles の全てが JOIN
-/// されている環境（Tag Source）でのみ使用可能。
-/// RemovedFiles のフォールバックが必要な理由: user_tags のタグは削除後も
-/// 残るが、file_references の行は消えているため、RemovedFiles を見なければ
-/// 'volatile' に落ちてしまい、同じアイテムの removed_file_* 側（'file' 固定）
-/// と item_kind が食い違う。
+/// 注意: これは FileReferences・ItemReferences が JOIN されている環境
+/// （Tag Source）でのみ使用可能。RemovedFiles によるフォールバック
+/// （削除後も残る user_tags を 'volatile' に落とさない）は
+/// `resolved_sources_sql` が外側で一括して行う。
 fn build_item_kind_expr() -> sea_query::SimpleExpr {
     CaseStatement::new()
         .case(
@@ -153,10 +121,6 @@ fn build_item_kind_expr() -> sea_query::SimpleExpr {
         .case(
             Expr::col((Tbl::ItemReferences, Col::ItemId)).is_not_null(),
             Expr::col((Tbl::ItemReferences, Col::ItemKind)),
-        )
-        .case(
-            Expr::col((Tbl::RemovedFiles, Col::ItemId)).is_not_null(),
-            Expr::val(Into::<&'static str>::into(ItemKind::File)),
         )
         .finally(Expr::val(Into::<&'static str>::into(ItemKind::Volatile)))
         .into()
@@ -229,30 +193,21 @@ fn spec_rank(source: &OneViewSource) -> sea_query::SimpleExpr {
                 Expr::col((Tbl::FileReferences, Col::Rank))
             };
             Func::cust(crate::db::DuckDbFunc::Coalesce)
-                .args([
-                    Expr::col((Tbl::UserRank, Col::Rank)).into(),
-                    system.into(),
-                    Expr::val(0).into(),
-                ])
+                .args([system.into(), Expr::val(0).into()])
                 .into()
         }
 
         // ItemRef は自身のテーブルの Rank カラムを使う
         OneViewSource::ItemRef(_) => Func::cust(crate::db::DuckDbFunc::Coalesce)
             .args([
-                Expr::col((Tbl::UserRank, Col::Rank)).into(),
                 Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
                 Expr::val(0).into(),
             ])
             .into(),
 
-        // RemovedFiles には system rank が無いため、user rank だけを見る
-        OneViewSource::Removed { .. } => Func::cust(crate::db::DuckDbFunc::Coalesce)
-            .args([
-                Expr::col((Tbl::UserRank, Col::Rank)).into(),
-                Expr::val(0).into(),
-            ])
-            .into(),
+        // RemovedFiles には system rank が無い。user rank は
+        // `resolved_sources_sql` が外側で一括して解決する。
+        OneViewSource::Removed { .. } => Expr::val(0).into(),
     }
 }
 
@@ -377,7 +332,6 @@ fn build_physical_column_query(
     tbl_alias: Tbl,
     parquet_path: &str,
     file_ref_path: Option<&str>,
-    user_tags_path: &str,
 ) -> String {
     let iden = crate::util::col_to_iden(&cd.name);
 
@@ -405,17 +359,11 @@ fn build_physical_column_query(
         );
     }
 
-    join_user_rank(&mut q, tbl_alias, user_tags_path);
-
     q.to_string(PostgresQueryBuilder)
 }
 
 /// ItemReferences のカラムからクエリを生成
-fn build_item_ref_query(
-    col: Col,
-    items_path: &str,
-    user_tags_path: &str,
-) -> String {
+fn build_item_ref_query(col: Col, items_path: &str) -> String {
     let label_col = BiticalType::String.to_column();
     let mut q = Query::select();
     q.column((Tbl::ItemReferences, Col::ItemId))
@@ -429,8 +377,6 @@ fn build_item_ref_query(
         Tbl::ItemReferences,
     );
 
-    join_user_rank(&mut q, Tbl::ItemReferences, user_tags_path);
-
     q.to_string(PostgresQueryBuilder)
 }
 
@@ -440,7 +386,6 @@ fn build_removed_file_query(
     ty: SType,
     col: Col,
     removed_path: &str,
-    user_tags_path: &str,
 ) -> String {
     let bitical = registry
         .get(ty.into())
@@ -452,7 +397,6 @@ fn build_removed_file_query(
     apply_label_columns(&mut q, Tbl::RemovedFiles, &col.into_iden(), bitical);
     apply_oneview_schema(&mut q, OneViewSource::Removed { ty, col });
     q.from_subquery(crate::util::parquet_query(removed_path), Tbl::RemovedFiles);
-    join_user_rank(&mut q, Tbl::RemovedFiles, user_tags_path);
 
     q.to_string(PostgresQueryBuilder)
 }
@@ -488,23 +432,7 @@ fn build_tag_query(
             Tbl::ItemReferences,
             Expr::col((tbl, Col::ItemId))
                 .eq(Expr::col((Tbl::ItemReferences, Col::ItemId))),
-        )
-        .join_subquery(
-            sea_query::JoinType::LeftJoin,
-            Query::select()
-                .column(Col::ItemId)
-                .distinct()
-                .from_subquery(
-                    crate::util::parquet_query(&path_fn(TargetTable::RemovedFiles)),
-                    Tbl::RemovedFiles,
-                )
-                .to_owned(),
-            Tbl::RemovedFiles,
-            Expr::col((tbl, Col::ItemId))
-                .eq(Expr::col((Tbl::RemovedFiles, Col::ItemId))),
         );
-
-    join_user_rank(&mut q, tbl, &path_fn(TargetTable::UserTags));
 
     q.to_string(PostgresQueryBuilder)
 }
@@ -553,7 +481,6 @@ impl OneView {
                             source.table,
                             &parquet_path,
                             join_path,
-                            &user_tags_path,
                         )
                     }),
             );
@@ -565,11 +492,7 @@ impl OneView {
             if col == Col::ItemId || col == Col::Rank {
                 continue;
             }
-            query_parts.push(build_item_ref_query(
-                col,
-                &items_path,
-                &user_tags_path,
-            ));
+            query_parts.push(build_item_ref_query(col, &items_path));
         }
 
         // 6. RemovedFiles の unpivot (removed_file_* 型)
@@ -580,24 +503,69 @@ impl OneView {
                 ty,
                 col,
                 &removed_path,
-                &user_tags_path,
             ));
         }
 
         // read 解決（reader）があれば、生の合流を中間ビュー `_oneview` に置き、
         // 解決済み SELECT 群を `oneview` として合成する（fetcher/nest は解決済みを読むだけ）。
+        // rank/item_kind の解決（user_rank・removed_files JOIN）はここで union の
+        // 外側に1回だけ適用する（各ブランチへの重複 JOIN を避ける）。
+        let raw = resolved_sources_sql(
+            &query_parts.join("\nUNION ALL BY NAME\n"),
+            &user_tags_path,
+            &removed_path,
+        );
         let oneview = sea_query::Iden::to_string(&Tbl::OneView);
         match reader {
-            None => create_view_union_by_name(conn, &oneview, &query_parts)?,
+            None => create_view(conn, &oneview, &raw)?,
             Some(reader) => {
                 let _oneview = sea_query::Iden::to_string(&Tbl::_OneView);
-                create_view_union_by_name(conn, &_oneview, &query_parts)?;
+                create_view(conn, &_oneview, &raw)?;
                 create_view_union_by_name(conn, &oneview, reader.selects())?;
             }
         }
 
         Ok(())
     }
+}
+
+/// union の外側で user_rank・removed_files を1回だけ JOIN し、
+/// rank と item_kind を解決した SELECT 文を生成します。
+fn resolved_sources_sql(
+    union_sql: &str,
+    user_tags_path: &str,
+    removed_path: &str,
+) -> String {
+    let volatile: &str = ItemKind::Volatile.into();
+    let file: &str = ItemKind::File.into();
+    format!(
+        "SELECT \"u\".* REPLACE(\
+           coalesce(\"user_rank\".\"rank\", \"u\".\"rank\") AS \"rank\", \
+           (CASE WHEN \"u\".\"item_kind\" = '{volatile}' \
+                  AND \"rf\".\"item_id\" IS NOT NULL \
+                 THEN '{file}' ELSE \"u\".\"item_kind\" END) AS \"item_kind\") \
+         FROM ({union_sql}) AS \"u\" \
+         LEFT JOIN (SELECT \"item_id\", MAX(\"label_int\") AS \"rank\" \
+                    FROM read_parquet('{user_tags_path}') \
+                    WHERE \"type\" = 'rank' GROUP BY \"item_id\") \
+                AS \"user_rank\" \
+           ON \"u\".\"item_id\" = \"user_rank\".\"item_id\" \
+         LEFT JOIN (SELECT DISTINCT \"item_id\" \
+                    FROM read_parquet('{removed_path}')) AS \"rf\" \
+           ON \"u\".\"item_id\" = \"rf\".\"item_id\""
+    )
+}
+
+/// 指定された SQL をそのままビューとして作成します。
+fn create_view(conn: &Connection, view_name: &str, sql: &str) -> Result<()> {
+    if std::env::var("TTFM_DEBUG").is_ok() {
+        println!("DEBUG ONEVIEW SQL:\n{}", sql);
+    }
+    conn.execute(
+        &format!("CREATE OR REPLACE VIEW {} AS {}", view_name, sql),
+        [],
+    )?;
+    Ok(())
 }
 
 /// 指定されたSQLパーツを UNION ALL BY NAME で結合し、ビューを作成します。
@@ -621,10 +589,18 @@ fn create_view_union_by_name(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::db::Store;
     use crate::tag::TagRegistry;
     use crate::{indexing, tagging};
     use tempfile::tempdir;
+
+    #[test]
+    fn resolved_sources_sql_projects_only_the_union_columns() {
+        let sql = resolved_sources_sql("SELECT 1 AS item_id", "u.parquet", "r.parquet");
+        assert!(sql.contains("SELECT \"u\".*"));
+        assert!(!sql.contains("SELECT * "));
+    }
 
     #[test]
     fn test_oneview_consistency() {

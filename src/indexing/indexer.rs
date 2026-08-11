@@ -46,6 +46,7 @@ pub struct TaggingResult {
     pub location_row: DynamicRow,
     pub tags: Vec<TagRow>,
     pub scan_hash: ScanHash,
+    pub basename_scan_hash: ScanHash,
 }
 
 pub struct DynamicRow {
@@ -506,6 +507,7 @@ impl ToSql for ScanHash {
 pub struct TempScanEntry {
     pub entry: ScanEntry,
     pub hash: ScanHash,
+    pub basename_hash: ScanHash,
 }
 
 impl TempScanEntry {
@@ -513,6 +515,7 @@ impl TempScanEntry {
     pub fn params(&self) -> Vec<&dyn duckdb::ToSql> {
         let mut p = self.entry.as_params();
         p.push(&self.hash);
+        p.push(&self.basename_hash);
         p
     }
 
@@ -527,6 +530,10 @@ impl TempScanEntry {
             Col::ScanHash.into_iden(),
             BiticalType::Integer.into_iden(),
         ));
+        cols.push((
+            Col::BasenameScanHash.into_iden(),
+            BiticalType::Integer.into_iden(),
+        ));
         cols
     }
 
@@ -538,13 +545,20 @@ impl TempScanEntry {
     ) -> duckdb::Result<Self> {
         let entry = ScanEntry::from_row_with_offset(row, offset)?;
         let hash: ScanHash = row.get(offset + loader.hash_idx)?;
-        Ok(Self { entry, hash })
+        let basename_hash: ScanHash =
+            row.get(offset + loader.basename_hash_idx)?;
+        Ok(Self {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
 /// `TempScanEntry` をデータベースの行から効率的に読み出すためのローダー。
 pub struct ScanEntryLoader {
     hash_idx: usize,
+    basename_hash_idx: usize,
 }
 
 impl Default for ScanEntryLoader {
@@ -556,8 +570,10 @@ impl Default for ScanEntryLoader {
 impl ScanEntryLoader {
     /// 新しいローダーを作成します。ハッシュのカラム位置を事前に計算します。
     pub fn new() -> Self {
+        let hash_idx = ScanEntry::schema().len();
         Self {
-            hash_idx: ScanEntry::schema().len(),
+            hash_idx,
+            basename_hash_idx: hash_idx + 1,
         }
     }
 
@@ -565,7 +581,12 @@ impl ScanEntryLoader {
     pub fn load(&self, row: &duckdb::Row) -> duckdb::Result<TempScanEntry> {
         let entry = ScanEntry::from_row(row)?;
         let hash: ScanHash = row.get(self.hash_idx)?;
-        Ok(TempScanEntry { entry, hash })
+        let basename_hash: ScanHash = row.get(self.basename_hash_idx)?;
+        Ok(TempScanEntry {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
@@ -575,6 +596,25 @@ pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
     use std::hash::{Hash, Hasher};
     let mut hasher = FxHasher::default();
     (path, mtime, size).hash(&mut hasher);
+    ScanHash(hasher.finish() as i64)
+}
+
+/// basename・mtime・size・inode から ScanHash を計算します。
+/// ディレクトリを跨いだ移動では一致し、別 inode への分裂では一致しません。
+pub(crate) fn calc_basename_scan_hash(
+    path: &str,
+    mtime: i64,
+    size: i64,
+    inode: crate::types::FileRef,
+) -> ScanHash {
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
+    let base = Path::new(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let mut hasher = FxHasher::default();
+    (base.as_ref(), mtime, size, inode.as_u64_pair().1).hash(&mut hasher);
     ScanHash(hasher.finish() as i64)
 }
 
@@ -611,6 +651,28 @@ mod tests {
         assert_ne!(h1, h3, "mtimeが変わればハッシュが変わること");
         assert_ne!(h1, h4, "pathが変わればハッシュが変わること");
         assert_ne!(h1, h5, "sizeが変わればハッシュが変わること");
+    }
+
+    #[test]
+    fn test_calc_basename_scan_hash() {
+        use crate::types::FileRef;
+
+        let inode_a = FileRef::from_u64_pair(0, 1);
+        let inode_b = FileRef::from_u64_pair(0, 2);
+
+        let h1 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_a);
+        let h2 =
+            calc_basename_scan_hash("/another/dir/a.txt", 100, 500, inode_a);
+        let h3 = calc_basename_scan_hash("/one/dir/a.txt", 101, 500, inode_a);
+        let h4 = calc_basename_scan_hash("/one/dir/b.txt", 100, 500, inode_a);
+        let h5 = calc_basename_scan_hash("/one/dir/a.txt", 100, 501, inode_a);
+        let h6 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_b);
+
+        assert_eq!(h1, h2, "hash must not change when only the directory changes");
+        assert_ne!(h1, h3, "hash must change when mtime changes");
+        assert_ne!(h1, h4, "hash must change when basename changes");
+        assert_ne!(h1, h5, "hash must change when size changes");
+        assert_ne!(h1, h6, "hash must change when inode changes");
     }
 
     #[test]

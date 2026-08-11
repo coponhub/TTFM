@@ -18,6 +18,7 @@
 use crate::cases::has_item_tags;
 use file_id::get_file_id;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
 use ttfm::{
     db::{Store, TargetTable},
@@ -659,6 +660,127 @@ fn losing_one_hardlink_drops_only_that_location_row() {
     assert!(kept[0].ends_with("a.txt"));
 }
 
+fn view_sql(store: &Store, name: &str) -> String {
+    store
+        .conn
+        .query_row(
+            "SELECT sql FROM duckdb_views() WHERE view_name = ?",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn file_ref_rank(store: &Store, id: ItemId) -> i64 {
+    let p = store.path_for_target(TargetTable::FileReferences);
+    let sql = format!(
+        "SELECT rank FROM read_parquet('{}') WHERE item_id = {}",
+        p.to_string_lossy(),
+        id.as_i64()
+    );
+    store.conn.query_row(&sql, [], |r| r.get(0)).unwrap()
+}
+
+fn mtime_of(m: &std::fs::Metadata) -> SystemTime {
+    m.modified().unwrap()
+}
+
+fn recreate_apart(root: &Path, names: &[&str], len: usize, at: SystemTime) {
+    for name in names {
+        let p = root.join(name);
+        std::fs::write(&p, vec![b'x'; len]).unwrap();
+        filetime::set_file_mtime(&p, filetime::FileTime::from_system_time(at))
+            .unwrap();
+    }
+}
+
+#[test]
+fn oneview_reads_user_tags_and_removed_files_once_per_role() {
+    let (store, registry, _d, root) = setup(&["a.txt"]);
+    index(&store, &registry, &[&root]);
+
+    let sql = view_sql(&store, "_oneview");
+    assert_eq!(sql.matches("user_tags.parquet").count(), 2);
+    assert_eq!(sql.matches("removed_files.parquet").count(), 6);
+}
+
+#[test]
+fn a_returning_file_keeps_its_system_rank() {
+    let (store, registry, _d, root) = setup(&["a.txt"]);
+    index(&store, &registry, &[&root]);
+    tag(&store, &registry, "filename:a.txt", "color:red");
+    let id = find(&store, &registry, "filename:a.txt")[0].id;
+    ttfm::rank::set_rank_by_id(&store, &registry, id.as_i64(), true, 42)
+        .unwrap();
+
+    let away = root.parent().unwrap().join("a.txt");
+    std::fs::rename(root.join("a.txt"), &away).unwrap();
+    index(&store, &registry, &[&root]);
+    std::fs::rename(&away, root.join("a.txt")).unwrap();
+    index(&store, &registry, &[&root]);
+
+    assert_eq!(file_ref_rank(&store, id), 42);
+}
+
+#[test]
+fn a_reindexed_file_keeps_its_system_rank() {
+    let (store, registry, _d, root) = setup(&["a.txt"]);
+    index(&store, &registry, &[&root]);
+    let id = find(&store, &registry, "filename:a.txt")[0].id;
+    ttfm::rank::set_rank_by_id(&store, &registry, id.as_i64(), true, 42)
+        .unwrap();
+
+    let later = SystemTime::now() + std::time::Duration::from_secs(120);
+    filetime::set_file_mtime(
+        root.join("a.txt"),
+        filetime::FileTime::from_system_time(later),
+    )
+    .unwrap();
+    index(&store, &registry, &[&root]);
+
+    assert_eq!(file_ref_rank(&store, id), 42);
+}
+
+#[test]
+fn a_removed_file_returning_in_another_dir_keeps_its_item_id() {
+    let (store, registry, _d, root) = setup(&["a.txt", "sub/keep.txt"]);
+    index(&store, &registry, &[&root]);
+    tag(&store, &registry, "filename:a.txt", "color:red");
+    let id = find(&store, &registry, "filename:a.txt")[0].id;
+
+    let away = root.parent().unwrap().join("a.txt");
+    std::fs::rename(root.join("a.txt"), &away).unwrap();
+    index(&store, &registry, &[&root]);
+    assert_eq!(removed_rows(&store).len(), 1);
+
+    std::fs::rename(&away, root.join("sub").join("a.txt")).unwrap();
+    index(&store, &registry, &[&root]);
+
+    assert_eq!(find(&store, &registry, "filename:a.txt")[0].id, id);
+    assert_eq!(find(&store, &registry, "color:red").len(), 1);
+    assert!(removed_rows(&store).is_empty());
+}
+
+#[test]
+fn a_split_hardlink_pair_does_not_share_an_item_id() {
+    let (store, registry, _d, root) = setup(&["a.txt"]);
+    std::fs::hard_link(root.join("a.txt"), root.join("b.txt")).unwrap();
+    index(&store, &registry, &[&root]);
+    tag(&store, &registry, "filename:a.txt", "color:red");
+    let m = std::fs::metadata(root.join("a.txt")).unwrap();
+
+    std::fs::remove_file(root.join("a.txt")).unwrap();
+    std::fs::remove_file(root.join("b.txt")).unwrap();
+    index(&store, &registry, &[&root]);
+
+    recreate_apart(&root, &["a.txt", "b.txt"], m.len() as usize, mtime_of(&m));
+    index(&store, &registry, &[&root]);
+
+    let a = find(&store, &registry, "filename:a.txt")[0].id;
+    let b = find(&store, &registry, "filename:b.txt")[0].id;
+    assert_ne!(a, b);
+}
+
 #[test]
 fn initialize_tables_creates_removed_files_with_typed_columns() {
     let (store, _registry, _d, _root) = setup(&[]);
@@ -684,8 +806,10 @@ fn initialize_tables_creates_removed_files_with_typed_columns() {
         cols,
         vec![
             ("item_id".into(), "BIGINT".into()),
+            ("rank".into(), "BIGINT".into()),
             ("file_id".into(), "UUID".into()),
             ("scan_hash".into(), "BIGINT".into()),
+            ("basename_scan_hash".into(), "BIGINT".into()),
             ("path".into(), "VARCHAR".into()),
             ("size".into(), "BIGINT".into()),
             ("mtime".into(), "BIGINT".into()),

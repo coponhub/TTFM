@@ -15,14 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{BiticalType, Col, Store, TargetTable, Tbl};
+use crate::db::{BiticalType, Col, CustomFunc, Store, TargetTable, Tbl};
 use crate::indexing::indexer::{DynamicRow, TaggingResult};
 use crate::tag::TagRegistry;
 use crate::types::{Bitical, ItemId};
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
-use sea_query::{Condition, Expr, Iden, JoinType, Order, Query, SelectStatement};
+use sea_query::{
+    Condition, Expr, Func, Iden, JoinType, Order, PostgresQueryBuilder, Query,
+    SelectStatement,
+};
 // use sea_query::{JoinType, SimpleExpr};
 use std::path::{Path, PathBuf};
 
@@ -135,7 +138,44 @@ impl<'a> FileEntityMerger<'a> {
         Ok(self)
     }
 
+    fn inherit_rank(&self) -> Result<()> {
+        let path = self.store.path_for_target(TargetTable::FileReferences);
+        if !path.exists() {
+            return Ok(());
+        }
+        let existing_rank = Query::select()
+            .expr(CustomFunc::any_value(Expr::col((
+                Tbl::FileReferences,
+                Col::Rank,
+            ))))
+            .from_subquery(
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::FileReferences,
+            )
+            .and_where(
+                Expr::col((Tbl::FileReferences, Col::ItemId))
+                    .equals((Tbl::FileReferencesDiff, Col::ItemId)),
+            )
+            .to_owned();
+
+        Query::update()
+            .table(Tbl::FileReferencesDiff)
+            .value(
+                Col::Rank,
+                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                    sea_query::SimpleExpr::SubQuery(
+                        None,
+                        Box::new(existing_rank.into_sub_query_statement()),
+                    ),
+                    Expr::val(0i64).into(),
+                ]),
+            )
+            .execute(self.conn)?;
+        Ok(())
+    }
+
     pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        self.inherit_rank()?;
         let ids_i64: Vec<i64> =
             deleted_ids.iter().map(|id| id.as_i64()).collect();
         // file_entities は item_id をキーにしてマージ
@@ -192,11 +232,13 @@ impl<'a> LocationMerger<'a> {
             let mut lr = vec![&res.location_row.id as &dyn ToSql];
             lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
             lr.push(&res.scan_hash as &dyn ToSql);
+            lr.push(&res.basename_scan_hash as &dyn ToSql);
             app.append_row(lr.as_slice())?;
         }
         for row in moved {
             let mut lr = vec![&row.id as &dyn ToSql];
             lr.extend(row.values.iter().map(|v| v as &dyn ToSql));
+            lr.push(&None::<Bitical> as &dyn ToSql);
             lr.push(&None::<Bitical> as &dyn ToSql);
             app.append_row(lr.as_slice())?;
         }
@@ -325,6 +367,19 @@ pub(crate) struct RemovedFileMerger<'a> {
 }
 
 impl<'a> RemovedFileMerger<'a> {
+    fn is_empty(&self) -> Result<bool> {
+        let path = self.store.path_for_target(TargetTable::RemovedFiles);
+        let sql = Query::select()
+            .expr(Expr::cust("COUNT(*)"))
+            .from_subquery(
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::RemovedFiles,
+            )
+            .to_string(PostgresQueryBuilder);
+        let count: i64 = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(count == 0)
+    }
+
     pub(crate) fn record(self, deleted_ids: &[ItemId]) -> Result<Self> {
         if deleted_ids.is_empty() {
             return Ok(self);
@@ -342,8 +397,13 @@ impl<'a> RemovedFileMerger<'a> {
 
         let rows = Query::select()
             .column((Tbl::Locations, Col::ItemId))
+            .column((Tbl::FileReferences, Col::Rank))
             .column((Tbl::FileReferences, Col::FileId))
-            .columns([(Tbl::Locations, Col::ScanHash), (Tbl::Locations, Col::Path)])
+            .columns([
+                (Tbl::Locations, Col::ScanHash),
+                (Tbl::Locations, Col::BasenameScanHash),
+                (Tbl::Locations, Col::Path),
+            ])
             .columns([
                 (Tbl::FileReferences, Col::Size),
                 (Tbl::FileReferences, Col::Mtime),
@@ -369,16 +429,19 @@ impl<'a> RemovedFileMerger<'a> {
         Ok(self)
     }
 
-    /// スキャン結果に removed_files と同じ scan_hash が現れたら、その行を
-    /// file_references へ復元し、removed_files から取り除く。file_id は今回
-    /// スキャンで割り当てられた新しい値を使う。OS が inode を再利用しうるため、
-    /// removed_files の古い file_id をそのまま使うと無関係な新規ファイルが
-    /// 誤って昔のタグを引き継いでしまう。
+    /// スキャン結果に removed_files と同じ basename_scan_hash（basename・mtime・
+    /// size・inode）が現れたら、その行を file_references へ復元し、removed_files
+    /// から取り除く。file_id は今回スキャンで割り当てられた新しい値を使う。OS が
+    /// inode を再利用しうるため、removed_files の古い file_id をそのまま使うと
+    /// 無関係な新規ファイルが誤って昔のタグを引き継いでしまう。
     pub(crate) fn rediscover(self, temp_scan_path: &Path) -> Result<Self> {
+        if self.is_empty()? {
+            return Ok(self);
+        }
         let hits = Query::select()
             .distinct()
             .column((Tbl::RemovedFiles, Col::ItemId))
-            .expr_as(Expr::val(0i64), Col::Rank)
+            .column((Tbl::RemovedFiles, Col::Rank))
             .column((Tbl::Scan, Col::FileId))
             .columns([
                 (Tbl::RemovedFiles, Col::IsDir),
@@ -398,8 +461,8 @@ impl<'a> RemovedFileMerger<'a> {
                 JoinType::InnerJoin,
                 util::parquet_query(&temp_scan_path.to_string_lossy()),
                 Tbl::Scan,
-                Expr::col((Tbl::RemovedFiles, Col::ScanHash))
-                    .eq(Expr::col((Tbl::Scan, Col::ScanHash))),
+                Expr::col((Tbl::RemovedFiles, Col::BasenameScanHash))
+                    .eq(Expr::col((Tbl::Scan, Col::BasenameScanHash))),
             )
             .to_owned();
 
@@ -584,6 +647,21 @@ mod tests {
     use super::*;
     use sea_query::Alias;
     use tempfile::tempdir;
+
+    #[test]
+    fn is_empty_true_when_removed_files_has_no_rows() -> Result<()> {
+        let dir = tempdir()?;
+        let registry = crate::tag::TagRegistry::with_standard();
+        let store = Store::open(dir.path().join("db"))?;
+        crate::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+
+        let merger = RemovedFileMerger {
+            conn: &store.conn,
+            store: &store,
+        };
+        assert!(merger.is_empty()?);
+        Ok(())
+    }
 
     #[test]
     fn test_merge_and_save_sorting() -> Result<()> {

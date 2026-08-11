@@ -15,7 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use super::indexer::{calc_scanhash, ScanHash, TempScanEntry};
+use super::indexer::{
+    calc_basename_scan_hash, calc_scanhash, ScanHash, TempScanEntry,
+};
 use crate::db::{Col, Tbl};
 use crate::indexing::ScanEntry;
 use crate::types::ItemId;
@@ -281,6 +283,12 @@ fn process_entry(
         entry.mtime.value.0,
         entry.size.value.0,
     );
+    let basename_hash = calc_basename_scan_hash(
+        &entry.path.value,
+        entry.mtime.value.0,
+        entry.size.value.0,
+        entry.inode.value,
+    );
 
     // ハッシュがキャッシュにあれば生存 ID として報告
     if let Some(id) = cache.get(&hash) {
@@ -292,7 +300,11 @@ fn process_entry(
 
     // 変更ありならフルデータを送信
     if tx
-        .send(ScanMessage::Found(TempScanEntry { entry, hash }))
+        .send(ScanMessage::Found(TempScanEntry {
+            entry,
+            hash,
+            basename_hash,
+        }))
         .is_err()
     {
         return ignore::WalkState::Quit;

@@ -1561,6 +1561,7 @@ pub enum SType {
     Types,
     Labels,
     ScanHash,
+    BasenameScanHash,
     TypedTag,
     // 検索専用仮想タグ
     Directory,
@@ -1614,6 +1615,7 @@ impl SType {
             Self::Types => "types",
             Self::Labels => "labels",
             Self::ScanHash => "scan_hash",
+            Self::BasenameScanHash => "basename_scan_hash",
             Self::TypedTag => "tag",
             Self::Directory => "directory",
             Self::LabelStr => "label_str",
@@ -1675,6 +1677,7 @@ impl std::str::FromStr for SType {
             "types" => Ok(Self::Types),
             "labels" => Ok(Self::Labels),
             "scan_hash" => Ok(Self::ScanHash),
+            "basename_scan_hash" => Ok(Self::BasenameScanHash),
             "tag" => Ok(Self::TypedTag),
             "directory" => Ok(Self::Directory),
             "label_str" => Ok(Self::LabelStr),

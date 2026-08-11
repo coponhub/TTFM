@@ -83,7 +83,7 @@ impl<'a> ItemTriager<'a> {
     pub(crate) fn extract_all(
         &self,
         entries: Vec<(Option<ItemId>, TempScanEntry)>,
-    ) -> Result<Vec<(Option<ItemId>, Biticals, ScanHash, FileRef)>> {
+    ) -> Result<Vec<(Option<ItemId>, Biticals, Hashes, FileRef)>> {
         entries
             .into_par_iter()
             .map(|(id, e)| self.extract_with_hash(id, e))
@@ -99,13 +99,13 @@ impl<'a> ItemTriager<'a> {
         &self,
         existing_id: Option<ItemId>,
         entry: TempScanEntry,
-    ) -> Result<Option<(Option<ItemId>, Biticals, ScanHash, FileRef)>> {
+    ) -> Result<Option<(Option<ItemId>, Biticals, Hashes, FileRef)>> {
         let path = &entry.entry.path.value;
-        let hash = entry.hash;
+        let hashes = Hashes(entry.hash, entry.basename_hash);
         let file_ref = entry.entry.inode.value;
 
         match self.extract_single_file(path)? {
-            Some(values) => Ok(Some((existing_id, values, hash, file_ref))),
+            Some(values) => Ok(Some((existing_id, values, hashes, file_ref))),
             None => Ok(None),
         }
     }
@@ -128,19 +128,19 @@ impl<'a> ItemTriager<'a> {
 
     pub(crate) fn assemble_records(
         &self,
-        all_values: Vec<(Option<ItemId>, Biticals, ScanHash, FileRef)>,
+        all_values: Vec<(Option<ItemId>, Biticals, Hashes, FileRef)>,
         by_file_ref: &FxHashMap<FileRef, i64>,
     ) -> Result<Vec<TaggingResult>> {
         let columns = self.registry.get_all_columns();
 
         all_values
             .into_iter()
-            .map(|(existing_id, values, hash, file_ref)| {
+            .map(|(existing_id, values, hashes, file_ref)| {
                 let id = match existing_id {
                     Some(id) => id,
                     None => ItemId::from(by_file_ref[&file_ref]),
                 };
-                self.triage_item(id, values, hash, &columns)
+                self.triage_item(id, values, hashes, &columns)
             })
             .collect::<Vec<_>>()
             .to_ok()
@@ -150,7 +150,7 @@ impl<'a> ItemTriager<'a> {
         &self,
         id: ItemId,
         values: Biticals,
-        hash: ScanHash,
+        hashes: Hashes,
         cols: &[ColumnDef],
     ) -> TaggingResult {
         let id_i64 = id.as_i64();
@@ -161,7 +161,8 @@ impl<'a> ItemTriager<'a> {
             .fold(TriageAccumulator::new(id_i64), |acc, p| acc.collect(p))
             .finish();
 
-        res.scan_hash = hash;
+        res.scan_hash = hashes.0;
+        res.basename_scan_hash = hashes.1;
         res
     }
 
@@ -201,6 +202,8 @@ impl<'a> ItemTriager<'a> {
 // ========================================================
 // 2. Triage Accumulator (Internal helper)
 // ========================================================
+
+pub(crate) struct Hashes(pub(crate) ScanHash, pub(crate) ScanHash);
 
 pub(crate) enum TriagePiece {
     Entity(Option<Bitical>),
@@ -248,6 +251,7 @@ impl TriageAccumulator {
             },
             tags: self.tags,
             scan_hash: ScanHash(0),
+            basename_scan_hash: ScanHash(0),
         }
     }
 }
@@ -260,7 +264,7 @@ impl TriageAccumulator {
 mod tests {
     use super::*;
     use crate::db::BiticalType;
-    use crate::indexing::indexer::calc_scanhash;
+    use crate::indexing::indexer::{calc_basename_scan_hash, calc_scanhash};
     use crate::indexing::ScanEntry;
     use crate::util::SafeMetadata;
 
@@ -331,11 +335,16 @@ mod tests {
             Some(Bitical::String("rs".into())),
         ];
 
-        let res =
-            triager.triage_item(ItemId::from(7), vals, ScanHash(123), &cols);
+        let res = triager.triage_item(
+            ItemId::from(7),
+            vals,
+            Hashes(ScanHash(123), ScanHash(456)),
+            &cols,
+        );
 
         assert_eq!(res.entity_row.id, 7);
         assert_eq!(res.scan_hash, ScanHash(123));
+        assert_eq!(res.basename_scan_hash, ScanHash(456));
         assert_eq!(res.entity_row.values[1], Some(Bitical::Integer(500)));
         assert_eq!(
             res.location_row.values[0],
@@ -373,7 +382,20 @@ mod tests {
                     entry.mtime.value.0,
                     entry.size.value.0,
                 );
-                (None, TempScanEntry { entry, hash })
+                let basename_hash = calc_basename_scan_hash(
+                    &entry.path.value,
+                    entry.mtime.value.0,
+                    entry.size.value.0,
+                    entry.inode.value,
+                );
+                (
+                    None,
+                    TempScanEntry {
+                        entry,
+                        hash,
+                        basename_hash,
+                    },
+                )
             })
             .collect();
 
@@ -395,10 +417,10 @@ mod tests {
             (
                 Some(ItemId::from(100)),
                 vec![],
-                ScanHash(1),
+                Hashes(ScanHash(1), ScanHash(11)),
                 FileRef::from_u64_pair(0, 1),
             ),
-            (None, vec![], ScanHash(2), new_file_ref),
+            (None, vec![], Hashes(ScanHash(2), ScanHash(22)), new_file_ref),
         ];
         let by_file_ref: FxHashMap<FileRef, i64> =
             [(new_file_ref, 501)].into_iter().collect();
