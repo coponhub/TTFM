@@ -81,7 +81,7 @@ fn test_item_id_and_kind_refactoring() {
     std::fs::write(dir.path().join("file1.txt"), "content").unwrap();
     std::fs::write(dir.path().join("file2.txt"), "content").unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let res = search::search_nowarn(

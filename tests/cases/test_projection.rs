@@ -38,7 +38,7 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -229,7 +229,7 @@ fn test_projection_queries() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. extension: (投影 - 転置: Label → Items)
@@ -455,7 +455,7 @@ fn test_projection_returns_label_volatile_items() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // extension: で投影
@@ -580,7 +580,7 @@ fn test_scan_hash_is_treated_as_unregistered_tag() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -610,7 +610,7 @@ fn test_label_set_op_includes_fixed_attributes() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -654,7 +654,7 @@ fn test_count_type_matches_bare_type_projection() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,

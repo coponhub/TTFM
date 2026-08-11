@@ -54,7 +54,7 @@ fn verify_complex_search_patterns() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry)
         .initialize_tables()?;
     let (store, registry) = (index_path_store, index_path_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -144,7 +144,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &data_dir,
         None::<&fn(usize)>,
         false,
@@ -278,7 +278,7 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert!(status.success());
 
     // 再インデックスして mtime を反映させる
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &data_dir,
         None::<&fn(usize)>,
         false,
@@ -334,7 +334,7 @@ fn test_or_negation_complex_behavior() {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 2. クエリ実行: item_kind:file - extension:rs (差集合: 全ファイル - rsファイル)
@@ -394,7 +394,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. ワイルドカードによる部分一致
@@ -563,7 +563,7 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // テスト用の特殊ファイルを作成
     let special_file = root.join("[WIP]_test.txt");
     std::fs::File::create(&special_file)?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -632,7 +632,7 @@ fn test_complex_search_combinations() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. Type Glob + Value Glob (exte*:r*)
@@ -651,7 +651,7 @@ fn test_complex_search_combinations() {
     std::fs::write(root.join("main.rs"), "content").unwrap();
     // Re-index to update metadata
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     let results = search::search_nowarn(
@@ -783,7 +783,7 @@ fn test_escaping_behavior() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. Escaped Colon (Using raw string)
@@ -885,7 +885,7 @@ fn test_parent_directory_logic() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&index_path_store, &index_path_registry)
         .initialize_tables()?;
     let (store, registry) = (index_path_store, index_path_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,

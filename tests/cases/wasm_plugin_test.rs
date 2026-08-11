@@ -135,7 +135,7 @@ fn test_plugin_normalize_label_applied_in_search() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
@@ -209,7 +209,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         registry.load_from_dir(&user_plugins_dir, &status).unwrap();
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
         search::search_nowarn(
             &store,
@@ -231,7 +231,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
             .unwrap();
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
         search::search_nowarn(
             &store,
@@ -408,7 +408,7 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
 
     edit(

@@ -25,7 +25,7 @@ use crate::types::{
     Rank, SType, TagEntry, TagType, TypedTag,
 };
 use crate::util::{DotOk, SafeMetadata};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use chrono::TimeZone as _;
 use indexmap::IndexMap;
 use path_slash::PathExt as _;
@@ -598,6 +598,12 @@ impl TagRegistry {
         reg.register(TypeFn);
         reg.register(LabelFn);
         reg.register(TypedTagFn);
+        reg.register(RemovedFileAtFn);
+        reg.register(RemovedFilePathFn);
+        reg.register(RemovedFileSizeFn);
+        reg.register(RemovedFileMtimeFn);
+        reg.register(RemovedFileIsDirFn);
+        reg.register(RemovedFileFn);
         reg
     }
 
@@ -1092,7 +1098,7 @@ impl Index for IsDirFn {
         BiticalType::Boolean
     }
     fn target_table(&self) -> TargetTable {
-        TargetTable::BaseTags
+        TargetTable::FileReferences
     }
 }
 impl Query for IsDirFn {
@@ -1389,6 +1395,9 @@ impl Index for SizeFn {
     fn sql_type(&self) -> BiticalType {
         BiticalType::Integer
     }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::FileReferences
+    }
 }
 impl Query for SizeFn {
     fn logical_type(&self) -> LogicalType {
@@ -1537,6 +1546,9 @@ impl Index for MtimeFn {
     }
     fn sql_type(&self) -> BiticalType {
         BiticalType::Integer
+    }
+    fn target_table(&self) -> TargetTable {
+        TargetTable::FileReferences
     }
 }
 fn format_mtime_relative(secs: i64) -> String {
@@ -2018,6 +2030,80 @@ impl Query for TypedTagFn {
     }
     fn capture(&self, tagtype: &TagType, pattern: &str, item: &Item) -> Vec<Vec<String>> {
         fit_each(pattern, repr_of(item, tagtype))
+    }
+}
+
+// --- RemovedFile*Fn ---
+macro_rules! removed_file_fn {
+    ($name:ident, $stype:expr, $lt:expr) => {
+        pub(crate) struct $name;
+        impl TagFunction for $name {
+            fn name(&self) -> &str {
+                $stype.into()
+            }
+            fn query(&self) -> &dyn Query {
+                self
+            }
+        }
+        impl Query for $name {
+            fn logical_type(&self) -> LogicalType {
+                $lt
+            }
+        }
+    };
+}
+
+removed_file_fn!(RemovedFileAtFn, SType::RemovedFileAt, LogicalType::Integer);
+removed_file_fn!(RemovedFilePathFn, SType::RemovedFilePath, LogicalType::String);
+removed_file_fn!(RemovedFileSizeFn, SType::RemovedFileSize, LogicalType::Integer);
+removed_file_fn!(
+    RemovedFileMtimeFn,
+    SType::RemovedFileMtime,
+    LogicalType::Integer
+);
+removed_file_fn!(
+    RemovedFileIsDirFn,
+    SType::RemovedFileIsDir,
+    LogicalType::Boolean
+);
+
+// --- RemovedFileFn ---
+pub(crate) struct RemovedFileFn;
+impl TagFunction for RemovedFileFn {
+    fn name(&self) -> &str {
+        SType::RemovedFile.into()
+    }
+    fn query(&self) -> &dyn Query {
+        self
+    }
+}
+impl Query for RemovedFileFn {
+    fn logical_role(&self) -> LogicalRole {
+        LogicalRole::Composite
+    }
+    fn logical_type(&self) -> LogicalType {
+        LogicalType::Boolean
+    }
+    fn expand(
+        &self,
+        _tt: &TagType,
+        label: &Label,
+        _tag: &TypedTag,
+        _schema: &dyn LogicalSchema,
+    ) -> Result<QueryNode> {
+        let removed = QueryNode::TypedTag(TypedTag::retag(
+            SType::RemovedFilePath,
+            &Label::other(Bitical::String("*".into())),
+        ));
+        let all = QueryNode::TypedTag(TypedTag::new(TagType::from("*"), "*"));
+        match label.value {
+            Bitical::Boolean(true) => removed,
+            Bitical::Boolean(false) => {
+                QueryNode::Difference(Box::new(all), Box::new(removed))
+            }
+            _ => bail!("removed_file: takes true or false"),
+        }
+        .to_ok()
     }
 }
 
@@ -3650,5 +3736,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- RemovedFile*Fn ---
+
+    #[test]
+    fn removed_file_types_are_registered_as_query_only() {
+        let reg = TagRegistry::with_standard();
+
+        for name in [
+            "removed_file",
+            "removed_file_at",
+            "removed_file_path",
+            "removed_file_size",
+            "removed_file_mtime",
+            "removed_file_is_dir",
+        ] {
+            let f = reg.get(name).expect("must be registered");
+            assert!(f.index().is_none(), "{name} must not add a column");
+        }
+        assert_eq!(
+            reg.get("removed_file_is_dir").unwrap().query().logical_type(),
+            LogicalType::Boolean
+        );
+        assert_eq!(
+            reg.get("removed_file_size").unwrap().query().logical_type(),
+            LogicalType::Integer
+        );
     }
 }

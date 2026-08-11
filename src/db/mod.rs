@@ -42,6 +42,7 @@ pub enum TargetTable {
     SystemTags,
     UserTags,
     DataTypes,
+    RemovedFiles,
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +174,9 @@ pub enum Tbl {
     ItemReferences,
     SystemTags,
     UserTags,
+    UserRank,
     DataTypes,
+    RemovedFiles,
     #[iden = "oneview"]
     OneView,
     #[iden = "_oneview"]
@@ -534,6 +537,16 @@ impl Col {
             Self::Origin,
         ]
     }
+
+    pub fn removed_file_columns() -> [(Col, Col); 5] {
+        [
+            (Col::RemovedFileAt, Col::RemovedFileAt),
+            (Col::RemovedFilePath, Col::Path),
+            (Col::RemovedFileSize, Col::Size),
+            (Col::RemovedFileMtime, Col::Mtime),
+            (Col::RemovedFileIsDir, Col::IsDir),
+        ]
+    }
 }
 
 /// DuckDB 固有の関数名を表す識別子。
@@ -553,6 +566,7 @@ pub enum DuckDbFunc {
     #[iden = "typeof"]
     TypeOf,
     StringAgg,
+    StartsWith,
 }
 
 #[derive(Iden, Clone, Copy)]
@@ -625,6 +639,17 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::Type).string())
                     .col(SeaColumnDef::new(Col::DataType).integer());
+            }
+            TargetTable::RemovedFiles => {
+                create
+                    .col(SeaColumnDef::new(Col::ItemId).big_integer())
+                    .col(SeaColumnDef::new(Col::FileId).custom(BiticalType::Uuid))
+                    .col(SeaColumnDef::new(Col::ScanHash).big_integer())
+                    .col(SeaColumnDef::new(Col::Path).string())
+                    .col(SeaColumnDef::new(Col::Size).big_integer())
+                    .col(SeaColumnDef::new(Col::Mtime).big_integer())
+                    .col(SeaColumnDef::new(Col::IsDir).boolean())
+                    .col(SeaColumnDef::new(Col::RemovedFileAt).big_integer());
             }
         }
         create

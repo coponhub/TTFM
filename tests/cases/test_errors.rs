@@ -85,7 +85,7 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &files_dir,
         None::<&fn(usize)>,
         false,
@@ -133,7 +133,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &files_dir,
         None::<&fn(usize)>,
         false,

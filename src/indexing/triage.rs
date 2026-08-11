@@ -20,10 +20,11 @@ use crate::indexing::indexer::{
     DynamicRow, ScanHash, TagRow, TaggingResult, TempScanEntry,
 };
 use crate::tag::TagRegistry;
-use crate::types::{Bitical, Biticals, ItemId, Origin};
+use crate::types::{Bitical, Biticals, FileRef, ItemId, Origin};
 use crate::util::DotOk;
 use anyhow::Result;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 
 /// 指定されたエラーが「ファイルが見つからない」ことに起因するか判定します。
@@ -43,16 +44,24 @@ pub(crate) fn run_triage(
 ) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
     let triager = ItemTriager::new(registry);
 
-    // 1. 各エントリからメタデータを抽出（ハッシュとIDも引き継ぐ）
+    // 1. 各エントリからメタデータを抽出（ハッシュ・inode・IDも引き継ぐ）
     let raw_values = triager.extract_all(to_process)?;
 
-    // 2. 新規（既存 ID 無し）の分だけ db に一括採番を依頼する。
-    //    採番（連番生成）は db（identifier::next）の責務。
-    let new_count = raw_values.iter().filter(|(id, _, _)| id.is_none()).count();
-    let new_ids = identifier::next(store, Origin::File, new_count)?;
+    // 2. 新規（既存 ID 無し）の分だけ、file_ref（inode）単位で重複排除してから
+    //    db に一括採番を依頼する。同じ file_ref（ハードリンク）には同じ id を渡す。
+    let mut new_refs: Vec<FileRef> = raw_values
+        .iter()
+        .filter(|(id, ..)| id.is_none())
+        .map(|(.., file_ref)| *file_ref)
+        .collect();
+    new_refs.sort();
+    new_refs.dedup();
+    let new_ids = identifier::next(store, Origin::File, new_refs.len())?;
+    let by_file_ref: FxHashMap<FileRef, i64> =
+        new_refs.into_iter().zip(new_ids).collect();
 
-    // 3. ID の割当（既存 ID があれば流用、なければ採番済み id を配る）
-    let results = triager.assemble_records(raw_values, new_ids)?;
+    // 3. ID の割当（既存 ID があれば流用、なければ file_ref に紐づく採番済み id を使う）
+    let results = triager.assemble_records(raw_values, &by_file_ref)?;
 
     // 移動用の再構築ロジックは merge.rs で吸収されるため、ここでは常に空
     (results, Vec::new()).to_ok()
@@ -74,7 +83,7 @@ impl<'a> ItemTriager<'a> {
     pub(crate) fn extract_all(
         &self,
         entries: Vec<(Option<ItemId>, TempScanEntry)>,
-    ) -> Result<Vec<(Option<ItemId>, Biticals, ScanHash)>> {
+    ) -> Result<Vec<(Option<ItemId>, Biticals, ScanHash, FileRef)>> {
         entries
             .into_par_iter()
             .map(|(id, e)| self.extract_with_hash(id, e))
@@ -85,17 +94,18 @@ impl<'a> ItemTriager<'a> {
             .to_ok()
     }
 
-    /// ファイルからタグを抽出し、元のハッシュ値と ID をセットにして返します。
+    /// ファイルからタグを抽出し、元のハッシュ値・inode（file_ref）・ID をセットにして返します。
     fn extract_with_hash(
         &self,
         existing_id: Option<ItemId>,
         entry: TempScanEntry,
-    ) -> Result<Option<(Option<ItemId>, Biticals, ScanHash)>> {
+    ) -> Result<Option<(Option<ItemId>, Biticals, ScanHash, FileRef)>> {
         let path = &entry.entry.path.value;
         let hash = entry.hash;
+        let file_ref = entry.entry.inode.value;
 
         match self.extract_single_file(path)? {
-            Some(values) => Ok(Some((existing_id, values, hash))),
+            Some(values) => Ok(Some((existing_id, values, hash, file_ref))),
             None => Ok(None),
         }
     }
@@ -118,22 +128,17 @@ impl<'a> ItemTriager<'a> {
 
     pub(crate) fn assemble_records(
         &self,
-        all_values: Vec<(Option<ItemId>, Biticals, ScanHash)>,
-        new_ids: Vec<i64>,
+        all_values: Vec<(Option<ItemId>, Biticals, ScanHash, FileRef)>,
+        by_file_ref: &FxHashMap<FileRef, i64>,
     ) -> Result<Vec<TaggingResult>> {
         let columns = self.registry.get_all_columns();
-        let mut new_ids = new_ids.into_iter();
 
         all_values
             .into_iter()
-            .map(|(existing_id, values, hash)| {
+            .map(|(existing_id, values, hash, file_ref)| {
                 let id = match existing_id {
                     Some(id) => id,
-                    None => ItemId::from(
-                        new_ids
-                            .next()
-                            .expect("attach must supply one id per new entry"),
-                    ),
+                    None => ItemId::from(by_file_ref[&file_ref]),
                 };
                 self.triage_item(id, values, hash, &columns)
             })
@@ -385,13 +390,21 @@ mod tests {
     fn test_assemble_records_id_reuse() {
         let registry = TagRegistry::new();
         let triager = ItemTriager::new(&registry);
+        let new_file_ref = FileRef::from_u64_pair(0, 2);
         let input = vec![
-            (Some(ItemId::from(100)), vec![], ScanHash(1)),
-            (None, vec![], ScanHash(2)),
+            (
+                Some(ItemId::from(100)),
+                vec![],
+                ScanHash(1),
+                FileRef::from_u64_pair(0, 1),
+            ),
+            (None, vec![], ScanHash(2), new_file_ref),
         ];
+        let by_file_ref: FxHashMap<FileRef, i64> =
+            [(new_file_ref, 501)].into_iter().collect();
 
-        // 採番済み id（db 役割）を渡すと、新規エントリへ順に配られる。
-        let results = triager.assemble_records(input, vec![501]).unwrap();
+        // 採番済み id（db 役割）を渡すと、新規エントリへ file_ref 経由で配られる。
+        let results = triager.assemble_records(input, &by_file_ref).unwrap();
 
         assert_eq!(results[0].entity_row.id, 100, "Should reuse existing ID");
         assert_eq!(results[1].entity_row.id, 501, "Should use allocated ID");

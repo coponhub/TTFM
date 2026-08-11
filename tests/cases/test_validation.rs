@@ -33,7 +33,7 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -73,7 +73,7 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -115,7 +115,7 @@ fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -160,7 +160,7 @@ fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -205,7 +205,7 @@ fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -251,7 +251,7 @@ fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -295,7 +295,7 @@ fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -352,7 +352,7 @@ fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -397,7 +397,7 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
@@ -468,7 +468,7 @@ fn test_sum_with_label_comparison_inner_is_error() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // バグ1: sum() の内側に label comparison → パニックではなくエラー
@@ -494,7 +494,7 @@ fn test_set_operation_error_message_says_invalid() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,

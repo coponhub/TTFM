@@ -1578,6 +1578,13 @@ pub enum SType {
     Boolean,
     Double,
     Null,
+    // Removed Files
+    RemovedFile,
+    RemovedFileAt,
+    RemovedFilePath,
+    RemovedFileSize,
+    RemovedFileMtime,
+    RemovedFileIsDir,
 }
 
 impl SType {
@@ -1620,6 +1627,12 @@ impl SType {
             Self::Boolean => "boolean",
             Self::Double => "double",
             Self::Null => "null",
+            Self::RemovedFile => "removed_file",
+            Self::RemovedFileAt => "removed_file_at",
+            Self::RemovedFilePath => "removed_file_path",
+            Self::RemovedFileSize => "removed_file_size",
+            Self::RemovedFileMtime => "removed_file_mtime",
+            Self::RemovedFileIsDir => "removed_file_is_dir",
         }
     }
 
@@ -1675,6 +1688,12 @@ impl std::str::FromStr for SType {
             "boolean" => Ok(Self::Boolean),
             "double" => Ok(Self::Double),
             "null" => Ok(Self::Null),
+            "removed_file" => Ok(Self::RemovedFile),
+            "removed_file_at" => Ok(Self::RemovedFileAt),
+            "removed_file_path" => Ok(Self::RemovedFilePath),
+            "removed_file_size" => Ok(Self::RemovedFileSize),
+            "removed_file_mtime" => Ok(Self::RemovedFileMtime),
+            "removed_file_is_dir" => Ok(Self::RemovedFileIsDir),
             _ => Err(format!("Unknown SType: {}", s)),
         }
     }

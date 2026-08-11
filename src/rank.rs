@@ -81,6 +81,7 @@ pub fn set_rank_by_id(
     );
     crate::oneview::OneView::recreate(
         &store.conn,
+        registry,
         &all_columns,
         reader,
         &store.db_dir,

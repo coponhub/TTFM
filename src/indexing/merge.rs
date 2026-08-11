@@ -22,9 +22,9 @@ use crate::types::{Bitical, ItemId};
 use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
-use sea_query::{Condition, Expr, Iden, Order, Query, SelectStatement};
+use sea_query::{Condition, Expr, Iden, JoinType, Order, Query, SelectStatement};
 // use sea_query::{JoinType, SimpleExpr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ========================================================
 // Merge Phase Orchestrator
@@ -39,9 +39,14 @@ pub(crate) fn run_merge(
     deleted_ids: Vec<ItemId>,
     temp_scan_path: &Path,
     temp_live_path: &Path,
+    roots: &[PathBuf],
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
 ) -> Result<()> {
     // 各テーブルの取り込みと同期を実行
+
+    // 0. Removed Files: 実体・場所テーブルが上書きされる前に、ユーザーの
+    // タグを持つ削除対象アイテムを removed_files へ退避する。
+    RemovedFileMerger { conn, store }.record(&deleted_ids)?;
 
     // A. 実体テーブル (不変): 削除は行わず、新規登録のみ。
     let ent = FileEntityMerger {
@@ -61,7 +66,7 @@ pub(crate) fn run_merge(
     }
     .prepare()?
     .ingest(&results, &moved)?
-    .sync(temp_live_path)?;
+    .sync(temp_live_path, roots)?;
 
     // C. タグテーブル (可変): 削除 ID の分を掃除。
     let tag = BaseTagMerger {
@@ -117,7 +122,12 @@ impl<'a> FileEntityMerger<'a> {
         let table_name = Tbl::FileReferencesDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
 
+        let mut seen: rustc_hash::FxHashSet<i64> =
+            rustc_hash::FxHashSet::default();
         for res in results {
+            if !seen.insert(res.entity_row.id) {
+                continue;
+            }
             let mut er = vec![&res.entity_row.id as &dyn ToSql];
             er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
             app.append_row(er.as_slice())?;
@@ -193,21 +203,26 @@ impl<'a> LocationMerger<'a> {
         Ok(self)
     }
 
-    pub(crate) fn sync(self, live_path: &Path) -> Result<Self> {
+    pub(crate) fn sync(self, live_path: &Path, roots: &[PathBuf]) -> Result<Self> {
         let path_str = live_path.to_string_lossy();
         let live_query = Query::select()
-            .column(Col::ItemId)
+            .column(Col::ScanHash)
             .from_subquery(util::parquet_query(&path_str), Tbl::Live)
             .to_owned();
 
-        // locations は path をキーにして上書き判定を行う（ハードリンク対応）
+        // locations は path をキーにして上書き判定を行う（ハードリンク対応）。
+        // 生存フィルタは item_id ではなく scan_hash で絞る。item_id 単位だと
+        // 同一アイテムの他ロケーションが生きているだけで、消えたロケーション
+        // も道連れに残ってしまう。roots 範囲外の location は今回のスキャン対象
+        // 外なので、生存判定と関係なく無条件に保持する。
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
             Some(
-                Condition::all()
-                    .add(Expr::col(Col::ItemId).in_subquery(live_query)),
+                Condition::any()
+                    .add(Expr::col(Col::ScanHash).in_subquery(live_query))
+                    .add(super::diff::in_scope(Col::Path, roots).not()),
             ),
             Col::Path,
             None,
@@ -285,6 +300,138 @@ impl<'a> BaseTagMerger<'a> {
     pub(crate) fn cleanup(self) -> Result<()> {
         Tbl::BaseTagsDiff.drop_table(self.conn).ok();
         Ok(())
+    }
+}
+
+fn append_to_target(
+    conn: &Connection,
+    store: &Store,
+    target: TargetTable,
+    rows: SelectStatement,
+) -> Result<()> {
+    let path = store.path_for_target(target);
+    if !path.exists() {
+        return rows.save_parquet(conn, &path);
+    }
+    let mut existing = util::parquet_query(&path.to_string_lossy());
+    existing
+        .union(sea_query::UnionType::All, rows)
+        .save_parquet(conn, &path)
+}
+
+pub(crate) struct RemovedFileMerger<'a> {
+    pub(crate) conn: &'a Connection,
+    pub(crate) store: &'a Store,
+}
+
+impl<'a> RemovedFileMerger<'a> {
+    pub(crate) fn record(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        if deleted_ids.is_empty() {
+            return Ok(self);
+        }
+        let ids_i64: Vec<i64> = deleted_ids.iter().map(|id| id.as_i64()).collect();
+        let store = self.store;
+        let path =
+            |t| util::parquet_query(&store.path_for_target(t).to_string_lossy());
+
+        let tagged = Query::select()
+            .distinct()
+            .column(Col::ItemId)
+            .from_subquery(path(TargetTable::UserTags), Tbl::UserTags)
+            .to_owned();
+
+        let rows = Query::select()
+            .column((Tbl::Locations, Col::ItemId))
+            .column((Tbl::FileReferences, Col::FileId))
+            .columns([(Tbl::Locations, Col::ScanHash), (Tbl::Locations, Col::Path)])
+            .columns([
+                (Tbl::FileReferences, Col::Size),
+                (Tbl::FileReferences, Col::Mtime),
+                (Tbl::FileReferences, Col::IsDir),
+            ])
+            .expr_as(
+                Expr::cust("CAST(epoch(now()) AS BIGINT)"),
+                Col::RemovedFileAt,
+            )
+            .from_subquery(path(TargetTable::Locations), Tbl::Locations)
+            .join_subquery(
+                JoinType::InnerJoin,
+                path(TargetTable::FileReferences),
+                Tbl::FileReferences,
+                Expr::col((Tbl::Locations, Col::ItemId))
+                    .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
+            )
+            .and_where(Expr::col((Tbl::Locations, Col::ItemId)).is_in(ids_i64))
+            .and_where(Expr::col((Tbl::Locations, Col::ItemId)).in_subquery(tagged))
+            .to_owned();
+
+        append_to_target(self.conn, self.store, TargetTable::RemovedFiles, rows)?;
+        Ok(self)
+    }
+
+    /// スキャン結果に removed_files と同じ scan_hash が現れたら、その行を
+    /// file_references へ復元し、removed_files から取り除く。file_id は今回
+    /// スキャンで割り当てられた新しい値を使う。OS が inode を再利用しうるため、
+    /// removed_files の古い file_id をそのまま使うと無関係な新規ファイルが
+    /// 誤って昔のタグを引き継いでしまう。
+    pub(crate) fn rediscover(self, temp_scan_path: &Path) -> Result<Self> {
+        let hits = Query::select()
+            .distinct()
+            .column((Tbl::RemovedFiles, Col::ItemId))
+            .expr_as(Expr::val(0i64), Col::Rank)
+            .column((Tbl::Scan, Col::FileId))
+            .columns([
+                (Tbl::RemovedFiles, Col::IsDir),
+                (Tbl::RemovedFiles, Col::Size),
+                (Tbl::RemovedFiles, Col::Mtime),
+            ])
+            .from_subquery(
+                util::parquet_query(
+                    &self
+                        .store
+                        .path_for_target(TargetTable::RemovedFiles)
+                        .to_string_lossy(),
+                ),
+                Tbl::RemovedFiles,
+            )
+            .join_subquery(
+                JoinType::InnerJoin,
+                util::parquet_query(&temp_scan_path.to_string_lossy()),
+                Tbl::Scan,
+                Expr::col((Tbl::RemovedFiles, Col::ScanHash))
+                    .eq(Expr::col((Tbl::Scan, Col::ScanHash))),
+            )
+            .to_owned();
+
+        append_to_target(
+            self.conn,
+            self.store,
+            TargetTable::FileReferences,
+            hits.clone(),
+        )?;
+
+        let restored = Query::select()
+            .column(Col::ItemId)
+            .from_subquery(hits, crate::db::Pronoun::Sub)
+            .to_owned();
+        Query::select()
+            .column(sea_query::Asterisk)
+            .from_subquery(
+                util::parquet_query(
+                    &self
+                        .store
+                        .path_for_target(TargetTable::RemovedFiles)
+                        .to_string_lossy(),
+                ),
+                Tbl::RemovedFiles,
+            )
+            .and_where(Expr::col(Col::ItemId).not_in_subquery(restored))
+            .to_owned()
+            .save_parquet(
+                self.conn,
+                &self.store.path_for_target(TargetTable::RemovedFiles),
+            )?;
+        Ok(self)
     }
 }
 

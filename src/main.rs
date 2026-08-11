@@ -60,8 +60,9 @@ struct Cli {
 enum Commands {
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
     Index {
-        /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
-        path: PathBuf,
+        /// スキャンを開始するディレクトリパス（例: "." や "/home/user"。複数指定可）
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
 
         /// trueの場合、データベースへの書き込みやParquet保存を行わず、スキャン速度の計測のみを行います。
         #[arg(long)]
@@ -187,10 +188,10 @@ fn main() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
     match &cli.command {
-        Commands::Index { path, dry_run } => {
+        Commands::Index { paths, dry_run } => {
             safe_println!(
-                "Indexing directory: {:?} (dry-run: {})",
-                path,
+                "Indexing directories: {:?} (dry-run: {})",
+                paths,
                 dry_run
             );
 
@@ -204,7 +205,7 @@ fn main() -> Result<()> {
             pb.enable_steady_tick(Duration::from_millis(100));
 
             let count = ttfm::indexing::Indexer::new(&store, &registry).run(
-                path,
+                paths,
                 Some(&|count| {
                     pb.set_message(format!("Indexed {} files...", count));
                 }),
@@ -750,7 +751,7 @@ mod tests {
         let test_file = dir.path().join("sized.bin");
         std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(
@@ -799,7 +800,7 @@ mod tests {
         let test_file = dir.path().join("dated.txt");
         std::fs::write(&test_file, b"hi").unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(
@@ -844,7 +845,7 @@ mod tests {
 
         std::fs::write(dir.path().join("sized.bin"), vec![0u8; 1024]).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(

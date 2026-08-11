@@ -35,7 +35,7 @@ pub(crate) enum ScanMessage {
     /// 新規・変更あり：フルデータを一時テーブルに書く。
     Found(TempScanEntry),
     /// 変更なし：生存している既存の Item ID を一時テーブルに書く。
-    Live(ItemId),
+    Live(ItemId, ScanHash),
 }
 
 pub(crate) fn run_scan<F>(
@@ -43,7 +43,7 @@ pub(crate) fn run_scan<F>(
     db_dir: &Path,
     temp_scan_path: &Path,
     temp_live_path: &Path,
-    root_path: &Path,
+    roots: &[PathBuf],
     cache: &FxHashMap<ScanHash, ItemId>,
     on_progress: Option<&F>,
     dry_run: bool,
@@ -53,7 +53,7 @@ where
 {
     let (mut scanner, rx) = FileScanner::new(
         conn,
-        root_path.to_path_buf(),
+        roots,
         db_dir.to_path_buf(),
         cache,
         dry_run,
@@ -89,14 +89,18 @@ pub(crate) struct FileScanner<'a> {
 impl<'a> FileScanner<'a> {
     pub(crate) fn new(
         conn: &'a Connection,
-        root_path: PathBuf,
+        roots: &[PathBuf],
         db_dir: PathBuf,
         cache: &'a FxHashMap<ScanHash, ItemId>,
         dry_run: bool,
         on_progress: Option<&'a (dyn Fn(usize) + Sync + Send)>,
     ) -> (Self, std::sync::mpsc::Receiver<ScanMessage>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let walker = ignore::WalkBuilder::new(root_path)
+        let mut builder = ignore::WalkBuilder::new(&roots[0]);
+        for r in &roots[1..] {
+            builder.add(r);
+        }
+        let walker = builder
             .hidden(false)
             .git_ignore(true)
             .threads(rayon::current_num_threads())
@@ -130,11 +134,12 @@ impl<'a> FileScanner<'a> {
             .add_columns(TempScanEntry::columns_with_type())
             .execute(self.conn)?;
 
-        // 生存 ID 用テーブル (item_id カラムのみ)
+        // 生存 ID 用テーブル (item_id + scan_hash)
         Table::create()
             .table(Tbl::Live)
             .temporary()
             .col(sea_query::ColumnDef::new(Col::ItemId).big_integer())
+            .col(sea_query::ColumnDef::new(Col::ScanHash).big_integer())
             .execute(self.conn)?;
 
         Ok(())
@@ -185,9 +190,12 @@ impl<'a> FileScanner<'a> {
                         app.append_row(&*temp_entry.params())?;
                     }
                 }
-                ScanMessage::Live(id) => {
+                ScanMessage::Live(id, hash) => {
                     if let Some(ref mut app) = app_live {
-                        app.append_row(&[&id])?;
+                        app.append_row([
+                            &id as &dyn duckdb::ToSql,
+                            &hash as &dyn duckdb::ToSql,
+                        ])?;
                     }
                 }
             }
@@ -276,7 +284,7 @@ fn process_entry(
 
     // ハッシュがキャッシュにあれば生存 ID として報告
     if let Some(id) = cache.get(&hash) {
-        if tx.send(ScanMessage::Live(id.clone())).is_err() {
+        if tx.send(ScanMessage::Live(id.clone(), hash)).is_err() {
             return ignore::WalkState::Quit;
         }
         return ignore::WalkState::Continue;

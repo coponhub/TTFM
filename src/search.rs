@@ -216,6 +216,7 @@ pub fn spawn_cache_worker(
             );
             crate::oneview::OneView::recreate(
                 &conn,
+                &registry,
                 &all_columns,
                 reader,
                 &db_dir,
@@ -406,7 +407,7 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let cid = "test-worker-cid";
         spawn_cache_worker(store.db_dir.clone(), &cache, cid, "extension:txt")?;
@@ -438,7 +439,7 @@ mod tests {
         let db_dir = dir.path().join("db");
         std::fs::create_dir(&db_dir)?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(
+        Indexer::new(&store, &registry).run_single(
             dir.path(),
             None::<&fn(usize)>,
             false,
@@ -511,7 +512,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let query = "extension:txt";
 
@@ -580,7 +581,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let res = search_nowarn(
             &store,
@@ -606,7 +607,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let res = search_nowarn(
             &store,
@@ -637,7 +638,7 @@ mod tests {
 
         File::create(root.join("a.txt"))?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let res = search_nowarn(
             &store,
@@ -669,7 +670,7 @@ mod tests {
         std::fs::write(&path, vec![0u8; 123])?;
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let res = search_nowarn(
             &store,
@@ -698,7 +699,7 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let query = "extension:";
 
@@ -801,7 +802,7 @@ mod tests {
         File::create(root.join("test.rs"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(root, None::<&fn(usize)>, false)?;
 
         let query = "extension:md | extension:rs";
         let cid = "test-complex-cid";

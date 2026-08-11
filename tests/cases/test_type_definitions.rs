@@ -41,7 +41,7 @@ fn setup() -> (Store, TagRegistry, TempDir) {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
     (store, registry, dir)
 }
@@ -529,7 +529,7 @@ fn count_definition_ref_mixed_or_with_projection() -> anyhow::Result<()> {
     let registry = TagRegistry::with_standard();
     let store = Store::open(&db_dir)?;
     Indexer::new(&store, &registry).initialize_tables()?;
-    Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
+    Indexer::new(&store, &registry).run_single(&root, None::<&fn(usize)>, false)?;
 
     let type_count = ttfm::search::search_nowarn(
         &store,

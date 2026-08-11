@@ -1,10 +1,7 @@
-use crate::db::{Col, Tbl};
+use crate::db::Col;
 use crate::types::{Bitical, TypedTag};
 use crate::util::parquet_query;
-use sea_query::{
-    CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
-    UpdateStatement,
-};
+use sea_query::{Expr, Order, Query, SelectStatement, UnionType};
 
 pub(crate) struct UserTagDelete {
     pub(crate) item_id: i64,
@@ -88,32 +85,6 @@ pub(crate) fn user_tags_write(
         .order_by(Col::LabelStr, Order::Asc)
         .order_by(Col::ItemId, Order::Asc);
     q
-}
-
-pub(crate) fn rank_case_update(
-    tmp: Tbl,
-    updates: &[(i64, i64)],
-) -> UpdateStatement {
-    let rank_case: SimpleExpr = updates
-        .iter()
-        .fold(CaseStatement::new(), |acc, (id, rank)| {
-            acc.case(Expr::col(Col::ItemId).eq(*id), *rank)
-        })
-        .finally(Expr::col(Col::Rank))
-        .into();
-
-    Query::update()
-        .table(tmp)
-        .value(Col::Rank, rank_case)
-        .and_where(
-            Expr::col(Col::ItemId).is_in(
-                updates
-                    .iter()
-                    .map(|(id, _)| sea_query::Value::from(*id))
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .to_owned()
 }
 
 #[cfg(test)]

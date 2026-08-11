@@ -29,7 +29,7 @@ use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rustc_hash::FxHashMap;
 use sea_query::{Expr, PostgresQueryBuilder, Query, Table};
 // use sea_query::{ExprTrait, Func};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::diff;
 use super::merge;
@@ -69,6 +69,20 @@ pub struct Indexer<'a> {
     pub(crate) registry: &'a TagRegistry,
 }
 
+fn normalize_roots<P: AsRef<Path>>(roots: &[P]) -> Result<Vec<PathBuf>> {
+    let mut abs: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| r.as_ref().canonicalize())
+        .collect::<std::io::Result<_>>()?;
+    abs.sort();
+    abs.dedup();
+    Ok(abs
+        .iter()
+        .filter(|r| !abs.iter().any(|o| *o != **r && r.starts_with(o)))
+        .cloned()
+        .collect())
+}
+
 impl<'a> Indexer<'a> {
     pub fn new(store: &'a Store, registry: &'a TagRegistry) -> Self {
         Self { store, registry }
@@ -77,7 +91,7 @@ impl<'a> Indexer<'a> {
     /// インデックス作成の全体ワークフローを実行します。
     pub fn run<P, F>(
         &self,
-        root_path: P,
+        roots: &[P],
         on_progress: Option<&F>,
         dry_run: bool,
     ) -> Result<usize>
@@ -85,6 +99,8 @@ impl<'a> Indexer<'a> {
         P: AsRef<Path>,
         F: Fn(usize) + Sync + Send,
     {
+        let roots = normalize_roots(roots)?;
+
         // 既存のハッシュをロード
         let cache = self.load_metadata_cache()?;
 
@@ -94,7 +110,7 @@ impl<'a> Indexer<'a> {
             &self.store.db_dir,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            root_path.as_ref(),
+            &roots,
             &cache,
             on_progress,
             dry_run,
@@ -104,8 +120,14 @@ impl<'a> Indexer<'a> {
             return Ok(count);
         }
 
+        merge::RemovedFileMerger {
+            conn: &self.store.conn,
+            store: &self.store,
+        }
+        .rediscover(&self.store.temp_scan_path())?;
+
         // 2. Diff Phase
-        let diff = diff::run_diff(&self.store.conn, &self.store)?;
+        let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 
         // 3. Triage Phase
         let (results, moved_rows) =
@@ -121,11 +143,25 @@ impl<'a> Indexer<'a> {
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
+            &roots,
             // |data| self.update_system_items(data),
             |_data| Ok(()),
         )?;
 
         Ok(count)
+    }
+
+    pub fn run_single<P, F>(
+        &self,
+        root: P,
+        on_progress: Option<&F>,
+        dry_run: bool,
+    ) -> Result<usize>
+    where
+        P: AsRef<Path>,
+        F: Fn(usize) + Sync + Send,
+    {
+        self.run(&[root], on_progress, dry_run)
     }
 
     /// 既存のインデックスから変更検知用のメタデータ・キャッシュをロードします。
@@ -184,6 +220,7 @@ impl<'a> Indexer<'a> {
         );
         crate::oneview::OneView::recreate(
             &self.store.conn,
+            self.registry,
             &all_cols,
             reader,
             &self.store.db_dir,
@@ -546,6 +583,21 @@ mod tests {
     use super::*;
     use crate::tag::TagRegistry;
     use tempfile::tempdir;
+
+    #[test]
+    fn normalize_roots_dedups_and_drops_nested() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let outer = base.join("outer");
+        let inner = outer.join("inner");
+        let other = base.join("other");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let got = normalize_roots(&[&outer, &inner, &outer, &other]).unwrap();
+
+        assert_eq!(got, vec![other.clone(), outer.clone()]);
+    }
 
     #[test]
     fn test_calc_scanhash() {

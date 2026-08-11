@@ -23,7 +23,7 @@ fn setup() -> (Store, TagRegistry, TempDir) {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
     (store, registry, dir)
 }
@@ -42,7 +42,7 @@ fn setup_with_files(names: &[&str]) -> (Store, TagRegistry, TempDir) {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
     (store, registry, dir)
 }
@@ -760,7 +760,7 @@ fn edit_tag_applies_to_all_over_100_files() -> anyhow::Result<()> {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
 
     let resp = edit(

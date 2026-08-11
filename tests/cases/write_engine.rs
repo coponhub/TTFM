@@ -257,7 +257,7 @@ fn setup_with_indexed_file() -> (Store, TagRegistry, i64, tempfile::TempDir) {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
 
     let file_id = read_file_ids(&store)[0];
@@ -390,10 +390,11 @@ fn read_rank(store: &Store, item_id: i64) -> Option<i64> {
 }
 
 #[test]
-fn write_rank_update_changes_rank_in_item_references() {
+fn write_rank_tags_item_ref_without_touching_the_rank_column() {
     let (store, registry, _dir) = setup();
     let id =
         ttfm::tagging::add_item(&store, &registry, "note", "my note").unwrap();
+    let before = read_rank(&store, id);
 
     write(
         &store,
@@ -405,7 +406,10 @@ fn write_rank_update_changes_rank_in_item_references() {
     )
     .unwrap();
 
-    assert_eq!(read_rank(&store, id), Some(5));
+    assert!(read_user_tags(&store)
+        .iter()
+        .any(|(i, t, v)| *i == id && t == "rank" && v == "5"));
+    assert_eq!(read_rank(&store, id), before);
 }
 
 // ──────────────────────────────────────────────
@@ -584,7 +588,7 @@ fn read_file_rank(store: &Store, item_id: i64) -> Option<i64> {
 }
 
 #[test]
-fn write_rank_update_changes_rank_in_file_references() {
+fn write_rank_tags_file_ref_without_touching_the_rank_column() {
     let (store, registry, file_id, _dir) = setup_with_indexed_file();
     let initial = read_file_rank(&store, file_id).unwrap_or(0);
 
@@ -598,7 +602,10 @@ fn write_rank_update_changes_rank_in_file_references() {
     )
     .unwrap();
 
-    assert_eq!(read_file_rank(&store, file_id), Some(initial + 7));
+    assert!(read_user_tags(&store)
+        .iter()
+        .any(|(i, t, _)| *i == file_id && t == "rank"));
+    assert_eq!(read_file_rank(&store, file_id), Some(initial));
 }
 
 // ──────────────────────────────────────────────

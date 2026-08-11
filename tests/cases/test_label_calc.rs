@@ -124,7 +124,7 @@ fn test_complex_comparisons() {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     let query_agg_agg = "sum(size:) > count(extension:rs)";

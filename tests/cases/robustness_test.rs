@@ -42,7 +42,7 @@ fn test_metadata_error_recovery_integration() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     // 3. エラー値がセットされたアイテムを検索して検証

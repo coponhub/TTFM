@@ -16,20 +16,28 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use super::indexer::{ScanEntryLoader, TempScanEntry};
-use crate::db::{Col, Store, TargetTable, Tbl};
+use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
 use crate::indexing::ScanEntry;
 use crate::types::ItemId;
 use crate::util::{self};
 use anyhow::Result;
 use duckdb::Connection;
-use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query, SelectStatement};
-use std::path::Path;
+use path_slash::PathExt as _;
+use sea_query::{
+    Condition, Expr, Func, JoinType, PostgresQueryBuilder, Query,
+    SelectStatement,
+};
+use std::path::{Path, PathBuf};
 
 // ========================================================
 // Diff Phase Orchestrator
 // ========================================================
 
-pub(crate) fn run_diff(conn: &Connection, store: &Store) -> Result<IndexDiff> {
+pub(crate) fn run_diff(
+    conn: &Connection,
+    store: &Store,
+    roots: &[PathBuf],
+) -> Result<IndexDiff> {
     let auditor = DiffAuditor::new(store);
 
     if auditor.is_initial() {
@@ -43,11 +51,24 @@ pub(crate) fn run_diff(conn: &Connection, store: &Store) -> Result<IndexDiff> {
     let to_process = auditor.query_with_existing_ids().fetch_with_ids(conn)?;
 
     // 2. 削除対象の特定（生存リストにも、今回のスキャン結果にも載っていない既存 ID）
-    let deleted_ids = auditor.query_deleted().fetch_ids(conn)?;
+    let deleted_ids = auditor.query_deleted(roots).fetch_ids(conn)?;
 
     Ok(IndexDiff {
         to_process,
         deleted_ids,
+    })
+}
+
+/// 指定された roots のいずれか（自身、またはその配下）に path が含まれるか判定する。
+pub(crate) fn in_scope(col: Col, roots: &[PathBuf]) -> Condition {
+    roots.iter().fold(Condition::any(), |cond, r| {
+        let base = format!("{}/", r.to_slash_lossy());
+        cond.add(Expr::col(col).eq(r.to_slash_lossy().to_string())).add(
+            sea_query::SimpleExpr::from(
+                Func::cust(DuckDbFunc::StartsWith)
+                    .args([Expr::col(col).into(), Expr::val(base).into()]),
+            ),
+        )
     })
 }
 
@@ -59,6 +80,7 @@ pub(crate) struct DiffAuditor {
     scan: String,
     live: String,
     ents: String,
+    locs: String,
 }
 
 impl DiffAuditor {
@@ -68,6 +90,7 @@ impl DiffAuditor {
             scan: store.temp_scan_path().to_string_lossy().into_owned(),
             live: store.temp_live_path().to_string_lossy().into_owned(),
             ents: path(TargetTable::FileReferences),
+            locs: path(TargetTable::Locations),
         }
     }
 
@@ -118,8 +141,9 @@ impl DiffAuditor {
             .to_owned()
     }
 
-    /// 削除判定：生存リスト(live)にも、変更(scan)にも載っていない既存 ID
-    pub(crate) fn query_deleted(&self) -> SelectStatement {
+    /// 削除判定：生存リスト(live)にも、変更(scan)にも、roots 範囲外にも
+    /// location を持たない既存 ID
+    pub(crate) fn query_deleted(&self, roots: &[PathBuf]) -> SelectStatement {
         let mut q = Query::select();
         q.column(Col::ItemId).from_subquery(
             util::parquet_query(&self.ents),
@@ -145,6 +169,13 @@ impl DiffAuditor {
                     .eq(Expr::col((Tbl::Scan, col_file_id))),
             );
         q.union(sea_query::UnionType::Except, scan_q);
+
+        let mut outside_q = Query::select();
+        outside_q
+            .column(Col::ItemId)
+            .from_subquery(util::parquet_query(&self.locs), Tbl::Locations)
+            .cond_where(in_scope(Col::Path, roots).not());
+        q.union(sea_query::UnionType::Except, outside_q);
 
         q
     }

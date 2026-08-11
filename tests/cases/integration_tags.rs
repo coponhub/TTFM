@@ -84,7 +84,7 @@ fn test_integration_tag_tagging() {
     let file_path = dir.path().join("dummy.txt");
     File::create(&file_path).unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
     let registered_paths =
         search::search_nowarn(&store, &registry, "extension:txt", Default::default())
@@ -132,7 +132,7 @@ fn test_system_item_metadata_integration() {
     File::create(dir.path().join("no_ext")).unwrap();
 
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let ext_list =

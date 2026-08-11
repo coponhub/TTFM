@@ -39,7 +39,7 @@ fn test_rank_sorting_files() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 2. クエリでランクを設定
@@ -107,7 +107,7 @@ fn test_rank_batch_update() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
@@ -155,7 +155,7 @@ fn test_rank_set_by_id_low_level() {
 
     fs::create_dir_all(&db_dir).unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let id = tagging::add_item(&store, &registry, "note", "test note").unwrap();
@@ -166,6 +166,47 @@ fn test_rank_set_by_id_low_level() {
             .unwrap();
     assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
+}
+
+#[test]
+fn user_rank_survives_reindex() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    fs::write(root.join("a.txt"), "original content").unwrap();
+
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    edit(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Some("rank:9"),
+        QueryType::Tag,
+        None,
+        WriteOptions { yes: true },
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    fs::write(root.join("a.txt"), "changed content").unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let results =
+        search::search_nowarn(&store, &registry, "filename:a.txt", Default::default())
+            .unwrap();
+    assert_eq!(results.results[0].rank, 9);
 }
 
 // `type:filename` (DefinitionRef) の rank は、定義行が未登録(Volatile)の場合
@@ -184,7 +225,7 @@ fn test_definition_ref_rank_falls_back_to_registry_default() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // `filename` の type 定義行は index 時に registry のデフォルト rank を
