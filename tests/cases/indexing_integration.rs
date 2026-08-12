@@ -646,6 +646,22 @@ fn two_roots_are_both_indexed() {
 }
 
 #[test]
+fn indexing_no_roots_scans_nothing() {
+    let (store, registry, _d, _root) = setup(&["a.txt"]);
+
+    let empty: &[&Path] = &[];
+    let count = Indexer::new(&store, &registry)
+        .run(empty, None::<&fn(usize)>, false)
+        .unwrap();
+
+    assert_eq!(count, 0, "an empty root list must scan no entries");
+    assert!(
+        find(&store, &registry, "filename:a.txt").is_empty(),
+        "an empty root list must index nothing"
+    );
+}
+
+#[test]
 fn losing_one_hardlink_drops_only_that_location_row() {
     let (store, registry, _d, root) = setup(&["a.txt"]);
     std::fs::hard_link(root.join("a.txt"), root.join("link.txt")).unwrap();

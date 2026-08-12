@@ -352,13 +352,7 @@ fn append_to_target(
     rows: SelectStatement,
 ) -> Result<()> {
     let path = store.path_for_target(target);
-    if !path.exists() {
-        return rows.save_parquet(conn, &path);
-    }
-    let mut existing = util::parquet_query(&path.to_string_lossy());
-    existing
-        .union(sea_query::UnionType::All, rows)
-        .save_parquet(conn, &path)
+    union_and_save(conn, &path, rows, |_| {})
 }
 
 pub(crate) struct RemovedFileMerger<'a> {
@@ -598,6 +592,24 @@ impl<'a> RemovedFileMerger<'a> {
 // 3. Internal Utility (Merge context only)
 // ========================================================
 
+fn union_and_save(
+    conn: &Connection,
+    path: &Path,
+    rows: SelectStatement,
+    retain: impl FnOnce(&mut SelectStatement),
+) -> Result<()> {
+    if !path.exists() {
+        return rows.save_parquet(conn, path);
+    }
+
+    let mut existing = util::parquet_query(&path.to_string_lossy());
+    retain(&mut existing);
+
+    existing
+        .union(sea_query::UnionType::All, rows)
+        .save_parquet(conn, path)
+}
+
 fn merge_and_save(
     conn: &Connection,
     path: &Path,
@@ -611,31 +623,22 @@ fn merge_and_save(
         .from(temp_table.clone())
         .to_owned();
 
-    if !path.exists() {
-        return base_query.save_parquet(conn, path);
-    }
+    union_and_save(conn, path, base_query, |query| {
+        // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
+        query.and_where(Expr::col(key_col).not_in_subquery(
+            Query::select().column(key_col).from(temp_table).to_owned(),
+        ));
 
-    let path_str = path.to_string_lossy().to_string();
-    let mut query = util::parquet_query(&path_str);
-
-    // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
-    query.and_where(Expr::col(key_col).not_in_subquery(
-        Query::select().column(key_col).from(temp_table).to_owned(),
-    ));
-
-    if let Some(cond) = filter {
-        query.cond_where(cond);
-    }
-
-    if let Some(cols) = order_by {
-        for col in cols {
-            query.order_by(col, Order::Asc);
+        if let Some(cond) = filter {
+            query.cond_where(cond);
         }
-    }
 
-    query
-        .union(sea_query::UnionType::All, base_query)
-        .save_parquet(conn, path)
+        if let Some(cols) = order_by {
+            for col in cols {
+                query.order_by(col, Order::Asc);
+            }
+        }
+    })
 }
 
 // ========================================================

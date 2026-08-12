@@ -101,6 +101,9 @@ impl<'a> Indexer<'a> {
         F: Fn(usize) + Sync + Send,
     {
         let roots = normalize_roots(roots)?;
+        if roots.is_empty() {
+            return Ok(0);
+        }
 
         // 既存のハッシュをロード
         let cache = self.load_metadata_cache()?;
