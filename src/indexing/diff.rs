@@ -15,11 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+use super::append_to_target;
 use super::indexer::{ScanEntryLoader, TempScanEntry};
 use crate::db::{Col, DuckDbFunc, Store, TargetTable, Tbl};
 use crate::indexing::ScanEntry;
 use crate::types::ItemId;
-use crate::util::{self};
+use crate::util::{self, ParquetExt};
 use anyhow::Result;
 use duckdb::Connection;
 use path_slash::PathExt as _;
@@ -38,7 +39,10 @@ pub(crate) fn run_diff(
     store: &Store,
     roots: &[PathBuf],
 ) -> Result<IndexDiff> {
-    let auditor = DiffAuditor::new(store);
+    let scan_path = store.temp_scan_path();
+    rediscover(conn, store, &scan_path)?;
+
+    let auditor = DiffAuditor::new(store, &scan_path);
 
     if auditor.is_initial() {
         return Ok(IndexDiff {
@@ -57,6 +61,72 @@ pub(crate) fn run_diff(
         to_process,
         deleted_ids,
     })
+}
+
+/// スキャン結果に removed_files と同じ basename_scan_hash（basename・mtime・
+/// size・inode）が現れたら、その行を file_references へ復元し、removed_files
+/// から取り除く。file_id は今回スキャンで割り当てられた新しい値を使う。OS が
+/// inode を再利用しうるため、removed_files の古い file_id をそのまま使うと
+/// 無関係な新規ファイルが誤って昔のタグを引き継いでしまう。
+fn rediscover(
+    conn: &Connection,
+    store: &Store,
+    scan_path: &Path,
+) -> Result<()> {
+    let removed_path = store
+        .path_for_target(TargetTable::RemovedFiles)
+        .to_string_lossy()
+        .into_owned();
+
+    if removed_files_is_empty(conn, &removed_path)? {
+        return Ok(());
+    }
+
+    let hits = Query::select()
+        .distinct()
+        .column((Tbl::RemovedFiles, Col::ItemId))
+        .column((Tbl::RemovedFiles, Col::Rank))
+        .column((Tbl::Scan, Col::FileId))
+        .columns([
+            (Tbl::RemovedFiles, Col::IsDir),
+            (Tbl::RemovedFiles, Col::Size),
+            (Tbl::RemovedFiles, Col::Mtime),
+        ])
+        .from_subquery(util::parquet_query(&removed_path), Tbl::RemovedFiles)
+        .join_subquery(
+            JoinType::InnerJoin,
+            util::parquet_query(&scan_path.to_string_lossy()),
+            Tbl::Scan,
+            Expr::col((Tbl::RemovedFiles, Col::BasenameScanHash))
+                .eq(Expr::col((Tbl::Scan, Col::BasenameScanHash))),
+        )
+        .to_owned();
+
+    append_to_target(conn, store, TargetTable::FileReferences, hits.clone())?;
+
+    let restored = Query::select()
+        .column(Col::ItemId)
+        .from_subquery(hits, crate::db::Pronoun::Sub)
+        .to_owned();
+
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from_subquery(util::parquet_query(&removed_path), Tbl::RemovedFiles)
+        .and_where(Expr::col(Col::ItemId).not_in_subquery(restored))
+        .to_owned()
+        .save_parquet(conn, &store.path_for_target(TargetTable::RemovedFiles))
+}
+
+fn removed_files_is_empty(
+    conn: &Connection,
+    removed_path: &str,
+) -> Result<bool> {
+    let sql = Query::select()
+        .expr(Expr::cust("COUNT(*)"))
+        .from_subquery(util::parquet_query(removed_path), Tbl::RemovedFiles)
+        .to_string(PostgresQueryBuilder);
+    let count: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
+    Ok(count == 0)
 }
 
 /// 指定された roots のいずれか（自身、またはその配下）に path が含まれるか判定する。
@@ -84,10 +154,10 @@ pub(crate) struct DiffAuditor {
 }
 
 impl DiffAuditor {
-    pub(crate) fn new(store: &Store) -> Self {
+    pub(crate) fn new(store: &Store, scan_path: &Path) -> Self {
         let path = |t| store.path_for_target(t).to_string_lossy().into_owned();
         Self {
-            scan: store.temp_scan_path().to_string_lossy().into_owned(),
+            scan: scan_path.to_string_lossy().into_owned(),
             live: store.temp_live_path().to_string_lossy().into_owned(),
             ents: path(TargetTable::FileReferences),
             locs: path(TargetTable::Locations),
@@ -239,7 +309,23 @@ mod tests {
     fn test_diff_auditor_initial() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let auditor = DiffAuditor::new(&store);
+        let scan_path = store.temp_scan_path();
+        let auditor = DiffAuditor::new(&store, &scan_path);
         assert!(auditor.is_initial());
+    }
+
+    #[test]
+    fn removed_files_is_empty_when_table_has_no_rows() -> Result<()> {
+        let dir = tempdir()?;
+        let registry = crate::tag::TagRegistry::with_standard();
+        let store = Store::open(dir.path().join("db"))?;
+        crate::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+
+        let removed_path = store
+            .path_for_target(TargetTable::RemovedFiles)
+            .to_string_lossy()
+            .into_owned();
+        assert!(removed_files_is_empty(&store.conn, &removed_path)?);
+        Ok(())
     }
 }

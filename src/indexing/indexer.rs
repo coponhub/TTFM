@@ -124,12 +124,6 @@ impl<'a> Indexer<'a> {
             return Ok(count);
         }
 
-        merge::RemovedFileMerger {
-            conn: &self.store.conn,
-            store: &self.store,
-        }
-        .rediscover(&self.store.temp_scan_path())?;
-
         // 2. Diff Phase
         let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 

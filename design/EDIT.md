@@ -74,8 +74,7 @@ pub trait Edit: Send + Sync {
 pub enum EditStrategy {
     // --- プラグイン作者が選択可能 (WIT に公開) ---
     Append,      // 重複可で追記 (一般ユーザータグ相当)
-    Replace,     // 単一値・置換。物理的な格納先が user_tags 行か rank 等のカラムかは
-                 // Lens が吸収するため、両者を区別しない (旧 ReplaceCol を統合)
+    Replace,     // 単一値・置換。
     RemoveOnly,  // 付与不可・削除可。Tag 方向は常にエラー、Untag 方向のみ許可
                  // (item_id → item 削除 §5.1 のための例外的な戦略)
 
@@ -112,7 +111,7 @@ pub enum EditStrategy {
 |---|---|
 | `path` / `filename` / `parentdir` / `extension` / `stem` | `Relocate` |
 | `mtime` | `SetFileAttr` (Windows/Unix 両対応) |
-| `rank` | `Replace` (カラム書き込みは Lens が吸収) |
+| `rank` | `Replace` |
 | `name` | `Replace` |
 | `item_kind` / `content` | `ModifyInjection` (ユーザー不可。Volatile 登録時に `inject()` で内部注入) |
 | `item_id` | `RemoveOnly` (付与不可。`untag <Q> item_id:` による item 削除 §5.1 のみ許可) |
@@ -192,7 +191,7 @@ in-memory フィルタして Delete 対象を絞る。`TagCondition` はエン�
 FileSystemに対する操作は`write`ではなく、`fs_operate`が行う。
 両者は物理 parquet を直接操作せず、**oneview と Lens が成す抽象レイヤー**を介して動作する。
 oneview は物理テーブル群を統合した論理ビュー、Lens は論理タグと物理スキーマを相互に対応づける
-写像であり、両者が物理配置 (`user_tags` / `item_references` / `rank` カラム等の区別) を隠蔽する。
+写像であり、両者が物理配置 (`user_tags` / `item_references` 等の区別) を隠蔽する。
 `search` が `Item` を読み出すのに対し、`write` は編集を表す **`WriteAction` の列**を受け取り、
 Lens を通じて適用する。
 
@@ -220,8 +219,7 @@ Lens を通じて適用する。
   基底テーブルへの解決**として使う (定義は STORE.md §5)。`oneview` は読み取り専用の派生 VIEW で
   書き込めないため、`write` は Lens で各 `WriteAction` のラベルを基底テーブル/カラムへ解決して
   直接書き、完了後に `OneView::recreate` で作り直す。
-- この抽象化により、action は格納先の物理差を意識しない。`rank` は物理カラム、一般ユーザータグは
-  `user_tags` の行だが、`Add` から見ればどちらも「ラベルの永続化」であり、Lens が書き込み先の違いを吸収する。
+- この抽象化により、action は格納先の物理差を意識しない。
 
 ### 5.3 守備範囲 (境界)
 `write` の作用は **DB に限定**される。
@@ -370,12 +368,11 @@ DB への反映方法は、編集が**実ファイルを変更するか / DB の
 
 - **実ファイルを変更する戦略 (`Relocate` / `SetFileAttr`)**。
   - `Relocate` (同一 fs): `fs::rename` で `file_id` (inode) は不変。**完了後に即時再インデックス**し、
-    再 index が Moved として検出して locations を再生成する。
-  - `Relocate` (cross-device): copy+delete で `file_id` が変わり Moved 検出が効かないため、**Relocate が
-    DB を直接 rebind する** — item_id を据え置き、`file_references` の `file_id` / `device_id` 
-    (引き継がないなら `mtime` も) と `locations` の `path` / `parentdir` を新実体の値へ更新する。
+    locations を再生成する。
+  - `Relocate` (cross-device): copy+delete で `file_id` が変わり変更検出が効かないため、Relocate が
+    DB を 更新する。item_id を変更せず、`file_references` を新実体への参照へ更新する。
     `base_tags` は内容同一で不変、`user_tags` / `system_tags` は item_id キーで保持される。
-    indexing には頼らない (後続 `ttfm index`は `file_id` 一致で Unchanged と見える)。
+    (後続 `ttfm index`は `file_id` が一致していると見える)。
   - `SetFileAttr` (mtime): 変更した mtime は `file_references` のスキャン値であり DB 側が古くなる。
     完了後に再 index が Mtime 変化を検出して `file_references` を更新する。
   - 同一 fs の `Relocate` と `SetFileAttr` は parquet を手書きせず既存のインデックス機構で整合を取る
@@ -383,7 +380,7 @@ DB への反映方法は、編集が**実ファイルを変更するか / DB の
     rebind のみ当該 item の行を直接更新する。
 - **DB のみを書き換える戦略 (`Append` / `Replace`) → 再インデックス不要**。
   各`Append/Replace`を `WriteAction` (`Add` / `Delete`) 列へ展開し、
-  `write` 関数(第5章) が Lens 経由でDBに適用する(`rank` カラム含む)。
+  `write` 関数(第5章) が Lens 経由でDBに適用する。
   タグの付け替え (`ttfm replace`, 第6章) も`Add/Delete`の合成なので、
   個々のコマンドが上記に帰着する。書き換え後`OneView::recreate` を行う。
 

@@ -6,13 +6,13 @@ TTFMのデータベースは以下の様式で定義される。
 
 ### 1.1 `file_references` テーブル (実体)
 - **ファイルパス**: `.ttfm/db/file_references.parquet`
-- `item_id`: 内部管理用ユニークID (PRIMARY KEY)
+- `item_id`: Item ID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
-- `file_id`: OSレベルの識別子 (Inode number / File Index)
-- `device_id`: デバイス識別子
+- `file_id`: OSレベルの識別子 device_id + (Inode number / File Index)
 - `size`: ファイルサイズ
 - `mtime`: 最終更新日時
 - `hash`: コンテンツハッシュ (オプション)
+- `is_dir`: ディレクトリかどうかの判定
 
 ### 1.2 `locations` テーブル (場所)
 - **ファイルパス**: `.ttfm/db/locations.parquet`
@@ -21,6 +21,8 @@ TTFMのデータベースは以下の様式で定義される。
 - `filename`: ファイル名
 - `parentdir`: 親ディレクトリパス（検索最適化用）
 - `extension`: 拡張子
+- `scan_hash`: Path・Mtime・Size のhash
+- `basename_scan_hash`: filename・Mtime・Size・Inodeのhash
 
 ### 1.3 `base_tags` テーブル (自動抽出タグ)
 - **ファイルパス**: `.ttfm/db/base_tags.parquet`
@@ -28,6 +30,15 @@ TTFMのデータベースは以下の様式で定義される。
 - `type`: タグの種類（例: `size_str`, `type_from_ext`）
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（型ごとに物理カラムを持ち、適切な型で格納される）
 - ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
+
+### 1.4 `removed_files` テーブル (`user_tags`が付与されているのにファイルが失われたItem)
+- **ファイルパス**: `.ttfm/db/removed_files.parquet`
+- `item_id`:  Item ID (PRIMARY KEY)
+- `rank`: 削除時点のrank
+- `file_id`: 削除時点のfile_id
+- `scan_hash`, `basename_scan_hash`: 復帰判定に用いる識別子
+- `path`, `size`, `mtime`, `is_dir`: 削除時点のメタデータ
+- `removed_at`: 削除を検知した日時 (epoch)
 
 ## 2. Item Store (Definition Registry)
 タグの型(Type)や値(Label)の定義自体を管理するID台帳。
@@ -37,6 +48,7 @@ TTFMのデータベースは以下の様式で定義される。
 - **ファイルパス**: `.ttfm/db/item_references.parquet`
 - `item_id`: ユニークID (PRIMARY KEY)
 - `rank`: 優先度 (DEFAULT 0)
+- `name`: アイテムの名称
 - `item_kind`: アイテムの種類 (`type`, `tag`, `note` のいずれか。`label` は登録対象外＝Volatile)
 - `content`: 識別名（Type名等）または Note の本文
 
@@ -74,9 +86,10 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 - `name`: アイテムの名称
 - `tagged_at`: 付与日時 (epoch)。`user_tags` 由来の行のみ値を持ち、`base_tags` / `system_tags` 由来は NULL。
 
+
 ### 4.1 Origin & Name Resolution
 - **Origin**:
-  - `file_references/locations/base_tags` 由来の行は`file`(indexingでのplugin関与タグも含む)、 
+  - `file_references/locations/base_tags/removed_files` 由来の行は`file`(indexingでのplugin関与タグも含む)、 
   - `item_references` 由来の行はItemIDで判定(現状は`builtin/plugin/user`)
   - `system_tags` 由来の行は `builtin`
   - `user_tags` 由来の行は `user`
@@ -92,13 +105,19 @@ StorageMapping は3種:
 
 | マッピング | read（`oneview` 上の表現） | write（書き込み先の基底テーブル） |
 |---|---|---|
-| **Fixed(col)** | 専用カラム（`rank` / `item_kind` / `content` 等） | 対象 item の物理テーブルの当該カラムを更新（`rank` なら `file_references` / `item_references` の `rank`、`item_kind` / `content` は `item_references`） |
+| **Fixed(col)** | 専用カラム（`item_kind` / `content` 等） | 対象 item の物理テーブルの当該カラムを更新（`item_references` の `item_kind` / `content` は `item_references`） |
 | **Basic{column, tag_type}** | 汎用ラベルカラム（`label_str` / `label_int` / `label_double` / `label_bool`）＋ `type` | `user_tags` に行を追加/削除（`type` = tag_type、値を型に応じた `label_*` カラムへ） |
 | **Composite** | 他タグへ展開される論理タグ（`directory:` 等） | 直接の格納先を持たず、展開先の各タグの write へ委ねる |
 
 - **書き込み先テーブルは origin で決まる**: ユーザー編集は常に `user_tags`（または Fixed の専用カラム）。
   `base_tags` / `system_tags` は `ttfm index` 専管で、編集の write 対象外。
 - **値の型解決**（どの `label_*` カラムを使うか）は read と同じロジックを共有する。
+- **`rank` はカラムと `user_tags` の両方に載る**: ユーザーが指定した rank は `user_tags` の
+  `rank` タグとして保存し、`file_references` / `item_references` の `rank` カラムは
+  rankタグから導出したソート用の値として保持する。カラムの値は system 既定とユーザー指定分の
+  合算であり、編集時は変更前の値との差分をカラムと `user_tags` の双方へ加算する。
+  index時 は行を system 既定で作り直したうえで `user_tags` の値を加算するため、
+  どちらの経路でも同じ値に落ちる。`rank` タグは1つの item につき1行のみを持つ。
 
 ## 6. Sorting strategy
 - `base_tags`, `system_tags`, `user_tags`は保存時、以下の順序でソートしておき、DuckDBのZoneMapを活用する
