@@ -53,7 +53,8 @@ fn test_search_all_no_paging() -> anyhow::Result<()> {
         ..Default::default()
     };
     // Query must match all files
-    let res = search::search_nowarn(&store, &registry, "extension:txt", options)?;
+    let res =
+        search::search_nowarn(&store, &registry, "extension:txt", options)?;
 
     assert_eq!(res.results.len(), 25, "Should retrieve all 25 items");
     assert!(!res.has_more, "Should not have more results when n is None");

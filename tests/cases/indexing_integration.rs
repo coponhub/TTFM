@@ -268,7 +268,8 @@ fn test_typedtag_listing_via_type_query() {
     let tt_items: Vec<_> = find(&store, &registry, "type:extension")
         .into_iter()
         .filter(|r| {
-            r.item_kind == ttfm::ItemKind::Tag && r.raw_repr() == "extension:txt"
+            r.item_kind == ttfm::ItemKind::Tag
+                && r.raw_repr() == "extension:txt"
         })
         .collect();
     assert_eq!(
@@ -290,7 +291,11 @@ fn test_typedtag_listing_via_type_query() {
         .collect();
 
     assert_eq!(files.len(), 1, "Should find the file");
-    assert_eq!(tags.len(), 0, "Should NOT find the tag item itself as noise");
+    assert_eq!(
+        tags.len(),
+        0,
+        "Should NOT find the tag item itself as noise"
+    );
 }
 
 #[test]
@@ -309,7 +314,8 @@ fn test_no_empty_extension_system_item() {
     let (store, registry) = (db_dir_store, db_dir_registry);
     index(&store, &registry, &[root]);
 
-    let results = find(&store, &registry, "item_kind:tag & name:\"extension:\"");
+    let results =
+        find(&store, &registry, "item_kind:tag & name:\"extension:\"");
     assert!(
         results.is_empty(),
         "Should NOT register 'extension:' system item"
@@ -334,13 +340,18 @@ fn test_definition_only_items_not_registered() {
 
     // 初期登録が廃止されたため、type 定義専用アイテムは自動生成されない。
     assert!(find(&store, &registry, "item_kind:type & name:name").is_empty());
-    assert!(find(&store, &registry, "item_kind:type & name:item_kind").is_empty());
+    assert!(
+        find(&store, &registry, "item_kind:type & name:item_kind").is_empty()
+    );
 }
 
 /// 区画幅 B = 2^58。System 区画は [8B, 9B)。
 const SPACE_B: i64 = 1 << 58;
 
-fn read_item_ids(store: &ttfm::db::Store, target: ttfm::db::TargetTable) -> Vec<i64> {
+fn read_item_ids(
+    store: &ttfm::db::Store,
+    target: ttfm::db::TargetTable,
+) -> Vec<i64> {
     let path = store.path_for_target(target);
     let sql = format!(
         "SELECT item_id FROM read_parquet('{}') ORDER BY item_id",
@@ -510,8 +521,14 @@ fn a_removed_file_is_searchable_through_its_removed_file_types() {
     index(&store, &registry, &[&root]);
 
     assert_eq!(find(&store, &registry, "removed_file:true")[0].id, id);
-    assert_eq!(find(&store, &registry, "removed_file_path:*a.txt")[0].id, id);
-    assert_eq!(find(&store, &registry, "removed_file_is_dir:false")[0].id, id);
+    assert_eq!(
+        find(&store, &registry, "removed_file_path:*a.txt")[0].id,
+        id
+    );
+    assert_eq!(
+        find(&store, &registry, "removed_file_is_dir:false")[0].id,
+        id
+    );
     assert!(find(&store, &registry, "removed_file_at:>0")[0].id == id);
     assert!(find(&store, &registry, "removed_file:false")
         .iter()
@@ -617,7 +634,10 @@ fn location_paths(store: &Store, id: ItemId) -> Vec<String> {
 
 fn location_row_count(store: &Store) -> usize {
     let p = store.path_for_target(TargetTable::Locations);
-    let sql = format!("SELECT count(*) FROM read_parquet('{}')", p.to_string_lossy());
+    let sql = format!(
+        "SELECT count(*) FROM read_parquet('{}')",
+        p.to_string_lossy()
+    );
     store
         .conn
         .prepare(&sql)
@@ -833,4 +853,29 @@ fn initialize_tables_creates_removed_files_with_typed_columns() {
             ("removed_file_at".into(), "BIGINT".into()),
         ]
     );
+}
+
+#[test]
+fn test_dir_changed_skips_base_tags_and_updates_location() {
+    let (store, registry, _d, root) = setup(&["dir_a/file.txt"]);
+    let path_a = root.join("dir_a/file.txt");
+    let dir_b = root.join("dir_b");
+    let path_b = dir_b.join("file.txt");
+
+    index(&store, &registry, &[&root]);
+    let items_before = find(&store, &registry, "filename:file.txt");
+    assert_eq!(items_before.len(), 1);
+    let original_id = items_before[0].id;
+
+    std::fs::create_dir_all(&dir_b).unwrap();
+    std::fs::rename(&path_a, &path_b).unwrap();
+
+    index(&store, &registry, &[&root]);
+
+    let items_after = find(&store, &registry, "filename:file.txt");
+    assert_eq!(items_after.len(), 1);
+    assert_eq!(items_after[0].id, original_id);
+
+    let locs = find(&store, &registry, "parentdir:*dir_b");
+    assert_eq!(locs.len(), 1);
 }

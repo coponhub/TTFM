@@ -46,7 +46,8 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     )?;
 
     // デバッグ: 全アイテム数を確認 (実ファイル/ディレクトリのみ。インデックスルートの data は除く)
-    let all_items = search::search_nowarn(&store, &registry, "", Default::default())?;
+    let all_items =
+        search::search_nowarn(&store, &registry, "", Default::default())?;
     let files_only: Vec<_> = all_items
         .results
         .iter()
@@ -64,8 +65,12 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     // 1. Boolean の sum 集計 (TRUE=1, FALSE=0)
     // ディレクトリが2つ (data, subdir)、ファイルが2つなので sum(is_dir:) は 2 となるはず
     let query_sum = "sum(is_dir:)";
-    let res_sum =
-        search::search_nowarn(&store, &registry, query_sum, Default::default())?;
+    let res_sum = search::search_nowarn(
+        &store,
+        &registry,
+        query_sum,
+        Default::default(),
+    )?;
     assert_eq!(
         res_sum.results[0].raw_repr(),
         "2",
@@ -90,8 +95,12 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
     // アイテム 4 つ: ディレクトリ 2 つ (1+1=2), ファイル 2 つ (0+1=1)
     // 合計: 2*2 + 1*2 = 6
     let query_calc = "sum(is_dir: + 1)";
-    let res_calc =
-        search::search_nowarn(&store, &registry, query_calc, Default::default())?;
+    let res_calc = search::search_nowarn(
+        &store,
+        &registry,
+        query_calc,
+        Default::default(),
+    )?;
     assert_eq!(
         res_calc.results[0].raw_repr(),
         "6",
@@ -101,8 +110,12 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
 
     // 3. Boolean 同士の比較 (is_dir:true)
     let query_cmp = "is_dir:true";
-    let res_cmp =
-        search::search_nowarn(&store, &registry, query_cmp, Default::default())?;
+    let res_cmp = search::search_nowarn(
+        &store,
+        &registry,
+        query_cmp,
+        Default::default(),
+    )?;
     // data と subdir がヒットするはずなので 2
     assert_eq!(
         res_cmp.results.len(),

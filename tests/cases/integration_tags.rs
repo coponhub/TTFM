@@ -86,9 +86,13 @@ fn test_integration_tag_tagging() {
     ttfm::indexing::Indexer::new(&store, &registry)
         .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
-    let registered_paths =
-        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
-            .unwrap();
+    let registered_paths = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     let item_id = registered_paths.results[0].id.as_i64();
 
     super::tag_item_id(&store, &registry, item_id, "project:mars").unwrap();
@@ -109,9 +113,13 @@ fn test_integration_tag_tagging() {
     assert_eq!(results.results[0].id, ItemId::from(tag_id));
     assert_eq!(results.results[0].primary_value().unwrap(), "project:mars");
 
-    let file_results =
-        search::search_nowarn(&store, &registry, "project:mars", Default::default())
-            .unwrap();
+    let file_results = search::search_nowarn(
+        &store,
+        &registry,
+        "project:mars",
+        Default::default(),
+    )
+    .unwrap();
     assert!(file_results
         .results
         .iter()
@@ -135,9 +143,13 @@ fn test_system_item_metadata_integration() {
         .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
-    let ext_list =
-        search::search_nowarn(&store, &registry, "type:extension", Default::default())
-            .unwrap();
+    let ext_list = search::search_nowarn(
+        &store,
+        &registry,
+        "type:extension",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         !ext_list
             .results
@@ -158,9 +170,13 @@ fn test_system_item_metadata_integration() {
         "Physical tag item should NOT be created automatically"
     );
 
-    let results_proj =
-        search::search_nowarn(&store, &registry, "extension:", Default::default())
-            .unwrap();
+    let results_proj = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         !results_proj.results.is_empty(),
         "Should find label items via projection"

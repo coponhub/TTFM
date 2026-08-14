@@ -64,6 +64,10 @@ pub trait TagFunction {
 pub trait Edit: Send + Sync {
     /// 編集戦略の宣言。実際の実行 (FS rename / カラム更新 / 再 index 等) はホストが担う。
     fn strategy(&self) -> EditStrategy;
+    fn path_components(&self) -> &'static [SType] { &[] }
+    fn file_attr(&self, _label: &Label) -> Result<FileAttr> {
+        bail!("this tag type has no file attribute to set")
+    }
     /// 新しい値の検証・正規化 (省略可)。
     fn validate(&self, new: &Label) -> Result<Label> { Ok(new.clone()) }
     /// Volatile item 登録時に item から注入するラベルを導出する (ModifyInjection 戦略のみ。省略可)。

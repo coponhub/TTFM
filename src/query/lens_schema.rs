@@ -65,7 +65,10 @@ pub(crate) fn definition_candidates(
 pub(crate) fn definition_reserved_names(
     entries: &[(TagType, Rank, ItemId)],
 ) -> Vec<String> {
-    entries.iter().map(|(t, _, _)| t.as_str().to_string()).collect()
+    entries
+        .iter()
+        .map(|(t, _, _)| t.as_str().to_string())
+        .collect()
 }
 
 /// タグの物理的な格納場所
@@ -137,7 +140,9 @@ pub(crate) fn check_tag_match(tag_type: &str) -> SimpleExpr {
 }
 
 fn coerce_plain_bitical(label: &Label, logical_type: LogicalType) -> Label {
-    let LabelNode::Formatted(crate::query::format::Formatted::Bitical(resolved)) = label.node()
+    let LabelNode::Formatted(crate::query::format::Formatted::Bitical(
+        resolved,
+    )) = label.node()
     else {
         return label.clone();
     };
@@ -194,8 +199,8 @@ impl Bitical {
         match self {
             Bitical::Integer(i) => {
                 let target = if is_eav_col { Col::LabelInt } else { col };
-                let mut cond =
-                    Condition::any().add(schema_pieces::col_cmp_i64(target, op, *i));
+                let mut cond = Condition::any()
+                    .add(schema_pieces::col_cmp_i64(target, op, *i));
                 if is_eav_col && is_order_op(op) {
                     cond = cond.add(schema_pieces::col_cmp_f64(
                         Col::LabelDouble,
@@ -207,16 +212,21 @@ impl Bitical {
             }
             Bitical::Double(d) => {
                 let target = if is_eav_col { Col::LabelDouble } else { col };
-                let mut cond =
-                    Condition::any().add(schema_pieces::col_cmp_f64(target, op, *d));
+                let mut cond = Condition::any()
+                    .add(schema_pieces::col_cmp_f64(target, op, *d));
                 if is_eav_col && is_order_op(op) {
-                    cond = cond.add(schema_pieces::col_cmp_f64(Col::LabelInt, op, *d));
+                    cond = cond.add(schema_pieces::col_cmp_f64(
+                        Col::LabelInt,
+                        op,
+                        *d,
+                    ));
                 }
                 cond
             }
             Bitical::Boolean(b) => {
                 let target = if is_eav_col { Col::LabelBool } else { col };
-                Condition::any().add(schema_pieces::col_cmp_bool(target, op, *b))
+                Condition::any()
+                    .add(schema_pieces::col_cmp_bool(target, op, *b))
             }
             Bitical::String(s) => {
                 let target = if is_eav_col { Col::LabelStr } else { col };
@@ -251,7 +261,9 @@ fn build_column_condition(
         };
     }
 
-    if let Some(cond) = double_decimal_glob_condition(bitical_type, col, label, bin_op) {
+    if let Some(cond) =
+        double_decimal_glob_condition(bitical_type, col, label, bin_op)
+    {
         return cond;
     }
 
@@ -283,7 +295,12 @@ fn double_decimal_glob_condition(
 /// `(expr, lo, hi)` の半開区間 `[lo, hi)` に演算子ごとの境界行列を適用する
 /// （size の `size_glob_condition` と同じ行列）: Eq→区間内 / Ne→区間外 /
 /// Gt・Ge→上限・下限側 / Lt・Le→下限・上限側。
-fn range_op_condition(expr: SimpleExpr, op: BinOper, lo: f64, hi: f64) -> Option<SimpleExpr> {
+fn range_op_condition(
+    expr: SimpleExpr,
+    op: BinOper,
+    lo: f64,
+    hi: f64,
+) -> Option<SimpleExpr> {
     Some(match op {
         BinOper::Equal => expr.clone().gte(lo).and(expr.lt(hi)),
         BinOper::NotEqual => expr.clone().lt(lo).or(expr.gte(hi)),
@@ -308,7 +325,11 @@ fn decimal_literal_band(digits: &str) -> (f64, f64) {
 /// SQL 条件式へ翻訳する。値ベース（表示・丸めではない）で、桁数の上限はない。
 /// 小数部リテラルは負値も一致するよう絶対値の剰余で判定し、f64 の表現誤差を
 /// 帯幅に比例した許容で吸収する。
-fn translate_double_decimal_glob(pattern: &str, col: Col, op: BinOper) -> Option<SimpleExpr> {
+fn translate_double_decimal_glob(
+    pattern: &str,
+    col: Col,
+    op: BinOper,
+) -> Option<SimpleExpr> {
     use crate::util::NumericField;
     let (int_str, dec_str) = match pattern.split_once('.') {
         Some((i, d)) => (i, Some(d)),
@@ -328,15 +349,19 @@ fn translate_double_decimal_glob(pattern: &str, col: Col, op: BinOper) -> Option
         (NumericField::Free, Some(NumericField::Literal(digits))) => {
             let (lo, hi) = decimal_literal_band(digits);
             let eps = (hi - lo) / 1000.0;
-            let frac: SimpleExpr =
-                Func::abs(Expr::col(col)).binary(BinOper::Custom("%"), Expr::val(1.0_f64));
+            let frac: SimpleExpr = Func::abs(Expr::col(col))
+                .binary(BinOper::Custom("%"), Expr::val(1.0_f64));
             range_op_condition(frac, op, lo - eps, hi + eps)
         }
         _ => None,
     }
 }
 
-pub(crate) fn build_str_condition(col: Col, op: BinOper, val: &str) -> Condition {
+pub(crate) fn build_str_condition(
+    col: Col,
+    op: BinOper,
+    val: &str,
+) -> Condition {
     check_string_match(col, op, val)
         .map(|expr| Condition::any().add(expr))
         .unwrap_or_else(Condition::any)
@@ -392,11 +417,13 @@ impl LogicalSchema for Lens {
             if let Some(func) = &desc.logical_function {
                 let q = func.query();
                 let label = coerce_plain_bitical(label, q.logical_type());
-                let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
+                let tag =
+                    crate::types::TypedTag::retag(tag_type.clone(), &label);
                 return q.expand(tag_type, &label, &tag, self);
             }
         }
-        let label = coerce_plain_bitical(label, self.get_logical_type(tag_type));
+        let label =
+            coerce_plain_bitical(label, self.get_logical_type(tag_type));
         let tag = crate::types::TypedTag::retag(tag_type.clone(), &label);
         let predicate = QueryNode::Comparison(ComparisonNode {
             first: Operand::TypeRef(tag_type.clone()),
@@ -405,9 +432,9 @@ impl LogicalSchema for Lens {
                 Operand::Literal(label),
             )],
         });
-        Ok(QueryNode::TypedTag(
-            tag.with_node(crate::query::Node::Expanded(Box::new(predicate))),
-        ))
+        Ok(QueryNode::TypedTag(tag.with_node(
+            crate::query::Node::Expanded(Box::new(predicate)),
+        )))
     }
 
     fn expand_projection(&self, tag_type: &TagType) -> QueryNode {
@@ -481,8 +508,9 @@ fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
         match op {
             Operand::TypeRef(tt) => Some(tt.clone()),
             Operand::Aggregation(agg) => from_aggregation(agg),
-            Operand::Calculation(calc) => from_operand(&calc.left)
-                .or_else(|| from_operand(&calc.right)),
+            Operand::Calculation(calc) => {
+                from_operand(&calc.left).or_else(|| from_operand(&calc.right))
+            }
             Operand::Query(q) => from_query_node(q),
             Operand::Literal(_) => None,
         }
@@ -496,12 +524,10 @@ fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
     }
     fn from_query_node(node: &QueryNode) -> Option<TagType> {
         match node {
-            QueryNode::Nest(nest) if nest.left.is_none() => {
-                match &nest.right {
-                    Operand::TypeRef(tt) => Some(tt.clone()),
-                    _ => None,
-                }
-            }
+            QueryNode::Nest(nest) if nest.left.is_none() => match &nest.right {
+                Operand::TypeRef(tt) => Some(tt.clone()),
+                _ => None,
+            },
             QueryNode::And(ns) | QueryNode::Or(ns) => {
                 ns.iter().find_map(from_query_node)
             }
@@ -853,10 +879,12 @@ mod tests {
         double_glob_sql_with_op(pattern, crate::query::ast::BasicOp::Eq)
     }
 
-    fn double_glob_sql_with_op(pattern: &str, op: crate::query::ast::BasicOp) -> String {
+    fn double_glob_sql_with_op(
+        pattern: &str,
+        op: crate::query::ast::BasicOp,
+    ) -> String {
         use crate::types::{Bitical, Label};
-        let label = Label::other(Bitical::String(pattern.to_string()),
-        );
+        let label = Label::other(Bitical::String(pattern.to_string()));
         cond_where_sql(build_column_condition(
             Col::LabelDouble,
             ComparisonOp::Scalar(op),
@@ -938,10 +966,16 @@ mod tests {
         );
 
         let lt = double_glob_sql_with_op("2.*", BasicOp::Lt);
-        assert!(lt.contains("< 2") && !lt.contains("< 3"), "Lt は下限(2.0)未満になるべき: {lt}");
+        assert!(
+            lt.contains("< 2") && !lt.contains("< 3"),
+            "Lt は下限(2.0)未満になるべき: {lt}"
+        );
 
         let le = double_glob_sql_with_op("2.*", BasicOp::Le);
-        assert!(le.contains("< 3") && !le.contains("< 2"), "Le は上限(3.0)未満になるべき: {le}");
+        assert!(
+            le.contains("< 3") && !le.contains("< 2"),
+            "Le は上限(3.0)未満になるべき: {le}"
+        );
     }
 
     /// 範囲形の Ne は区間外（OR）になる。
@@ -960,7 +994,10 @@ mod tests {
     fn test_double_periodic_glob_order_ops_wrap_modulo() {
         use crate::query::ast::BasicOp;
         let gt = double_glob_sql_with_op("*.5", BasicOp::Gt);
-        assert!(gt.to_uppercase().contains("ABS"), "周期形は絶対値を使うべき: {gt}");
+        assert!(
+            gt.to_uppercase().contains("ABS"),
+            "周期形は絶対値を使うべき: {gt}"
+        );
         let (lo, hi) = decimal_literal_band("5");
         let eps = (hi - lo) / 1000.0;
         assert!(
@@ -979,8 +1016,7 @@ mod tests {
     #[test]
     fn test_build_column_condition_full_match_glob_eq_drops_value_condition() {
         use crate::types::{Bitical, Label};
-        let label = Label::other(Bitical::String("*".to_string()),
-        );
+        let label = Label::other(Bitical::String("*".to_string()));
         let cond = build_column_condition(
             Col::LabelInt,
             ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
@@ -999,8 +1035,7 @@ mod tests {
     #[test]
     fn test_build_column_condition_full_match_glob_ne_becomes_false() {
         use crate::types::{Bitical, Label};
-        let label = Label::other(Bitical::String("*".to_string()),
-        );
+        let label = Label::other(Bitical::String("*".to_string()));
         let cond = build_column_condition(
             Col::LabelInt,
             ComparisonOp::Scalar(crate::query::ast::BasicOp::Ne),
@@ -1331,8 +1366,8 @@ mod tests {
 
     #[test]
     fn test_check_string_match_caret_is_literal_not_prefix_glob() {
-        let expr = check_string_match(Col::LabelStr, BinOper::Equal, "^foo")
-            .unwrap();
+        let expr =
+            check_string_match(Col::LabelStr, BinOper::Equal, "^foo").unwrap();
         let sql = sea_query::Query::select()
             .expr(expr)
             .to_string(sea_query::PostgresQueryBuilder);

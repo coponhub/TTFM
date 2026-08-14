@@ -43,8 +43,12 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     // This implies "Projection(size:) > Scalar(100)" which is invalid logic but valid loose grammar.
     // In strict grammar, this is a Parse Error.
     // Our post-processor should catch it.
-    let res =
-        search::search_nowarn(&store, &registry, "size: > 100", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: > 100",
+        Default::default(),
+    );
 
     if res.is_ok() {
         // Fail the test if it unexpectedly succeeds (Loose grammar state)
@@ -88,7 +92,8 @@ fn test_strict_grammar_space_requirement() -> Result<()> {
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let res = search::search_nowarn(&store, &registry, "1 >1", Default::default());
+    let res =
+        search::search_nowarn(&store, &registry, "1 >1", Default::default());
 
     if res.is_ok() {
         panic!("Expected error for '1 >1', but it succeeded. Grammar is too loose.");
@@ -123,8 +128,12 @@ fn test_strict_grammar_invalid_stuck_op() -> Result<()> {
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let res =
-        search::search_nowarn(&store, &registry, "size:^=100", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size:^=100",
+        Default::default(),
+    );
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     println!("Actual error: {}", err_msg);

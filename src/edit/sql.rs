@@ -1,7 +1,37 @@
-use crate::db::Col;
-use crate::types::{Bitical, TypedTag};
+use crate::db::{Col, Tbl};
+use crate::types::{Bitical, BiticalType, TypedTag};
 use crate::util::parquet_query;
-use sea_query::{Expr, Order, Query, SelectStatement, UnionType};
+use sea_query::{
+    CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
+    UpdateStatement, Value,
+};
+
+pub(crate) fn column_case_update(
+    tmp: Tbl,
+    col: Col,
+    bitical_type: BiticalType,
+    updates: &[(i64, Bitical)],
+) -> UpdateStatement {
+    let case: SimpleExpr = updates
+        .iter()
+        .fold(CaseStatement::new(), |acc, (id, v)| {
+            acc.case(
+                Expr::col(Col::ItemId).eq(*id),
+                v.to_simple_expr().cast_as(bitical_type),
+            )
+        })
+        .finally(Expr::col(col))
+        .into();
+
+    Query::update()
+        .table(tmp)
+        .value(col, case)
+        .and_where(
+            Expr::col(Col::ItemId)
+                .is_in(updates.iter().map(|(id, _)| Value::from(*id))),
+        )
+        .to_owned()
+}
 
 pub(crate) struct UserTagDelete {
     pub(crate) item_id: i64,
@@ -19,12 +49,13 @@ pub(crate) fn item_references_write(
         q.and_where(Expr::col(Col::ItemId).is_not_in(cascade_ids.to_vec()));
     }
     if !inserts.is_empty() {
-        let rows: Vec<(i64, Option<i64>, Option<String>, String, String)> = inserts
-            .into_iter()
-            .map(|(item_id, item_kind, content)| {
-                (item_id, None, None, item_kind, content)
-            })
-            .collect();
+        let rows: Vec<(i64, Option<i64>, Option<String>, String, String)> =
+            inserts
+                .into_iter()
+                .map(|(item_id, item_kind, content)| {
+                    (item_id, None, None, item_kind, content)
+                })
+                .collect();
         q.union(
             UnionType::All,
             Query::select()
@@ -61,16 +92,22 @@ pub(crate) fn user_tags_write(
     }
 
     if !inserts.is_empty() {
-        let rows: Vec<(i64, String, Option<String>, Option<i64>, Option<f64>, Option<bool>)> =
-            inserts
-                .into_iter()
-                .map(|(item_id, tag)| {
-                    let tag_type = tag.tag_type().to_string();
-                    let (ls, li, ld, lb) =
-                        Bitical::to_eav_columns(Some(tag.value()));
-                    (item_id, tag_type, ls, li, ld, lb)
-                })
-                .collect();
+        let rows: Vec<(
+            i64,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<f64>,
+            Option<bool>,
+        )> = inserts
+            .into_iter()
+            .map(|(item_id, tag)| {
+                let tag_type = tag.tag_type().to_string();
+                let (ls, li, ld, lb) =
+                    Bitical::to_eav_columns(Some(tag.value()));
+                (item_id, tag_type, ls, li, ld, lb)
+            })
+            .collect();
         q.union(
             UnionType::All,
             Query::select()
@@ -233,5 +270,26 @@ mod tests {
             small, large,
             "UNION ALL branch count must not grow with the number of inserted rows"
         );
+    }
+
+    #[test]
+    fn test_column_case_update_sql() {
+        let updates = vec![
+            (1i64, Bitical::String("/new/path1".into())),
+            (2i64, Bitical::String("/new/path2".into())),
+        ];
+        let stmt = column_case_update(
+            Tbl::Target,
+            Col::Path,
+            BiticalType::String,
+            &updates,
+        );
+        let sql = stmt.to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains("UPDATE \"target\""));
+        assert!(sql.contains("\"path\" = (CASE"));
+        assert!(sql.contains("\"item_id\" = 1"));
+        assert!(sql.contains("'/new/path1'"));
+        assert!(sql.contains("\"item_id\" = 2"));
+        assert!(sql.contains("'/new/path2'"));
     }
 }

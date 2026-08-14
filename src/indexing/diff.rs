@@ -51,14 +51,18 @@ pub(crate) fn run_diff(
         });
     }
 
-    // 1. 今回スキャンされたエントリに対し、既存の Inode を持っていればその ID を特定
+    // 1. 移動のみ (DirChanged) のエントリを特定
+    let dir_changed = auditor.query_dir_changed().fetch_with_ids(conn)?;
+
+    // 2. 今回スキャンされたエントリに対し、既存の Inode を持っていればその ID を特定 (DirChanged は除外)
     let to_process = auditor.query_with_existing_ids().fetch_with_ids(conn)?;
 
-    // 2. 削除対象の特定（生存リストにも、今回のスキャン結果にも載っていない既存 ID）
+    // 3. 削除対象の特定（生存リストにも、今回のスキャン結果にも載っていない既存 ID）
     let deleted_ids = auditor.query_deleted(roots).fetch_ids(conn)?;
 
     Ok(IndexDiff {
         to_process,
+        dir_changed,
         deleted_ids,
     })
 }
@@ -133,12 +137,11 @@ fn removed_files_is_empty(
 pub(crate) fn in_scope(col: Col, roots: &[PathBuf]) -> Condition {
     roots.iter().fold(Condition::any(), |cond, r| {
         let base = format!("{}/", r.to_slash_lossy());
-        cond.add(Expr::col(col).eq(r.to_slash_lossy().to_string())).add(
-            sea_query::SimpleExpr::from(
+        cond.add(Expr::col(col).eq(r.to_slash_lossy().to_string()))
+            .add(sea_query::SimpleExpr::from(
                 Func::cust(DuckDbFunc::StartsWith)
                     .args([Expr::col(col).into(), Expr::val(base).into()]),
-            ),
-        )
+            ))
     })
 }
 
@@ -181,7 +184,7 @@ impl DiffAuditor {
             .to_owned()
     }
 
-    /// スキャン結果と既存 DB を Inode で JOIN し、既存 ID を特定するクエリ
+    /// スキャン結果と既存 DB を Inode で JOIN し、既存 ID を特定するクエリ (DirChanged を除く)
     pub(crate) fn query_with_existing_ids(&self) -> SelectStatement {
         let col_file_id = util::col_to_iden(ScanEntry::schema()[1].name);
 
@@ -191,6 +194,23 @@ impl DiffAuditor {
             .from_subquery(util::parquet_query(&self.ents), Tbl::FileReferences)
             .order_by(Col::FileId, sea_query::Order::Asc)
             .order_by(Col::ItemId, sea_query::Order::Asc)
+            .to_owned();
+
+        // DirChanged のパス一覧サブクエリ
+        let dir_changed_paths = Query::select()
+            .column((Tbl::Scan, Col::Path))
+            .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
+            .join_subquery(
+                JoinType::InnerJoin,
+                util::parquet_query(&self.locs),
+                Tbl::Locations,
+                Expr::col((Tbl::Scan, Col::BasenameScanHash))
+                    .eq(Expr::col((Tbl::Locations, Col::BasenameScanHash)))
+                    .and(
+                        Expr::col((Tbl::Scan, Col::Path))
+                            .ne(Expr::col((Tbl::Locations, Col::Path))),
+                    ),
+            )
             .to_owned();
 
         Query::select()
@@ -207,6 +227,34 @@ impl DiffAuditor {
                 Tbl::FileReferences,
                 Expr::col((Tbl::Scan, col_file_id.clone()))
                     .eq(Expr::col((Tbl::FileReferences, col_file_id))),
+            )
+            .and_where(
+                Expr::col((Tbl::Scan, Col::Path))
+                    .not_in_subquery(dir_changed_paths),
+            )
+            .to_owned()
+    }
+
+    /// 移動のみ (DirChanged: basename_scan_hash が一致し path のみ変更) のエントリを取得するクエリ
+    pub(crate) fn query_dir_changed(&self) -> SelectStatement {
+        Query::select()
+            .column((Tbl::Locations, Col::ItemId))
+            .columns(
+                TempScanEntry::columns_with_type()
+                    .into_iter()
+                    .map(|(c, _)| (Tbl::Scan, c)),
+            )
+            .from_subquery(util::parquet_query(&self.scan), Tbl::Scan)
+            .join_subquery(
+                JoinType::InnerJoin,
+                util::parquet_query(&self.locs),
+                Tbl::Locations,
+                Expr::col((Tbl::Scan, Col::BasenameScanHash))
+                    .eq(Expr::col((Tbl::Locations, Col::BasenameScanHash)))
+                    .and(
+                        Expr::col((Tbl::Scan, Col::Path))
+                            .ne(Expr::col((Tbl::Locations, Col::Path))),
+                    ),
             )
             .to_owned()
     }
@@ -297,6 +345,7 @@ impl SelectFetchExt for SelectStatement {
 #[derive(Default)]
 pub(crate) struct IndexDiff {
     pub to_process: Vec<(Option<ItemId>, TempScanEntry)>,
+    pub dir_changed: Vec<(Option<ItemId>, TempScanEntry)>,
     pub deleted_ids: Vec<ItemId>,
 }
 
@@ -326,6 +375,17 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert!(removed_files_is_empty(&store.conn, &removed_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_diff_auditor_dir_changed() -> Result<()> {
+        let dir = tempdir()?;
+        let store = Store::open(dir.path().join("db"))?;
+        let scan_path = store.temp_scan_path();
+        let auditor = DiffAuditor::new(&store, &scan_path);
+        let q = auditor.query_dir_changed();
+        assert!(!q.to_string(PostgresQueryBuilder).is_empty());
         Ok(())
     }
 }

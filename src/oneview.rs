@@ -43,6 +43,10 @@ const TAG_SOURCES: &[TagSource] = &[
         target: TargetTable::BaseTags,
     },
     TagSource {
+        table: Tbl::TagsByLocation,
+        target: TargetTable::TagsByLocation,
+    },
+    TagSource {
         table: Tbl::SystemTags,
         target: TargetTable::SystemTags,
     },
@@ -157,15 +161,13 @@ fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
                 .cast_as(BiticalType::String)
                 .into()
         }
-        OneViewSource::ItemRef(_) => {
-            sea_query::Expr::cust(
-                &crate::db::CustomFunc::item_id_origin_qualified(
-                    Tbl::ItemReferences,
-                    Col::ItemId,
-                ),
-            )
-            .into()
-        }
+        OneViewSource::ItemRef(_) => sea_query::Expr::cust(
+            &crate::db::CustomFunc::item_id_origin_qualified(
+                Tbl::ItemReferences,
+                Col::ItemId,
+            ),
+        )
+        .into(),
         OneViewSource::Tag(_)
         | OneViewSource::Physical { .. }
         | OneViewSource::Removed { .. } => {
@@ -198,12 +200,14 @@ fn spec_rank(source: &OneViewSource) -> sea_query::SimpleExpr {
         }
 
         // ItemRef は自身のテーブルの Rank カラムを使う
-        OneViewSource::ItemRef(_) => Func::cust(crate::db::DuckDbFunc::Coalesce)
-            .args([
-                Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
-                Expr::val(0).into(),
-            ])
-            .into(),
+        OneViewSource::ItemRef(_) => {
+            Func::cust(crate::db::DuckDbFunc::Coalesce)
+                .args([
+                    Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
+                    Expr::val(0).into(),
+                ])
+                .into()
+        }
 
         // RemovedFiles には system rank が無い。user rank は
         // `resolved_sources_sql` が外側で一括して解決する。
@@ -396,7 +400,10 @@ fn build_removed_file_query(
     q.column((Tbl::RemovedFiles, Col::ItemId));
     apply_label_columns(&mut q, Tbl::RemovedFiles, &col.into_iden(), bitical);
     apply_oneview_schema(&mut q, OneViewSource::Removed { ty, col });
-    q.from_subquery(crate::util::parquet_query(removed_path), Tbl::RemovedFiles);
+    q.from_subquery(
+        crate::util::parquet_query(removed_path),
+        Tbl::RemovedFiles,
+    );
 
     q.to_string(PostgresQueryBuilder)
 }
@@ -597,7 +604,11 @@ mod tests {
 
     #[test]
     fn resolved_sources_sql_projects_only_the_union_columns() {
-        let sql = resolved_sources_sql("SELECT 1 AS item_id", "u.parquet", "r.parquet");
+        let sql = resolved_sources_sql(
+            "SELECT 1 AS item_id",
+            "u.parquet",
+            "r.parquet",
+        );
         assert!(sql.contains("SELECT \"u\".*"));
         assert!(!sql.contains("SELECT * "));
     }
@@ -656,5 +667,12 @@ mod tests {
              across all its tag rows.",
             inconsistent_ids
         );
+    }
+
+    #[test]
+    fn test_oneview_tag_sources_includes_tags_by_location() {
+        assert!(TAG_SOURCES
+            .iter()
+            .any(|s| s.target == TargetTable::TagsByLocation));
     }
 }

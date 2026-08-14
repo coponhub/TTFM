@@ -111,7 +111,8 @@ fn match_atoms(atoms: &[Atom], text: &[char]) -> Option<Vec<String>> {
         }),
         Atom::Any => (0..=text.len()).find_map(|take| {
             let (bound, tail) = text.split_at(take);
-            match_atoms(rest, tail).map(|caps| prepend(bound.iter().collect(), caps))
+            match_atoms(rest, tail)
+                .map(|caps| prepend(bound.iter().collect(), caps))
         }),
     }
 }
@@ -160,10 +161,7 @@ mod tests {
     #[test]
     fn question_and_class_capture_one_char() {
         assert_eq!(captures("a?c", "abc"), Some(vec!["b".to_string()]));
-        assert_eq!(
-            captures("a[bx]c", "abc"),
-            Some(vec!["b".to_string()])
-        );
+        assert_eq!(captures("a[bx]c", "abc"), Some(vec!["b".to_string()]));
     }
 
     #[test]
@@ -282,11 +280,9 @@ mod tests {
     fn multibyte_divergence_from_duckdb_is_pinned() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
         let sql_hit: bool = conn
-            .query_row(
-                "SELECT ? GLOB ?",
-                duckdb::params!["あ", "?"],
-                |row| row.get(0),
-            )
+            .query_row("SELECT ? GLOB ?", duckdb::params!["あ", "?"], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(!sql_hit, "DuckDB GLOB matches ? against bytes, not chars");
         assert!(glob_captures("?", "あ").is_some());

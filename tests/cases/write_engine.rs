@@ -66,7 +66,9 @@ fn write_add_volatile_creates_item_ref_and_user_tag() {
             tags: vec![
                 TagOp::Append(TypedTag::new(SType::ItemKind, "tag")),
                 TagOp::Append(TypedTag::new(SType::Content, "project:A")),
-                TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("A".to_string()),
                 )),
             ],
         }],
@@ -117,9 +119,13 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
-                TagOp::Append(TypedTag::new(TagType::from("flag"), Bitical::Boolean(true),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("flag"),
+                    Bitical::Boolean(true),
                 )),
-                TagOp::Append(TypedTag::new(TagType::from("flag"), Bitical::Boolean(false),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("flag"),
+                    Bitical::Boolean(false),
                 )),
             ],
         }],
@@ -133,7 +139,9 @@ fn write_delete_by_boolean_label_removes_only_matching_value() {
         &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
-            tags: vec![DeleteTarget::Tag(TypedTag::new(TagType::from("flag"), Bitical::Boolean(true),
+            tags: vec![DeleteTarget::Tag(TypedTag::new(
+                TagType::from("flag"),
+                Bitical::Boolean(true),
             ))],
         }],
     )
@@ -159,9 +167,13 @@ fn write_delete_by_type_removes_user_tags() {
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
-                TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("A".to_string()),
                 )),
-                TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("B".to_string()),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("B".to_string()),
                 )),
             ],
         }],
@@ -198,9 +210,13 @@ fn write_delete_by_label_removes_specific_tag() {
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
-                TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("A".to_string()),
                 )),
-                TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("B".to_string()),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("B".to_string()),
                 )),
             ],
         }],
@@ -213,7 +229,9 @@ fn write_delete_by_label_removes_specific_tag() {
         &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
-            tags: vec![DeleteTarget::Tag(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+            tags: vec![DeleteTarget::Tag(TypedTag::new(
+                TagType::from("project"),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -328,7 +346,9 @@ fn write_cascade_delete_also_removes_user_tags() {
         &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
-            tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+            tags: vec![TagOp::Append(TypedTag::new(
+                TagType::from("project"),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -433,7 +453,9 @@ fn write_add_stored_appends_user_tag() {
         &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(existing_id),
-            tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+            tags: vec![TagOp::Append(TypedTag::new(
+                TagType::from("project"),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -464,7 +486,9 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
         &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
-            tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+            tags: vec![TagOp::Append(TypedTag::new(
+                TagType::from("project"),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -480,7 +504,9 @@ fn write_delete_and_add_same_type_in_one_batch_replaces_value() {
             },
             WriteAction::Add {
                 item: ItemId::Stored(id),
-                tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("B".to_string()),
+                tags: vec![TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("B".to_string()),
                 ))],
             },
         ],
@@ -506,7 +532,9 @@ fn write_replace_delete_not_counted_in_deleted() {
         &registry,
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
-            tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+            tags: vec![TagOp::Append(TypedTag::new(
+                TagType::from("project"),
+                Bitical::String("A".to_string()),
             ))],
         }],
     )
@@ -522,7 +550,9 @@ fn write_replace_delete_not_counted_in_deleted() {
             },
             WriteAction::Add {
                 item: ItemId::Stored(id),
-                tags: vec![TagOp::Replace(TypedTag::new(TagType::from("project"), Bitical::String("B".to_string()),
+                tags: vec![TagOp::Replace(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("B".to_string()),
                 ))],
             },
         ],
@@ -552,12 +582,16 @@ fn write_multiple_items_in_one_batch() {
         vec![
             WriteAction::Add {
                 item: ItemId::Stored(id1),
-                tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+                tags: vec![TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("A".to_string()),
                 ))],
             },
             WriteAction::Add {
                 item: ItemId::Stored(id2),
-                tags: vec![TagOp::Append(TypedTag::new(TagType::from("project"), Bitical::String("A".to_string()),
+                tags: vec![TagOp::Append(TypedTag::new(
+                    TagType::from("project"),
+                    Bitical::String("A".to_string()),
                 ))],
             },
         ],
@@ -626,7 +660,10 @@ fn write_delete_by_double_label_removes_only_matching_value() {
         vec![WriteAction::Add {
             item: ItemId::Stored(id),
             tags: vec![
-                TagOp::Append(TypedTag::new(TagType::from("score"), v1.clone())),
+                TagOp::Append(TypedTag::new(
+                    TagType::from("score"),
+                    v1.clone(),
+                )),
                 TagOp::Append(TypedTag::new(TagType::from("score"), v2)),
             ],
         }],
@@ -639,7 +676,9 @@ fn write_delete_by_double_label_removes_only_matching_value() {
         &registry,
         vec![WriteAction::Delete {
             item: ItemId::Stored(id),
-            tags: vec![DeleteTarget::Tag(TypedTag::new(TagType::from("score"), v1,
+            tags: vec![DeleteTarget::Tag(TypedTag::new(
+                TagType::from("score"),
+                v1,
             ))],
         }],
     )

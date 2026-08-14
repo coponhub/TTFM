@@ -66,24 +66,44 @@ fn test_toplevel_arithmetic_without_parens(
     // size: - 7 = 0
     // "size:" will return 7 for the file.
     // Existing test
-    let _res =
-        search::search_nowarn(&store, &registry, "size: - 7", Default::default())?;
+    let _res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: - 7",
+        Default::default(),
+    )?;
 
     // Addition
-    let _res =
-        search::search_nowarn(&store, &registry, "count() + 1", Default::default())?;
+    let _res = search::search_nowarn(
+        &store,
+        &registry,
+        "count() + 1",
+        Default::default(),
+    )?;
 
     // Multiplication
-    let _res =
-        search::search_nowarn(&store, &registry, "size: * 2", Default::default())?;
+    let _res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: * 2",
+        Default::default(),
+    )?;
 
     // Division
-    let _res =
-        search::search_nowarn(&store, &registry, "size: / 2", Default::default())?;
+    let _res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: / 2",
+        Default::default(),
+    )?;
 
     // Remainder
-    let _res =
-        search::search_nowarn(&store, &registry, "count() % 2", Default::default())?;
+    let _res = search::search_nowarn(
+        &store,
+        &registry,
+        "count() % 2",
+        Default::default(),
+    )?;
 
     // Set Difference Regression check
     // "type:file - type:dir" should be valid Set Difference, not Arithmetic.

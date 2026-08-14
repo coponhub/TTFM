@@ -114,10 +114,15 @@ fn test_plugin_normalize_label_applied_in_search() {
                 "c" => Label::from("clean"),
                 _ => label.clone(),
             };
-            Ok(ttfm::QueryNode::Comparison(ttfm::query::ast::ComparisonNode {
-                first: first.clone(),
-                rest: vec![(op, ttfm::query::ast::Operand::Literal(normalized))],
-            }))
+            Ok(ttfm::QueryNode::Comparison(
+                ttfm::query::ast::ComparisonNode {
+                    first: first.clone(),
+                    rest: vec![(
+                        op,
+                        ttfm::query::ast::Operand::Literal(normalized),
+                    )],
+                },
+            ))
         }
     }
 
@@ -423,9 +428,13 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
     )
     .expect("edit should materialize the plugin type definition");
 
-    let results =
-        search::search_nowarn(&store, &registry, "type:*", SearchOptions::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "type:*",
+        SearchOptions::default(),
+    )
+    .unwrap();
     let plugin_item = results
         .results
         .iter()
@@ -438,4 +447,15 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
         ttfm::types::Origin::Plugin
     );
     assert_eq!(plugin_item.rank, 5);
+}
+
+#[test]
+fn test_wasm_plugin_adapter_target_table_default() {
+    use ttfm::db::TargetTable;
+
+    let adapter = load_sample_adapter();
+    let idx = adapter
+        .index()
+        .expect("sample plugin should implement index");
+    assert_eq!(idx.target_table(), TargetTable::BaseTags);
 }

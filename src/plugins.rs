@@ -25,7 +25,9 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::db::{BiticalType, TargetTable};
-use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
+};
 use crate::tag::{
     Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query,
     ScanRole, TagFunction,
@@ -49,6 +51,18 @@ enum WasmValueType {
     Boolean,
     #[component(name = "double")]
     Double,
+}
+
+// indexing::target-table enum
+#[allow(dead_code)]
+#[derive(ComponentType, Lift, Lower, Debug, Clone, Copy, PartialEq)]
+#[component(enum)]
+#[repr(u8)]
+enum WasmTargetTable {
+    #[component(name = "base-tags")]
+    BaseTags,
+    #[component(name = "tags-by-location")]
+    TagsByLocation,
 }
 
 // indexing::tag-value variant
@@ -169,7 +183,7 @@ impl WasmPlugin {
             .context("Failed to call name")?;
 
         // indexing がある場合は get-value-type を呼び出して SQL 型を決定
-        let bitical_type = if has_indexing {
+        let (bitical_type, target_table) = if has_indexing {
             let idx_export = instance
                 .get_export(&mut store, None, "ttfm:plugin/indexing")
                 .context(
@@ -183,20 +197,46 @@ impl WasmPlugin {
                 .context("Failed to get get-value-type Func")?;
             let (vt,) =
                 wasm_call::<(), (WasmValueType,)>(&func, &mut store, ())?;
-            match vt {
+            let btype = match vt {
                 WasmValueType::Text => BiticalType::String,
                 WasmValueType::BigInt => BiticalType::Integer,
                 WasmValueType::Boolean => BiticalType::Boolean,
                 WasmValueType::Double => BiticalType::Double,
-            }
+            };
+
+            let ttable = if let Some(tt_idx) = instance.get_export(
+                &mut store,
+                Some(&idx_export),
+                "target-table",
+            ) {
+                let tt_func = instance
+                    .get_func(&mut store, tt_idx)
+                    .context("Failed to get target-table Func")?;
+                let (tt,) = wasm_call::<(), (WasmTargetTable,)>(
+                    &tt_func,
+                    &mut store,
+                    (),
+                )?;
+                match tt {
+                    WasmTargetTable::BaseTags => TargetTable::BaseTags,
+                    WasmTargetTable::TagsByLocation => {
+                        TargetTable::TagsByLocation
+                    }
+                }
+            } else {
+                TargetTable::BaseTags
+            };
+
+            (btype, ttable)
         } else {
-            BiticalType::String
+            (BiticalType::String, TargetTable::BaseTags)
         };
 
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),
             name,
             bitical_type,
+            target_table,
             has_indexing,
             has_display,
         })
@@ -229,6 +269,7 @@ pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
     pub name: String,
     bitical_type: BiticalType,
+    target_table: TargetTable,
     has_indexing: bool,
     has_display: bool,
 }
@@ -312,7 +353,7 @@ impl Index for WasmPluginAdapter {
     }
 
     fn target_table(&self) -> TargetTable {
-        TargetTable::BaseTags
+        self.target_table
     }
 
     fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
@@ -391,7 +432,8 @@ impl Query for WasmPluginAdapter {
         QueryNode::Comparison(ComparisonNode {
             first: first.clone(),
             rest: vec![(op, Operand::Literal(normalized))],
-        }).to_ok()
+        })
+        .to_ok()
     }
 
     fn expand(
@@ -436,7 +478,8 @@ impl Query for WasmPluginAdapter {
                     crate::query::Node::Expanded(Box::new(predicate)),
                 ))
             }
-        }.to_ok()
+        }
+        .to_ok()
     }
 
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {

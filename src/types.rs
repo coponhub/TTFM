@@ -16,6 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use path_slash::PathExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 use uuid::Uuid;
@@ -266,7 +268,9 @@ impl Origin {
     /// 区画内オフセットから item_id を求める。区画外に出るオフセットは `None`。
     pub fn id_at_offset(self, offset: i64) -> Option<i64> {
         let id = self.block_lo().checked_add(offset)?;
-        (self.block_lo()..self.block_hi()).contains(&id).then_some(id)
+        (self.block_lo()..self.block_hi())
+            .contains(&id)
+            .then_some(id)
     }
 
     /// origin の短縮ラベル。Builtin→"Sys"、User→"User"、File→"File"。
@@ -406,7 +410,9 @@ impl ToSql for FileTimestamp {
 // BiticalはInt, Float, String, Boolean等の、
 // ハードウェア・プロセッサレベルのプリミティブな型を指す。
 // アイテムの持つ値はこれらに収束する。
-#[derive(Debug, PartialEq, Eq, Clone, Copy, strum::Display, strum::EnumIter)]
+#[derive(
+    Debug, PartialEq, Eq, Clone, Copy, strum::Display, strum::EnumIter,
+)]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub enum BiticalType {
@@ -743,7 +749,10 @@ impl Ord for Label {
 
 impl Label {
     pub(crate) fn other(v: impl Into<Bitical>) -> Self {
-        Self { value: v.into(), node: LabelNode::DefaultLabelNode }
+        Self {
+            value: v.into(),
+            node: LabelNode::DefaultLabelNode,
+        }
     }
 
     pub fn node(&self) -> &LabelNode {
@@ -902,7 +911,9 @@ impl DateTime {
                 return Some(Err(()));
             };
             return Some(
-                NaiveDate::from_ymd_opt(y, m, d).map(DateTime::Date).ok_or(()),
+                NaiveDate::from_ymd_opt(y, m, d)
+                    .map(DateTime::Date)
+                    .ok_or(()),
             );
         }
 
@@ -919,7 +930,10 @@ impl DateTime {
             if parts[0].len() == 4 || p1 > 12 {
                 return Some(
                     NaiveDate::from_ymd_opt(p1, p2, 1)
-                        .map(|_| DateTime::YearMonth { year: p1, month: p2 })
+                        .map(|_| DateTime::YearMonth {
+                            year: p1,
+                            month: p2,
+                        })
                         .ok_or(()),
                 );
             }
@@ -1099,7 +1113,9 @@ impl DateTimeRange {
     /// glob を含まないパターンは通常の日付解釈に任せるため None を返す。
     /// フィールド単位の glob を `(DateField, 生の値文字列)` の列へ分割する。
     /// 書かれたフィールドのみを返す（欠けた末尾フィールドは含まない）。
-    pub(crate) fn split_slot_fields(pattern: &str) -> Option<Vec<(DateField, &str)>> {
+    pub(crate) fn split_slot_fields(
+        pattern: &str,
+    ) -> Option<Vec<(DateField, &str)>> {
         if !pattern.contains('*') {
             return None;
         }
@@ -1155,10 +1171,15 @@ impl DateTimeRange {
             return Some(Ok(range));
         }
         if let Some(result) = DateTime::parse_structured(s) {
-            return Some(result.map_err(|_| format!("invalid date: {s}")).and_then(|dt| {
-                dt.to_interval()
-                    .ok_or_else(|| format!("cannot resolve date range: {s}"))
-            }));
+            return Some(
+                result.map_err(|_| format!("invalid date: {s}")).and_then(
+                    |dt| {
+                        dt.to_interval().ok_or_else(|| {
+                            format!("cannot resolve date range: {s}")
+                        })
+                    },
+                ),
+            );
         }
         if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
             return None;
@@ -1177,8 +1198,10 @@ impl DateTimeRange {
             DateSlot::Free => min,
         };
         let year = field(DateField::Year, NaiveDate::MIN.year() as i64);
-        let months = (field(DateField::Month, 1).max(1) - 1).clamp(0, u32::MAX as i64) as u32;
-        let days = (field(DateField::Day, 1).max(1) - 1).clamp(0, i64::MAX) as u64;
+        let months = (field(DateField::Month, 1).max(1) - 1)
+            .clamp(0, u32::MAX as i64) as u32;
+        let days =
+            (field(DateField::Day, 1).max(1) - 1).clamp(0, i64::MAX) as u64;
         let hours = field(DateField::Hour, 0);
         let minutes = field(DateField::Minute, 0);
         let seconds = field(DateField::Second, 0);
@@ -1341,13 +1364,19 @@ impl TypedTag {
 
     /// 名札が指す既定形（`Type: := Label` の比較）。
     pub(crate) fn default_form(&self) -> crate::query::ast::QueryNode {
-        crate::query::ast::QueryNode::Comparison(crate::query::ast::ComparisonNode {
-            first: crate::query::ast::Operand::TypeRef(self.tag_type.clone()),
-            rest: vec![(
-                crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Eq),
-                crate::query::ast::Operand::Literal(self.label.clone()),
-            )],
-        })
+        crate::query::ast::QueryNode::Comparison(
+            crate::query::ast::ComparisonNode {
+                first: crate::query::ast::Operand::TypeRef(
+                    self.tag_type.clone(),
+                ),
+                rest: vec![(
+                    crate::query::ast::ComparisonOp::Label(
+                        crate::query::ast::BasicOp::Eq,
+                    ),
+                    crate::query::ast::Operand::Literal(self.label.clone()),
+                )],
+            },
+        )
     }
 
     pub fn node(&self) -> std::borrow::Cow<'_, crate::query::Node> {
@@ -1534,6 +1563,41 @@ pub type Name<'a> = &'a str;
 /// プログラム終了まで有効なタグ名（静的文字列）。
 pub type StaticName = &'static str;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathComponents {
+    pub parentdir: String,
+    pub stem: String,
+    pub extension: Option<String>,
+}
+
+impl PathComponents {
+    pub fn decompose(p: &Path) -> Self {
+        Self {
+            parentdir: p
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_slash_lossy()
+                .into(),
+            stem: p.file_stem().unwrap_or_default().to_string_lossy().into(),
+            extension: p.extension().map(|e| e.to_string_lossy().into()),
+        }
+    }
+
+    pub fn set_filename(&mut self, name: &str) {
+        let p = Path::new(name);
+        self.stem = p.file_stem().unwrap_or_default().to_string_lossy().into();
+        self.extension = p.extension().map(|e| e.to_string_lossy().into());
+    }
+
+    pub fn join(&self) -> PathBuf {
+        let name = match &self.extension {
+            Some(e) => format!("{}.{}", self.stem, e),
+            None => self.stem.clone(),
+        };
+        Path::new(&self.parentdir).join(name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SType {
     ItemId,
@@ -1589,6 +1653,10 @@ pub enum SType {
 }
 
 impl SType {
+    pub fn path_components() -> &'static [SType] {
+        &[SType::Parentdir, SType::Stem, SType::Extension]
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ItemId => "item_id",
@@ -1720,7 +1788,10 @@ mod tests_types {
         let naive = chrono::DateTime::from_timestamp(local_epoch, 0)
             .unwrap()
             .naive_utc();
-        assert_eq!(naive.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-12-31 23:00:00");
+        assert_eq!(
+            naive.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2024-12-31 23:00:00"
+        );
     }
 
     #[test]
@@ -1813,13 +1884,17 @@ mod tests_types {
     fn typed_tag_node_builds_default_comparison_form_for_name_tag() {
         let tt = TypedTag::new(SType::Size, 1024i64);
         let expected = crate::query::Node::Query(Box::new(
-            crate::query::ast::QueryNode::Comparison(crate::query::ast::ComparisonNode {
-                first: crate::query::ast::Operand::TypeRef(tt.tag_type()),
-                rest: vec![(
-                    crate::query::ast::ComparisonOp::Label(crate::query::ast::BasicOp::Eq),
-                    crate::query::ast::Operand::Literal(tt.label.clone()),
-                )],
-            }),
+            crate::query::ast::QueryNode::Comparison(
+                crate::query::ast::ComparisonNode {
+                    first: crate::query::ast::Operand::TypeRef(tt.tag_type()),
+                    rest: vec![(
+                        crate::query::ast::ComparisonOp::Label(
+                            crate::query::ast::BasicOp::Eq,
+                        ),
+                        crate::query::ast::Operand::Literal(tt.label.clone()),
+                    )],
+                },
+            ),
         ));
         assert_eq!(tt.node().as_ref(), &expected);
     }
@@ -2480,9 +2555,9 @@ mod tests_types {
     /// 「2000年以降」のような範囲は glob ではなく比較式で書く。
     #[test]
     fn test_date_time_range_parse_slot_glob_rejects_partial_field_glob() {
-        for pattern in [
-            "2026-0*", "20*", "*-0*-01", "20*-1*", "12:3*", "2026-02-0*",
-        ] {
+        for pattern in
+            ["2026-0*", "20*", "*-0*-01", "20*-1*", "12:3*", "2026-02-0*"]
+        {
             assert!(
                 DateTimeRange::parse_slot_glob(pattern).is_none(),
                 "フィールド内の部分 glob は拒否されるべき: {pattern}"
@@ -2570,13 +2645,19 @@ mod tests_types {
     fn test_date_time_range_parse_delegates_to_structured_date() {
         use chrono::NaiveDate;
         let dt = DateTime::Date(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap());
-        assert_eq!(DateTimeRange::parse("2026-02-01"), Some(Ok(dt.to_interval().unwrap())));
+        assert_eq!(
+            DateTimeRange::parse("2026-02-01"),
+            Some(Ok(dt.to_interval().unwrap()))
+        );
     }
 
     #[test]
     fn test_date_time_range_parse_claims_natural_language() {
         let dt: DateTime = "today".parse().unwrap();
-        assert_eq!(DateTimeRange::parse("today"), Some(Ok(dt.to_interval().unwrap())));
+        assert_eq!(
+            DateTimeRange::parse("today"),
+            Some(Ok(dt.to_interval().unwrap()))
+        );
     }
 
     #[test]
@@ -2589,7 +2670,11 @@ mod tests_types {
     #[test]
     fn test_date_time_range_parse_declines_bare_number() {
         for s in ["2026", "0", "123456", "0.1", "3.14", "1e5"] {
-            assert_eq!(DateTimeRange::parse(s), None, "should decline a bare number: {s}");
+            assert_eq!(
+                DateTimeRange::parse(s),
+                None,
+                "should decline a bare number: {s}"
+            );
         }
     }
 
@@ -2607,6 +2692,29 @@ mod tests_types {
                 "should decline a malformed field glob: {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn test_stype_path_components() {
+        assert_eq!(
+            SType::path_components(),
+            &[SType::Parentdir, SType::Stem, SType::Extension]
+        );
+    }
+
+    #[test]
+    fn test_path_components_decompose_and_join() {
+        let p = Path::new("/path/to/MyFile.TXT");
+        let mut comps = PathComponents::decompose(p);
+        assert_eq!(comps.parentdir, "/path/to");
+        assert_eq!(comps.stem, "MyFile");
+        assert_eq!(comps.extension.as_deref(), Some("TXT"));
+        assert_eq!(comps.join(), PathBuf::from("/path/to/MyFile.TXT"));
+
+        comps.set_filename("Renamed.DOC");
+        assert_eq!(comps.stem, "Renamed");
+        assert_eq!(comps.extension.as_deref(), Some("DOC"));
+        assert_eq!(comps.join(), PathBuf::from("/path/to/Renamed.DOC"));
     }
 }
 

@@ -28,6 +28,7 @@ const CORE_WIT: &str = "interface core {
 // }
 const INDEXING_WIT: &str = "interface indexing {
     enum value-type { text, big-int, boolean, double }
+    enum target-table { base-tags, tags-by-location }
     variant tag-value {
         text(string),
         big-int(s64),
@@ -36,6 +37,7 @@ const INDEXING_WIT: &str = "interface indexing {
         empty,
     }
     get-value-type: func() -> value-type;
+    target-table: func() -> target-table;
     tag-file: func(path: string) -> list<tag-value>;
 }";
 

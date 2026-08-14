@@ -455,9 +455,10 @@ mod tests {
     #[test]
     fn test_parse_numeric_field() {
         assert!(matches!(parse_numeric_field("*"), Some(NumericField::Free)));
-        assert!(
-            matches!(parse_numeric_field("123"), Some(NumericField::Literal("123")))
-        );
+        assert!(matches!(
+            parse_numeric_field("123"),
+            Some(NumericField::Literal("123"))
+        ));
         assert!(parse_numeric_field("").is_none());
         assert!(parse_numeric_field("1*").is_none());
         assert!(parse_numeric_field("abc").is_none());
@@ -531,9 +532,11 @@ mod tests {
         assert!(parse_datetime("30min ago").is_some());
 
         // 部分的指定 (M/D, HH:MM)
-        let (md_start, md_end) = parse_datetime("1/10").unwrap().as_interval().unwrap();
+        let (md_start, md_end) =
+            parse_datetime("1/10").unwrap().as_interval().unwrap();
         assert_ne!(md_start, md_end);
-        let (hm_start, hm_end) = parse_datetime("12:30").unwrap().as_interval().unwrap();
+        let (hm_start, hm_end) =
+            parse_datetime("12:30").unwrap().as_interval().unwrap();
         assert_ne!(hm_start, hm_end);
 
         // 絶対指定 (YYYY/M/D)
@@ -546,10 +549,11 @@ mod tests {
             parse_datetime("12:30:05").unwrap().as_interval().unwrap();
         assert_eq!(hms_start, hms_end);
 
-        let (ymd_hms_start, ymd_hms_end) = parse_datetime("2024/01/01 12:30:05")
-            .unwrap()
-            .as_interval()
-            .unwrap();
+        let (ymd_hms_start, ymd_hms_end) =
+            parse_datetime("2024/01/01 12:30:05")
+                .unwrap()
+                .as_interval()
+                .unwrap();
         assert_eq!(ymd_hms_start, ymd_hms_end);
 
         // 各種区切り文字
@@ -558,7 +562,8 @@ mod tests {
 
         assert!(parse_datetime("2024").is_none());
 
-        let (ym_start, ym_end) = parse_datetime("2013/1").unwrap().as_interval().unwrap();
+        let (ym_start, ym_end) =
+            parse_datetime("2013/1").unwrap().as_interval().unwrap();
         assert!(ym_start < ym_end);
         // 2013/1/1 00:00:00 〜 2013/1/31 23:59:59 のはず
     }

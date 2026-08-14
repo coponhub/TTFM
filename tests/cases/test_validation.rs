@@ -407,7 +407,8 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
     let queries = vec!["sum()", "avg()", "max()", "min()"];
 
     for q in queries {
-        let result = search::search_nowarn(&store, &registry, q, Default::default());
+        let result =
+            search::search_nowarn(&store, &registry, q, Default::default());
         assert!(
             result.is_err(),
             "Aggregator '{}' without arguments should fail",
@@ -479,7 +480,8 @@ fn test_sum_with_label_comparison_inner_is_error() {
         "parentdir: &: ((size: * 2) :> 1000)",
     ];
     for q in &queries {
-        let result = search::search_nowarn(&store, &registry, q, Default::default());
+        let result =
+            search::search_nowarn(&store, &registry, q, Default::default());
         assert!(result.is_err(), "'{q}' should return an error, not panic");
     }
 }
@@ -507,7 +509,8 @@ fn test_set_operation_error_message_says_invalid() -> anyhow::Result<()> {
         "sum(size:) & count(path:)",
     ];
     for q in &queries {
-        let result = search::search_nowarn(&store, &registry, q, Default::default());
+        let result =
+            search::search_nowarn(&store, &registry, q, Default::default());
         assert!(result.is_err(), "'{q}' should return an error");
         let msg = result.unwrap_err().to_string();
         assert!(

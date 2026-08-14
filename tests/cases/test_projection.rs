@@ -44,8 +44,12 @@ fn test_projection_no_empty_labels() -> anyhow::Result<()> {
         false,
     )?;
 
-    let res =
-        search::search_nowarn(&store, &registry, "extension:", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        Default::default(),
+    )?;
 
     assert!(
         res.results.iter().any(|r| r.raw_repr() == "txt"),
@@ -234,9 +238,13 @@ fn test_projection_queries() {
 
     // 1. extension: (投影 - 転置: Label → Items)
     // 投影結果はラベル値（rs, txt）のリストとして返される
-    let results =
-        search::search_nowarn(&store, &registry, "extension:", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'extension:': {:?}",
         results
@@ -261,9 +269,13 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 2. directory: (投影 -> is_dir:true + projection:filename - 転置)
-    let results =
-        search::search_nowarn(&store, &registry, "directory:", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "directory:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'directory:': {:?}",
         results
@@ -282,9 +294,13 @@ fn test_projection_queries() {
     assert!(has_item_tags(&results.results));
 
     // 3. filename: (投影 -> is_dir:false + projection:filename - 転置)
-    let results =
-        search::search_nowarn(&store, &registry, "filename:", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "filename:",
+        Default::default(),
+    )
+    .unwrap();
     println!(
         "Matches for 'filename:': {:?}",
         results
@@ -310,9 +326,13 @@ fn test_projection_queries() {
 
     // 4. origin:system
     // 全てのアイテムは system 由来のタグを持つはず（初期状態）
-    let results =
-        search::search_nowarn(&store, &registry, "origin:system", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "origin:system",
+        Default::default(),
+    )
+    .unwrap();
     assert!(results.results.len() >= 3);
 
     // 5. 複合クエリ
@@ -331,7 +351,8 @@ fn test_projection_queries() {
 
     // 6. type: (全アイテムヒット確認 + SType網羅性確認)
     let results =
-        search::search_nowarn(&store, &registry, "type:", Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, "type:", Default::default())
+            .unwrap();
     assert!(results.results.len() >= 3, "type: should match all items");
     assert!(has_item_tags(&results.results));
 
@@ -358,7 +379,8 @@ fn test_projection_queries() {
 
     // 7. typedtag: (全アイテムヒット確認 + 値の検証)
     let results =
-        search::search_nowarn(&store, &registry, "tag:", Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, "tag:", Default::default())
+            .unwrap();
     println!("Matches for 'tag:': {} items", results.results.len());
     assert!(results.results.len() >= 3, "tag: should match all items");
     assert!(has_item_tags(&results.results));
@@ -371,9 +393,13 @@ fn test_projection_queries() {
     assert!(has_tag, "Items should have 'tag' tag values in Item");
 
     // 追加検証: extension: 結果の中身
-    let ext_results =
-        search::search_nowarn(&store, &registry, "extension:", Default::default())
-            .unwrap();
+    let ext_results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
     for r in &ext_results.results {
         // test.rs は extension:rs を持つ
         if r.raw_repr() == "test.rs" {
@@ -387,7 +413,8 @@ fn test_projection_queries() {
     // rank は oneview 上の全ての行で有効な値を持つカラムだが、
     // プロジェクションクエリとしては type='rank' ではなく rank column のユニーク値を期待する。
     let results =
-        search::search_nowarn(&store, &registry, "rank:", Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, "rank:", Default::default())
+            .unwrap();
     // 全てのアイテムは初期状態で rank=0 のはず (あるいは計算された値)
     // 実装が未対応なら0件になる
     println!("Matches for 'rank:': {} items", results.results.len());
@@ -411,9 +438,13 @@ fn test_projection_queries() {
     super::tag_item_id(&store, &registry, note_id, "category:important")
         .unwrap();
 
-    let results =
-        search::search_nowarn(&store, &registry, "category:", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "category:",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results.results.len() >= 1,
         "category: should match items with category tag"
@@ -459,9 +490,13 @@ fn test_projection_returns_label_volatile_items() {
         .unwrap();
 
     // extension: で投影
-    let results =
-        search::search_nowarn(&store, &registry, "extension:", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        Default::default(),
+    )
+    .unwrap();
 
     // 検証1: type_for_projection が設定されている
     assert!(has_item_tags(&results.results));
@@ -586,8 +621,12 @@ fn test_scan_hash_is_treated_as_unregistered_tag() -> anyhow::Result<()> {
         false,
     )?;
 
-    let results =
-        search::search_nowarn(&store, &registry, "scan_hash:", Default::default())?;
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "scan_hash:",
+        Default::default(),
+    )?;
     assert!(
         results.results.is_empty(),
         "scan_hash: should be an unregistered tag with no matches, not a Binder Error"
@@ -664,8 +703,12 @@ fn test_count_type_matches_bare_type_projection() -> anyhow::Result<()> {
         search::search_nowarn(&store, &registry, "type:", Default::default())?;
     let bare_count = bare_results.results.len();
 
-    let count_results =
-        search::search_nowarn(&store, &registry, "count(type:)", Default::default())?;
+    let count_results = search::search_nowarn(
+        &store,
+        &registry,
+        "count(type:)",
+        Default::default(),
+    )?;
     let counted: f64 = count_results.results[0].raw_repr().parse()?;
 
     assert_eq!(

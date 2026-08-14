@@ -392,8 +392,13 @@ fn build_comparison_inner(
                 // Projection のつもりが文字列として解釈されている可能性を警告する。
                 // 空白ありの label_op / label_op_to_proj は右辺に type_ref を許容するため
                 // ここには到達せず（Operand::TypeRef になる）、密着形のみを検出する。
-                if matches!(&right_op, Operand::Literal(Label { value: Bitical::String(_), .. }))
-                    && !right_text.starts_with('"')
+                if matches!(
+                    &right_op,
+                    Operand::Literal(Label {
+                        value: Bitical::String(_),
+                        ..
+                    })
+                ) && !right_text.starts_with('"')
                     && right_text.ends_with(':')
                 {
                     warnings.warn(error::stuck_comparison_unquoted_colon_msg(
@@ -562,6 +567,14 @@ fn build_nest_expr(
     let first = inner.next().unwrap();
     let mut left = build_nest_operand(first, warnings)?;
 
+    if let QueryNode::Nest(ref n) = left {
+        if n.left.is_none() && matches!(n.right, Operand::Calculation(_)) {
+            return Err(anyhow!(
+                "Syntax Error: Calculations are not allowed on the left-hand side of nest operator (&:)"
+            ));
+        }
+    }
+
     // inner yields alternating: ampersand_colon, nest_operand, ampersand_colon, nest_operand, ...
     // (WHITESPACE is silent _{ } so it doesn't produce tokens)
     while let Some(op_pair) = inner.next() {
@@ -592,19 +605,39 @@ fn is_base_key_operand(op: &Operand) -> bool {
     matches!(op, Operand::TypeRef(t) if t.is_base_key())
 }
 
-/// `nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }`
+/// `nest_lhs` または `nest_rhs` をパースして QueryNode を生成します。
 fn build_nest_operand(
     pair: Pair<Rule>,
     warnings: &mut dyn error::WarningSink,
 ) -> Result<QueryNode> {
-    let inner = pair.into_inner().next().unwrap();
+    let rule = pair.as_rule();
+    let inner = if rule == Rule::nest_lhs || rule == Rule::nest_rhs {
+        pair.into_inner().next().unwrap()
+    } else {
+        pair
+    };
     match inner.as_rule() {
-        Rule::scalar_comparison => build_comparison_from_scalar(inner, warnings),
+        Rule::type_ref => {
+            let inner_tag = inner.into_inner().next().unwrap();
+            let tag_type = build_tag_type(inner_tag)?;
+            Ok(QueryNode::base_nest(Operand::TypeRef(tag_type)))
+        }
+        Rule::scalar_comparison => {
+            build_comparison_from_scalar(inner, warnings)
+        }
         Rule::aggregation => {
             build_aggregation(inner, warnings).map(QueryNode::Aggregation)
         }
         Rule::projection => build_projection(inner, warnings),
         Rule::expr => build_expr(inner, warnings),
+        Rule::nest_expr => build_nest_expr(inner, warnings),
+        Rule::nest_parenthesized_expr => {
+            let operand = build_nested_parenthesized_operand(inner, warnings)?;
+            match operand {
+                Operand::Query(q) => Ok(*q),
+                op => Ok(QueryNode::base_nest(op)),
+            }
+        }
         Rule::label => {
             let label = build_label(inner)?;
             Ok(QueryNode::base_nest(Operand::Literal(label)))
@@ -921,9 +954,7 @@ fn build_arithmetic_operand(
         Rule::number
         | Rule::label
         | Rule::quoted_string
-        | Rule::unquoted_string => {
-            Ok(Operand::Literal(build_label(inner)?))
-        }
+        | Rule::unquoted_string => Ok(Operand::Literal(build_label(inner)?)),
         _ => Err(anyhow!(
             "Unexpected arithmetic operand inner: {:?}",
             inner.as_rule()
@@ -942,13 +973,17 @@ mod tests {
         use crate::query::lens_resolver::Resolver;
         use crate::tag::TagRegistry;
         use crate::types::{Bitical, Label, SType, TagType};
-        let resolver =
-            Resolver::new_nowarn("\"1MB\" :> size:", &TagRegistry::with_standard())
-                .expect("should expand");
+        let resolver = Resolver::new_nowarn(
+            "\"1MB\" :> size:",
+            &TagRegistry::with_standard(),
+        )
+        .expect("should expand");
         assert_eq!(
             resolver.expanded_query,
             QueryNode::Comparison(ComparisonNode {
-                first: Operand::Literal(Label::other(Bitical::Integer(1_048_576))),
+                first: Operand::Literal(Label::other(Bitical::Integer(
+                    1_048_576
+                ))),
                 rest: vec![(
                     ComparisonOp::Label(BasicOp::Gt),
                     Operand::TypeRef(TagType::from(SType::Size)),
@@ -964,10 +999,13 @@ mod tests {
         use crate::tag::TagRegistry;
         use crate::types::{DateTime, SType, TagType};
         use chrono::NaiveDate;
-        let resolver =
-            Resolver::new_nowarn("2026-02-01 :> mtime:", &TagRegistry::with_standard())
-                .expect("should expand");
-        let QueryNode::Comparison(ComparisonNode { first, rest }) = resolver.expanded_query
+        let resolver = Resolver::new_nowarn(
+            "2026-02-01 :> mtime:",
+            &TagRegistry::with_standard(),
+        )
+        .expect("should expand");
+        let QueryNode::Comparison(ComparisonNode { first, rest }) =
+            resolver.expanded_query
         else {
             panic!("expected Comparison, got {:?}", resolver.expanded_query)
         };
@@ -991,10 +1029,14 @@ mod tests {
         let node =
             parse_nowarn("\"hello\"").expect("quoted string should parse");
         match node {
-            QueryNode::Nest(NestNode { left: None, right: Operand::Literal(Label {
-                value: Bitical::String(s),
-                ..
-            }) }) => {
+            QueryNode::Nest(NestNode {
+                left: None,
+                right:
+                    Operand::Literal(Label {
+                        value: Bitical::String(s),
+                        ..
+                    }),
+            }) => {
                 assert_eq!(s, "hello");
             }
             other => {
@@ -1060,8 +1102,8 @@ mod tests {
 
     #[test]
     fn test_parse_typed_tag() {
-        let node = parse_nowarn("name:test.txt")
-            .expect("Failed to parse typed tag");
+        let node =
+            parse_nowarn("name:test.txt").expect("Failed to parse typed tag");
         match node {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(tt.tag_type().as_str(), "name");
@@ -1073,8 +1115,7 @@ mod tests {
 
     #[test]
     fn test_numeric_type_name_typed_tag() {
-        let node =
-            parse_nowarn("5:x").expect("numeric type name should parse");
+        let node = parse_nowarn("5:x").expect("numeric type name should parse");
         match node {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(tt.tag_type().as_str(), "5");
@@ -1086,10 +1127,12 @@ mod tests {
 
     #[test]
     fn test_numeric_type_name_projection() {
-        let node =
-            parse_nowarn("5:").expect("numeric type_ref should parse");
+        let node = parse_nowarn("5:").expect("numeric type_ref should parse");
         match node {
-            QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) }) => {
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(tt),
+            }) => {
                 assert_eq!(tt.as_str(), "5");
             }
             _ => panic!("Expected Projection(TypeRef), got {:?}", node),
@@ -1098,8 +1141,8 @@ mod tests {
 
     #[test]
     fn test_numeric_type_name_with_numeric_label() {
-        let node = parse_nowarn("123:456")
-            .expect("numeric type:label should parse");
+        let node =
+            parse_nowarn("123:456").expect("numeric type:label should parse");
         match node {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(tt.tag_type().as_str(), "123");
@@ -1124,11 +1167,7 @@ mod tests {
     #[test]
     fn test_stuck_comparison_rhs_calculation_with_projection_is_error() {
         let result = parse_nowarn("size:>(size: + 1)");
-        assert!(
-            result.is_err(),
-            "expected error, got {:?}",
-            result
-        );
+        assert!(result.is_err(), "expected error, got {:?}", result);
     }
 
     #[test]
@@ -1151,8 +1190,7 @@ mod tests {
     #[test]
     fn test_stuck_comparison_quoted_rhs_does_not_warn() {
         let mut warnings: Vec<error::Warning> = Vec::new();
-        parse(r#"width:>"height:""#, &mut warnings)
-            .expect("Failed to parse");
+        parse(r#"width:>"height:""#, &mut warnings).expect("Failed to parse");
         assert!(
             warnings.is_empty(),
             "Quoted RHS is an explicit literal, should not warn: {:?}",
@@ -1163,8 +1201,7 @@ mod tests {
     #[test]
     fn test_spaced_comparison_rhs_ending_in_colon_does_not_warn() {
         let mut warnings: Vec<error::Warning> = Vec::new();
-        parse("width: :> height:", &mut warnings)
-            .expect("Failed to parse");
+        parse("width: :> height:", &mut warnings).expect("Failed to parse");
         assert!(
             warnings.is_empty(),
             "Spaced form's RHS parses as TypeRef, not a literal, so no warning should fire: {:?}",
@@ -1232,13 +1269,18 @@ mod tests {
         use crate::types::Bitical;
         let node = parse_nowarn("count() + 1").expect("should parse");
         match node {
-            QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) }) => match calc.right {
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::Calculation(calc),
+            }) => match calc.right {
                 Operand::Literal(l) => {
                     assert_eq!(l.value(), Bitical::Integer(1));
                 }
                 other => panic!("Expected Literal, got {:?}", other),
             },
-            other => panic!("Expected Projection(Calculation), got {:?}", other),
+            other => {
+                panic!("Expected Projection(Calculation), got {:?}", other)
+            }
         }
     }
 
@@ -1254,7 +1296,10 @@ mod tests {
                 assert_eq!(
                     tt.label.node(),
                     &LabelNode::Formatted(Formatted::ByteSizeRange(
-                        ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 }
+                        ByteSizeRange::Range {
+                            lo: 1_048_576,
+                            hi: 1_048_576
+                        }
                     ))
                 );
             }
@@ -1271,7 +1316,9 @@ mod tests {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(
                     tt.label.node(),
-                    &LabelNode::Formatted(Formatted::Bitical(Bitical::Integer(42)))
+                    &LabelNode::Formatted(Formatted::Bitical(
+                        Bitical::Integer(42)
+                    ))
                 );
             }
             _ => panic!("Expected TypedTag, got {:?}", node),
@@ -1314,8 +1361,8 @@ mod tests {
         }
 
         // Parentheses
-        let node = parse_nowarn("(a:1 | b:2)")
-            .expect("Failed to parse parentheses");
+        let node =
+            parse_nowarn("(a:1 | b:2)").expect("Failed to parse parentheses");
         match node {
             QueryNode::Or(nodes) => assert_eq!(nodes.len(), 2),
             _ => panic!("Expected Or, got {:?}", node),
@@ -1324,10 +1371,12 @@ mod tests {
 
     #[test]
     fn test_parse_origin_projection() {
-        let node =
-            parse_nowarn("origin:").expect("Failed to parse origin:");
+        let node = parse_nowarn("origin:").expect("Failed to parse origin:");
         match node {
-            QueryNode::Nest(NestNode { left: None, right: op }) => match op {
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: op,
+            }) => match op {
                 Operand::TypeRef(tt) => assert_eq!(tt.as_str(), "origin"),
                 _ => panic!("Expected TypeRef operand, got {:?}", op),
             },
@@ -1364,7 +1413,10 @@ mod tests {
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Count(inner) => match &*inner {
-                    QueryNode::Nest(NestNode { left: None, right: op }) => match op {
+                    QueryNode::Nest(NestNode {
+                        left: None,
+                        right: op,
+                    }) => match op {
                         Operand::TypeRef(tt) => {
                             assert_eq!(tt.as_str(), "extension");
                         }
@@ -1390,7 +1442,10 @@ mod tests {
                 AggregationNode::Arithmetic { op, ref inner } => {
                     assert_eq!(op, ArithmeticAggOp::Sum);
                     match &**inner {
-                        QueryNode::Nest(NestNode { left: None, right: op }) => match op {
+                        QueryNode::Nest(NestNode {
+                            left: None,
+                            right: op,
+                        }) => match op {
                             Operand::TypeRef(tt) => {
                                 assert_eq!(tt.as_str(), "size");
                             }
@@ -1459,7 +1514,10 @@ mod tests {
                 AggregationNode::Arithmetic { op, ref inner } => {
                     assert_eq!(op, ArithmeticAggOp::Sum);
                     match &**inner {
-                        QueryNode::Nest(NestNode { left: None, right: operand }) => match operand {
+                        QueryNode::Nest(NestNode {
+                            left: None,
+                            right: operand,
+                        }) => match operand {
                             Operand::Calculation(calc) => {
                                 // left = TypeRef(size)
                                 match &calc.left {
@@ -1512,7 +1570,10 @@ mod tests {
                 AggregationNode::Arithmetic { op, ref inner } => {
                     assert_eq!(op, ArithmeticAggOp::Sum);
                     match &**inner {
-                        QueryNode::Nest(NestNode { left: None, right: operand }) => match operand {
+                        QueryNode::Nest(NestNode {
+                            left: None,
+                            right: operand,
+                        }) => match operand {
                             Operand::Calculation(calc) => {
                                 // 外側の演算子は Sub
                                 assert_eq!(calc.op, ArithmeticOp::Sub);
@@ -1575,14 +1636,16 @@ mod tests {
     /// リグレッション: sum(size:) は既存動作と同一
     #[test]
     fn test_parse_agg_projection_no_regression() {
-        let node =
-            parse_nowarn("sum(size:)").expect("sum(size:) should parse");
+        let node = parse_nowarn("sum(size:)").expect("sum(size:) should parse");
         match node {
             QueryNode::Aggregation(agg) => match agg {
                 AggregationNode::Arithmetic { op, ref inner } => {
                     assert_eq!(op, ArithmeticAggOp::Sum);
                     match &**inner {
-                        QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) }) => {
+                        QueryNode::Nest(NestNode {
+                            left: None,
+                            right: Operand::TypeRef(tt),
+                        }) => {
                             assert_eq!(tt.as_str(), "size");
                         }
                         _ => panic!(
@@ -1739,7 +1802,10 @@ mod tests {
         match node {
             QueryNode::Nest(nest) => {
                 match nest.left.as_deref() {
-                    Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                    Some(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(tt),
+                    })) => {
                         assert_eq!(tt.as_str(), "project");
                     }
                     _ => panic!(
@@ -1768,7 +1834,10 @@ mod tests {
         match node {
             QueryNode::Nest(nest) => {
                 match nest.left.as_deref() {
-                    Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                    Some(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(tt),
+                    })) => {
                         assert_eq!(tt.as_str(), "parentdir");
                     }
                     _ => panic!(
@@ -1778,7 +1847,10 @@ mod tests {
                 }
                 match &nest.right {
                     Operand::Aggregation(agg)
-                        if matches!(agg.as_ref(), AggregationNode::Count(_)) => {}
+                        if matches!(
+                            agg.as_ref(),
+                            AggregationNode::Count(_)
+                        ) => {}
                     _ => panic!(
                         "Expected Aggregation(Count) as right, got {:?}",
                         nest.right
@@ -1796,7 +1868,10 @@ mod tests {
         match node {
             QueryNode::Nest(nest) => {
                 match nest.left.as_deref() {
-                    Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                    Some(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(tt),
+                    })) => {
                         assert_eq!(tt.as_str(), "project");
                     }
                     _ => panic!(
@@ -1820,8 +1895,8 @@ mod tests {
     #[test]
     fn test_parse_nest_chain() {
         // a: &: b: &: c: → Nest(Nest(a, b), c) due to left-associativity
-        let node = parse_nowarn("a: &: b: &: c:")
-            .expect("nest chain should parse");
+        let node =
+            parse_nowarn("a: &: b: &: c:").expect("nest chain should parse");
         match node {
             QueryNode::Nest(outer) => {
                 match &outer.right {
@@ -1845,7 +1920,10 @@ mod tests {
                             Operand::TypeRef(tt) => {
                                 assert_eq!(tt.as_str(), "b");
                             }
-                            _ => panic!("Expected TypeRef(b) as inner right, got {:?}", inner.right),
+                            _ => panic!(
+                                "Expected TypeRef(b) as inner right, got {:?}",
+                                inner.right
+                            ),
                         }
                     }
                     _ => panic!(
@@ -1896,15 +1974,18 @@ mod tests {
     fn test_parse_nest_priority_over_and() {
         // a: &: b: & c:d → And(Nest(a, b), TypedTag(c:d))
         // &: has higher priority than &
-        let node = parse_nowarn("a: &: b: & c:d")
-            .expect("nest priority should parse");
+        let node =
+            parse_nowarn("a: &: b: & c:d").expect("nest priority should parse");
         match node {
             QueryNode::And(nodes) => {
                 assert_eq!(nodes.len(), 2);
                 match &nodes[0] {
                     QueryNode::Nest(nest) => {
                         match nest.left.as_deref() {
-                            Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                            Some(QueryNode::Nest(NestNode {
+                                left: None,
+                                right: Operand::TypeRef(tt),
+                            })) => {
                                 assert_eq!(tt.as_str(), "a");
                             }
                             _ => panic!(
@@ -1949,7 +2030,10 @@ mod tests {
                 match outer.left.as_deref() {
                     Some(QueryNode::Nest(left)) => {
                         match left.left.as_deref() {
-                            Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                            Some(QueryNode::Nest(NestNode {
+                                left: None,
+                                right: Operand::TypeRef(tt),
+                            })) => {
                                 assert_eq!(tt.as_str(), "a")
                             }
                             _ => panic!("Expected a"),
@@ -1967,7 +2051,10 @@ mod tests {
                     Operand::Query(q) => match q.as_ref() {
                         QueryNode::Nest(right) => {
                             match right.left.as_deref() {
-                                Some(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) })) => {
+                                Some(QueryNode::Nest(NestNode {
+                                    left: None,
+                                    right: Operand::TypeRef(tt),
+                                })) => {
                                     assert_eq!(tt.as_str(), "c")
                                 }
                                 _ => panic!("Expected c"),
@@ -1995,8 +2082,8 @@ mod tests {
 
     #[test]
     fn test_parse_nest_collect_types() {
-        let node = parse_nowarn("project: &: extension:")
-            .expect("should parse");
+        let node =
+            parse_nowarn("project: &: extension:").expect("should parse");
         let types = node.get_all_types();
         assert!(types.contains(&"project".to_string()));
         assert!(types.contains(&"extension".to_string()));
@@ -2006,8 +2093,7 @@ mod tests {
     /// 括弧内はスカラー式なので `>` を使うべき。
     #[test]
     fn test_parse_nest_right_label_op_in_scalar_context_is_error() {
-        let result =
-            parse_nowarn("parentdir: &: (count(extension:jpg) :> 1)");
+        let result = parse_nowarn("parentdir: &: (count(extension:jpg) :> 1)");
         assert!(
             result.is_err(),
             "Using label op :> inside Nest right scalar context should be a parse error"

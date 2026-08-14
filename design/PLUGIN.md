@@ -25,6 +25,7 @@ interface core {
 ```wit
 interface indexing {
     enum value-type { text, big-int, boolean, double }
+    enum target-table { base-tags, tags-by-location }
     variant tag-value {
         text(string),
         big-int(s64),
@@ -33,6 +34,7 @@ interface indexing {
         empty,
     }
     get-value-type: func() -> value-type;
+    target-table: func() -> target-table;
     tag-file: func(path: string) -> list<tag-value>;
 }
 ```
@@ -75,7 +77,7 @@ interface display {
 `core` は必須。それ以外は必要なものだけ実装する。
 
 - **core**: `name()` でプラグイン識別名、`version()` でバージョンを返す。
-- **indexing**（省略可能）: 渡されたファイルパスを解析し `tag-value` のリストを返す。空の場合は `empty` を返す。
+- **indexing**（省略可能）: 渡されたファイルパスを解析し `tag-value` のリストを返す。書き込み先テーブル（`base-tags` または `tags-by-location`）を `target-table()` で宣言する（省略時は `base-tags`）。空の場合は `empty` を返す。
 - **query**（省略可能）: ラベル正規化・クエリ展開ロジックを実装する。省略時はホスト側のデフォルト動作が使われる。
 - **display**（省略可能）: 値の表示フォーマットを実装する。省略時は生値がそのまま表示される。
 
@@ -104,6 +106,9 @@ impl exports::ttfm::plugin::core::Guest for MyPlugin {
 impl exports::ttfm::plugin::indexing::Guest for MyPlugin {
     fn get_value_type() -> exports::ttfm::plugin::indexing::ValueType {
         exports::ttfm::plugin::indexing::ValueType::Text
+    }
+    fn target_table() -> exports::ttfm::plugin::indexing::TargetTable {
+        exports::ttfm::plugin::indexing::TargetTable::BaseTags
     }
     fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing::TagValue> {
         vec![exports::ttfm::plugin::indexing::TagValue::Text("value".to_string())]

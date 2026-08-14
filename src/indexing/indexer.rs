@@ -45,6 +45,7 @@ pub struct TaggingResult {
     pub entity_row: DynamicRow,
     pub location_row: DynamicRow,
     pub tags: Vec<TagRow>,
+    pub location_tags: Vec<TagRow>,
     pub scan_hash: ScanHash,
     pub basename_scan_hash: ScanHash,
 }
@@ -128,16 +129,19 @@ impl<'a> Indexer<'a> {
         let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 
         // 3. Triage Phase
-        let (results, moved_rows) =
-            triage::run_triage(&self.store, self.registry, diff.to_process)?;
-
+        let (results, dir_changed_results) = triage::run_triage(
+            &self.store,
+            self.registry,
+            diff.to_process,
+            diff.dir_changed,
+        )?;
         // 4. Merge Phase
         merge::run_merge(
             &self.store.conn,
             self.registry,
             &self.store,
             results,
-            moved_rows,
+            dir_changed_results,
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
@@ -604,14 +608,18 @@ pub(crate) fn calc_basename_scan_hash(
     size: i64,
     inode: crate::types::FileRef,
 ) -> ScanHash {
+    use crate::types::PathComponents;
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
-    let base = Path::new(path)
+    let parts = PathComponents::decompose(Path::new(path));
+    let base = parts
+        .join()
         .file_name()
         .unwrap_or_default()
-        .to_string_lossy();
+        .to_string_lossy()
+        .into_owned();
     let mut hasher = FxHasher::default();
-    (base.as_ref(), mtime, size, inode.as_u64_pair().1).hash(&mut hasher);
+    (base.as_str(), mtime, size, inode.as_u64_pair().1).hash(&mut hasher);
     ScanHash(hasher.finish() as i64)
 }
 
@@ -665,7 +673,10 @@ mod tests {
         let h5 = calc_basename_scan_hash("/one/dir/a.txt", 100, 501, inode_a);
         let h6 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_b);
 
-        assert_eq!(h1, h2, "hash must not change when only the directory changes");
+        assert_eq!(
+            h1, h2,
+            "hash must not change when only the directory changes"
+        );
         assert_ne!(h1, h3, "hash must change when mtime changes");
         assert_ne!(h1, h4, "hash must change when basename changes");
         assert_ne!(h1, h5, "hash must change when size changes");

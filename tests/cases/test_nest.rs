@@ -2361,10 +2361,14 @@ fn test_nest_parse_basic() {
 
 #[test]
 fn test_nest_parse_chain() {
-    let node = ttfm::query::parse_nowarn("extension: &: parentdir: &: name:").unwrap();
+    let node =
+        ttfm::query::parse_nowarn("extension: &: parentdir: &: name:").unwrap();
     if let ttfm::query::QueryNode::Nest(outer) = &node {
         assert!(
-            matches!(outer.left.as_deref(), Some(ttfm::query::QueryNode::Nest(_))),
+            matches!(
+                outer.left.as_deref(),
+                Some(ttfm::query::QueryNode::Nest(_))
+            ),
             "left=Nest"
         );
         assert!(
@@ -2379,7 +2383,8 @@ fn test_nest_parse_chain() {
 #[test]
 fn test_nest_priority_over_and() {
     let node =
-        ttfm::query::parse_nowarn("extension: &: parentdir: & extension:rs").unwrap();
+        ttfm::query::parse_nowarn("extension: &: parentdir: & extension:rs")
+            .unwrap();
     assert!(
         matches!(node, ttfm::query::QueryNode::And(_)),
         "top-level And, got {:?}",
@@ -2389,8 +2394,8 @@ fn test_nest_priority_over_and() {
 
 #[test]
 fn test_nest_parse_with_aggregation() {
-    let node =
-        ttfm::query::parse_nowarn("parentdir: &: count(extension:jpg)").unwrap();
+    let node = ttfm::query::parse_nowarn("parentdir: &: count(extension:jpg)")
+        .unwrap();
     if let ttfm::query::QueryNode::Nest(nest) = &node {
         assert!(
             matches!(nest.right, ttfm::query::Operand::Aggregation(_)),

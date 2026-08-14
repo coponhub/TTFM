@@ -239,7 +239,9 @@ fn main() -> Result<()> {
                 &registry,
                 query,
                 opts,
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
             if *short {
                 print_simple_results(&registry, &response);
@@ -275,7 +277,9 @@ fn main() -> Result<()> {
                 &registry,
                 "",
                 opts,
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
             if *short {
                 print_simple_results(&registry, &response);
@@ -303,9 +307,11 @@ fn main() -> Result<()> {
                 QueryType::Tag,
                 None,
                 WriteOptions { yes: cli.yes },
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
-            safe_println!("Updated {} tag(s).", resp.updated);
+            safe_println!("{}", format_tag_result(&resp));
         }
         Commands::Untag {
             search_query,
@@ -321,9 +327,11 @@ fn main() -> Result<()> {
                 QueryType::Untag,
                 condition.as_deref(),
                 WriteOptions { yes: cli.yes },
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
-            safe_println!("Deleted {} tag(s).", resp.deleted);
+            safe_println!("{}", format_untag_result(&resp));
         }
         Commands::Replace { old: _, new_tag: _ } => {
             anyhow::bail!("replace は未実装です");
@@ -673,7 +681,9 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
         .tags
         .entries
         .iter()
-        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .find(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue")
+        })
         .map(|e| e.typed_tag.as_str().to_string());
 
     let repr = res.representative.display_keys(registry);
@@ -688,9 +698,7 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use ttfm::types::{
-        Bitical, ItemId, ItemKind, Origin, SType, TypedTag,
-    };
+    use ttfm::types::{Bitical, ItemId, ItemKind, Origin, SType, TypedTag};
     use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
@@ -920,4 +928,42 @@ mod tests {
         assert!(!text.is_empty(), "ColorWarningSink should produce output");
         assert!(text.contains("&:"), "output should contain '&:' suggestion");
     }
+
+    #[test]
+    fn test_format_tag_result() {
+        let resp = ttfm::edit::EditResponse {
+            updated: 1,
+            deleted: 0,
+            fs_ops: 2,
+            has_skipped: false,
+        };
+        assert_eq!(format_tag_result(&resp), "Updated tags: 1, files: 2.");
+
+        let resp_zero = ttfm::edit::EditResponse {
+            updated: 0,
+            deleted: 0,
+            fs_ops: 1,
+            has_skipped: false,
+        };
+        assert_eq!(format_tag_result(&resp_zero), "Updated tags: 0, files: 1.");
+    }
+
+    #[test]
+    fn test_format_untag_result() {
+        let resp = ttfm::edit::EditResponse {
+            updated: 0,
+            deleted: 3,
+            fs_ops: 0,
+            has_skipped: false,
+        };
+        assert_eq!(format_untag_result(&resp), "Deleted tags: 3, files: 0.");
+    }
+}
+
+fn format_tag_result(resp: &ttfm::edit::EditResponse) -> String {
+    format!("Updated tags: {}, files: {}.", resp.updated, resp.fs_ops)
+}
+
+fn format_untag_result(resp: &ttfm::edit::EditResponse) -> String {
+    format!("Deleted tags: {}, files: {}.", resp.deleted, resp.fs_ops)
 }

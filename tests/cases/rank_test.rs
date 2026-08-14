@@ -70,9 +70,13 @@ fn test_rank_sorting_files() {
     .unwrap();
 
     // 3. 検索して順序を確認
-    let results =
-        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
@@ -111,9 +115,13 @@ fn test_rank_batch_update() {
         .unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
-    let results =
-        search::search_nowarn(&store, &registry, "extension:txt", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 2);
     edit(
         &store,
@@ -161,9 +169,13 @@ fn test_rank_set_by_id_low_level() {
     let id = tagging::add_item(&store, &registry, "note", "test note").unwrap();
     ttfm::rank::set_rank_by_id(&store, &registry, id, false, 500).unwrap();
 
-    let results =
-        search::search_nowarn(&store, &registry, "item_kind:note", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "item_kind:note",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
 }
@@ -203,9 +215,13 @@ fn user_rank_survives_reindex() {
         .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
-    let results =
-        search::search_nowarn(&store, &registry, "filename:a.txt", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results[0].rank, 9);
 }
 
@@ -255,9 +271,13 @@ fn test_definition_ref_rank_falls_back_to_registry_default() {
         "sanity: filename should have a nonzero default rank in the registry"
     );
 
-    let results =
-        search::search_nowarn(&store, &registry, "type:filename", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "type:filename",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 1);
     assert_eq!(
         results.results[0].rank, expected,

@@ -59,9 +59,7 @@ pub(crate) fn expand_query_node(
         QueryNode::TypedTag(tt) if !tt.is_default_node() => {
             Ok(QueryNode::TypedTag(tt))
         }
-        QueryNode::TypedTag(tt) => {
-            schema.expand_tag(&tt.tag_type(), &tt.label)
-        }
+        QueryNode::TypedTag(tt) => schema.expand_tag(&tt.tag_type(), &tt.label),
         QueryNode::Nest(nest) if nest.left.is_none() => {
             expand_base_key(schema, nest.right, sink)
         }
@@ -125,7 +123,9 @@ fn expand_comparison_with_recursion(
                 rest: vec![(op, right.clone())],
             };
             // 各比較を再帰的に展開
-            nodes.push(expand_comparison_with_recursion(schema, single_cmp, sink)?);
+            nodes.push(expand_comparison_with_recursion(
+                schema, single_cmp, sink,
+            )?);
             left = right;
         }
         return Ok(QueryNode::And(nodes));
@@ -452,7 +452,10 @@ fn strip_filters_from_operand(
         Operand::Query(node) => {
             let nodes = match *node {
                 QueryNode::And(nodes) => nodes,
-                QueryNode::Nest(NestNode { left: None, right: op }) => return op,
+                QueryNode::Nest(NestNode {
+                    left: None,
+                    right: op,
+                }) => return op,
                 other => return Operand::Query(Box::new(other)),
             };
             let (filter_nodes, core_nodes): (Vec<_>, Vec<_>) =
@@ -465,7 +468,10 @@ fn strip_filters_from_operand(
                 }
             };
             match core {
-                QueryNode::Nest(NestNode { left: None, right: op }) => op,
+                QueryNode::Nest(NestNode {
+                    left: None,
+                    right: op,
+                }) => op,
                 other => Operand::Query(Box::new(other)),
             }
         }
@@ -685,7 +691,10 @@ fn inject_filter_into_aggregations(
                 .map(|n| inject_filter_into_aggregations(n, filter))
                 .collect(),
         ),
-        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(mut calc) }) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(mut calc),
+        }) => {
             calc.left = inject_filter_into_operand(calc.left, filter);
             calc.right = inject_filter_into_operand(calc.right, filter);
             QueryNode::base_nest(Operand::Calculation(calc))
@@ -693,11 +702,9 @@ fn inject_filter_into_aggregations(
         // ベースキー（左辺なし）は集約を持たないため、Calculation 以外はそのまま返す
         QueryNode::Nest(nest) if nest.left.is_none() => QueryNode::Nest(nest),
         QueryNode::Nest(mut nest) => {
-            nest.right = inject_filter_into_aggregations(
-                nest.right.into_node(),
-                filter,
-            )
-            .into_operand();
+            nest.right =
+                inject_filter_into_aggregations(nest.right.into_node(), filter)
+                    .into_operand();
             QueryNode::Nest(nest)
         }
         _ => node,
@@ -864,9 +871,10 @@ fn expand_nest(
             }
         }
         // 右辺が Projection(Calculation) → 算術演算の両辺に Nest キーを分配する
-        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) })
-            if calc_has_only_aggregations_and_literals(&calc) =>
-        {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(calc),
+        }) if calc_has_only_aggregations_and_literals(&calc) => {
             let distributed = distribute_nest_over_calc(&left, *calc);
             QueryNode::base_nest(Operand::Calculation(Box::new(distributed)))
         }
@@ -898,9 +906,10 @@ fn operand_has_only_aggregations_and_literals(operand: &Operand) -> bool {
         Operand::Literal(_) | Operand::Aggregation(_) => true,
         Operand::Calculation(c) => calc_has_only_aggregations_and_literals(c),
         Operand::Query(q) => match &**q {
-            QueryNode::Nest(NestNode { left: None, right: op }) => {
-                operand_has_only_aggregations_and_literals(op)
-            }
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: op,
+            }) => operand_has_only_aggregations_and_literals(op),
             QueryNode::Aggregation(_) => true,
             _ => false,
         },
@@ -1236,9 +1245,8 @@ mod tests {
             let parsed = crate::query::parser::parse_nowarn(q).unwrap();
             let once =
                 expand_query_node(&lens, parsed, &mut Vec::new()).unwrap();
-            let twice =
-                expand_query_node(&lens, once.clone(), &mut Vec::new())
-                    .unwrap();
+            let twice = expand_query_node(&lens, once.clone(), &mut Vec::new())
+                .unwrap();
             assert_eq!(
                 format!("{once:?}"),
                 format!("{twice:?}"),
@@ -1255,8 +1263,7 @@ mod tests {
             QueryNode::TypedTag(TypedTag::new("mtime", "today")),
         ]);
         let mut warnings: Vec<error::Warning> = Vec::new();
-        let expanded =
-            expand_query_node(&lens, node, &mut warnings).unwrap();
+        let expanded = expand_query_node(&lens, node, &mut warnings).unwrap();
         // and(size:100, mtime:today) -> and(size:100, and(mtime>=..., mtime<=...))
         assert!(matches!(expanded, QueryNode::And(_)));
     }
@@ -1265,9 +1272,10 @@ mod tests {
     fn test_expand_nest_count_type_wildcard_warns() {
         let lens = Lens::base_standard();
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
                 Box::new(QueryNode::TypedTag(TypedTag::new("type", "*"))),
             ))),
@@ -1285,13 +1293,12 @@ mod tests {
     fn test_expand_nest_count_extension_does_not_warn() {
         let lens = Lens::base_standard();
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
-                Box::new(QueryNode::TypedTag(TypedTag::new(
-                    "extension", "rs",
-                ))),
+                Box::new(QueryNode::TypedTag(TypedTag::new("extension", "rs"))),
             ))),
         });
         let mut warnings: Vec<error::Warning> = Vec::new();
@@ -1479,11 +1486,17 @@ mod tests {
             op: ArithmeticOp::Add,
             right: Operand::Literal(Label::from(2i64)),
         };
-        let node = QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(Box::new(calc)) });
+        let node = QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(Box::new(calc)),
+        });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         // 畳み込みにより Projection(Literal(5)) になるはず
         match expanded {
-            QueryNode::Nest(NestNode { left: None, right: Operand::Literal(l) }) => {
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::Literal(l),
+            }) => {
                 assert_eq!(l.as_i64(), 5);
             }
             _ => panic!("Expected Projection(Literal), got {:?}", expanded),
@@ -1503,11 +1516,17 @@ mod tests {
             op: ArithmeticOp::Add,
             right: Operand::Literal(Label::from(1i64)),
         };
-        let node = QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(Box::new(calc)) });
+        let node = QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(Box::new(calc)),
+        });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         assert!(matches!(
             expanded,
-            QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(_) })
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::Calculation(_)
+            })
         ));
     }
 
@@ -1519,16 +1538,23 @@ mod tests {
         // custom: &: custom2: → 子ノードが正しく展開される
         // (base_standard で特殊展開されないカスタムタグを使用)
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("project"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("project")),
+            }))),
             right: Operand::TypeRef(TagType::from("category")),
         });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
         match expanded {
             QueryNode::Nest(nest) => {
                 assert!(
-                    matches!(nest.left.as_deref(), Some(QueryNode::Nest(NestNode { left: None, right: _ }))),
+                    matches!(
+                        nest.left.as_deref(),
+                        Some(QueryNode::Nest(NestNode {
+                            left: None,
+                            right: _
+                        }))
+                    ),
                     "left should be Projection, got: {:?}",
                     nest.left
                 );
@@ -1545,9 +1571,10 @@ mod tests {
     #[test]
     fn test_nest_is_set_operation() {
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("project"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("project")),
+            }))),
             right: Operand::TypeRef(TagType::from("extension")),
         });
         assert!(is_set_operation(&node));
@@ -1571,9 +1598,10 @@ mod tests {
             )],
         };
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: QueryNode::Comparison(cmp).into_operand(),
         });
 
@@ -1616,15 +1644,17 @@ mod tests {
         // → Comparison(Nest(parentdir, avg(size:)) := Nest(parentdir, sum(size:)))
         let avg_agg = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Avg,
-            inner: Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("size"),
-            ) })),
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("size")),
+            })),
         };
         let sum_agg = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("size"),
-            ) })),
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("size")),
+            })),
         };
         let cmp = ComparisonNode {
             first: Operand::Aggregation(Box::new(avg_agg)),
@@ -1634,9 +1664,10 @@ mod tests {
             )],
         };
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: QueryNode::Comparison(cmp).into_operand(),
         });
 
@@ -1669,13 +1700,15 @@ mod tests {
         // extension: は And([is_dir:false, Projection(extension)]) に展開される
         // extension: &: count(name:) → And([is_dir:false, Nest(Proj(ext), count(name:))])
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("extension"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("extension")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
-                Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("name"),
-                ) })),
+                Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("name")),
+                })),
             ))),
         });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
@@ -1715,9 +1748,10 @@ mod tests {
 
         // parentdir: &: (200 > sum(size:) > 50)
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: QueryNode::Comparison(ComparisonNode {
                 first: Operand::Literal(Label::from(200)),
                 rest: vec![
@@ -1726,9 +1760,12 @@ mod tests {
                         Operand::Aggregation(Box::new(
                             AggregationNode::Arithmetic {
                                 op: ArithmeticAggOp::Sum,
-                                inner: Box::new(QueryNode::Nest(NestNode { left: None, right: 
-                                    Operand::TypeRef(TagType::from("size")),
-                                 })),
+                                inner: Box::new(QueryNode::Nest(NestNode {
+                                    left: None,
+                                    right: Operand::TypeRef(TagType::from(
+                                        "size",
+                                    )),
+                                })),
                             },
                         )),
                     ),
@@ -1737,7 +1774,8 @@ mod tests {
                         Operand::Literal(Label::from(50)),
                     ),
                 ],
-            }).into_operand(),
+            })
+            .into_operand(),
         });
 
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
@@ -1785,13 +1823,15 @@ mod tests {
         let lens = Lens::base_standard();
         // クエリ: extension: &: count(name:)
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("extension"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("extension")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
-                Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("name"),
-                ) })),
+                Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("name")),
+                })),
             ))),
         });
 
@@ -1801,7 +1841,13 @@ mod tests {
         let nest = find_nest_in_and(&expanded);
         // Nest の左辺は Projection のみ（フィルタは分離済み）
         assert!(
-            matches!(nest.left.as_deref(), Some(QueryNode::Nest(NestNode { left: None, right: _ }))),
+            matches!(
+                nest.left.as_deref(),
+                Some(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: _
+                }))
+            ),
             "Nest の左辺は Projection であること: {:?}",
             nest.left
         );
@@ -1827,9 +1873,10 @@ mod tests {
             right: Operand::Literal(Label::from(10)),
         };
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("extension"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("extension")),
+            }))),
             right: Operand::Calculation(Box::new(calc)),
         });
 
@@ -1844,7 +1891,13 @@ mod tests {
                     nodes
                 );
                 let calc_node = nodes.iter().find(|n| {
-                    matches!(n, QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(_) }))
+                    matches!(
+                        n,
+                        QueryNode::Nest(NestNode {
+                            left: None,
+                            right: Operand::Calculation(_)
+                        })
+                    )
                 });
                 assert!(
                     calc_node.is_some(),
@@ -1909,13 +1962,15 @@ mod tests {
     fn test_nest_filter_injection_count() {
         let lens = Lens::base_standard();
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("extension"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("extension")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
-                Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("name"),
-                ) })),
+                Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("name")),
+                })),
             ))),
         });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
@@ -1931,15 +1986,17 @@ mod tests {
         use crate::query::ast::ArithmeticAggOp;
         let lens = Lens::base_standard();
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("extension"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("extension")),
+            }))),
             right: Operand::Aggregation(Box::new(
                 AggregationNode::Arithmetic {
                     op: ArithmeticAggOp::Sum,
-                    inner: Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                        TagType::from("size"),
-                    ) })),
+                    inner: Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("size")),
+                    })),
                 },
             )),
         });
@@ -1977,9 +2034,10 @@ mod tests {
         let node = QueryNode::Comparison(ComparisonNode {
             first: Operand::Calculation(Box::new(CalculationNode {
                 left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
-                    left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                        TagType::from("extension"),
-                    ) }))),
+                    left: Some(Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("extension")),
+                    }))),
                     right: Operand::Aggregation(Box::new(
                         AggregationNode::Count(Box::new(QueryNode::TypedTag(
                             TypedTag::new(
@@ -2028,13 +2086,15 @@ mod tests {
     fn test_nest_no_filter_no_injection() {
         let lens = Lens::base_standard();
         let node = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: Operand::Aggregation(Box::new(AggregationNode::Count(
-                Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("name"),
-                ) })),
+                Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("name")),
+                })),
             ))),
         });
         let expanded = expand_query_node(&lens, node, &mut Vec::new()).unwrap();
@@ -2049,29 +2109,32 @@ mod tests {
     #[test]
     fn test_validate_calculation_mixed_keys() {
         let lens = Lens::base_standard();
-        let calc = CalculationNode {
-            left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
-                left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("parentdir"),
-                ) }))),
-                right: Operand::Aggregation(Box::new(
-                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
-                        TypedTag::new("parentdir", "foo"),
-                    ))),
-                )),
-            }))),
-            op: ArithmeticOp::Add,
-            right: Operand::Query(Box::new(QueryNode::Nest(NestNode {
-                left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("extension"),
-                ) }))),
-                right: Operand::Aggregation(Box::new(
-                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
-                        TypedTag::new("extension", "rs"),
-                    ))),
-                )),
-            }))),
-        };
+        let calc =
+            CalculationNode {
+                left: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                    left: Some(Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("parentdir")),
+                    }))),
+                    right: Operand::Aggregation(Box::new(
+                        AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                            TypedTag::new("parentdir", "foo"),
+                        ))),
+                    )),
+                }))),
+                op: ArithmeticOp::Add,
+                right: Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                    left: Some(Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("extension")),
+                    }))),
+                    right: Operand::Aggregation(Box::new(
+                        AggregationNode::Count(Box::new(QueryNode::TypedTag(
+                            TypedTag::new("extension", "rs"),
+                        ))),
+                    )),
+                }))),
+            };
         // 異種キー演算が validate_calculation で許可されていることを確認
         assert!(validate_calculation(&calc, &lens).is_ok());
     }
@@ -2086,9 +2149,10 @@ mod tests {
         let agg = AggregationNode::Arithmetic {
             op: crate::query::ast::ArithmeticAggOp::Sum,
             inner: Box::new(QueryNode::Nest(NestNode {
-                left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("parentdir"),
-                ) }))),
+                left: Some(Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("parentdir")),
+                }))),
                 right: Operand::TypeRef(TagType::from("size")),
             })),
         };
@@ -2116,7 +2180,9 @@ mod tests {
                                 QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(t) }) if t.as_str() == "size"
                             ));
                         }
-                        other => panic!("Expected Arithmetic, got: {:?}", other),
+                        other => {
+                            panic!("Expected Arithmetic, got: {:?}", other)
+                        }
                     },
                     other => panic!("Expected Aggregation, got: {:?}", other),
                 }
@@ -2129,9 +2195,10 @@ mod tests {
     #[test]
     fn test_unnest_count_projection() {
         let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: Operand::TypeRef(TagType::from("extension")),
         })));
 
@@ -2157,9 +2224,10 @@ mod tests {
     #[test]
     fn test_unnest_deep_nest() {
         let inner_nest = QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: Operand::TypeRef(TagType::from("extension")),
         });
         let agg = AggregationNode::Arithmetic {
@@ -2176,7 +2244,10 @@ mod tests {
         match &result {
             QueryNode::Nest(nest) => {
                 // left = Nest(parentdir, extension)
-                assert!(matches!(nest.left.as_deref(), Some(QueryNode::Nest(_))));
+                assert!(matches!(
+                    nest.left.as_deref(),
+                    Some(QueryNode::Nest(_))
+                ));
                 // right = Aggregation(Sum, Proj(size))
                 assert!(matches!(
                     &nest.right,
@@ -2194,14 +2265,13 @@ mod tests {
         let agg = AggregationNode::Arithmetic {
             op: crate::query::ast::ArithmeticAggOp::Sum,
             inner: Box::new(QueryNode::Nest(NestNode {
-                left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                    TagType::from("parentdir"),
-                ) }))),
-                right: Operand::Aggregation(Box::new(
-                    AggregationNode::Count(Box::new(QueryNode::TypedTag(
-                        TypedTag::new("*", "*"),
-                    ))),
-                )),
+                left: Some(Box::new(QueryNode::Nest(NestNode {
+                    left: None,
+                    right: Operand::TypeRef(TagType::from("parentdir")),
+                }))),
+                right: Operand::Aggregation(Box::new(AggregationNode::Count(
+                    Box::new(QueryNode::TypedTag(TypedTag::new("*", "*"))),
+                ))),
             })),
         };
 
@@ -2212,9 +2282,10 @@ mod tests {
     #[test]
     fn test_unnest_no_change_right_is_comparison() {
         let agg = AggregationNode::Count(Box::new(QueryNode::Nest(NestNode {
-            left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("parentdir"),
-            ) }))),
+            left: Some(Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("parentdir")),
+            }))),
             right: QueryNode::Comparison(ComparisonNode {
                 first: Operand::Aggregation(Box::new(AggregationNode::Count(
                     Box::new(QueryNode::TypedTag(TypedTag::new(
@@ -2226,7 +2297,8 @@ mod tests {
                     ComparisonOp::Scalar(BasicOp::Gt),
                     Operand::Literal(crate::types::Label::from(10i64)),
                 )],
-            }).into_operand(),
+            })
+            .into_operand(),
         })));
 
         assert!(!is_unnestable_aggregation(&agg));
@@ -2237,9 +2309,10 @@ mod tests {
     fn test_unnest_no_change_plain_agg() {
         let agg = AggregationNode::Arithmetic {
             op: crate::query::ast::ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                TagType::from("size"),
-            ) })),
+            inner: Box::new(QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("size")),
+            })),
         };
 
         assert!(!is_unnestable_aggregation(&agg));
@@ -2251,7 +2324,10 @@ mod tests {
     #[test]
     fn test_is_unnestable_right_and_with_projection() {
         let right = QueryNode::And(vec![
-            QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(TagType::from("size")) }),
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: Operand::TypeRef(TagType::from("size")),
+            }),
             QueryNode::TypedTag(TypedTag::new("path", "/tmp/test/*")),
         ]);
         assert!(is_unnestable_right(&right));
@@ -2274,9 +2350,10 @@ mod tests {
             op: crate::query::ast::ArithmeticAggOp::Sum,
             inner: Box::new(QueryNode::And(vec![
                 QueryNode::Nest(NestNode {
-                    left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                        TagType::from("parentdir"),
-                    ) }))),
+                    left: Some(Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("parentdir")),
+                    }))),
                     right: Operand::TypeRef(TagType::from("size")),
                 }),
                 QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
@@ -2306,9 +2383,10 @@ mod tests {
             op: crate::query::ast::ArithmeticAggOp::Sum,
             inner: Box::new(QueryNode::And(vec![
                 QueryNode::Nest(NestNode {
-                    left: Some(Box::new(QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(
-                        TagType::from("parentdir"),
-                    ) }))),
+                    left: Some(Box::new(QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("parentdir")),
+                    }))),
                     right: Operand::TypeRef(TagType::from("size")),
                 }),
                 QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
@@ -2349,17 +2427,20 @@ mod tests {
             op: crate::query::ast::ArithmeticAggOp::Sum,
             inner: Box::new(QueryNode::Nest(NestNode {
                 left: Some(Box::new(QueryNode::And(vec![
-                    QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(TagType::from(
-                        "parentdir",
-                    )) }),
+                    QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("parentdir")),
+                    }),
                     QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
                 ]))),
                 right: QueryNode::And(vec![
-                    QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(TagType::from(
-                        "size",
-                    )) }),
+                    QueryNode::Nest(NestNode {
+                        left: None,
+                        right: Operand::TypeRef(TagType::from("size")),
+                    }),
                     QueryNode::TypedTag(TypedTag::new("path", "/tmp/*")),
-                ]).into_operand(),
+                ])
+                .into_operand(),
             })),
         };
         assert!(is_unnestable_aggregation(&agg));
@@ -2372,7 +2453,10 @@ mod tests {
 
         let mut left = Label::other(Bitical::String("1MB".to_string()));
         left.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
-            ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 },
+            ByteSizeRange::Range {
+                lo: 1_048_576,
+                hi: 1_048_576,
+            },
         )));
         let mut right = Label::other(Bitical::String("100B".to_string()));
         right.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(

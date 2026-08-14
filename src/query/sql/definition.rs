@@ -56,7 +56,15 @@ impl ResolvedDefinition {
         reserved: Vec<String>,
         default_rank: Rank,
     ) -> Self {
-        Self::build(kind, value, Vec::new(), true, candidates, reserved, default_rank)
+        Self::build(
+            kind,
+            value,
+            Vec::new(),
+            true,
+            candidates,
+            reserved,
+            default_rank,
+        )
     }
 
     /// id 区画の参照（`origin:system`）由来。区画内の型定義を全て指す。
@@ -296,8 +304,7 @@ fn name_condition(pattern: &str, exact: bool) -> sea_query::SimpleExpr {
     if exact {
         Expr::col(Col::Name).eq(pattern)
     } else {
-        Expr::col(Col::Name)
-            .binary(BinOper::Custom("GLOB"), Expr::val(pattern))
+        Expr::col(Col::Name).binary(BinOper::Custom("GLOB"), Expr::val(pattern))
     }
 }
 

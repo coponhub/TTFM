@@ -152,8 +152,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // 1. 基本的なサイズ比較
     println!("Testing 'size: :> 300'...");
-    let res =
-        search::search_nowarn(&store, &registry, "size: :> 300", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: :> 300",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 2); // medium, large
 
     // 2. 連鎖比較 (Between)
@@ -173,8 +177,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let item_id = item_id_num.to_string();
     super::tag_item_id(&store, &registry, item_id_num, "width:640")?;
 
-    let res =
-        search::search_nowarn(&store, &registry, "width: :> 500", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "width: :> 500",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].id.as_i64().to_string(), item_id);
 
@@ -191,8 +199,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // 5. スペースなしフォーマット
     println!("Testing 'width:>500' (no spaces)...");
-    let res =
-        search::search_nowarn(&store, &registry, "width:>500", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "width:>500",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].id.as_i64().to_string(), item_id);
 
@@ -201,8 +213,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // >= (Inclusive)
     println!("Testing 'size: :>= 500'...");
-    let res =
-        search::search_nowarn(&store, &registry, "size: :>= 500", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: :>= 500",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 2, "size: :>= 500 failed"); // medium(500), large(1000)
 
     // <= (Inclusive)
@@ -218,8 +234,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
 
     // == (Equal)
     println!("Testing 'size: := 500'...");
-    let res =
-        search::search_nowarn(&store, &registry, "size: := 500", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: := 500",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 1, "size: := 500 failed"); // medium(500)
 
     // ^= (Not Equal)
@@ -242,8 +262,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     assert_eq!(res.results.len(), 2); // small(100), large(1000)
 
     // Custom tag exact match (Cast check)
-    let res =
-        search::search_nowarn(&store, &registry, "width: := 640", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "width: := 640",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 1);
 
     // width:640 is set on one item. Others don't have width.
@@ -260,13 +284,18 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     let yesterday_str = yesterday.format("%Y-%m-%d %H:%M:%S").to_string();
 
     println!("Testing 'mtime:today'...");
-    let res =
-        search::search_nowarn(&store, &registry, "mtime:today", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "mtime:today",
+        Default::default(),
+    )?;
     assert!(res.results.len() >= 3, "Should match files created today");
 
     println!("Testing 'mtime:\"{}\"'...", today_str);
     let query = format!("mtime:\"{}\"", today_str);
-    let res = search::search_nowarn(&store, &registry, &query, Default::default())?;
+    let res =
+        search::search_nowarn(&store, &registry, &query, Default::default())?;
     assert!(res.results.len() >= 3, "Should match specific date (today)");
 
     // 過去のファイルを準備 (Linux の touch コマンドを使用)
@@ -297,8 +326,12 @@ fn test_comparison_logic() -> anyhow::Result<()> {
     );
 
     println!("Testing 'mtime:<today'...");
-    let res =
-        search::search_nowarn(&store, &registry, "mtime:<today", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "mtime:<today",
+        Default::default(),
+    )?;
     assert!(
         res.results.iter().any(|r| r.raw_repr() == "past.txt"),
         "Should match past.txt by '<today'"
@@ -342,7 +375,8 @@ fn test_or_negation_complex_behavior() {
     let query = "item_kind:file - extension:rs";
 
     let results =
-        search::search_nowarn(&store, &registry, query, Default::default()).unwrap();
+        search::search_nowarn(&store, &registry, query, Default::default())
+            .unwrap();
 
     let mut found_txt_file = false;
 
@@ -522,9 +556,13 @@ fn test_glob_search_behavior() -> anyhow::Result<()> {
     // 11. Type Wildcard + Value Prefix (Regression Test)
     // "exte*:^pd" should match project_alpha.pdf (extension: pdf)
     // This confirms that 'exte*' parses as a typed tag (not comparison) and '^pd' becomes 'pd*' glob.
-    let results =
-        search::search_nowarn(&store, &registry, "exte*:^pd", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "exte*:^pd",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results.results.len() > 0,
         "Should match .pdf files via 'exte*' type glob and '^pd' value prefix"
@@ -637,9 +675,13 @@ fn test_complex_search_combinations() {
 
     // 1. Type Glob + Value Glob (exte*:r*)
     // Should match 15 test_src + main + lib + mod = 18 files. (Extension is "rs")
-    let results =
-        search::search_nowarn(&store, &registry, "exte*:r*", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "exte*:r*",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         results.results.len() >= 18,
         "exte*:r* should match all rs files"
@@ -686,11 +728,15 @@ fn test_complex_search_combinations() {
     );
 
     // 4. Type Glob + Difference + Value Glob (exte*:rs - name:mod*)
-    let all_rs =
-        search::search_nowarn(&store, &registry, "exte*:rs", Default::default())
-            .unwrap()
-            .results
-            .len();
+    let all_rs = search::search_nowarn(
+        &store,
+        &registry,
+        "exte*:rs",
+        Default::default(),
+    )
+    .unwrap()
+    .results
+    .len();
     let results_diff = search::search_nowarn(
         &store,
         &registry,
@@ -732,22 +778,34 @@ fn test_complex_search_combinations() {
     assert!(results.results.iter().all(|r| r.raw_repr() == "main.rs"));
 
     // 7. Bracket Glob (name:[m]ain.rs)
-    let results =
-        search::search_nowarn(&store, &registry, "name:[m]ain.rs", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "name:[m]ain.rs",
+        Default::default(),
+    )
+    .unwrap();
     assert!(results.results.len() >= 1);
     assert!(results.results.iter().any(|r| r.raw_repr() == "main.rs"));
 
     // 8. Type Glob ('?' wildcard) + Value Exact (exte*:r?)
-    let results =
-        search::search_nowarn(&store, &registry, "exte*:r?", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "exte*:r?",
+        Default::default(),
+    )
+    .unwrap();
     assert!(results.results.len() >= 18);
 
     // 9. Double Glob (nam*:*.rs)
-    let results =
-        search::search_nowarn(&store, &registry, "nam*:*.rs", Default::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "nam*:*.rs",
+        Default::default(),
+    )
+    .unwrap();
     assert!(results.results.len() >= 18);
 
     // 10. Type Prefix + Value Glob (item_kind:^fi & name:*.rs)

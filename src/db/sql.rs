@@ -201,8 +201,7 @@ impl CustomFunc {
     }
 
     pub fn item_id_origin_qualified(tbl: super::Tbl, col: Col) -> String {
-        let qualified =
-            format!("{}.{}", sea_query::Iden::to_string(&tbl), col);
+        let qualified = format!("{}.{}", sea_query::Iden::to_string(&tbl), col);
         Self::item_id_origin(&qualified)
     }
 

@@ -2,7 +2,10 @@ use tempfile::TempDir;
 use ttfm::{
     db::{Store, TargetTable},
     edit::{
-        edit, modify::modify, parse::parse_edit_query, write::write_and_refresh,
+        edit,
+        modify::{modify, resolve_nodes},
+        parse::parse_edit_query,
+        write::write_and_refresh,
         QueryType, WriteOptions,
     },
     indexing::Indexer,
@@ -177,8 +180,18 @@ fn product_append_on_same_type_writes_every_value() -> anyhow::Result<()> {
         &mut Vec::new(),
     )?;
 
-    let n1 = ttfm::search::search_nowarn(&store, &registry, "note:1", SearchOptions::default())?;
-    let n2 = ttfm::search::search_nowarn(&store, &registry, "note:2", SearchOptions::default())?;
+    let n1 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "note:1",
+        SearchOptions::default(),
+    )?;
+    let n2 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "note:2",
+        SearchOptions::default(),
+    )?;
     assert_eq!(n1.results.len(), 1);
     assert_eq!(n2.results.len(), 1);
     Ok(())
@@ -232,8 +245,18 @@ fn tag_definition_binds_two_numbers_from_one_match() -> anyhow::Result<()> {
         &mut Vec::new(),
     )?;
 
-    let r1 = ttfm::search::search_nowarn(&store, &registry, "ta:x", SearchOptions::default())?;
-    let r2 = ttfm::search::search_nowarn(&store, &registry, "tb:A", SearchOptions::default())?;
+    let r1 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "ta:x",
+        SearchOptions::default(),
+    )?;
+    let r2 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "tb:A",
+        SearchOptions::default(),
+    )?;
     assert_eq!(r1.results.len(), 1);
     assert_eq!(r2.results.len(), 1);
     assert_eq!(
@@ -271,8 +294,18 @@ fn tag_definition_reuses_same_number_across_nodes() -> anyhow::Result<()> {
         &mut Vec::new(),
     )?;
 
-    let r1 = ttfm::search::search_nowarn(&store, &registry, "ta:B", SearchOptions::default())?;
-    let r2 = ttfm::search::search_nowarn(&store, &registry, "tb:B", SearchOptions::default())?;
+    let r1 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "ta:B",
+        SearchOptions::default(),
+    )?;
+    let r2 = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "tb:B",
+        SearchOptions::default(),
+    )?;
     assert_eq!(r1.results.len(), 1);
     assert_eq!(r2.results.len(), 1);
     assert_eq!(
@@ -346,7 +379,8 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
 
     // modify → write で登録 + rank 付与
     let eq = parse_edit_query("rank:100", QueryType::Tag, &registry)?;
-    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
+    let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
+    let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // Stored になり rank が付いている
@@ -386,7 +420,8 @@ fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
 
     // modify → write で note として登録 + project:archived 付与
     let eq = parse_edit_query("project:archived", QueryType::Tag, &registry)?;
-    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
+    let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
+    let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // item_references に note 行が存在する
@@ -427,7 +462,8 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
     assert!(!item.id.is_stored());
 
     // None → 登録 Add のみ生成
-    let actions = modify(item, None, QueryType::Tag, &registry)?;
+    let nodes = resolve_nodes(None, QueryType::Tag, &registry)?;
+    let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
     assert_eq!(
         actions.len(),
         1,
@@ -478,7 +514,11 @@ fn tag_exact_returns_definition_item() -> anyhow::Result<()> {
         "unregistered tag def must not be Stored"
     );
     assert_eq!(
-        r.results[0].representative.tags.first().map(|l| l.tag_type()),
+        r.results[0]
+            .representative
+            .tags
+            .first()
+            .map(|l| l.tag_type()),
         Some(TagType::Base(SType::TypedTag))
     );
 
@@ -616,7 +656,8 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
         "tag def must not be Stored before registration"
     );
     let eq = parse_edit_query("rank:77", QueryType::Tag, &registry)?;
-    let actions = modify(item, Some(&eq), QueryType::Tag, &registry)?;
+    let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
+    let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
     write_and_refresh(&store, &registry, actions)?;
 
     // rank: projection の item 表示が 'unknown' でなく 'project:A' を含む
@@ -689,7 +730,8 @@ fn renamed_file_shows_user_name() -> anyhow::Result<()> {
     )?;
     assert_eq!(r.results.len(), 1);
     let name = r.results[0].representative.tags.iter().find_map(|l| {
-        if l.tag_type() == ttfm::types::TagType::Base(ttfm::types::SType::Name) {
+        if l.tag_type() == ttfm::types::TagType::Base(ttfm::types::SType::Name)
+        {
             let s = l.as_str();
             Some(s.clone())
         } else {

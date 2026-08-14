@@ -38,6 +38,7 @@ pub enum TargetTable {
     FileReferences,
     Locations,
     BaseTags,
+    TagsByLocation,
     ItemReferences,
     SystemTags,
     UserTags,
@@ -133,6 +134,7 @@ impl Store {
             TargetTable::FileReferences,
             TargetTable::Locations,
             TargetTable::BaseTags,
+            TargetTable::TagsByLocation,
         ];
         for target in targets {
             let path = self.path_for_target(target);
@@ -171,6 +173,7 @@ pub enum Tbl {
     FileReferences,
     Locations,
     BaseTags,
+    TagsByLocation,
     ItemReferences,
     SystemTags,
     UserTags,
@@ -185,6 +188,7 @@ pub enum Tbl {
     FileReferencesDiff,
     LocationsDiff,
     BaseTagsDiff,
+    TagsByLocationDiff,
     ItemReferencesDiff,
     SystemTagsDiff,
     UserTagsDiff,
@@ -432,7 +436,8 @@ impl Bitical {
                 } else {
                     tag
                 };
-                Expr::col(t).binary(BinOper::Custom("GLOB"), Expr::val(s.clone()))
+                Expr::col(t)
+                    .binary(BinOper::Custom("GLOB"), Expr::val(s.clone()))
             }
             Bitical::Boolean(b) => Expr::col(Col::LabelBool).eq(*b),
             Bitical::Double(d) => Expr::col(Col::LabelDouble).eq(*d),
@@ -616,10 +621,12 @@ impl Schema {
                     create.col(&mut def);
                 }
                 create.col(SeaColumnDef::new(Col::ScanHash).big_integer());
-                create
-                    .col(SeaColumnDef::new(Col::BasenameScanHash).big_integer());
+                create.col(
+                    SeaColumnDef::new(Col::BasenameScanHash).big_integer(),
+                );
             }
             TargetTable::BaseTags
+            | TargetTable::TagsByLocation
             | TargetTable::SystemTags
             | TargetTable::UserTags => {
                 create
@@ -647,11 +654,12 @@ impl Schema {
                 create
                     .col(SeaColumnDef::new(Col::ItemId).big_integer())
                     .col(SeaColumnDef::new(Col::Rank).big_integer())
-                    .col(SeaColumnDef::new(Col::FileId).custom(BiticalType::Uuid))
-                    .col(SeaColumnDef::new(Col::ScanHash).big_integer())
                     .col(
-                        SeaColumnDef::new(Col::BasenameScanHash).big_integer(),
+                        SeaColumnDef::new(Col::FileId)
+                            .custom(BiticalType::Uuid),
                     )
+                    .col(SeaColumnDef::new(Col::ScanHash).big_integer())
+                    .col(SeaColumnDef::new(Col::BasenameScanHash).big_integer())
                     .col(SeaColumnDef::new(Col::Path).string())
                     .col(SeaColumnDef::new(Col::Size).big_integer())
                     .col(SeaColumnDef::new(Col::Mtime).big_integer())
@@ -672,7 +680,9 @@ mod tests {
     fn test_store_open_disables_extension_autoload() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("db")).unwrap();
-        for setting in ["autoinstall_known_extensions", "autoload_known_extensions"] {
+        for setting in
+            ["autoinstall_known_extensions", "autoload_known_extensions"]
+        {
             let value: String = store
                 .conn
                 .query_row(
@@ -822,8 +832,7 @@ mod tests {
     fn test_to_column_match_expr_caret_is_literal_not_prefix_glob() {
         let expr =
             Bitical::String("^foo".into()).to_column_match_expr(Col::Label);
-        let sql =
-            Query::select().expr(expr).to_string(PostgresQueryBuilder);
+        let sql = Query::select().expr(expr).to_string(PostgresQueryBuilder);
         assert!(
             sql.contains("'^foo'"),
             "value should stay literal '^foo': {}",
@@ -1074,6 +1083,7 @@ mod tests {
             db_dir.join("file_references.parquet"),
             db_dir.join("locations.parquet"),
             db_dir.join("base_tags.parquet"),
+            db_dir.join("tags_by_location.parquet"),
             db_dir.join("current_scan.parquet"),
             db_dir.join("live_ids.parquet"),
         ];
@@ -1114,5 +1124,13 @@ mod tests {
         for file in &files_to_keep {
             assert!(file.exists(), "File should be kept: {:?}", file);
         }
+    }
+
+    #[test]
+    fn test_tags_by_location_target_table() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Store::open(temp_dir.path()).unwrap();
+        let path = store.path_for_target(TargetTable::TagsByLocation);
+        assert!(path.ends_with("tags_by_location.parquet"));
     }
 }

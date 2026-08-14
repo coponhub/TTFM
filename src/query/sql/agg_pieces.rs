@@ -370,7 +370,9 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
                     StorageMapping::Basic { column, .. }
                         if *column == Col::LabelStr =>
                     {
-                        CustomFunc::try_cast_double(coalesce_label_columns_as_string())
+                        CustomFunc::try_cast_double(
+                            coalesce_label_columns_as_string(),
+                        )
                     }
                     StorageMapping::Basic { column, .. } => {
                         Expr::col(*column).into()

@@ -657,7 +657,10 @@ mod tests {
         // （build_label が本番でやるのと同じ形）。
         let mut label = Label::other(Bitical::String("1MB".to_string()));
         label.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
-            ByteSizeRange::Range { lo: 1_048_576, hi: 1_048_576 },
+            ByteSizeRange::Range {
+                lo: 1_048_576,
+                hi: 1_048_576,
+            },
         )));
 
         let expr = build_resolved_literal_expr(&label);
@@ -684,7 +687,9 @@ mod tests {
         use crate::types::TagType;
 
         // 1. Boolean Literal -> CAST(... AS BIGINT)
-        let lit_bool = ResolvedOperand::Literal(crate::types::Label::other(crate::types::Bitical::Boolean(true)));
+        let lit_bool = ResolvedOperand::Literal(crate::types::Label::other(
+            crate::types::Bitical::Boolean(true),
+        ));
         let expr_lit = build_resolved_operand_expr_for_arithmetic(
             &lit_bool,
             &AggregationContext::new(),

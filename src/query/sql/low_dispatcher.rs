@@ -80,9 +80,9 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::ScalarMatch { left, op, right } => {
             Ok(build_scalar_match_sql(src, left, *op, right))
         }
-        ResolvedNode::DateTimeMatch { storage, op, range, .. } => {
-            Ok(build_resolved_date_time_match_sql(src, storage, *op, range))
-        }
+        ResolvedNode::DateTimeMatch {
+            storage, op, range, ..
+        } => Ok(build_resolved_date_time_match_sql(src, storage, *op, range)),
         _ => Err(child_sqls),
     }
 }

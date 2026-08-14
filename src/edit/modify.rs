@@ -3,7 +3,9 @@ use super::{
     write::{DeleteTarget, TagOp, WriteAction},
     EditStrategy, QueryType,
 };
-use crate::query::ast::{BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode};
+use crate::query::ast::{
+    BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
+};
 use crate::response::Item;
 use crate::tag::TagRegistry;
 use crate::types::{Bitical, ItemId, Label, SType, TagType, TypedTag};
@@ -87,8 +89,8 @@ impl QueryType {
                 tag_type.as_str()
             ),
             (QueryType::Tag, Some(v)) => {
+                let strategy = get_strategy(&tag_type, registry)?;
                 let tag = TypedTag::retag(tag_type, &v);
-                let strategy = get_strategy(&tag, registry)?;
                 let tag = interpret_tag_value(tag, registry)?;
                 Ok(Directive::Tag(tag, strategy))
             }
@@ -152,39 +154,78 @@ fn interpret_tag_value(
     TypedTag::retag(tag.tag_type(), value).to_ok()
 }
 
-// registry から label の EditStrategy を取り出す純粋ヘルパー。
-// 未登録のカスタム型はデフォルト Append。登録済みだが edit() 未定義なら Forbidden(即エラー)。
 fn get_strategy(
-    tag: &TypedTag,
+    tag_type: &TagType,
     registry: &TagRegistry,
 ) -> Result<EditStrategy> {
-    match registry.get(tag.tag_type().as_str()) {
+    match registry.get(tag_type.as_str()) {
         Some(f) => match f.edit() {
             Some(e) => Ok(e.strategy()),
             None => bail!(
                 "tag type '{}' is registered but not editable (Forbidden)",
-                tag.tag_type()
+                tag_type
             ),
         },
         None => Ok(EditStrategy::Append),
     }
 }
 
-// Untag 方向の Forbidden 判定。registry ヒットかつ edit() None なら拒否
-// (strategy の値は見ない。RemoveOnly 等 edit() Some のものは通す)。
+pub struct ResolvedNode {
+    pub tag_type: TagType,
+    pub label: Option<Label>,
+    pub strategy: EditStrategy,
+}
+
+pub fn resolve_nodes(
+    query: Option<&EditQuery>,
+    query_type: QueryType,
+    registry: &TagRegistry,
+) -> Result<Vec<ResolvedNode>> {
+    query
+        .map(|q| q.nodes.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .map(|n| {
+            let tag_type = TagType::from(n.tag_type.value().as_str());
+            if tag_type.as_str().is_empty() {
+                bail!("empty tag type in EditQuery");
+            }
+            let label = n.label.as_ref().map(build_leaf_label).transpose()?;
+            if matches!(query_type, QueryType::Untag) {
+                check_untag_allowed(&tag_type, registry)?;
+            }
+            let strategy = get_strategy(&tag_type, registry)?;
+            Ok(ResolvedNode {
+                tag_type,
+                label,
+                strategy,
+            })
+        })
+        .collect()
+}
+
 fn check_untag_allowed(
     tag_type: &TagType,
     registry: &TagRegistry,
 ) -> Result<()> {
-    if let Some(f) = registry.get(tag_type.as_str()) {
-        if f.edit().is_none() {
-            bail!(
-                "tag type '{}' is registered but not editable (Forbidden)",
-                tag_type.as_str()
-            );
-        }
+    let Some(f) = registry.get(tag_type.as_str()) else {
+        return Ok(());
+    };
+    let Some(e) = f.edit() else {
+        bail!(
+            "tag type '{tag_type}' is registered but not editable (Forbidden)"
+        );
+    };
+    if e.can_untag() {
+        return Ok(());
     }
-    Ok(())
+    match e.strategy() {
+        EditStrategy::Relocate => bail!(
+            "tag type '{tag_type}' is only part of a location; \
+             remove 'path:' to remove the location itself"
+        ),
+        _ => bail!("tag type '{tag_type}' has no removal to perform"),
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -226,10 +267,7 @@ fn injection_labels(
         .filter_map(|f| {
             let e = f.edit()?;
             matches!(e.strategy(), EditStrategy::ModifyInjection)
-                .then(|| {
-                    e.inject(item)
-                        .map(|l| TypedTag::retag(f.name(), &l))
-                })
+                .then(|| e.inject(item).map(|l| TypedTag::retag(f.name(), &l)))
                 .flatten()
         })
         .collect();
@@ -283,8 +321,12 @@ fn fold_volatile(
     actions: Vec<WriteAction>,
     registry: &TagRegistry,
 ) -> Vec<WriteAction> {
-    let mut tags: Vec<TypedTag> =
-        item.tags.entries.iter().map(|e| e.typed_tag.clone()).collect();
+    let mut tags: Vec<TypedTag> = item
+        .tags
+        .entries
+        .iter()
+        .map(|e| e.typed_tag.clone())
+        .collect();
     actions
         .into_iter()
         .flat_map(TagDelta::flatten)
@@ -299,25 +341,20 @@ fn fold_volatile(
 
 pub fn modify(
     item: &Item,
-    query: Option<&EditQuery>,
+    nodes: &[ResolvedNode],
     query_type: QueryType,
     registry: &TagRegistry,
 ) -> Result<Vec<WriteAction>> {
-    let directives = match query {
-        Some(q) => q
-            .nodes
-            .iter()
-            .map(|n| {
-                let ty = TagType::from(n.tag_type.value().as_str());
-                if ty.as_str().is_empty() {
-                    bail!("empty tag type in EditQuery");
-                }
-                let label = n.label.as_ref().map(build_leaf_label).transpose()?;
-                query_type.to_directive(ty, label, registry)
-            })
-            .collect::<Result<Vec<_>>>()?,
-        None => vec![],
-    };
+    let directives = nodes
+        .iter()
+        .map(|n| {
+            query_type.to_directive(
+                n.tag_type.clone(),
+                n.label.clone(),
+                registry,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
     let actions: Vec<WriteAction> = directives
         .into_iter()
         .map(|d| d.into_actions(&item.id, item))
@@ -342,9 +379,7 @@ mod tests {
     use super::*;
     use crate::response::Item;
     use crate::tag::TagRegistry;
-    use crate::types::{
-        Bitical, ItemId, ItemKind, SType, TagType, Tags,
-    };
+    use crate::types::{Bitical, ItemId, ItemKind, SType, TagType, Tags};
 
     fn make_item(item_id: i64, typed_tags: Vec<TypedTag>) -> Item {
         use crate::types::{Intrinsic, Origin, Rank};
@@ -371,6 +406,16 @@ mod tests {
         crate::edit::parse::parse_edit_query(q, qt, &registry()).unwrap()
     }
 
+    fn modify_query(
+        item: &Item,
+        query: Option<&EditQuery>,
+        query_type: QueryType,
+        registry: &TagRegistry,
+    ) -> Result<Vec<WriteAction>> {
+        let nodes = resolve_nodes(query, query_type, registry)?;
+        modify(item, &nodes, query_type, registry)
+    }
+
     fn leaf(q: &str) -> EditQueryLeaf {
         eq(&format!("t:{q}"), QueryType::Tag)
             .nodes
@@ -383,7 +428,9 @@ mod tests {
 
     fn make_volatile_item(stype: SType, repr_value: &str) -> Item {
         use crate::types::{Bitical, Intrinsic, Rank};
-        let repr_label = TypedTag::new(TagType::Base(stype), Bitical::String(repr_value.to_string()),
+        let repr_label = TypedTag::new(
+            TagType::Base(stype),
+            Bitical::String(repr_value.to_string()),
         );
         Item {
             id: ItemId::Volatile(0),
@@ -433,7 +480,7 @@ mod tests {
     #[test]
     fn modify_append_custom_type() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:A", QueryType::Tag)),
             QueryType::Tag,
@@ -449,7 +496,7 @@ mod tests {
     #[test]
     fn modify_tag_multiple_tokens() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:A status:done", QueryType::Tag)),
             QueryType::Tag,
@@ -462,7 +509,7 @@ mod tests {
     #[test]
     fn modify_replace_rank_generates_delete_then_add() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("rank:5", QueryType::Tag)),
             QueryType::Tag,
@@ -480,8 +527,8 @@ mod tests {
 
     #[test]
     fn interpret_tag_value_applies_tagfn_interpret() {
-        let label = TypedTag::new(TagType::from("size"), Bitical::String("1k".into()),
-        );
+        let label =
+            TypedTag::new(TagType::from("size"), Bitical::String("1k".into()));
         let interpreted = interpret_tag_value(label, &registry()).unwrap();
         assert_eq!(
             interpreted,
@@ -494,7 +541,7 @@ mod tests {
     #[test]
     fn modify_tag_relocate_is_error() {
         let item = make_item(1, vec![]);
-        assert!(modify(
+        assert!(modify_query(
             &item,
             Some(&eq("filename:foo.txt", QueryType::Tag)),
             QueryType::Tag,
@@ -508,7 +555,12 @@ mod tests {
     #[test]
     fn modify_tag_registered_without_edit_is_forbidden() {
         assert!(
-            crate::edit::parse::parse_edit_query("hash:xxx", QueryType::Tag, &registry()).is_err(),
+            crate::edit::parse::parse_edit_query(
+                "hash:xxx",
+                QueryType::Tag,
+                &registry()
+            )
+            .is_err(),
             "registered type without edit() must be Forbidden, not Append"
         );
     }
@@ -516,7 +568,12 @@ mod tests {
     #[test]
     fn modify_tag_type_value_is_forbidden() {
         assert!(
-            crate::edit::parse::parse_edit_query("type:foo", QueryType::Tag, &registry()).is_err(),
+            crate::edit::parse::parse_edit_query(
+                "type:foo",
+                QueryType::Tag,
+                &registry()
+            )
+            .is_err(),
             "type: is a meta type and must be Forbidden as an EditQuery value"
         );
     }
@@ -525,7 +582,7 @@ mod tests {
     fn modify_tag_item_id_is_forbidden() {
         let item = make_item(1, vec![]);
         assert!(
-            modify(&item, Some(&eq("item_id:5", QueryType::Tag)), QueryType::Tag, &registry())
+            modify_query(&item, Some(&eq("item_id:5", QueryType::Tag)), QueryType::Tag, &registry())
                 .is_err(),
             "item_id: must reject Tag direction (RemoveOnly: append not allowed)"
         );
@@ -534,8 +591,12 @@ mod tests {
     #[test]
     fn modify_untag_registered_without_edit_is_forbidden() {
         assert!(
-            crate::edit::parse::parse_edit_query("hash:xxx", QueryType::Untag, &registry())
-                .is_err(),
+            crate::edit::parse::parse_edit_query(
+                "hash:xxx",
+                QueryType::Untag,
+                &registry()
+            )
+            .is_err(),
             "Forbidden must also block Untag direction"
         );
     }
@@ -543,7 +604,7 @@ mod tests {
     #[test]
     fn modify_untag_item_id_is_allowed() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("item_id:", QueryType::Untag)),
             QueryType::Untag,
@@ -560,8 +621,13 @@ mod tests {
     #[test]
     fn modify_tag_stem_is_relocate_not_forbidden() {
         let item = make_item(1, vec![]);
-        let err = modify(&item, Some(&eq("stem:foo", QueryType::Tag)), QueryType::Tag, &registry())
-            .unwrap_err();
+        let err = modify_query(
+            &item,
+            Some(&eq("stem:foo", QueryType::Tag)),
+            QueryType::Tag,
+            &registry(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("fs_operate"),
             "stem must be classified as Relocate, not Forbidden: {err}"
@@ -571,7 +637,7 @@ mod tests {
     #[test]
     fn modify_tag_modify_injection_is_error() {
         let item = make_item(1, vec![]);
-        assert!(modify(
+        assert!(modify_query(
             &item,
             Some(&eq("item_kind:note", QueryType::Tag)),
             QueryType::Tag,
@@ -583,7 +649,12 @@ mod tests {
     #[test]
     fn modify_tag_projection_is_error() {
         assert!(
-            crate::edit::parse::parse_edit_query("project:", QueryType::Tag, &registry()).is_err(),
+            crate::edit::parse::parse_edit_query(
+                "project:",
+                QueryType::Tag,
+                &registry()
+            )
+            .is_err(),
             "Projection form must be rejected at parse time in Tag direction"
         );
     }
@@ -592,7 +663,7 @@ mod tests {
     fn modify_untag_existing_label() {
         let tag = TypedTag::new("project", Bitical::String("A".into()));
         let item = make_item(1, vec![tag.clone()]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:A", QueryType::Untag)),
             QueryType::Untag,
@@ -608,7 +679,7 @@ mod tests {
     #[test]
     fn modify_untag_nonexistent_label_is_noop() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:Z", QueryType::Untag)),
             QueryType::Untag,
@@ -621,7 +692,7 @@ mod tests {
     #[test]
     fn modify_untag_projection() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:", QueryType::Untag)),
             QueryType::Untag,
@@ -641,7 +712,7 @@ mod tests {
             TypedTag::new("status", Bitical::String("done".into())),
         ];
         let item = make_item(1, tags);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:A status:done", QueryType::Untag)),
             QueryType::Untag,
@@ -678,7 +749,7 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::Type, "project");
         item.id = ItemId::Volatile(0).settle(Origin::User);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("rank:5", QueryType::Tag)),
             QueryType::Tag,
@@ -697,13 +768,12 @@ mod tests {
     #[test]
     fn modify_volatile_injects_name_from_representative() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         assert!(
-            has_append(
-                tags,
-                |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "project:A"
-            ),
+            has_append(tags, |l| l.tag_type() == TagType::Base(SType::Name)
+                && l.as_str() == "project:A"),
             "name must be injected from representative when no name tag exists"
         );
     }
@@ -714,17 +784,17 @@ mod tests {
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags
             .push(TypedTag::new(SType::Name, "custom name"), Origin::User);
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         let names: Vec<_> = tags
             .iter()
             .filter(|t| matches!(t, TagOp::Append(l) if l.tag_type() == TagType::Base(SType::Name)))
             .collect();
         assert_eq!(names.len(), 1, "must not duplicate name tag");
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "custom name"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Name)
+            && l.as_str() == "custom name"));
     }
 
     #[test]
@@ -739,7 +809,7 @@ mod tests {
             tags: Tags::new(),
             item_count: None,
         };
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:X", QueryType::Tag)),
             QueryType::Tag,
@@ -748,7 +818,8 @@ mod tests {
         .unwrap();
         let tags = add_tags(&actions);
         assert!(
-            has_append(tags, |l| l.tag_type() == TagType::Base(SType::Name) && l.as_str() == "note"),
+            has_append(tags, |l| l.tag_type() == TagType::Base(SType::Name)
+                && l.as_str() == "note"),
             "name must fall back to item_kind when representative is empty"
         );
     }
@@ -756,7 +827,7 @@ mod tests {
     #[test]
     fn modify_volatile_tag_def_replace_single_add() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("rank:5", QueryType::Tag)),
             QueryType::Tag,
@@ -764,15 +835,15 @@ mod tests {
         )
         .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(tags, |l| l.tag_type() == TagType::Base(SType::Rank) && l.label.as_i64() == 5));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Rank)
+            && l.label.as_i64() == 5));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "project:A"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "tag"));
     }
 
     // item.tags に同 type が既存なら Replace は EditQuery 側のみ採用（重複しない）
@@ -781,7 +852,7 @@ mod tests {
         use crate::types::Origin;
         let mut item = make_volatile_item(SType::TypedTag, "project:A");
         item.tags.push(TypedTag::new(SType::Rank, 1), Origin::User);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("rank:5", QueryType::Tag)),
             QueryType::Tag,
@@ -798,13 +869,15 @@ mod tests {
             1,
             "old rank dropped, only EditQuery rank remains"
         );
-        assert!(has_append(tags, |l| l.tag_type() == TagType::Base(SType::Rank) && l.label.as_i64() == 5));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Rank)
+            && l.label.as_i64() == 5));
     }
 
     #[test]
     fn modify_volatile_tag_def_append_single_add() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:X", QueryType::Tag)),
             QueryType::Tag,
@@ -812,20 +885,18 @@ mod tests {
         )
         .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "project:A"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "tag"));
     }
 
     #[test]
     fn modify_volatile_type_def_single_add() {
         let item = make_volatile_item(SType::Type, "project");
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:X", QueryType::Tag)),
             QueryType::Tag,
@@ -833,20 +904,18 @@ mod tests {
         )
         .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "type"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "project"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "type"));
     }
 
     #[test]
     fn modify_volatile_other_projection_single_add_note() {
         let item = make_volatile_item(SType::Parentdir, "/home/aki/projects");
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:X", QueryType::Tag)),
             QueryType::Tag,
@@ -854,20 +923,18 @@ mod tests {
         )
         .unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "/home/aki/projects"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "note"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "/home/aki/projects"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "note"));
     }
 
     #[test]
     fn modify_stored_item_no_registration_action() {
         let item = make_item(1, vec![]);
-        let actions = modify(
+        let actions = modify_query(
             &item,
             Some(&eq("project:X", QueryType::Tag)),
             QueryType::Tag,
@@ -880,22 +947,22 @@ mod tests {
     #[test]
     fn modify_volatile_no_edit_query_registration_only() {
         let item = make_volatile_item(SType::TypedTag, "project:A");
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "tag"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "project:A"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "tag"));
     }
 
     #[test]
     fn modify_stored_no_edit_query_is_noop() {
         let item = make_item(1, vec![]);
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         assert!(actions.is_empty());
     }
 
@@ -904,9 +971,13 @@ mod tests {
     fn modify_volatile_multi_repr_is_note_with_joined_content() {
         use crate::types::{Bitical, Intrinsic, Rank};
         let repr = vec![
-            TypedTag::new(TagType::Base(SType::TypedTag), Bitical::String("project:A".to_string()),
+            TypedTag::new(
+                TagType::Base(SType::TypedTag),
+                Bitical::String("project:A".to_string()),
             ),
-            TypedTag::new(TagType::Base(SType::TypedTag), Bitical::String("status:done".to_string()),
+            TypedTag::new(
+                TagType::Base(SType::TypedTag),
+                Bitical::String("status:done".to_string()),
             ),
         ];
         let item = Item {
@@ -918,16 +989,15 @@ mod tests {
             tags: Tags::new(),
             item_count: None,
         };
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::ItemKind) && l.as_str() == "note"
-        ));
-        assert!(has_append(
-            tags,
-            |l| l.tag_type() == TagType::Base(SType::Content) && l.as_str() == "project:A &: status:done"
-        ));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::ItemKind)
+            && l.as_str() == "note"));
+        assert!(has_append(tags, |l| l.tag_type()
+            == TagType::Base(SType::Content)
+            && l.as_str() == "project:A &: status:done"));
     }
 
     // bitical_type: 移行後、type: タグはもうリネームされず素通りする。
@@ -939,7 +1009,8 @@ mod tests {
             TypedTag::new(SType::Type, Bitical::String("integer".to_string())),
             Origin::Builtin,
         );
-        let actions = modify(&item, None, QueryType::Tag, &registry()).unwrap();
+        let actions =
+            modify_query(&item, None, QueryType::Tag, &registry()).unwrap();
         let tags = add_tags(&actions);
         assert!(
             has_append(tags, |l| l.tag_type() == TagType::Base(SType::Type)
@@ -949,5 +1020,33 @@ mod tests {
                 )),
             "type: tag must pass through unchanged"
         );
+    }
+
+    #[test]
+    fn test_check_untag_allowed_rejections() {
+        let reg = registry();
+        assert!(check_untag_allowed(&TagType::Base(SType::Path), &reg).is_ok());
+        assert!(check_untag_allowed(&TagType::Base(SType::Name), &reg).is_ok());
+        assert!(
+            check_untag_allowed(&TagType::Base(SType::ItemId), &reg).is_ok()
+        );
+        assert!(check_untag_allowed(
+            &TagType::Custom("custom_tag".into()),
+            &reg
+        )
+        .is_ok());
+
+        assert!(check_untag_allowed(&TagType::Base(SType::Stem), &reg).is_err());
+        assert!(
+            check_untag_allowed(&TagType::Base(SType::Filename), &reg).is_err()
+        );
+        assert!(check_untag_allowed(&TagType::Base(SType::Extension), &reg)
+            .is_err());
+        assert!(check_untag_allowed(&TagType::Base(SType::Parentdir), &reg)
+            .is_err());
+        assert!(
+            check_untag_allowed(&TagType::Base(SType::Mtime), &reg).is_err()
+        );
+        assert!(check_untag_allowed(&TagType::Base(SType::Size), &reg).is_err());
     }
 }

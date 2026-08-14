@@ -19,7 +19,9 @@ fn group_replace_adds_by(
         })
         .flat_map(|(item, tags)| {
             tags.iter().filter_map(move |op| match op {
-                TagOp::Replace(t) => Some(((item.clone(), t.tag_type()), t.label.clone())),
+                TagOp::Replace(t) => {
+                    Some(((item.clone(), t.tag_type()), t.label.clone()))
+                }
                 TagOp::Append(_) => None,
             })
         })
@@ -45,8 +47,17 @@ fn distinct_count(labels: &[Label]) -> usize {
 pub fn confirm(
     _item_edits: &[(Item, Option<EditQuery>)],
     actions: &[WriteAction],
+    fs_plan: &super::fs_operate::FsPlan,
     _options: &WriteOptions,
 ) -> Result<bool> {
+    if !fs_plan.issues.is_empty() {
+        let lines: Vec<String> =
+            fs_plan.issues.iter().map(|i| i.to_string()).collect();
+        bail!(
+            "these need a choice, which is not implemented yet:\n{}",
+            lines.join("\n")
+        );
+    }
     for ((item, tag_type), labels) in group_replace_adds_by(actions) {
         if distinct_count(&labels) > 1 {
             bail!(

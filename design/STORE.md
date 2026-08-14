@@ -27,11 +27,18 @@ TTFMのデータベースは以下の様式で定義される。
 ### 1.3 `base_tags` テーブル (自動抽出タグ)
 - **ファイルパス**: `.ttfm/db/base_tags.parquet`
 - `item_id`: `file_references.item_id` への外部キー
-- `type`: タグの種類（例: `size_str`, `type_from_ext`）
+- `type`: タグの種類（例: `size_str`, `stem`）
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（型ごとに物理カラムを持ち、適切な型で格納される）
-- ※ 旧 `file_tags`。スキャンごとの洗い替え対象。
+- ※ 内容やファイル名に依存する自動抽出タグ。ファイル移動のみ（内容不変）の場合は再抽出をスキップする。
 
-### 1.4 `removed_files` テーブル (`user_tags`が付与されているのにファイルが失われたItem)
+### 1.4 `tags_by_location` テーブル (パス依存タグ)
+- **ファイルパス**: `.ttfm/db/tags_by_location.parquet`
+- `item_id`: `file_references.item_id` への外部キー
+- `type`: タグの種類
+- `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
+- ※ パス（ディレクトリ）に依存する自動抽出タグ。`locations` と同じタイミングで常に更新・洗い替えされる。
+
+### 1.5 `removed_files` テーブル (`user_tags`が付与されているのにファイルが失われたItem)
 - **ファイルパス**: `.ttfm/db/removed_files.parquet`
 - `item_id`:  Item ID (PRIMARY KEY)
 - `rank`: 削除時点のrank
@@ -89,7 +96,7 @@ Item（FileおよびDefinition）に対するタグ付けを管理する。
 
 ### 4.1 Origin & Name Resolution
 - **Origin**:
-  - `file_references/locations/base_tags/removed_files` 由来の行は`file`(indexingでのplugin関与タグも含む)、 
+  - `file_references/locations/base_tags/tags_by_location/removed_files` 由来の行は`file`(indexingでのplugin関与タグも含む)、 
   - `item_references` 由来の行はItemIDで判定(現状は`builtin/plugin/user`)
   - `system_tags` 由来の行は `builtin`
   - `user_tags` 由来の行は `user`
@@ -110,7 +117,7 @@ StorageMapping は3種:
 | **Composite** | 他タグへ展開される論理タグ（`directory:` 等） | 直接の格納先を持たず、展開先の各タグの write へ委ねる |
 
 - **書き込み先テーブルは origin で決まる**: ユーザー編集は常に `user_tags`（または Fixed の専用カラム）。
-  `base_tags` / `system_tags` は `ttfm index` 専管で、編集の write 対象外。
+  `base_tags` / `tags_by_location` / `system_tags` は `ttfm index` 専管で、編集の write 対象外。
 - **値の型解決**（どの `label_*` カラムを使うか）は read と同じロジックを共有する。
 - **`rank` はカラムと `user_tags` の両方に載る**: ユーザーが指定した rank は `user_tags` の
   `rank` タグとして保存し、`file_references` / `item_references` の `rank` カラムは
@@ -120,7 +127,7 @@ StorageMapping は3種:
   どちらの経路でも同じ値に落ちる。`rank` タグは1つの item につき1行のみを持つ。
 
 ## 6. Sorting strategy
-- `base_tags`, `system_tags`, `user_tags`は保存時、以下の順序でソートしておき、DuckDBのZoneMapを活用する
+- `base_tags`, `tags_by_location`, `system_tags`, `user_tags`は保存時、以下の順序でソートしておき、DuckDBのZoneMapを活用する
     - type ASC
     - label_int ASC
     - label_str ASC

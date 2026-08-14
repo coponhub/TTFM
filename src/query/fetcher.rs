@@ -138,7 +138,8 @@ impl<'a> Fetcher<'a> {
                     let s = bitical.as_display_name();
                     let s =
                         s.parse::<f64>().map(|f| f.to_string()).unwrap_or(s);
-                    res.representative = vec![TypedTag::new(SType::Name, s)].into();
+                    res.representative =
+                        vec![TypedTag::new(SType::Name, s)].into();
                 }
             } else {
                 #[allow(deprecated)]
@@ -189,7 +190,8 @@ impl<'a> Fetcher<'a> {
                     }
                 }
                 // 型情報が不明な場合は Name タグとして扱う (Lv.1 互換)
-                representative.push(TypedTag::new(SType::Name, lv.as_display_name()));
+                representative
+                    .push(TypedTag::new(SType::Name, lv.as_display_name()));
             }
             res.representative = representative.into();
         }
@@ -231,7 +233,8 @@ impl<'a> Fetcher<'a> {
                                 .parse::<f64>()
                                 .map(|f| f.to_string())
                                 .unwrap_or(s);
-                            res.representative = vec![TypedTag::new(SType::Name, s)].into();
+                            res.representative =
+                                vec![TypedTag::new(SType::Name, s)].into();
                         }
                     }
                     #[allow(deprecated)]
@@ -338,7 +341,9 @@ mod tests {
                 assert_eq!(tt.tag_type(), TagType::Base(SType::Directory));
                 assert!(!tt.is_default_node());
             }
-            other => panic!("expected a single annotated TypedTag, got {other:?}"),
+            other => {
+                panic!("expected a single annotated TypedTag, got {other:?}")
+            }
         }
     }
 
@@ -799,10 +804,9 @@ mod tests {
         let results = fetcher.fetch(100, 0).unwrap();
         assert_eq!(results.len(), 1);
         // item: タグは注入されないはず（items パス）
-        let has_item_tag =
-            results[0].tags.entries.iter().any(|e| {
-                e.typed_tag.tag_type() == crate::types::TagType::from("item")
-            });
+        let has_item_tag = results[0].tags.entries.iter().any(|e| {
+            e.typed_tag.tag_type() == crate::types::TagType::from("item")
+        });
         assert!(!has_item_tag, "Items path should not have item: tags");
     }
 
@@ -894,10 +898,9 @@ mod tests {
             "Items path returns filename, not group label"
         );
         // items パスを通るので item: タグは存在しない
-        let has_item_tag =
-            results[0].tags.entries.iter().any(|e| {
-                e.typed_tag.tag_type() == crate::types::TagType::from("item")
-            });
+        let has_item_tag = results[0].tags.entries.iter().any(|e| {
+            e.typed_tag.tag_type() == crate::types::TagType::from("item")
+        });
         assert!(!has_item_tag, "Flat list result should NOT have item: tags");
     }
 }

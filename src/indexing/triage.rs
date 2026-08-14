@@ -41,10 +41,11 @@ pub(crate) fn run_triage(
     store: &Store,
     registry: &TagRegistry,
     to_process: Vec<(Option<ItemId>, TempScanEntry)>,
-) -> Result<(Vec<TaggingResult>, Vec<DynamicRow>)> {
+    dir_changed: Vec<(Option<ItemId>, TempScanEntry)>,
+) -> Result<(Vec<TaggingResult>, Vec<TaggingResult>)> {
     let triager = ItemTriager::new(registry);
 
-    // 1. 各エントリからメタデータを抽出（ハッシュ・inode・IDも引き継ぐ）
+    // 1. 通常処理エントリからメタデータを抽出
     let raw_values = triager.extract_all(to_process)?;
 
     // 2. 新規（既存 ID 無し）の分だけ、file_ref（inode）単位で重複排除してから
@@ -60,11 +61,15 @@ pub(crate) fn run_triage(
     let by_file_ref: FxHashMap<FileRef, i64> =
         new_refs.into_iter().zip(new_ids).collect();
 
-    // 3. ID の割当（既存 ID があれば流用、なければ file_ref に紐づく採番済み id を使う）
+    // 3. ID の割当
     let results = triager.assemble_records(raw_values, &by_file_ref)?;
 
-    // 移動用の再構築ロジックは merge.rs で吸収されるため、ここでは常に空
-    (results, Vec::new()).to_ok()
+    // 4. 移動のみ (DirChanged) のエントリからパス依存メタデータのみを抽出 (base_tags をスキップ)
+    let raw_dir_changed = triager.extract_all_dir_changed(dir_changed)?;
+    let dir_changed_results =
+        triager.assemble_records(raw_dir_changed, &FxHashMap::default())?;
+
+    (results, dir_changed_results).to_ok()
 }
 
 // ========================================================
@@ -113,6 +118,55 @@ impl<'a> ItemTriager<'a> {
     /// 1つのファイルに対してタグ抽出を試みます。
     fn extract_single_file(&self, path_str: &str) -> Result<Option<Biticals>> {
         let res = self.registry.process_file(Path::new(path_str));
+
+        if let Ok(values) = res {
+            return Ok(Some(values));
+        }
+
+        let err = res.unwrap_err();
+        if is_not_found(&err) {
+            Ok(None)
+        } else {
+            Err(err)
+        }
+    }
+
+    pub(crate) fn extract_all_dir_changed(
+        &self,
+        entries: Vec<(Option<ItemId>, TempScanEntry)>,
+    ) -> Result<Vec<(Option<ItemId>, Biticals, Hashes, FileRef)>> {
+        entries
+            .into_par_iter()
+            .map(|(id, e)| self.extract_with_hash_dir_changed(id, e))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .to_ok()
+    }
+
+    fn extract_with_hash_dir_changed(
+        &self,
+        existing_id: Option<ItemId>,
+        entry: TempScanEntry,
+    ) -> Result<Option<(Option<ItemId>, Biticals, Hashes, FileRef)>> {
+        let path = &entry.entry.path.value;
+        let hashes = Hashes(entry.hash, entry.basename_hash);
+        let file_ref = entry.entry.inode.value;
+
+        match self.extract_single_file_location_only(path)? {
+            Some(values) => Ok(Some((existing_id, values, hashes, file_ref))),
+            None => Ok(None),
+        }
+    }
+
+    fn extract_single_file_location_only(
+        &self,
+        path_str: &str,
+    ) -> Result<Option<Biticals>> {
+        let res = self
+            .registry
+            .process_file_location_only(Path::new(path_str));
 
         if let Ok(values) = res {
             return Ok(Some(values));
@@ -176,6 +230,9 @@ impl<'a> ItemTriager<'a> {
             TargetTable::FileReferences => TriagePiece::Entity(val),
             TargetTable::Locations => TriagePiece::Location(val),
             TargetTable::BaseTags => self.triage_base_tag(id, val, &col.name),
+            TargetTable::TagsByLocation => {
+                self.triage_location_tag(id, val, &col.name)
+            }
             _ => TriagePiece::None,
         }
     }
@@ -197,6 +254,22 @@ impl<'a> ItemTriager<'a> {
             None => TriagePiece::None,
         }
     }
+
+    fn triage_location_tag(
+        &self,
+        id: i64,
+        val: Option<Bitical>,
+        name: &str,
+    ) -> TriagePiece {
+        match val {
+            Some(value) => TriagePiece::LocationTag(TagRow {
+                item_id: id,
+                tag_type: name.to_string(),
+                value,
+            }),
+            None => TriagePiece::None,
+        }
+    }
 }
 
 // ========================================================
@@ -209,6 +282,7 @@ pub(crate) enum TriagePiece {
     Entity(Option<Bitical>),
     Location(Option<Bitical>),
     Tag(TagRow),
+    LocationTag(TagRow),
     None,
 }
 
@@ -217,6 +291,7 @@ pub(crate) struct TriageAccumulator {
     entities: Biticals,
     locations: Biticals,
     tags: Vec<TagRow>,
+    location_tags: Vec<TagRow>,
 }
 
 impl TriageAccumulator {
@@ -226,6 +301,7 @@ impl TriageAccumulator {
             entities: vec![Some(Bitical::Integer(0))],
             locations: Vec::new(),
             tags: Vec::new(),
+            location_tags: Vec::new(),
         }
     }
 
@@ -234,6 +310,7 @@ impl TriageAccumulator {
             TriagePiece::Entity(v) => self.entities.push(v),
             TriagePiece::Location(v) => self.locations.push(v),
             TriagePiece::Tag(t) => self.tags.push(t),
+            TriagePiece::LocationTag(t) => self.location_tags.push(t),
             TriagePiece::None => {}
         }
         self
@@ -250,6 +327,7 @@ impl TriageAccumulator {
                 values: self.locations,
             },
             tags: self.tags,
+            location_tags: self.location_tags,
             scan_hash: ScanHash(0),
             basename_scan_hash: ScanHash(0),
         }
@@ -420,7 +498,12 @@ mod tests {
                 Hashes(ScanHash(1), ScanHash(11)),
                 FileRef::from_u64_pair(0, 1),
             ),
-            (None, vec![], Hashes(ScanHash(2), ScanHash(22)), new_file_ref),
+            (
+                None,
+                vec![],
+                Hashes(ScanHash(2), ScanHash(22)),
+                new_file_ref,
+            ),
         ];
         let by_file_ref: FxHashMap<FileRef, i64> =
             [(new_file_ref, 501)].into_iter().collect();
@@ -430,5 +513,28 @@ mod tests {
 
         assert_eq!(results[0].entity_row.id, 100, "Should reuse existing ID");
         assert_eq!(results[1].entity_row.id, 501, "Should use allocated ID");
+    }
+
+    #[test]
+    fn test_triager_tags_by_location() {
+        let registry = TagRegistry::new();
+        let triager = ItemTriager::new(&registry);
+
+        let cols = vec![ColumnDef {
+            name: "loc_tag".into(),
+            bitical_type: BiticalType::String,
+            target_table: TargetTable::TagsByLocation,
+        }];
+        let vals: Biticals = vec![Some(Bitical::String("val".into()))];
+
+        let res = triager.triage_item(
+            ItemId::from(9),
+            vals,
+            Hashes(ScanHash(1), ScanHash(2)),
+            &cols,
+        );
+
+        assert_eq!(res.location_tags.len(), 1);
+        assert_eq!(res.location_tags[0].tag_type, "loc_tag");
     }
 }

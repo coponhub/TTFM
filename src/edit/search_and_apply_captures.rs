@@ -101,7 +101,11 @@ fn leaf(pair: Pair<Rule>) -> Pair<Rule> {
     pair.into_inner().next().unwrap()
 }
 
-fn walk(pairs: Pairs<Rule>, units: &mut Vec<Unit>, next: &mut usize) -> Result<()> {
+fn walk(
+    pairs: Pairs<Rule>,
+    units: &mut Vec<Unit>,
+    next: &mut usize,
+) -> Result<()> {
     for pair in pairs {
         match pair.as_rule() {
             Rule::typed_tag => {
@@ -111,7 +115,10 @@ fn walk(pairs: Pairs<Rule>, units: &mut Vec<Unit>, next: &mut usize) -> Result<(
                 units.push(Unit::Pair { ty, label });
             }
             Rule::type_ref => {
-                let ty = build_pattern(leaf(pair.into_inner().next().unwrap()), next)?;
+                let ty = build_pattern(
+                    leaf(pair.into_inner().next().unwrap()),
+                    next,
+                )?;
                 units.push(Unit::Type(ty));
             }
             Rule::quoted_string
@@ -174,11 +181,13 @@ fn braced_parts(q: &EditQuery) -> impl Iterator<Item = &str> {
 fn resolve_refs(parsed: &EditQuery, total: usize) -> Result<HashSet<usize>> {
     let mut referenced = HashSet::new();
     for braced in braced_parts(parsed) {
-        let n: usize = braced
-            .parse()
-            .map_err(|_| anyhow!("capture reference {{{braced}}} is not a number"))?;
+        let n: usize = braced.parse().map_err(|_| {
+            anyhow!("capture reference {{{braced}}} is not a number")
+        })?;
         if n == 0 {
-            bail!("capture reference {{0}} is not allowed; numbering starts at 1");
+            bail!(
+                "capture reference {{0}} is not allowed; numbering starts at 1"
+            );
         }
         if n > total {
             bail!("capture reference {{{n}}} exceeds the number of captures ({total})");
@@ -191,7 +200,9 @@ fn resolve_refs(parsed: &EditQuery, total: usize) -> Result<HashSet<usize>> {
 fn fit_type(p: &Pattern, ty: &TagType) -> Option<Vec<String>> {
     match p {
         Pattern::Literal(s) => (ty.as_str() == s).then(Vec::new),
-        Pattern::Glob { text, .. } => glob_capture::glob_captures(text, ty.as_str()),
+        Pattern::Glob { text, .. } => {
+            glob_capture::glob_captures(text, ty.as_str())
+        }
     }
 }
 
@@ -210,14 +221,23 @@ fn all_types(reg: &TagRegistry, item: &Item) -> Vec<TagType> {
     out
 }
 
-fn candidate_types(reg: &TagRegistry, item: &Item, p: &Pattern) -> Vec<TagType> {
+fn candidate_types(
+    reg: &TagRegistry,
+    item: &Item,
+    p: &Pattern,
+) -> Vec<TagType> {
     all_types(reg, item)
         .into_iter()
         .filter(|ty| fit_type(p, ty).is_some())
         .collect()
 }
 
-fn fit_label(reg: &TagRegistry, p: &Pattern, ty: &TagType, item: &Item) -> Vec<Vec<String>> {
+fn fit_label(
+    reg: &TagRegistry,
+    p: &Pattern,
+    ty: &TagType,
+    item: &Item,
+) -> Vec<Vec<String>> {
     match p {
         Pattern::Literal(s) => {
             if tag::entries_of(item, ty).any(|e| e.typed_tag.as_str() == *s) {
@@ -244,7 +264,12 @@ fn hits_for_unit(reg: &TagRegistry, item: &Item, unit: &Unit) -> Vec<Binding> {
                 let head = fit_type(ty, &t).unwrap();
                 fit_label(reg, label, &t, item)
                     .into_iter()
-                    .map(|tail| head.iter().cloned().chain(tail).collect::<Vec<String>>())
+                    .map(|tail| {
+                        head.iter()
+                            .cloned()
+                            .chain(tail)
+                            .collect::<Vec<String>>()
+                    })
                     .collect::<Vec<_>>()
             })
             .collect(),
@@ -289,7 +314,8 @@ fn materialise_leaf(
         match part {
             LeafPart::Text(s) => parts.push(LeafPart::Text(s.clone())),
             LeafPart::Braced(s) => {
-                let n: usize = s.parse().expect("resolve_refs already validated this");
+                let n: usize =
+                    s.parse().expect("resolve_refs already validated this");
                 parts.push(LeafPart::Text(bindings.get(&n)?.clone()));
             }
         }
@@ -331,7 +357,10 @@ fn reject_glob(parsed: &EditQuery) -> Result<()> {
     Ok(())
 }
 
-fn materialise(parsed: &EditQuery, bindings: &HashMap<usize, String>) -> Vec<EditQueryNode> {
+fn materialise(
+    parsed: &EditQuery,
+    bindings: &HashMap<usize, String>,
+) -> Vec<EditQueryNode> {
     let mut out = Vec::new();
     for n in &parsed.nodes {
         let Some(tag_type) = materialise_leaf(&n.tag_type, bindings) else {
@@ -570,7 +599,9 @@ mod tests {
     // --- apply_captures ---
 
     use crate::edit::QueryType;
-    use crate::types::{Intrinsic, ItemId, ItemKind, Origin, SType, Tags, TypedTag};
+    use crate::types::{
+        Intrinsic, ItemId, ItemKind, Origin, SType, Tags, TypedTag,
+    };
 
     fn reg() -> TagRegistry {
         TagRegistry::with_standard()
@@ -593,10 +624,16 @@ mod tests {
     }
 
     fn edit_query(s: &str) -> EditQuery {
-        super::super::parse::parse_edit_query(s, QueryType::Tag, &reg()).unwrap()
+        super::super::parse::parse_edit_query(s, QueryType::Tag, &reg())
+            .unwrap()
     }
 
-    fn local_at(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<chrono::Local> {
+    fn local_at(
+        y: i32,
+        m: u32,
+        d: u32,
+        h: u32,
+    ) -> chrono::DateTime<chrono::Local> {
         use chrono::TimeZone;
         chrono::Local.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
     }

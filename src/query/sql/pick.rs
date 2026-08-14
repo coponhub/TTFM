@@ -22,9 +22,8 @@ use super::{
     build_merged_nest_match_sql, build_nest_context, build_nest_match_sql,
     build_nest_nest_match_sql, build_resolved_literal_expr,
     build_storage_column_expr, build_tag_value_agg_expr,
-    needs_aggregation_context, needs_nest_context,
-    nvalue_rhs_condition, subquery, try_dispatch_common, AggregationContext,
-    NestContext,
+    needs_aggregation_context, needs_nest_context, nvalue_rhs_condition,
+    subquery, try_dispatch_common, AggregationContext, NestContext,
 };
 use crate::db::{
     BiticalType, Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src,
@@ -663,7 +662,8 @@ fn build_agg_match(
     let mut stmt = Query::select();
     stmt.from(src);
 
-    let condition = nvalue_rhs_condition(agg_expr, op, rhs, agg.is_string_type());
+    let condition =
+        nvalue_rhs_condition(agg_expr, op, rhs, agg.is_string_type());
 
     let _target_type = match agg {
         ResolvedAggregationNode::Count(inner) => inner.get_projection(),
