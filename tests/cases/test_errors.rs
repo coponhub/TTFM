@@ -37,7 +37,8 @@ fn make_store_registry_cache(
 
 fn assert_over_agg_error(query: &str) {
     let (store, registry) = make_store_registry_cache().unwrap();
-    let result = search::search_nowarn(&store, &registry, query, Default::default());
+    let result =
+        search::search_nowarn(&store, &registry, query, Default::default());
     assert!(
         result.is_err(),
         "Expected error for over-aggregation query '{query}', but got Ok"
@@ -85,15 +86,19 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &files_dir,
         None::<&fn(usize)>,
         false,
     )?;
 
     // size: > 100 という形式（本来は :> であるべき）を実行
-    let result =
-        search::search_nowarn(&store, &registry, "size: > 100", Default::default());
+    let result = search::search_nowarn(
+        &store,
+        &registry,
+        "size: > 100",
+        Default::default(),
+    );
 
     assert!(
         result.is_err(),
@@ -133,7 +138,7 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         &files_dir,
         None::<&fn(usize)>,
         false,
@@ -155,7 +160,8 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // 1.2 Nest 内での非集約タグ算術: 仕様上は最後の値（Calculation）を使って比較する
     // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
     let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
-    let result2 = search::search_nowarn(&store, &registry, query2, Default::default());
+    let result2 =
+        search::search_nowarn(&store, &registry, query2, Default::default());
     assert!(
         result2.is_ok(),
         "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
@@ -166,7 +172,8 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // (parentdir: &: count()) / (extension: &: count()) はエラーではなく、
     // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
-    let result = search::search_nowarn(&store, &registry, query, Default::default());
+    let result =
+        search::search_nowarn(&store, &registry, query, Default::default());
 
     assert!(
         result.is_ok(),
@@ -175,4 +182,21 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[test]
+fn test_nest_lhs_calculation_is_syntax_error() {
+    let (store, registry) = make_store_registry_cache().unwrap();
+    let query = "(size: / 1024) &: count()";
+    let result =
+        search::search_nowarn(&store, &registry, query, Default::default());
+    assert!(
+        result.is_err(),
+        "Expected syntax error for calculation on nest LHS"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("Calculations or scalar expressions cannot be used on the left-hand side of nest operator"),
+        "Error message should explain that nest LHS cannot be a calculation or scalar expression, got: {err_msg}"
+    );
 }

@@ -92,6 +92,7 @@ fn refresh_view(store: &Store, registry: &TagRegistry) -> Result<()> {
     );
     crate::oneview::OneView::recreate(
         &store.conn,
+        registry,
         &all_columns,
         reader,
         &store.db_dir,

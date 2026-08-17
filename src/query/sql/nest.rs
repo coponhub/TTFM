@@ -755,14 +755,13 @@ fn build_merged_nest_having_sql(
             }
             NestMatchRhs::Operand(op) => {
                 let rhs_expr = build_merged_nvalue_agg_expr(op, agg_ctx);
-                having_cond = having_cond.add(
-                    Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr),
-                );
+                having_cond = having_cond
+                    .add(Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr));
                 continue;
             }
         };
-        having_cond =
-            having_cond.add(nvalue_rhs_condition(lhs, cmp_op, &cond, is_string));
+        having_cond = having_cond
+            .add(nvalue_rhs_condition(lhs, cmp_op, &cond, is_string));
     }
     nfilter.cond_having(having_cond);
 
@@ -800,8 +799,9 @@ pub(super) fn build_merged_nest_match_sql(
             if !all_nv_ops.iter().any(|&o| o == &m.nvalue) {
                 all_nv_ops.push(&m.nvalue);
             }
-            if let NestMatchRhs::Operand(right_op @ ResolvedOperand::Aggregation(_)) =
-                &m.right
+            if let NestMatchRhs::Operand(
+                right_op @ ResolvedOperand::Aggregation(_),
+            ) = &m.right
             {
                 if !all_nv_ops.iter().any(|&o| o == right_op) {
                     all_nv_ops.push(right_op);
@@ -898,11 +898,14 @@ pub(super) fn build_merged_nest_match_sql(
                         is_string,
                     )
                 }
-                NestMatchRhs::Operand(right_op @ ResolvedOperand::Aggregation(_)) => {
+                NestMatchRhs::Operand(
+                    right_op @ ResolvedOperand::Aggregation(_),
+                ) => {
                     let right_idx =
                         all_nv_ops.iter().position(|&o| o == right_op).unwrap();
                     let rhs_expr: SimpleExpr =
-                        Expr::col(Alias::new(&group_nv_aliases[right_idx])).into();
+                        Expr::col(Alias::new(&group_nv_aliases[right_idx]))
+                            .into();
                     Condition::all().add(
                         Expr::expr(lhs).binary(to_bin_op(cmp_op), rhs_expr),
                     )
@@ -1771,8 +1774,9 @@ mod tests {
     #[test]
     fn test_build_fetch_nest_sql_generates_concat() {
         let query_str = "extension:";
-        let resolver = Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
-            .expect("Failed to resolve");
+        let resolver =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .expect("Failed to resolve");
 
         let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
             .expect("Failed to build SQL");
@@ -1797,8 +1801,9 @@ mod tests {
 
     #[test]
     fn base_key_is_never_materialized() {
-        let resolver = Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
-            .expect("Failed to resolve");
+        let resolver =
+            Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
+                .expect("Failed to resolve");
 
         let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
             .expect("Failed to build SQL");
@@ -1886,7 +1891,8 @@ mod tests {
     #[test]
     fn test_fetch_projection_no_nvalue_regression() {
         let resolver =
-            Resolver::new_nowarn("extension:", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
+                .unwrap();
 
         assert!(
             resolver.get_nvalue().is_none(),
@@ -1943,7 +1949,8 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard())
+                    .unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()
@@ -2001,7 +2008,8 @@ mod tests {
         for (query_str, expected_op) in operators {
             let query = format!("parentdir: &: ({})", query_str);
             let resolver =
-                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard())
+                    .unwrap();
 
             let sql =
                 build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0).unwrap();
@@ -2041,7 +2049,8 @@ mod tests {
         for (query_body, expected_keywords) in test_cases {
             let query = format!("parentdir: &: ({})", query_body);
             let resolver =
-                Resolver::new_nowarn(&query, &TagRegistry::with_standard()).unwrap();
+                Resolver::new_nowarn(&query, &TagRegistry::with_standard())
+                    .unwrap();
             let proj_operand = resolver
                 .resolved_query
                 .get_projection_operand()

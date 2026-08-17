@@ -114,10 +114,15 @@ fn test_plugin_normalize_label_applied_in_search() {
                 "c" => Label::from("clean"),
                 _ => label.clone(),
             };
-            Ok(ttfm::QueryNode::Comparison(ttfm::query::ast::ComparisonNode {
-                first: first.clone(),
-                rest: vec![(op, ttfm::query::ast::Operand::Literal(normalized))],
-            }))
+            Ok(ttfm::QueryNode::Comparison(
+                ttfm::query::ast::ComparisonNode {
+                    first: first.clone(),
+                    rest: vec![(
+                        op,
+                        ttfm::query::ast::Operand::Literal(normalized),
+                    )],
+                },
+            ))
         }
     }
 
@@ -135,7 +140,7 @@ fn test_plugin_normalize_label_applied_in_search() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     // "my_status:m" で検索 → normalize_label("m") == "modified" なのでヒットするはず
@@ -209,7 +214,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
         registry.load_from_dir(&user_plugins_dir, &status).unwrap();
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
         search::search_nowarn(
             &store,
@@ -231,7 +236,7 @@ fn test_user_plugin_overrides_builtin_by_package_name() {
             .unwrap();
         registry.load_builtins(&status).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
         search::search_nowarn(
             &store,
@@ -408,7 +413,7 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
 
     edit(
@@ -423,9 +428,13 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
     )
     .expect("edit should materialize the plugin type definition");
 
-    let results =
-        search::search_nowarn(&store, &registry, "type:*", SearchOptions::default())
-            .unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "type:*",
+        SearchOptions::default(),
+    )
+    .unwrap();
     let plugin_item = results
         .results
         .iter()
@@ -438,4 +447,15 @@ fn test_wasm_plugin_type_edit_materializes_in_plugin_block() {
         ttfm::types::Origin::Plugin
     );
     assert_eq!(plugin_item.rank, 5);
+}
+
+#[test]
+fn test_wasm_plugin_adapter_target_table_default() {
+    use ttfm::db::TargetTable;
+
+    let adapter = load_sample_adapter();
+    let idx = adapter
+        .index()
+        .expect("sample plugin should implement index");
+    assert_eq!(idx.target_table(), TargetTable::BaseTags);
 }

@@ -190,7 +190,10 @@ fn node_to_simple_string(node: &QueryNode) -> String {
         QueryNode::TypedTag(tt) => {
             format!("{}:{}", tt.tag_type().as_str(), tt.as_str())
         }
-        QueryNode::Nest(NestNode { left: None, right: Operand::TypeRef(tt) }) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::TypeRef(tt),
+        }) => {
             format!("{}:", tt.as_str())
         }
         QueryNode::Aggregation(agg) => match agg {
@@ -356,6 +359,11 @@ pub fn map_grammar_error(
     if let Some(msg) =
         check_arithmetic_parentheses_misuse(line_str, error_char_orig, col)
     {
+        e.variant = ErrorVariant::CustomError { message: msg };
+        return anyhow::anyhow!(e);
+    }
+
+    if let Some(msg) = check_nest_lhs_misuse(&prefix_orig, line_str, col) {
         e.variant = ErrorVariant::CustomError { message: msg };
         return anyhow::anyhow!(e);
     }
@@ -630,6 +638,35 @@ fn check_label_op_misuse(
     }
 }
 
+fn check_nest_lhs_misuse(
+    prefix: &str,
+    line_str: &str,
+    col: usize,
+) -> Option<String> {
+    let char_idx = line_str
+        .char_indices()
+        .nth(col - 1)
+        .map(|(i, _)| i)
+        .unwrap_or(line_str.len());
+    let rest = &line_str[char_idx..];
+    let trimmed_rest = rest.trim_start();
+    if !trimmed_rest.starts_with("&:") {
+        return None;
+    }
+
+    let trimmed_prefix = prefix.trim();
+    if (trimmed_prefix.starts_with('(') && trimmed_prefix.ends_with(')'))
+        || trimmed_prefix.chars().any(|c| "+-*/%".contains(c))
+    {
+        return Some(
+            "Syntax Error: Calculations or scalar expressions cannot be used on the left-hand side of nest operator (&:).\nThe left-hand side must be a Projection (e.g. 'size:') or a Nest."
+                .to_string(),
+        );
+    }
+
+    None
+}
+
 fn check_scalar_op_target_proj_start(
     prefix: &str,
     line_str: &str,
@@ -780,9 +817,10 @@ fn operand_is_agg_or_literal(operand: &Operand) -> bool {
                 && operand_is_agg_or_literal(&c.right)
         }
         Operand::Query(q) => match q.as_ref() {
-            QueryNode::Nest(NestNode { left: None, right: op }) => {
-                operand_is_agg_or_literal(op)
-            }
+            QueryNode::Nest(NestNode {
+                left: None,
+                right: op,
+            }) => operand_is_agg_or_literal(op),
             QueryNode::Aggregation(_) => true,
             _ => false,
         },
@@ -876,7 +914,10 @@ pub fn order_op_partial_glob(op: &str, pattern: &str) -> anyhow::Error {
 pub const TAG_VALUE_NOT_INTERPRETABLE: &str =
     "Value cannot be interpreted for this tag's type";
 
-pub fn tag_value_not_interpretable(tag_type: &str, pattern: &str) -> anyhow::Error {
+pub fn tag_value_not_interpretable(
+    tag_type: &str,
+    pattern: &str,
+) -> anyhow::Error {
     anyhow::anyhow!(
         "{}: '{}' '{}'",
         TAG_VALUE_NOT_INTERPRETABLE,

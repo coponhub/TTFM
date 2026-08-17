@@ -105,4 +105,3 @@ pub fn get_ttfm_home() -> Result<std::path::PathBuf> {
 pub fn get_ttfm_plugins_dir() -> Result<std::path::PathBuf> {
     Ok(get_ttfm_home()?.join("plugins"))
 }
-

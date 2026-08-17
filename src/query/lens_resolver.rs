@@ -343,8 +343,7 @@ impl ResolvedOperand {
             }
             _ => {
                 // Calculation 等の場合はデフォルトの 'nvalue' として解決（数値フォーマット等）。
-                lens.resolve_label(&TagType::from("nvalue"), value)
-                    .as_str()
+                lens.resolve_label(&TagType::from("nvalue"), value).as_str()
             }
         }
     }
@@ -1251,10 +1250,7 @@ fn resolve_type_ref_operand(
     tt: &TagType,
 ) -> Result<ResolvedOperand> {
     let (storage, bitical_type) = match lens.look_up(tt) {
-        Some(desc) => (
-            desc.storage.clone(),
-            desc.logical_type.to_bitical(),
-        ),
+        Some(desc) => (desc.storage.clone(), desc.logical_type.to_bitical()),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
@@ -1352,8 +1348,12 @@ fn definition_context(
     target_name: &str,
     kind: ItemKind,
     origins: &[Origin],
-) -> Result<(ResolvedOperand, Vec<crate::query::ast::Candidate>, Vec<String>, Rank)>
-{
+) -> Result<(
+    ResolvedOperand,
+    Vec<crate::query::ast::Candidate>,
+    Vec<String>,
+    Rank,
+)> {
     let operand = resolve_type_ref_operand(lens, tag_type)?;
     let default_rank = lens
         .look_up(&TagType::from(target_name))
@@ -1533,12 +1533,16 @@ pub(crate) fn resolve_query_node(
 
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
         // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
-        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) })
-            if calc_has_nest_operands(&calc) =>
-        {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(calc),
+        }) if calc_has_nest_operands(&calc) => {
             resolve_projection_arithmetic(lens, *calc)
         }
-        QueryNode::Nest(NestNode { left: None, right: op }) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: op,
+        }) => {
             let resolved_op = resolve_operand(lens, &op)?;
             Ok(ResolvedNode::Nest {
                 keys: vec![resolved_op],
@@ -1689,15 +1693,19 @@ fn resolve_nest(
             })
         }
         // 深さ1: 右辺が Projection(Literal) → nvalue にスカラー値を付与
-        QueryNode::Nest(NestNode { left: None, right: Operand::Literal(label) }) => {
-            Ok(ResolvedNode::Nest {
-                keys,
-                nvalue: Some(ResolvedOperand::Literal(label)),
-                context,
-            })
-        }
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Literal(label),
+        }) => Ok(ResolvedNode::Nest {
+            keys,
+            nvalue: Some(ResolvedOperand::Literal(label)),
+            context,
+        }),
         // 深さ1: 右辺が Projection(Calculation)
-        QueryNode::Nest(NestNode { left: None, right: Operand::Calculation(calc) }) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(calc),
+        }) => {
             let resolved_calc = resolve_calculation(lens, *calc)?;
             let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
 
@@ -2370,7 +2378,9 @@ fn validate_order_op_not_partial_glob(node: &ResolvedNode) -> Result<()> {
                 calc.left.is_string_type() && calc.right.is_string_type(),
             )
         }
-        ResolvedNode::NestMatch { nvalue, op, rhs, .. } => {
+        ResolvedNode::NestMatch {
+            nvalue, op, rhs, ..
+        } => {
             let label = match rhs {
                 NvalueRhs::Label(l) => Some(l),
                 NvalueRhs::DateTime(_) => None,
@@ -2394,7 +2404,8 @@ fn validate_order_op_not_partial_glob(node: &ResolvedNode) -> Result<()> {
     }
 
     let s = label.as_str();
-    if crate::util::is_glob_pattern(&s) && !crate::util::is_full_match_glob(&s) {
+    if crate::util::is_glob_pattern(&s) && !crate::util::is_full_match_glob(&s)
+    {
         return Err(crate::query::error::order_op_partial_glob(
             &format!("{:?}", basic_op),
             &s,
@@ -2803,10 +2814,7 @@ fn get_storage_and_type(
     tt: &TagType,
 ) -> (StorageMapping, BiticalType) {
     match lens.look_up(tt) {
-        Some(desc) => (
-            desc.storage.clone(),
-            desc.logical_type.to_bitical(),
-        ),
+        Some(desc) => (desc.storage.clone(), desc.logical_type.to_bitical()),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
@@ -3033,8 +3041,8 @@ mod tests {
     use super::*;
     use crate::db::BiticalType;
     use crate::query::ast::ArithmeticOp;
-    use crate::query::lens_schema::StorageMapping;
     use crate::query::lens_schema::build_str_condition;
+    use crate::query::lens_schema::StorageMapping;
     use crate::tag::TagRegistry;
     use crate::types::{Label, SType};
 
@@ -3092,7 +3100,8 @@ mod tests {
 
     #[test]
     fn test_build_str_condition() {
-        let cond = build_str_condition(Col::LabelStr, BinOper::Equal, "test_val");
+        let cond =
+            build_str_condition(Col::LabelStr, BinOper::Equal, "test_val");
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
     }
@@ -3411,9 +3420,11 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3430,7 +3441,8 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::from(1i64));
 
@@ -3448,9 +3460,11 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::other(crate::types::Bitical::String("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3539,8 +3553,9 @@ mod tests {
     #[test]
     fn test_projection_no_regression() {
         // size: → Nest { nvalue: None }
-        let resolver = Resolver::new_nowarn("size:", &TagRegistry::with_standard())
-            .expect("simple projection should resolve");
+        let resolver =
+            Resolver::new_nowarn("size:", &TagRegistry::with_standard())
+                .expect("simple projection should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, .. } => {
                 assert!(
@@ -3672,9 +3687,11 @@ mod tests {
     /// 右辺スカラー → nvalue: Some(Literal(100))
     #[test]
     fn test_resolve_nest_scalar_right() {
-        let resolver =
-            Resolver::new_nowarn("parentdir: &: 100", &TagRegistry::with_standard())
-                .expect("nest with scalar right should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: 100",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest with scalar right should resolve");
 
         assert!(resolver.get_projection().is_some());
         let nvalue = resolver.get_nvalue();
@@ -3815,11 +3832,7 @@ mod tests {
     fn test_order_op_full_match_glob_context_b_is_not_error() {
         let reg = TagRegistry::with_standard();
         let result = Resolver::new_nowarn("name: :> *", &reg);
-        assert!(
-            result.is_ok(),
-            "expected ok, got {}",
-            result.err().unwrap()
-        );
+        assert!(result.is_ok(), "expected ok, got {}", result.err().unwrap());
     }
 
     #[test]
@@ -3863,9 +3876,9 @@ mod tests_integration {
 
     fn find_nest(node: &ResolvedNode) -> Option<&ResolvedNode> {
         match node {
-            ResolvedNode::And(nodes) => {
-                nodes.iter().find(|n| matches!(n, ResolvedNode::Nest { .. }))
-            }
+            ResolvedNode::And(nodes) => nodes
+                .iter()
+                .find(|n| matches!(n, ResolvedNode::Nest { .. })),
             n @ ResolvedNode::Nest { .. } => Some(n),
             _ => None,
         }
@@ -4045,7 +4058,10 @@ mod tests_integration {
     fn make_definition_ref(value_type: &str, value_str: &str) -> ResolvedNode {
         use crate::query::lens_schema::StorageMapping;
         use crate::types::TypedTag;
-        let value = TypedTag::new(crate::types::TagType::from(value_type), crate::types::Bitical::String(value_str.to_string()));
+        let value = TypedTag::new(
+            crate::types::TagType::from(value_type),
+            crate::types::Bitical::String(value_str.to_string()),
+        );
         let tag_type = value.tag_type();
         ResolvedNode::DefinitionRef {
             def: ResolvedDefinition::for_tag(
@@ -4103,7 +4119,9 @@ mod tests_integration {
             op: crate::query::ast::ComparisonOp::Label(
                 crate::query::ast::BasicOp::Eq,
             ),
-            label: crate::types::Label::other(crate::types::Bitical::String("/foo/*".to_string())),
+            label: crate::types::Label::other(crate::types::Bitical::String(
+                "/foo/*".to_string(),
+            )),
         };
 
         let mut node = ResolvedNode::LabelSetOp {
@@ -4141,9 +4159,11 @@ mod tests_integration {
     #[test]
     fn test_and_two_projections_produces_label_set_op_intersect() {
         // And([Proj(cat), Proj(flavor)]) → LabelSetOp { Intersect, [Nest{cat}, Nest{flavor}] }
-        let resolver =
-            Resolver::new_nowarn("cat: & flavor:", &TagRegistry::with_standard())
-                .unwrap();
+        let resolver = Resolver::new_nowarn(
+            "cat: & flavor:",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -4253,9 +4273,11 @@ mod tests_integration {
         // extension: は And([is_dir:false, Nest{ext}]) に展開される。
         // extension: & size: → And([And([is_dir:false, Nest{ext}]), Nest{size}])
         // as_label_set_op_operand() で And ラッパーを透過して LabelSetOp になるべき。
-        let resolver =
-            Resolver::new_nowarn("extension: & size:", &TagRegistry::with_standard())
-                .unwrap();
+        let resolver = Resolver::new_nowarn(
+            "extension: & size:",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert!(
             matches!(
                 &resolver.resolved_query,
@@ -4304,9 +4326,11 @@ mod tests_integration {
     fn test_and_proj_typedtag_does_not_produce_label_set_op() {
         // Proj & TypedTag → LabelSetOp にはならず Nest にコンテキスト注入される
         // 単一 Projection の場合は And ラッパーが剥がれ Nest{ctx:TypedTag} として返る
-        let resolver =
-            Resolver::new_nowarn("cat: & animal:dog", &TagRegistry::with_standard())
-                .unwrap();
+        let resolver = Resolver::new_nowarn(
+            "cat: & animal:dog",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert!(
             !resolver.is_label_set_op(),
             "cat: & animal:dog should NOT be LabelSetOp, got: {:?}",
@@ -4508,21 +4532,24 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_size() {
         use crate::types::{SType, TagType};
         let r =
-            Resolver::new_nowarn("sum(size:)", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("sum(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "sum(size:) should yield Some(Size)"
         );
         let r =
-            Resolver::new_nowarn("avg(size:)", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("avg(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "avg(size:) should yield Some(Size)"
         );
         let r =
-            Resolver::new_nowarn("min(size:)", &TagRegistry::with_standard()).unwrap();
+            Resolver::new_nowarn("min(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
@@ -4533,8 +4560,9 @@ mod tests_walk_fold {
     #[test]
     fn test_get_scalar_result_label_type_mtime() {
         use crate::types::{SType, TagType};
-        let r = Resolver::new_nowarn("max(mtime:)", &TagRegistry::with_standard())
-            .unwrap();
+        let r =
+            Resolver::new_nowarn("max(mtime:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Mtime)),
@@ -4544,16 +4572,18 @@ mod tests_walk_fold {
 
     #[test]
     fn test_get_scalar_result_label_type_count_is_none() {
-        let r =
-            Resolver::new_nowarn("count(extension:rs)", &TagRegistry::with_standard())
-                .unwrap();
+        let r = Resolver::new_nowarn(
+            "count(extension:rs)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
             "count() should yield None (no type propagation)"
         );
-        let r =
-            Resolver::new_nowarn("count()", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn("count()", &TagRegistry::with_standard())
+            .unwrap();
         assert_eq!(r.get_scalar_result_label_type(), None);
     }
 
@@ -4561,9 +4591,11 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_mixed_is_none() {
         // sum(size: + mtime:) — two different tag types → None
         // Note: arithmetic inside sum() does not require extra parens
-        let r =
-            Resolver::new_nowarn("sum(size: + mtime:)", &TagRegistry::with_standard())
-                .unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size: + mtime:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
@@ -4575,9 +4607,11 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_calc_with_literal() {
         use crate::types::{SType, TagType};
         // sum(size: - 1000) — Calculation(TagRef{size}, Literal) → size only
-        let r =
-            Resolver::new_nowarn("sum(size: - 1000)", &TagRegistry::with_standard())
-                .unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size: - 1000)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),

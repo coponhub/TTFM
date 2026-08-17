@@ -245,15 +245,23 @@ fn size_tag_form_unit_matches_exact_file() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
     )?;
 
-    let res =
-        search::search_nowarn(&store, &registry, "size:2k", Default::default())?;
-    assert_eq!(res.results.len(), 1, "size:2k tag form must match exactly the 2048-byte file");
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size:2k",
+        Default::default(),
+    )?;
+    assert_eq!(
+        res.results.len(),
+        1,
+        "size:2k tag form must match exactly the 2048-byte file"
+    );
     assert_eq!(res.results[0].raw_repr(), "big.bin");
     Ok(())
 }
@@ -278,15 +286,23 @@ fn mtime_tag_form_year_excludes_other_years() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run(
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
         root,
         None::<&fn(usize)>,
         false,
     )?;
 
-    let res =
-        search::search_nowarn(&store, &registry, "mtime:2025", Default::default())?;
-    assert_eq!(res.results.len(), 1, "mtime:2025 tag form must exclude the 2024 file");
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "mtime:2025",
+        Default::default(),
+    )?;
+    assert_eq!(
+        res.results.len(),
+        1,
+        "mtime:2025 tag form must exclude the 2024 file"
+    );
     assert_eq!(res.results[0].raw_repr(), "a2025.txt");
     Ok(())
 }
@@ -310,7 +326,8 @@ fn collect_typed_tags(node: &QueryNode) -> Vec<&TypedTag> {
 
 #[test]
 fn size_tag_form_expand_keeps_raw_unit_form() -> anyhow::Result<()> {
-    let resolver = Resolver::new_nowarn("size:1k", &TagRegistry::with_standard())?;
+    let resolver =
+        Resolver::new_nowarn("size:1k", &TagRegistry::with_standard())?;
     let typed_tags = collect_typed_tags(&resolver.expanded_query);
     let raw = typed_tags
         .into_iter()
@@ -329,13 +346,15 @@ fn size_tag_form_expand_keeps_raw_unit_form() -> anyhow::Result<()> {
 // ── 含意（is_dir）: タグ形は注釈であり書き換えではない ───────
 
 #[test]
-fn implication_tag_form_expand_is_a_single_annotated_typed_tag() -> anyhow::Result<()> {
+fn implication_tag_form_expand_is_a_single_annotated_typed_tag(
+) -> anyhow::Result<()> {
     for (query, tag_type) in [
         ("extension:rs", SType::Extension.into()),
         ("filename:foo", SType::Filename.into()),
         ("directory:foo", SType::Directory.into()),
     ] {
-        let resolver = Resolver::new_nowarn(query, &TagRegistry::with_standard())?;
+        let resolver =
+            Resolver::new_nowarn(query, &TagRegistry::with_standard())?;
         match &resolver.expanded_query {
             QueryNode::TypedTag(tt) => {
                 assert_eq!(
@@ -362,7 +381,8 @@ fn implication_tag_form_expand_is_a_single_annotated_typed_tag() -> anyhow::Resu
 
 #[test]
 fn mtime_tag_form_expand_keeps_raw_year_form() -> anyhow::Result<()> {
-    let resolver = Resolver::new_nowarn("mtime:2026", &TagRegistry::with_standard())?;
+    let resolver =
+        Resolver::new_nowarn("mtime:2026", &TagRegistry::with_standard())?;
     let typed_tags = collect_typed_tags(&resolver.expanded_query);
     let raw = typed_tags
         .into_iter()

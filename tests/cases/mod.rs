@@ -104,7 +104,7 @@ macro_rules! define_cases {
                     .initialize_tables()
                     .expect("initialize_tables");
                 ttfm::indexing::Indexer::new(&store, &registry)
-                    .run(root.path(), None::<&fn(usize)>, false)
+                    .run_single(root.path(), None::<&fn(usize)>, false)
                     .expect("index_directory");
                 // 宣言的タグ指定（tags フィールド）を全ケース分集めて 1 回の write で適用
                 let tag_specs: Vec<(std::path::PathBuf, &str)> = CASES
@@ -169,7 +169,9 @@ pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .find(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue")
+        })
         .map(|e| e.typed_tag.as_str().to_string())
 }
 
@@ -192,10 +194,9 @@ pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
 /// 結果が item: タグを持つか（グループ表示 / projection パス）を判定します。
 pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
     results.iter().any(|r| {
-        r.tags
-            .entries
-            .iter()
-            .any(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("item"))
+        r.tags.entries.iter().any(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("item")
+        })
     })
 }
 
@@ -253,13 +254,19 @@ pub(super) fn apply_tags_batch(
             tags: Tags::new(),
             item_count: None,
         };
+        let eq = ttfm::edit::parse::parse_edit_query(
+            tags,
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?;
+        let nodes = ttfm::edit::modify::resolve_nodes(
+            Some(&eq),
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?;
         actions.extend(ttfm::edit::modify::modify(
             &item,
-            Some(&ttfm::edit::parse::parse_edit_query(
-                tags,
-                ttfm::edit::QueryType::Tag,
-                registry,
-            )?),
+            &nodes,
             ttfm::edit::QueryType::Tag,
             registry,
         )?);
@@ -430,6 +437,7 @@ pub mod test_date_regression;
 pub mod test_discrepancy;
 pub mod test_edit;
 pub mod test_errors;
+pub mod test_fs_operate;
 pub mod test_glob_values;
 pub mod test_item_refactoring;
 pub mod test_label_calc;

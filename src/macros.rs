@@ -221,4 +221,3 @@ macro_rules! define_operand_formats {
         }
     };
 }
-

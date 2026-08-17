@@ -103,7 +103,9 @@ fn build_unquoted_part(pair: Pair<Rule>) -> Result<LeafPart> {
 
 fn build_quoted_part(pair: Pair<Rule>) -> Result<LeafPart> {
     match pair.as_rule() {
-        Rule::braced_d | Rule::braced_s => Ok(LeafPart::Braced(strip_braces(pair.as_str()))),
+        Rule::braced_d | Rule::braced_s => {
+            Ok(LeafPart::Braced(strip_braces(pair.as_str())))
+        }
         Rule::escape | Rule::text_d | Rule::text_s | Rule::lbrace => {
             Ok(LeafPart::Text(unescape_string(pair.as_str())?))
         }
@@ -115,20 +117,29 @@ fn build_quoted_part(pair: Pair<Rule>) -> Result<LeafPart> {
 fn build_leaf(pair: Pair<Rule>) -> Result<EditQueryLeaf> {
     let mut inner = pair.into_inner();
     let Some(first) = inner.next() else {
-        return Ok(EditQueryLeaf { parts: vec![], quoted: false });
+        return Ok(EditQueryLeaf {
+            parts: vec![],
+            quoted: false,
+        });
     };
     if first.as_rule() == Rule::quoted_tpl {
         let parts = first
             .into_inner()
             .map(build_quoted_part)
             .collect::<Result<Vec<_>>>()?;
-        return Ok(EditQueryLeaf { parts, quoted: true });
+        return Ok(EditQueryLeaf {
+            parts,
+            quoted: true,
+        });
     }
     let mut parts = vec![build_unquoted_part(first)?];
     for p in inner {
         parts.push(build_unquoted_part(p)?);
     }
-    Ok(EditQueryLeaf { parts, quoted: false })
+    Ok(EditQueryLeaf {
+        parts,
+        quoted: false,
+    })
 }
 
 const META_TYPES: [&str; 3] = ["type", "label", "tag"];
@@ -154,7 +165,8 @@ fn reject_static_multi_literal(
             continue;
         }
         let name = n.tag_type.value();
-        let strategy = reg.get(&name).and_then(|f| f.edit()).map(|e| e.strategy());
+        let strategy =
+            reg.get(&name).and_then(|f| f.edit()).map(|e| e.strategy());
         if !matches!(strategy, Some(EditStrategy::Replace)) {
             continue;
         }
@@ -200,7 +212,9 @@ pub fn parse_edit_query(
             bail!("'{name}' is a meta type and cannot be used as a literal type in EditQuery");
         }
         if is_forbidden(reg, &name) {
-            bail!("tag type '{name}' is registered but not editable (Forbidden)");
+            bail!(
+                "tag type '{name}' is registered but not editable (Forbidden)"
+            );
         }
         if matches!(qt, QueryType::Tag) && n.label.is_none() {
             bail!("Projection '{name}:' is not allowed in EditQuery (Tag direction)");
@@ -228,21 +242,25 @@ mod tests {
     #[test]
     fn space_and_piped_separators_are_same() {
         let reg = TagRegistry::with_standard();
-        let a = parse_edit_query("project:a note:b", QueryType::Tag, &reg).unwrap();
-        let b = parse_edit_query("project:a | note:b", QueryType::Tag, &reg).unwrap();
+        let a =
+            parse_edit_query("project:a note:b", QueryType::Tag, &reg).unwrap();
+        let b = parse_edit_query("project:a | note:b", QueryType::Tag, &reg)
+            .unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn pipe_without_trailing_space_is_error() {
         let reg = TagRegistry::with_standard();
-        assert!(parse_edit_query("project:a |note:b", QueryType::Tag, &reg).is_err());
+        assert!(parse_edit_query("project:a |note:b", QueryType::Tag, &reg)
+            .is_err());
     }
 
     #[test]
     fn spaced_ampersand_is_error() {
         let reg = TagRegistry::with_standard();
-        assert!(parse_edit_query("project:a & note:b", QueryType::Tag, &reg).is_err());
+        assert!(parse_edit_query("project:a & note:b", QueryType::Tag, &reg)
+            .is_err());
     }
 
     #[test]
@@ -371,6 +389,8 @@ mod tests {
     #[test]
     fn static_multi_literal_on_replace_type_is_error() {
         let reg = TagRegistry::with_standard();
-        assert!(parse_edit_query("name:a name:b", QueryType::Tag, &reg).is_err());
+        assert!(
+            parse_edit_query("name:a name:b", QueryType::Tag, &reg).is_err()
+        );
     }
 }

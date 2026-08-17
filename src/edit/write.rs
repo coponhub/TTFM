@@ -1,9 +1,9 @@
 use super::sql::{self, UserTagDelete};
 use crate::db::{Col, Store, TargetTable, Tbl};
 use crate::types::{ItemId, Origin, SType, TagType, TypedTag};
-use crate::util::{parquet_query, ExecuteSql, IdenExt, ParquetExt, SelectExt};
+use crate::util::{parquet_query, ParquetExt};
 use anyhow::Result;
-use sea_query::{Asterisk, Expr, Order, Query};
+use sea_query::{Expr, Query};
 
 #[derive(Debug)]
 pub enum WriteAction {
@@ -75,8 +75,6 @@ pub fn write(
 
     // 4. 変更を収集
     let mut ir_inserts: Vec<(i64, String, String)> = vec![];
-    let mut ir_rank_updates: Vec<(i64, i64)> = vec![];
-    let mut fr_rank_updates: Vec<(i64, i64)> = vec![];
     let mut ut_inserts: Vec<(i64, TypedTag)> = vec![];
     let mut ut_deletes: Vec<UserTagDelete> = vec![];
     let mut user_cascade: Vec<i64> = vec![]; // User/System item_id カスケード削除
@@ -99,14 +97,6 @@ pub fn write(
                         }
                         TagType::Base(SType::Content) => {
                             content = Some(tag.as_str())
-                        }
-                        TagType::Base(SType::Rank) => {
-                            let new_rank = tag.label.as_i64();
-                            if Origin::within(item_id) == Origin::File {
-                                fr_rank_updates.push((item_id, new_rank));
-                            } else {
-                                ir_rank_updates.push((item_id, new_rank));
-                            }
                         }
                         _ => ut_inserts.push((item_id, tag)),
                     }
@@ -184,25 +174,11 @@ pub fn write(
             TargetTable::FileReferences,
             TargetTable::Locations,
             TargetTable::BaseTags,
+            TargetTable::RemovedFiles,
         ] {
             cascade_delete_from(store, target, &file_cascade)?;
         }
     }
-    if !ir_rank_updates.is_empty() {
-        update_rank_column(
-            store,
-            TargetTable::ItemReferences,
-            &ir_rank_updates,
-        )?;
-    }
-    if !fr_rank_updates.is_empty() {
-        update_rank_column(
-            store,
-            TargetTable::FileReferences,
-            &fr_rank_updates,
-        )?;
-    }
-
     Ok(WriteResponse {
         updated,
         deleted,
@@ -223,6 +199,7 @@ pub fn write_and_refresh(
     );
     crate::oneview::OneView::recreate(
         &store.conn,
+        registry,
         &all_cols,
         reader,
         &store.db_dir,
@@ -404,34 +381,6 @@ fn cascade_delete_from(
 }
 
 // ──────────────────────────────────────────────
-// rank 更新（temp table パターン）
-// ──────────────────────────────────────────────
-
-fn update_rank_column(
-    store: &Store,
-    target: TargetTable,
-    updates: &[(i64, i64)],
-) -> Result<()> {
-    let path = store.path_for_target(target);
-    if !path.exists() {
-        return Ok(());
-    }
-    let path_str = path.to_string_lossy();
-    let tmp = Tbl::Target;
-
-    parquet_query(&path_str).create_table_as(&store.conn, tmp)?;
-    sql::rank_case_update(tmp, updates).execute(&store.conn)?;
-    Query::select()
-        .column(Asterisk)
-        .from(tmp)
-        .order_by(Col::ItemId, Order::Asc)
-        .to_owned()
-        .save_parquet(&store.conn, &path)?;
-    tmp.drop_table(&store.conn)?;
-    Ok(())
-}
-
-// ──────────────────────────────────────────────
 // 単体テスト（型確認）
 // ──────────────────────────────────────────────
 
@@ -475,23 +424,46 @@ mod tests {
     }
 
     #[test]
-    fn write_response_updated_includes_rank_ops() {
-        // rank は ut_inserts でなく ir_rank_updates に入るため、
-        // updated は両方の合計であることを構造体レベルで確認する
-        let resp = WriteResponse {
-            updated: 1,
-            deleted: 0,
-            new_item_ids: vec![],
-        };
-        assert_eq!(resp.updated, 1);
-    }
-
-    #[test]
     fn delete_target_type_item_id_for_cascade() {
         let target = DeleteTarget::Type(TagType::Base(SType::ItemId));
         assert!(matches!(
             target,
             DeleteTarget::Type(TagType::Base(SType::ItemId))
         ));
+    }
+
+    #[test]
+    fn rank_tag_is_stored_as_a_user_tags_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = crate::tag::TagRegistry::with_standard();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        crate::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
+
+        write(
+            &store,
+            &registry,
+            vec![WriteAction::Add {
+                item: ItemId::Volatile(0),
+                tags: vec![TagOp::Append(TypedTag::new(SType::Rank, 9i64))],
+            }],
+        )
+        .unwrap();
+
+        let path = store.path_for_target(TargetTable::UserTags);
+        let count: i64 = store
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM read_parquet('{}') \
+                     WHERE type = 'rank' AND label_int = 9",
+                    path.to_string_lossy()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

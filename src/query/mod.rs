@@ -118,7 +118,10 @@ mod tests {
 
         // Test unary minus (should fail according to DESIGN.md)
         let q_unary = "-type:file";
-        assert!(parse_nowarn(q_unary).is_ok(), "Unary minus should be valid now");
+        assert!(
+            parse_nowarn(q_unary).is_ok(),
+            "Unary minus should be valid now"
+        );
     }
 
     #[test]
@@ -234,7 +237,10 @@ mod tests {
 
     #[test]
     fn test_numeric_type_name_is_allowed() {
-        assert!(parse_nowarn("123:foo").is_ok(), "Numeric-only type should parse");
+        assert!(
+            parse_nowarn("123:foo").is_ok(),
+            "Numeric-only type should parse"
+        );
 
         assert!(
             parse_nowarn("\"123\":foo").is_ok(),

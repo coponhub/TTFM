@@ -200,6 +200,11 @@ impl CustomFunc {
         Self::item_id_case_expr(item_id_expr, |o| format!("'{o}'"))
     }
 
+    pub fn item_id_origin_qualified(tbl: super::Tbl, col: Col) -> String {
+        let qualified = format!("{}.{}", sea_query::Iden::to_string(&tbl), col);
+        Self::item_id_origin(&qualified)
+    }
+
     /// row_number() OVER (PARTITION BY ... ORDER BY ...) を生成します。
     pub fn row_number_over<P, O>(
         partition_by: P,

@@ -1,5 +1,5 @@
 mod confirm;
-mod fs_operate;
+pub(crate) mod fs_operate;
 pub(crate) mod glob_capture;
 mod lens_schema;
 pub mod modify;
@@ -12,11 +12,12 @@ pub mod write;
 use crate::db::Store;
 use crate::query::error::WarningSink;
 use crate::tag::TagRegistry;
+use crate::types::TagType;
 use anyhow::Result;
 
 pub use crate::tag::{Edit, EditStrategy};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum QueryType {
     Tag,
     Untag,
@@ -27,10 +28,22 @@ pub struct WriteOptions {
     pub yes: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct EditResponse {
     pub updated: usize,
     pub deleted: usize,
     pub fs_ops: usize,
+    pub has_skipped: bool,
+}
+
+fn static_tag_types(parsed: Option<&parse::EditQuery>) -> Vec<TagType> {
+    parsed
+        .map(|q| q.nodes.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .filter(|n| !n.tag_type.has_braced())
+        .map(|n| TagType::from(n.tag_type.value().as_str()))
+        .collect()
 }
 
 pub fn edit(
@@ -46,6 +59,10 @@ pub fn edit(
     let parsed = edit_query
         .map(|q| parse::parse_edit_query(q, query_type, registry))
         .transpose()?;
+    fs_operate::check_location_tag(
+        &static_tag_types(parsed.as_ref()),
+        registry,
+    )?;
     let item_edits = search_and_apply_captures::search_and_apply_captures(
         store,
         registry,
@@ -53,26 +70,29 @@ pub fn edit(
         parsed.as_ref(),
         sink,
     )?;
-    let (fs_ops_list, actions) = plan(
+    let (mut fs_plan, actions) = plan(
         store,
         registry,
         item_edits.clone(),
         query_type,
         tag_condition,
     )?;
-    if !confirm::confirm(&item_edits, &actions, &options)? {
+    let has_skipped = fs_plan.warn_unsupported(sink);
+    if !confirm::confirm(&item_edits, &actions, &fs_plan, &options)? {
         return Ok(EditResponse {
             updated: 0,
             deleted: 0,
             fs_ops: 0,
+            has_skipped: false,
         });
     }
-    let fs_count = fs_operate::fs_operate(fs_ops_list, registry)?;
+    let outcome = fs_operate::apply(store, registry, fs_plan)?;
     let resp = write::write_and_refresh(store, registry, actions)?;
     Ok(EditResponse {
         updated: resp.updated,
         deleted: resp.deleted,
-        fs_ops: fs_count,
+        fs_ops: outcome.count(),
+        has_skipped,
     })
 }
 
@@ -82,39 +102,42 @@ fn plan(
     item_edits: Vec<(crate::response::Item, Option<parse::EditQuery>)>,
     query_type: QueryType,
     tag_condition: Option<&str>,
-) -> Result<(
-    Vec<(crate::response::Item, String)>,
-    Vec<write::WriteAction>,
-)> {
+) -> Result<(fs_operate::FsPlan, Vec<write::WriteAction>)> {
     let condition = tag_condition
         .map(tag_filter::parse_tag_condition)
         .transpose()?;
 
+    let mut fs_inputs = Vec::new();
     let mut actions = Vec::new();
-    for (item, tag_query) in &item_edits {
+    for (item, tag_query) in item_edits {
+        let all_nodes =
+            modify::resolve_nodes(tag_query.as_ref(), query_type, registry)?;
+        let mut fs_nodes = Vec::new();
+        let mut tag_nodes = Vec::new();
+        for n in all_nodes {
+            if fs_operate::is_fs_strategy(n.strategy) {
+                fs_nodes.push(n);
+            } else {
+                tag_nodes.push(n);
+            }
+        }
+        if !fs_nodes.is_empty() {
+            fs_inputs.push((item.clone(), fs_nodes));
+        }
         if let Some(ref node) = condition {
-            // TODO: Store からエントリを取得し eval_tag_predicate で条件評価（別フェーズ）
-            // TypedTag: 満たすエントリがなければ modify をスキップ
-            // Projection: 満たす具体ラベルを取得して per-entry で modify
             if tag_filter::eval_tag_predicate(node, None)? {
                 actions.extend(modify::modify(
-                    item,
-                    tag_query.as_ref(),
-                    query_type,
-                    registry,
+                    &item, &tag_nodes, query_type, registry,
                 )?);
             }
         } else {
             actions.extend(modify::modify(
-                item,
-                tag_query.as_ref(),
-                query_type,
-                registry,
+                &item, &tag_nodes, query_type, registry,
             )?);
         }
-        // TODO: Relocate / SetFileAttr は fs_operate へ振り分け（別フェーズ）
     }
-    Ok((vec![], actions))
+    let fs_plan = fs_operate::plan_fs(registry, fs_inputs, query_type)?;
+    Ok((fs_plan, actions))
 }
 
 #[cfg(test)]

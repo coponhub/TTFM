@@ -49,7 +49,7 @@ fn setup() -> (Store, TagRegistry, TempDir) {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None::<&fn(usize)>, false)
         .unwrap();
     (store, registry, dir)
 }

@@ -29,7 +29,7 @@ use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rustc_hash::FxHashMap;
 use sea_query::{Expr, PostgresQueryBuilder, Query, Table};
 // use sea_query::{ExprTrait, Func};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::diff;
 use super::merge;
@@ -45,7 +45,9 @@ pub struct TaggingResult {
     pub entity_row: DynamicRow,
     pub location_row: DynamicRow,
     pub tags: Vec<TagRow>,
+    pub location_tags: Vec<TagRow>,
     pub scan_hash: ScanHash,
+    pub basename_scan_hash: ScanHash,
 }
 
 pub struct DynamicRow {
@@ -69,6 +71,20 @@ pub struct Indexer<'a> {
     pub(crate) registry: &'a TagRegistry,
 }
 
+fn normalize_roots<P: AsRef<Path>>(roots: &[P]) -> Result<Vec<PathBuf>> {
+    let mut abs: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| r.as_ref().canonicalize())
+        .collect::<std::io::Result<_>>()?;
+    abs.sort();
+    abs.dedup();
+    Ok(abs
+        .iter()
+        .filter(|r| !abs.iter().any(|o| *o != **r && r.starts_with(o)))
+        .cloned()
+        .collect())
+}
+
 impl<'a> Indexer<'a> {
     pub fn new(store: &'a Store, registry: &'a TagRegistry) -> Self {
         Self { store, registry }
@@ -77,7 +93,7 @@ impl<'a> Indexer<'a> {
     /// インデックス作成の全体ワークフローを実行します。
     pub fn run<P, F>(
         &self,
-        root_path: P,
+        roots: &[P],
         on_progress: Option<&F>,
         dry_run: bool,
     ) -> Result<usize>
@@ -85,6 +101,11 @@ impl<'a> Indexer<'a> {
         P: AsRef<Path>,
         F: Fn(usize) + Sync + Send,
     {
+        let roots = normalize_roots(roots)?;
+        if roots.is_empty() {
+            return Ok(0);
+        }
+
         // 既存のハッシュをロード
         let cache = self.load_metadata_cache()?;
 
@@ -94,7 +115,7 @@ impl<'a> Indexer<'a> {
             &self.store.db_dir,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            root_path.as_ref(),
+            &roots,
             &cache,
             on_progress,
             dry_run,
@@ -105,27 +126,44 @@ impl<'a> Indexer<'a> {
         }
 
         // 2. Diff Phase
-        let diff = diff::run_diff(&self.store.conn, &self.store)?;
+        let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 
         // 3. Triage Phase
-        let (results, moved_rows) =
-            triage::run_triage(&self.store, self.registry, diff.to_process)?;
-
+        let (results, dir_changed_results) = triage::run_triage(
+            &self.store,
+            self.registry,
+            diff.to_process,
+            diff.dir_changed,
+        )?;
         // 4. Merge Phase
         merge::run_merge(
             &self.store.conn,
             self.registry,
             &self.store,
             results,
-            moved_rows,
+            dir_changed_results,
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
+            &roots,
             // |data| self.update_system_items(data),
             |_data| Ok(()),
         )?;
 
         Ok(count)
+    }
+
+    pub fn run_single<P, F>(
+        &self,
+        root: P,
+        on_progress: Option<&F>,
+        dry_run: bool,
+    ) -> Result<usize>
+    where
+        P: AsRef<Path>,
+        F: Fn(usize) + Sync + Send,
+    {
+        self.run(&[root], on_progress, dry_run)
     }
 
     /// 既存のインデックスから変更検知用のメタデータ・キャッシュをロードします。
@@ -184,6 +222,7 @@ impl<'a> Indexer<'a> {
         );
         crate::oneview::OneView::recreate(
             &self.store.conn,
+            self.registry,
             &all_cols,
             reader,
             &self.store.db_dir,
@@ -469,6 +508,7 @@ impl ToSql for ScanHash {
 pub struct TempScanEntry {
     pub entry: ScanEntry,
     pub hash: ScanHash,
+    pub basename_hash: ScanHash,
 }
 
 impl TempScanEntry {
@@ -476,6 +516,7 @@ impl TempScanEntry {
     pub fn params(&self) -> Vec<&dyn duckdb::ToSql> {
         let mut p = self.entry.as_params();
         p.push(&self.hash);
+        p.push(&self.basename_hash);
         p
     }
 
@@ -490,6 +531,10 @@ impl TempScanEntry {
             Col::ScanHash.into_iden(),
             BiticalType::Integer.into_iden(),
         ));
+        cols.push((
+            Col::BasenameScanHash.into_iden(),
+            BiticalType::Integer.into_iden(),
+        ));
         cols
     }
 
@@ -501,13 +546,20 @@ impl TempScanEntry {
     ) -> duckdb::Result<Self> {
         let entry = ScanEntry::from_row_with_offset(row, offset)?;
         let hash: ScanHash = row.get(offset + loader.hash_idx)?;
-        Ok(Self { entry, hash })
+        let basename_hash: ScanHash =
+            row.get(offset + loader.basename_hash_idx)?;
+        Ok(Self {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
 /// `TempScanEntry` をデータベースの行から効率的に読み出すためのローダー。
 pub struct ScanEntryLoader {
     hash_idx: usize,
+    basename_hash_idx: usize,
 }
 
 impl Default for ScanEntryLoader {
@@ -519,8 +571,10 @@ impl Default for ScanEntryLoader {
 impl ScanEntryLoader {
     /// 新しいローダーを作成します。ハッシュのカラム位置を事前に計算します。
     pub fn new() -> Self {
+        let hash_idx = ScanEntry::schema().len();
         Self {
-            hash_idx: ScanEntry::schema().len(),
+            hash_idx,
+            basename_hash_idx: hash_idx + 1,
         }
     }
 
@@ -528,7 +582,12 @@ impl ScanEntryLoader {
     pub fn load(&self, row: &duckdb::Row) -> duckdb::Result<TempScanEntry> {
         let entry = ScanEntry::from_row(row)?;
         let hash: ScanHash = row.get(self.hash_idx)?;
-        Ok(TempScanEntry { entry, hash })
+        let basename_hash: ScanHash = row.get(self.basename_hash_idx)?;
+        Ok(TempScanEntry {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
@@ -541,11 +600,49 @@ pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
     ScanHash(hasher.finish() as i64)
 }
 
+/// basename・mtime・size・inode から ScanHash を計算します。
+/// ディレクトリを跨いだ移動では一致し、別 inode への分裂では一致しません。
+pub(crate) fn calc_basename_scan_hash(
+    path: &str,
+    mtime: i64,
+    size: i64,
+    inode: crate::types::FileRef,
+) -> ScanHash {
+    use crate::types::PathComponents;
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
+    let parts = PathComponents::decompose(Path::new(path));
+    let base = parts
+        .join()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = FxHasher::default();
+    (base.as_str(), mtime, size, inode.as_u64_pair().1).hash(&mut hasher);
+    ScanHash(hasher.finish() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tag::TagRegistry;
     use tempfile::tempdir;
+
+    #[test]
+    fn normalize_roots_dedups_and_drops_nested() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let outer = base.join("outer");
+        let inner = outer.join("inner");
+        let other = base.join("other");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let got = normalize_roots(&[&outer, &inner, &outer, &other]).unwrap();
+
+        assert_eq!(got, vec![other.clone(), outer.clone()]);
+    }
 
     #[test]
     fn test_calc_scanhash() {
@@ -559,6 +656,31 @@ mod tests {
         assert_ne!(h1, h3, "mtimeが変わればハッシュが変わること");
         assert_ne!(h1, h4, "pathが変わればハッシュが変わること");
         assert_ne!(h1, h5, "sizeが変わればハッシュが変わること");
+    }
+
+    #[test]
+    fn test_calc_basename_scan_hash() {
+        use crate::types::FileRef;
+
+        let inode_a = FileRef::from_u64_pair(0, 1);
+        let inode_b = FileRef::from_u64_pair(0, 2);
+
+        let h1 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_a);
+        let h2 =
+            calc_basename_scan_hash("/another/dir/a.txt", 100, 500, inode_a);
+        let h3 = calc_basename_scan_hash("/one/dir/a.txt", 101, 500, inode_a);
+        let h4 = calc_basename_scan_hash("/one/dir/b.txt", 100, 500, inode_a);
+        let h5 = calc_basename_scan_hash("/one/dir/a.txt", 100, 501, inode_a);
+        let h6 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_b);
+
+        assert_eq!(
+            h1, h2,
+            "hash must not change when only the directory changes"
+        );
+        assert_ne!(h1, h3, "hash must change when mtime changes");
+        assert_ne!(h1, h4, "hash must change when basename changes");
+        assert_ne!(h1, h5, "hash must change when size changes");
+        assert_ne!(h1, h6, "hash must change when inode changes");
     }
 
     #[test]

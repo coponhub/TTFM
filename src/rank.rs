@@ -81,6 +81,7 @@ pub fn set_rank_by_id(
     );
     crate::oneview::OneView::recreate(
         &store.conn,
+        registry,
         &all_columns,
         reader,
         &store.db_dir,
@@ -123,48 +124,29 @@ pub fn get_type_ranks(
     Ok(map)
 }
 
-fn batch_update_rank(
+pub(crate) fn batch_update_rank(
     store: &crate::db::Store,
     ids: &[i64],
     is_file: bool,
     rank: i64,
 ) -> anyhow::Result<()> {
-    use crate::db::{Col, TargetTable, Tbl};
-    use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
-    use sea_query::{Expr, Query};
-
-    let path = if is_file {
-        store.path_for_target(TargetTable::FileReferences)
+    use crate::db::TargetTable;
+    let target = if is_file {
+        TargetTable::FileReferences
     } else {
-        store.path_for_target(TargetTable::ItemReferences)
+        TargetTable::ItemReferences
     };
-
-    let path_str = path.to_string_lossy();
-    let temp_table = Tbl::Target;
-
-    util::parquet_query(&path_str).create_table_as(&store.conn, temp_table)?;
-
-    Query::update()
-        .table(temp_table)
-        .values([(Col::Rank, rank.into())])
-        .and_where(
-            Expr::col(Col::ItemId).is_in(
-                ids.iter()
-                    .cloned()
-                    .map(sea_query::Value::from)
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .execute(&store.conn)?;
-
-    Query::select()
-        .column(sea_query::Asterisk)
-        .from(temp_table)
-        .order_by(Col::ItemId, sea_query::Order::Asc)
-        .to_owned()
-        .save_parquet(&store.conn, &path)?;
-    temp_table.drop_table(&store.conn)?;
-    Ok(())
+    let updates: Vec<(i64, crate::types::Bitical)> = ids
+        .iter()
+        .map(|id| (*id, crate::types::Bitical::Integer(rank)))
+        .collect();
+    crate::edit::fs_operate::update_column(
+        store,
+        target,
+        crate::db::Col::Rank,
+        crate::types::BiticalType::Integer,
+        &updates,
+    )
 }
 
 /// 指定されたタグ名に対応するデフォルトランクを取得します。

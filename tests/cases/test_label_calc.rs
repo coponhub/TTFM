@@ -124,41 +124,64 @@ fn test_complex_comparisons() {
     let (store, registry) = (db_dir_store, db_dir_registry);
 
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     let query_agg_agg = "sum(size:) > count(extension:rs)";
     assert!(
-        search::search_nowarn(&store, &registry, query_agg_agg, Default::default())
-            .is_ok(),
+        search::search_nowarn(
+            &store,
+            &registry,
+            query_agg_agg,
+            Default::default()
+        )
+        .is_ok(),
         "Agg vs Agg should be valid"
     );
 
     let query_agg_calc = "(sum(size:) / 1024) > 100";
     assert!(
-        search::search_nowarn(&store, &registry, query_agg_calc, Default::default())
-            .is_ok(),
+        search::search_nowarn(
+            &store,
+            &registry,
+            query_agg_calc,
+            Default::default()
+        )
+        .is_ok(),
         "Agg calculation vs Literal should be valid"
     );
 
     let query_proj_calc = "size: :> (1024 * 1024)";
     assert!(
-        search::search_nowarn(&store, &registry, query_proj_calc, Default::default())
-            .is_ok(),
+        search::search_nowarn(
+            &store,
+            &registry,
+            query_proj_calc,
+            Default::default()
+        )
+        .is_ok(),
         "Proj vs Calculation with label op should be valid"
     );
 
     let query_forbidden = "size: > 100";
-    let res_forbidden =
-        search::search_nowarn(&store, &registry, query_forbidden, Default::default());
+    let res_forbidden = search::search_nowarn(
+        &store,
+        &registry,
+        query_forbidden,
+        Default::default(),
+    );
     assert!(
         res_forbidden.is_err(),
         "size: > 100 should be a syntax error according to design"
     );
 
     let query_agg_proj = "max(size:) == size:";
-    let res_agg_proj =
-        search::search_nowarn(&store, &registry, query_agg_proj, Default::default());
+    let res_agg_proj = search::search_nowarn(
+        &store,
+        &registry,
+        query_agg_proj,
+        Default::default(),
+    );
     assert!(res_agg_proj.is_err(), "max(size:) == size: should be a syntax error if both sides must be scalar");
 }
 
@@ -174,8 +197,12 @@ fn test_arithmetic_projection_syntax() -> Result<()> {
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
 
-    let result =
-        search::search_nowarn(&store, &registry, "(size: / 1024)", Default::default());
+    let result = search::search_nowarn(
+        &store,
+        &registry,
+        "(size: / 1024)",
+        Default::default(),
+    );
     assert!(
         result.is_ok(),
         "Failed to parse arithmetic projection: {:?}",

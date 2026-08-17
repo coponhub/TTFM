@@ -24,13 +24,16 @@ use super::{
     build_nest_context_for_operand, build_tag_value_agg_expr,
     label_to_simple_expr, needs_nest_context,
 };
-use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, QueryResultCol, Src};
+use crate::db::{
+    BiticalType, Col, CustomFunc, Pronoun::*, QueryResultCol, Src,
+};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::ResolvedOperand;
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{Label, SType};
 use sea_query::{
-    CaseStatement, Condition, Expr, ExprTrait, Query, SelectStatement, SimpleExpr,
+    CaseStatement, Condition, Expr, ExprTrait, Query, SelectStatement,
+    SimpleExpr,
 };
 
 pub(super) fn build_resolved_match_sql(
@@ -147,11 +150,8 @@ fn date_time_slot_order_condition(
         &DateField::ALL[..first_free],
         leading,
     ));
-    let pairs = date_time_slot_pairs(
-        local_ts,
-        &DateField::ALL[first_free..],
-        rest,
-    );
+    let pairs =
+        date_time_slot_pairs(local_ts, &DateField::ALL[first_free..], rest);
 
     let inner = match op {
         BasicOp::Gt => date_time_tuple_cmp(&pairs, |e, v| e.gt(v)),
@@ -183,8 +183,9 @@ fn date_time_slot_condition_expr(
 ) -> Condition {
     use crate::query::ast::BasicOp;
     let offset_secs = crate::types::DateTime::local_utc_offset_secs();
-    let int_secs: SimpleExpr =
-        Expr::expr(expr.clone()).cast_as(BiticalType::Integer).into();
+    let int_secs: SimpleExpr = Expr::expr(expr.clone())
+        .cast_as(BiticalType::Integer)
+        .into();
     let local_epoch_secs = int_secs.add(offset_secs);
     let local_ts: SimpleExpr = Expr::cust_with_exprs(
         "make_timestamp($1)",
@@ -403,11 +404,10 @@ fn scalar_to_volatile_row(inner: SelectStatement) -> SelectStatement {
             ))
             .into();
 
-    let value_expr: SimpleExpr = to_expr(
-        &sv,
-        cast_union(&sv, BiticalType::Integer),
-        |bt| cast_union(&sv, bt),
-    );
+    let value_expr: SimpleExpr =
+        to_expr(&sv, cast_union(&sv, BiticalType::Integer), |bt| {
+            cast_union(&sv, bt)
+        });
 
     let tags = CustomFunc::list_value([
         CustomFunc::struct_pack_tag(
@@ -485,10 +485,18 @@ mod tests {
         )
         .to_string(PostgresQueryBuilder);
 
-        assert!(sql.contains("label_int"), "should filter label_int: {}", sql);
+        assert!(
+            sql.contains("label_int"),
+            "should filter label_int: {}",
+            sql
+        );
         assert!(sql.contains("1000"), "should reference start: {}", sql);
         assert!(sql.contains("2000"), "should reference end: {}", sql);
-        assert!(sql.contains("'mtime'"), "should filter by tag_type: {}", sql);
+        assert!(
+            sql.contains("'mtime'"),
+            "should filter by tag_type: {}",
+            sql
+        );
     }
 
     #[test]
@@ -537,14 +545,21 @@ mod tests {
             "year is free, should not extract year: {}",
             sql
         );
-        assert!(sql.contains("label_int"), "should filter label_int: {}", sql);
-        assert!(sql.contains("'mtime'"), "should filter by tag_type: {}", sql);
+        assert!(
+            sql.contains("label_int"),
+            "should filter label_int: {}",
+            sql
+        );
+        assert!(
+            sql.contains("'mtime'"),
+            "should filter by tag_type: {}",
+            sql
+        );
     }
 
     #[test]
     fn test_date_time_match_sql_ne_slots_negates() {
-        let sql =
-            slot_sql(crate::query::ast::BasicOp::Ne, "*-02-01");
+        let sql = slot_sql(crate::query::ast::BasicOp::Ne, "*-02-01");
         assert!(
             sql.to_uppercase().contains("NOT"),
             "Ne should negate the slot match: {}",
@@ -660,7 +675,11 @@ mod tests {
         // mtime: >= 2026-*-01 → 2026年内で各月の1日以降（year は外側の等値制限）
         let sql = slot_sql(BasicOp::Ge, "2026-*-01");
         assert!(sql.contains("YEAR"), "should extract year: {}", sql);
-        assert!(sql.contains("2026"), "should restrict to year 2026: {}", sql);
+        assert!(
+            sql.contains("2026"),
+            "should restrict to year 2026: {}",
+            sql
+        );
         assert!(!sql.contains("MONTH"), "month is free: {}", sql);
         assert!(sql.contains("DAY"), "should extract day: {}", sql);
     }

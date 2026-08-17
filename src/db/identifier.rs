@@ -56,7 +56,10 @@ pub fn parse(s: &str) -> Result<i64> {
 /// origin の区画を採番ソースとして読む (TargetTable, 別名) の組。
 fn source_tables(origin: Origin) -> &'static [(TargetTable, Tbl)] {
     match origin {
-        Origin::File => &[(TargetTable::FileReferences, Tbl::FileReferences)],
+        Origin::File => &[
+            (TargetTable::FileReferences, Tbl::FileReferences),
+            (TargetTable::RemovedFiles, Tbl::RemovedFiles),
+        ],
         Origin::Builtin | Origin::User | Origin::Plugin => {
             &[(TargetTable::ItemReferences, Tbl::ItemReferences)]
         }

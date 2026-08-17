@@ -60,8 +60,9 @@ struct Cli {
 enum Commands {
     /// 指定されたディレクトリを再帰的にスキャンし、インデックスを作成します。
     Index {
-        /// スキャンを開始するディレクトリパス（例: "." や "/home/user"）
-        path: PathBuf,
+        /// スキャンを開始するディレクトリパス（例: "." や "/home/user"。複数指定可）
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
 
         /// trueの場合、データベースへの書き込みやParquet保存を行わず、スキャン速度の計測のみを行います。
         #[arg(long)]
@@ -187,10 +188,10 @@ fn main() -> Result<()> {
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
 
     match &cli.command {
-        Commands::Index { path, dry_run } => {
+        Commands::Index { paths, dry_run } => {
             safe_println!(
-                "Indexing directory: {:?} (dry-run: {})",
-                path,
+                "Indexing directories: {:?} (dry-run: {})",
+                paths,
                 dry_run
             );
 
@@ -204,7 +205,7 @@ fn main() -> Result<()> {
             pb.enable_steady_tick(Duration::from_millis(100));
 
             let count = ttfm::indexing::Indexer::new(&store, &registry).run(
-                path,
+                paths,
                 Some(&|count| {
                     pb.set_message(format!("Indexed {} files...", count));
                 }),
@@ -238,7 +239,9 @@ fn main() -> Result<()> {
                 &registry,
                 query,
                 opts,
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
             if *short {
                 print_simple_results(&registry, &response);
@@ -274,7 +277,9 @@ fn main() -> Result<()> {
                 &registry,
                 "",
                 opts,
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
             if *short {
                 print_simple_results(&registry, &response);
@@ -302,9 +307,11 @@ fn main() -> Result<()> {
                 QueryType::Tag,
                 None,
                 WriteOptions { yes: cli.yes },
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
-            safe_println!("Updated {} tag(s).", resp.updated);
+            safe_println!("{}", format_tag_result(&resp));
         }
         Commands::Untag {
             search_query,
@@ -320,9 +327,11 @@ fn main() -> Result<()> {
                 QueryType::Untag,
                 condition.as_deref(),
                 WriteOptions { yes: cli.yes },
-                &mut ColorWarningSink { writer: &mut stdout },
+                &mut ColorWarningSink {
+                    writer: &mut stdout,
+                },
             )?;
-            safe_println!("Deleted {} tag(s).", resp.deleted);
+            safe_println!("{}", format_untag_result(&resp));
         }
         Commands::Replace { old: _, new_tag: _ } => {
             anyhow::bail!("replace は未実装です");
@@ -672,7 +681,9 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
         .tags
         .entries
         .iter()
-        .find(|e| e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue"))
+        .find(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue")
+        })
         .map(|e| e.typed_tag.as_str().to_string());
 
     let repr = res.representative.display_keys(registry);
@@ -687,9 +698,7 @@ fn format_short_result(registry: &TagRegistry, res: &ttfm::Item) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use ttfm::types::{
-        Bitical, ItemId, ItemKind, Origin, SType, TypedTag,
-    };
+    use ttfm::types::{Bitical, ItemId, ItemKind, Origin, SType, TypedTag};
     use ttfm::Item;
 
     // COLUMNS 環境変数を操作するテストを直列化するための Mutex
@@ -750,7 +759,7 @@ mod tests {
         let test_file = dir.path().join("sized.bin");
         std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(
@@ -799,7 +808,7 @@ mod tests {
         let test_file = dir.path().join("dated.txt");
         std::fs::write(&test_file, b"hi").unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(
@@ -844,7 +853,7 @@ mod tests {
 
         std::fs::write(dir.path().join("sized.bin"), vec![0u8; 1024]).unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
             .unwrap();
 
         let response = ttfm::search::search_nowarn(
@@ -919,4 +928,42 @@ mod tests {
         assert!(!text.is_empty(), "ColorWarningSink should produce output");
         assert!(text.contains("&:"), "output should contain '&:' suggestion");
     }
+
+    #[test]
+    fn test_format_tag_result() {
+        let resp = ttfm::edit::EditResponse {
+            updated: 1,
+            deleted: 0,
+            fs_ops: 2,
+            has_skipped: false,
+        };
+        assert_eq!(format_tag_result(&resp), "Updated tags: 1, files: 2.");
+
+        let resp_zero = ttfm::edit::EditResponse {
+            updated: 0,
+            deleted: 0,
+            fs_ops: 1,
+            has_skipped: false,
+        };
+        assert_eq!(format_tag_result(&resp_zero), "Updated tags: 0, files: 1.");
+    }
+
+    #[test]
+    fn test_format_untag_result() {
+        let resp = ttfm::edit::EditResponse {
+            updated: 0,
+            deleted: 3,
+            fs_ops: 0,
+            has_skipped: false,
+        };
+        assert_eq!(format_untag_result(&resp), "Deleted tags: 3, files: 0.");
+    }
+}
+
+fn format_tag_result(resp: &ttfm::edit::EditResponse) -> String {
+    format!("Updated tags: {}, files: {}.", resp.updated, resp.fs_ops)
+}
+
+fn format_untag_result(resp: &ttfm::edit::EditResponse) -> String {
+    format!("Deleted tags: {}, files: {}.", resp.deleted, resp.fs_ops)
 }

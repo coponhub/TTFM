@@ -15,16 +15,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{BiticalType, Col, Store, TargetTable, Tbl};
-use crate::indexing::indexer::{DynamicRow, TaggingResult};
+use super::{append_to_target, union_and_save};
+use crate::db::{BiticalType, Col, CustomFunc, Store, TargetTable, Tbl};
+use crate::indexing::indexer::TaggingResult;
 use crate::tag::TagRegistry;
 use crate::types::{Bitical, ItemId};
-use crate::util::{self, ExecuteSql, IdenExt, ParquetExt};
+use crate::util::{self, ExecuteSql, IdenExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
-use sea_query::{Condition, Expr, Iden, Order, Query, SelectStatement};
+use sea_query::{
+    Condition, Expr, Func, Iden, JoinType, Order, Query, SelectStatement,
+};
 // use sea_query::{JoinType, SimpleExpr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ========================================================
 // Merge Phase Orchestrator
@@ -35,15 +38,19 @@ pub(crate) fn run_merge(
     registry: &TagRegistry,
     store: &Store,
     results: Vec<TaggingResult>,
-    moved: Vec<DynamicRow>,
+    dir_changed: Vec<TaggingResult>,
     deleted_ids: Vec<ItemId>,
     temp_scan_path: &Path,
     temp_live_path: &Path,
+    roots: &[PathBuf],
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
 ) -> Result<()> {
     // 各テーブルの取り込みと同期を実行
 
-    // A. 実体テーブル (不変): 削除は行わず、新規登録のみ。
+    // 実体・場所テーブルが上書きされる前に退避する必要がある。
+    record_removed_files(conn, store, &deleted_ids)?;
+
+    // A. 実体テーブル: 新規登録と、削除 ID の行の除去。
     let ent = FileEntityMerger {
         conn,
         registry,
@@ -60,10 +67,10 @@ pub(crate) fn run_merge(
         store,
     }
     .prepare()?
-    .ingest(&results, &moved)?
-    .sync(temp_live_path)?;
+    .ingest(&results, &dir_changed)?
+    .sync(temp_live_path, roots)?;
 
-    // C. タグテーブル (可変): 削除 ID の分を掃除。
+    // C. タグテーブル (可変): 削除 ID の分を掃除 (DirChanged は base_tags 抽出をスキップしたため results のみ)。
     let tag = BaseTagMerger {
         conn,
         registry,
@@ -73,9 +80,20 @@ pub(crate) fn run_merge(
     .ingest(&results)?
     .sync(&deleted_ids)?;
 
+    // D. パス依存タグテーブル (可変): locations と同様に常に更新。
+    let loc_tag = LocationTagMerger {
+        conn,
+        registry,
+        store,
+    }
+    .prepare()?
+    .ingest(&results, &dir_changed)?
+    .sync(&deleted_ids)?;
+
     ent.cleanup()?;
     loc.cleanup()?;
     tag.cleanup()?;
+    loc_tag.cleanup()?;
 
     // システムアイテム（基本Type定義のみ）の更新
     // 以前はここで type/label/tag の全バリエーションを登録していたが、
@@ -117,7 +135,12 @@ impl<'a> FileEntityMerger<'a> {
         let table_name = Tbl::FileReferencesDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
 
+        let mut seen: rustc_hash::FxHashSet<i64> =
+            rustc_hash::FxHashSet::default();
         for res in results {
+            if !seen.insert(res.entity_row.id) {
+                continue;
+            }
             let mut er = vec![&res.entity_row.id as &dyn ToSql];
             er.extend(res.entity_row.values.iter().map(|v| v as &dyn ToSql));
             app.append_row(er.as_slice())?;
@@ -125,7 +148,44 @@ impl<'a> FileEntityMerger<'a> {
         Ok(self)
     }
 
+    fn inherit_rank(&self) -> Result<()> {
+        let path = self.store.path_for_target(TargetTable::FileReferences);
+        if !path.exists() {
+            return Ok(());
+        }
+        let existing_rank = Query::select()
+            .expr(CustomFunc::any_value(Expr::col((
+                Tbl::FileReferences,
+                Col::Rank,
+            ))))
+            .from_subquery(
+                util::parquet_query(&path.to_string_lossy()),
+                Tbl::FileReferences,
+            )
+            .and_where(
+                Expr::col((Tbl::FileReferences, Col::ItemId))
+                    .equals((Tbl::FileReferencesDiff, Col::ItemId)),
+            )
+            .to_owned();
+
+        Query::update()
+            .table(Tbl::FileReferencesDiff)
+            .value(
+                Col::Rank,
+                Func::cust(crate::db::DuckDbFunc::Coalesce).args([
+                    sea_query::SimpleExpr::SubQuery(
+                        None,
+                        Box::new(existing_rank.into_sub_query_statement()),
+                    ),
+                    Expr::val(0i64).into(),
+                ]),
+            )
+            .execute(self.conn)?;
+        Ok(())
+    }
+
     pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        self.inherit_rank()?;
         let ids_i64: Vec<i64> =
             deleted_ids.iter().map(|id| id.as_i64()).collect();
         // file_entities は item_id をキーにしてマージ
@@ -170,44 +230,48 @@ impl<'a> LocationMerger<'a> {
     pub(crate) fn ingest(
         self,
         results: &[TaggingResult],
-        moved: &[DynamicRow],
+        dir_changed: &[TaggingResult],
     ) -> Result<Self> {
-        if results.is_empty() && moved.is_empty() {
+        if results.is_empty() && dir_changed.is_empty() {
             return Ok(self);
         }
         let table_name = Tbl::LocationsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
 
-        for res in results {
+        for res in results.iter().chain(dir_changed.iter()) {
             let mut lr = vec![&res.location_row.id as &dyn ToSql];
             lr.extend(res.location_row.values.iter().map(|v| v as &dyn ToSql));
             lr.push(&res.scan_hash as &dyn ToSql);
-            app.append_row(lr.as_slice())?;
-        }
-        for row in moved {
-            let mut lr = vec![&row.id as &dyn ToSql];
-            lr.extend(row.values.iter().map(|v| v as &dyn ToSql));
-            lr.push(&None::<Bitical> as &dyn ToSql);
+            lr.push(&res.basename_scan_hash as &dyn ToSql);
             app.append_row(lr.as_slice())?;
         }
         Ok(self)
     }
 
-    pub(crate) fn sync(self, live_path: &Path) -> Result<Self> {
+    pub(crate) fn sync(
+        self,
+        live_path: &Path,
+        roots: &[PathBuf],
+    ) -> Result<Self> {
         let path_str = live_path.to_string_lossy();
         let live_query = Query::select()
-            .column(Col::ItemId)
+            .column(Col::ScanHash)
             .from_subquery(util::parquet_query(&path_str), Tbl::Live)
             .to_owned();
 
-        // locations は path をキーにして上書き判定を行う（ハードリンク対応）
+        // locations は path をキーにして上書き判定を行う（ハードリンク対応）。
+        // 生存フィルタは item_id ではなく scan_hash で絞る。item_id 単位だと
+        // 同一アイテムの他ロケーションが生きているだけで、消えたロケーション
+        // も道連れに残ってしまう。roots 範囲外の location は今回のスキャン対象
+        // 外なので、生存判定と関係なく無条件に保持する。
         merge_and_save(
             self.conn,
             &self.store.path_for_target(TargetTable::Locations),
             Tbl::LocationsDiff,
             Some(
-                Condition::all()
-                    .add(Expr::col(Col::ItemId).in_subquery(live_query)),
+                Condition::any()
+                    .add(Expr::col(Col::ScanHash).in_subquery(live_query))
+                    .add(super::diff::in_scope(Col::Path, roots).not()),
             ),
             Col::Path,
             None,
@@ -286,6 +350,124 @@ impl<'a> BaseTagMerger<'a> {
         Tbl::BaseTagsDiff.drop_table(self.conn).ok();
         Ok(())
     }
+}
+
+pub(crate) struct LocationTagMerger<'a> {
+    pub(crate) conn: &'a Connection,
+    pub(crate) registry: &'a TagRegistry,
+    pub(crate) store: &'a Store,
+}
+
+impl<'a> LocationTagMerger<'a> {
+    pub(crate) fn prepare(self) -> Result<Self> {
+        let all_cols = self.registry.get_all_columns();
+        crate::db::Schema::build_table(
+            TargetTable::TagsByLocation,
+            Tbl::TagsByLocationDiff,
+            &all_cols,
+        )
+        .temporary()
+        .execute(self.conn)?;
+        Ok(self)
+    }
+
+    pub(crate) fn ingest(
+        self,
+        results: &[TaggingResult],
+        dir_changed: &[TaggingResult],
+    ) -> Result<Self> {
+        if results.is_empty() && dir_changed.is_empty() {
+            return Ok(self);
+        }
+        let table_name = Tbl::TagsByLocationDiff.to_string().replace('"', "");
+        let mut app = self.conn.appender(&table_name)?;
+
+        for res in results.iter().chain(dir_changed.iter()) {
+            for t in &res.location_tags {
+                let (stored_col, stored) = t.value.to_col_value();
+                let none = None::<Bitical>;
+                let mut row: Vec<&dyn ToSql> = vec![&t.item_id, &t.tag_type];
+                for col in BiticalType::to_columns() {
+                    row.push(if col == stored_col { &stored } else { &none });
+                }
+                app.append_row(row.as_slice())?;
+            }
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
+        let ids_i64: Vec<i64> =
+            deleted_ids.iter().map(|id| id.as_i64()).collect();
+        merge_and_save(
+            self.conn,
+            &self.store.path_for_target(TargetTable::TagsByLocation),
+            Tbl::TagsByLocationDiff,
+            (!ids_i64.is_empty()).then(|| {
+                Condition::all()
+                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
+            }),
+            Col::ItemId,
+            Some(vec![Col::Type, Col::LabelInt, Col::LabelStr, Col::ItemId]),
+        )?;
+        Ok(self)
+    }
+
+    pub(crate) fn cleanup(self) -> Result<()> {
+        Tbl::TagsByLocationDiff.drop_table(self.conn).ok();
+        Ok(())
+    }
+}
+
+pub(crate) fn record_removed_files(
+    conn: &Connection,
+    store: &Store,
+    deleted_ids: &[ItemId],
+) -> Result<()> {
+    if deleted_ids.is_empty() {
+        return Ok(());
+    }
+    let ids_i64: Vec<i64> = deleted_ids.iter().map(|id| id.as_i64()).collect();
+    let path =
+        |t| util::parquet_query(&store.path_for_target(t).to_string_lossy());
+
+    let tagged = Query::select()
+        .distinct()
+        .column(Col::ItemId)
+        .from_subquery(path(TargetTable::UserTags), Tbl::UserTags)
+        .to_owned();
+
+    let rows = Query::select()
+        .column((Tbl::Locations, Col::ItemId))
+        .column((Tbl::FileReferences, Col::Rank))
+        .column((Tbl::FileReferences, Col::FileId))
+        .columns([
+            (Tbl::Locations, Col::ScanHash),
+            (Tbl::Locations, Col::BasenameScanHash),
+            (Tbl::Locations, Col::Path),
+        ])
+        .columns([
+            (Tbl::FileReferences, Col::Size),
+            (Tbl::FileReferences, Col::Mtime),
+            (Tbl::FileReferences, Col::IsDir),
+        ])
+        .expr_as(
+            Expr::cust("CAST(epoch(now()) AS BIGINT)"),
+            Col::RemovedFileAt,
+        )
+        .from_subquery(path(TargetTable::Locations), Tbl::Locations)
+        .join_subquery(
+            JoinType::InnerJoin,
+            path(TargetTable::FileReferences),
+            Tbl::FileReferences,
+            Expr::col((Tbl::Locations, Col::ItemId))
+                .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
+        )
+        .and_where(Expr::col((Tbl::Locations, Col::ItemId)).is_in(ids_i64))
+        .and_where(Expr::col((Tbl::Locations, Col::ItemId)).in_subquery(tagged))
+        .to_owned();
+
+    append_to_target(conn, store, TargetTable::RemovedFiles, rows)
 }
 
 // // ========================================================
@@ -401,31 +583,22 @@ fn merge_and_save(
         .from(temp_table.clone())
         .to_owned();
 
-    if !path.exists() {
-        return base_query.save_parquet(conn, path);
-    }
+    union_and_save(conn, path, base_query, |query| {
+        // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
+        query.and_where(Expr::col(key_col).not_in_subquery(
+            Query::select().column(key_col).from(temp_table).to_owned(),
+        ));
 
-    let path_str = path.to_string_lossy().to_string();
-    let mut query = util::parquet_query(&path_str);
-
-    // 【核心】既存データから、今回更新されるレコードをキー（ID またはパス）で除外
-    query.and_where(Expr::col(key_col).not_in_subquery(
-        Query::select().column(key_col).from(temp_table).to_owned(),
-    ));
-
-    if let Some(cond) = filter {
-        query.cond_where(cond);
-    }
-
-    if let Some(cols) = order_by {
-        for col in cols {
-            query.order_by(col, Order::Asc);
+        if let Some(cond) = filter {
+            query.cond_where(cond);
         }
-    }
 
-    query
-        .union(sea_query::UnionType::All, base_query)
-        .save_parquet(conn, path)
+        if let Some(cols) = order_by {
+            for col in cols {
+                query.order_by(col, Order::Asc);
+            }
+        }
+    })
 }
 
 // ========================================================
@@ -482,6 +655,21 @@ mod tests {
 
         assert_eq!(rows, vec![1, 2, 3]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_location_tag_merger_sync() -> Result<()> {
+        let dir = tempdir()?;
+        let store = Store::open(dir.path().join("db"))?;
+        let registry = TagRegistry::new();
+        let merger = LocationTagMerger {
+            conn: &store.conn,
+            registry: &registry,
+            store: &store,
+        };
+        merger.prepare()?.sync(&[])?.cleanup()?;
+        assert!(store.path_for_target(TargetTable::TagsByLocation).exists());
         Ok(())
     }
 }

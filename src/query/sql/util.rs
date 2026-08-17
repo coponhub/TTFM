@@ -97,11 +97,15 @@ pub(super) fn nvalue_rhs_condition(
                 if crate::util::is_glob_pattern(&s) {
                     let glob = Expr::expr(lhs)
                         .binary(BinOper::Custom("GLOB"), Expr::val(s));
-                    let expr =
-                        if basic_op == BasicOp::Ne { glob.not() } else { glob };
+                    let expr = if basic_op == BasicOp::Ne {
+                        glob.not()
+                    } else {
+                        glob
+                    };
                     Condition::all().add(expr)
                 } else {
-                    Condition::all().add(Expr::expr(lhs).binary(bin_op, Expr::val(s)))
+                    Condition::all()
+                        .add(Expr::expr(lhs).binary(bin_op, Expr::val(s)))
                 }
             } else {
                 let rhs_expr = label_to_simple_expr(label);
@@ -157,7 +161,9 @@ pub(super) fn coalesce_label_columns_as_string() -> SimpleExpr {
     Func::coalesce([
         Expr::col(Col::LabelStr).into(),
         Expr::col(Col::LabelInt).cast_as(BiticalType::String).into(),
-        Expr::col(Col::LabelDouble).cast_as(BiticalType::String).into(),
+        Expr::col(Col::LabelDouble)
+            .cast_as(BiticalType::String)
+            .into(),
         sea_query::CaseStatement::new()
             .case(Expr::col(Col::LabelBool).eq(true), "true")
             .case(Expr::col(Col::LabelBool).eq(false), "false")

@@ -77,8 +77,15 @@ pub fn search(
     // キャッシュ無効パス。cache:false、または「全件(n=0)かつ読み込む cid も無い」場合。
     // cid があれば n に関わらずキャッシュ読みを試みる（下の有効パスへ）。
     if !options.cache || (n == 0 && options.cid.is_none()) {
-        let (results, has_more) =
-            search_core(store, registry, query, n, offset, &options.order, sink)?;
+        let (results, has_more) = search_core(
+            store,
+            registry,
+            query,
+            n,
+            offset,
+            &options.order,
+            sink,
+        )?;
         return Ok(SearchResponse::from_results(
             results, None, has_more, n, offset, query,
         ));
@@ -153,8 +160,12 @@ fn search_core(
                 });
             if let Some(raw) = raw {
                 let formatted = registry.format_display(tt.as_str(), &raw);
-                result.representative = vec![TypedTag::new(SType::Name, formatted.clone())].into();
-                result.tags.push(TypedTag::new(SType::Name, formatted), Origin::Builtin);
+                result.representative =
+                    vec![TypedTag::new(SType::Name, formatted.clone())].into();
+                result.tags.push(
+                    TypedTag::new(SType::Name, formatted),
+                    Origin::Builtin,
+                );
             }
         }
     }
@@ -172,7 +183,8 @@ fn search_core(
                 .as_ref()
                 .map(|tt| registry.format_display(tt.as_str(), &raw))
                 .unwrap_or(raw);
-            result.representative.nvalue = Some(crate::types::Label::from(display));
+            result.representative.nvalue =
+                Some(crate::types::Label::from(display));
         }
     }
 
@@ -216,6 +228,7 @@ pub fn spawn_cache_worker(
             );
             crate::oneview::OneView::recreate(
                 &conn,
+                &registry,
                 &all_columns,
                 reader,
                 &db_dir,
@@ -406,7 +419,11 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let cid = "test-worker-cid";
         spawn_cache_worker(store.db_dir.clone(), &cache, cid, "extension:txt")?;
@@ -438,7 +455,7 @@ mod tests {
         let db_dir = dir.path().join("db");
         std::fs::create_dir(&db_dir)?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(
+        Indexer::new(&store, &registry).run_single(
             dir.path(),
             None::<&fn(usize)>,
             false,
@@ -511,7 +528,11 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let query = "extension:txt";
 
@@ -580,7 +601,11 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let res = search_nowarn(
             &store,
@@ -606,7 +631,11 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let res = search_nowarn(
             &store,
@@ -637,7 +666,11 @@ mod tests {
 
         File::create(root.join("a.txt"))?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let res = search_nowarn(
             &store,
@@ -669,7 +702,11 @@ mod tests {
         std::fs::write(&path, vec![0u8; 123])?;
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let res = search_nowarn(
             &store,
@@ -698,16 +735,23 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let query = "extension:";
 
         let res_db =
             search_nowarn(&store, &registry, query, SearchOptions::default())?;
         assert!(!res_db.results.is_empty());
-        assert!(res_db.results.iter().any(|r| r.tags.entries.iter().any(
-            |e| e.typed_tag.tag_type() == crate::types::TagType::from("item")
-        )));
+        assert!(res_db.results.iter().any(|r| r
+            .tags
+            .entries
+            .iter()
+            .any(|e| e.typed_tag.tag_type()
+                == crate::types::TagType::from("item"))));
         assert!(res_db
             .results
             .iter()
@@ -801,7 +845,11 @@ mod tests {
         File::create(root.join("test.rs"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+        Indexer::new(&store, &registry).run_single(
+            root,
+            None::<&fn(usize)>,
+            false,
+        )?;
 
         let query = "extension:md | extension:rs";
         let cid = "test-complex-cid";

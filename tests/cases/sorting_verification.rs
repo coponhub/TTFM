@@ -38,7 +38,7 @@ fn test_parquet_physical_order() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(root, None::<&fn(usize)>, false)
+        .run_single(root, None::<&fn(usize)>, false)
         .unwrap();
 
     // Verify base_tags.parquet order

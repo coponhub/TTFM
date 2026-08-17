@@ -57,11 +57,10 @@ factor = {
 
 // Nest expression: &: operator, higher priority than set operations.
 // Requires at least one &: to match; standalone operands fall through to other factor alternatives.
-nest_expr = ${ nest_operand ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_operand)+ }
-// scalar_comparison is tried first so bare scalar comparisons (e.g. count(...) > 0) work as nest
-// right operand without causing left-recursion (comparison->label_comparison->nest_expr->nest_operand).
-// aggregation is the fallback when scalar_comparison fails (e.g. count(...) :> X leaves :>X for outer label_op).
-nest_operand = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }
+nest_expr = ${ nest_lhs ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_rhs)+ }
+
+nest_lhs = { type_ref | nest_parenthesized_expr | "(" ~ expr ~ ")" }
+nest_rhs = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }
 
 projection = { type_ref | calculation }
 

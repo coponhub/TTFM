@@ -87,26 +87,23 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 1.  **Scan Phase (並列メタデータ収集)**:
     - **高速並列トラバース**: `ignore` クレートを用いて、マルチスレッドでディレクトリ階層を走査する。
     - **メタデータ取得**: 各ファイルについて、ファイルシステムから最新のメタデータ（Inode, Size, Mtime等）を取得する。
-    - **一時保存**: 取得した全エントリのメタデータを `current_scan.parquet` に書き出す。
+    - **変更検知**: パス・Mtime・Size から `scan_hash` を算出し、変更されたファイルを検知。
+    - **一時保存**: 変更されたファイルを`current_scan.parquet`に、変更されていないファイルを `current_ids.parquet` に書き出す。
 
 2.  **Diff Phase (Auditing)**:
+    - **Rediscover**: スキャン結果のうち、ファイルの識別子が`removed_files`内の識別子と等しいものを `file_references` へ戻し、`removed_files` から取り除く。
     - **DiffAuditor** を用いて、`current_scan.parquet` (最新) と既存の Parquet ファイルを比較し、以下のカテゴリに分類する。
-        - **To Process**: 新規、または Mtime/Size が変化したファイル。
-        - **Moved**: `FileId` は一致するが、Path が異なるファイル。
-          - アクション: **Location (path, parentdir, filename, extension) の情報を再生成する。**
-        - **Unchanged**: 全てのメタデータが一致したファイル。
-        - **Deleted**: 既存インデックスにあるが、今回の走査で見つからなかったファイル。
+        - **To Process**: 新規、または内容/Mtime/Size/ファイル名が変化したファイル。
+        - **DirChanged**: `basename_scan_hash` が一致しパスのみが変化したファイル（ディレクトリ移動のみ）。
+        - **Deleted**: インデックス済みのファイルのうち、今回の走査範囲内で失われているファイル。
 
 3.  **Triage Phase (Selection & Assembly)**:
     - **ItemTriager** を実行し、抽出されたメタデータを各テーブルへ振り分ける。
-    - **Extraction**: **To Process** のリストに対して並列で各 `TagFunction` の Index を実行し、メタデータを抽出する。
-    - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/Tags）へ選別（トリアージ）する。
+    - **Extraction**: **To Process** に対しては全 `TagFunction` の Index を実行してメタデータを抽出する。**DirChanged** に対してはパス依存（`TargetTable::TagsByLocation`）の `TagFunction` のみを実行し、`base_tags` の再抽出をスキップする。
+    - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/BaseTags/TagsByLocation）へ選別（トリアージ）する。
 
 4.  **Merge Phase (Integration)**:
-    - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `file_references`, `locations`, `base_tags` 等のParquetファイルを更新・保存する。
-    - **Reconstruction**: **Moved** のリストに対し、ファイルを開かずにパス情報から場所情報を再構築する。
-    - `file_references`（実体テーブル）の行は削除しない。**Deleted** と判定されたファイルも、
-      `locations`/`base_tags` の情報のみ整理され、`file_references` の item_id は保持される。
+    - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `removed_files`, `file_references`, `locations`, `base_tags`, `tags_by_location` 等のParquetファイルを更新・保存する。
 
 ### 5.2 検索システム (`ttfm search`)
 

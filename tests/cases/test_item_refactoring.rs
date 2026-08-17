@@ -81,7 +81,7 @@ fn test_item_id_and_kind_refactoring() {
     std::fs::write(dir.path().join("file1.txt"), "content").unwrap();
     std::fs::write(dir.path().join("file2.txt"), "content").unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let res = search::search_nowarn(
@@ -167,12 +167,20 @@ fn item_id_quoted_local_form_resolves_same_as_raw_id() {
     let q_raw = format!("item_id:{raw_id}");
     let q_local = format!("item_id:\"{disp}\"");
 
-    let r_raw =
-        search::search_nowarn(&store, &registry, &q_raw, SearchOptions::default())
-            .unwrap();
-    let r_local =
-        search::search_nowarn(&store, &registry, &q_local, SearchOptions::default())
-            .unwrap();
+    let r_raw = search::search_nowarn(
+        &store,
+        &registry,
+        &q_raw,
+        SearchOptions::default(),
+    )
+    .unwrap();
+    let r_local = search::search_nowarn(
+        &store,
+        &registry,
+        &q_local,
+        SearchOptions::default(),
+    )
+    .unwrap();
 
     assert_eq!(r_raw.results.len(), 1, "raw id query should find item");
     assert_eq!(

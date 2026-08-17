@@ -30,3 +30,33 @@ crate::define_scan_entry! {
     size:  crate::tag::SizeFn,
     mtime: crate::tag::MtimeFn,
 }
+
+pub(crate) fn append_to_target(
+    conn: &duckdb::Connection,
+    store: &crate::db::Store,
+    target: crate::db::TargetTable,
+    rows: sea_query::SelectStatement,
+) -> anyhow::Result<()> {
+    let path = store.path_for_target(target);
+    union_and_save(conn, &path, rows, |_| {})
+}
+
+pub(crate) fn union_and_save(
+    conn: &duckdb::Connection,
+    path: &std::path::Path,
+    rows: sea_query::SelectStatement,
+    retain: impl FnOnce(&mut sea_query::SelectStatement),
+) -> anyhow::Result<()> {
+    use crate::util::ParquetExt;
+
+    if !path.exists() {
+        return rows.save_parquet(conn, path);
+    }
+
+    let mut existing = crate::util::parquet_query(&path.to_string_lossy());
+    retain(&mut existing);
+
+    existing
+        .union(sea_query::UnionType::All, rows)
+        .save_parquet(conn, path)
+}

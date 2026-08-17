@@ -25,5 +25,5 @@ ttfm search --short "extension:rs & path:" | head -n 5
 
 ## 3. データベースの初期化 (`ttfm clear`)
 索引データを削除し、再構築可能な状態に戻すためのコマンド。
-- `ttfm clear`: File Reference 関連のテーブル（`file_references` / `locations` / `base_tags`、STORE.md §1）を丸ごと削除する。
+- `ttfm clear`: File Reference 関連のテーブル（`file_references` / `locations` / `base_tags` / `tags_by_location`）(STORE.md §1参照)を丸ごと削除する。
 - `ttfm clear --all`: データベース全体を削除する。Origin を問わず全ての登録済みの Item が失われる。
