@@ -53,6 +53,22 @@ struct Cli {
     /// 全ての確認をスキップして 'yes' と回答します
     #[arg(short, long, global = true)]
     yes: bool,
+
+    /// 確認プロンプトの動作 (auto, always, never)
+    #[arg(long, global = true)]
+    confirm: Option<ttfm::config::ConfirmMode>,
+
+    /// 移動先の重複・衝突時のポリシー (abort, skip, serial, first)
+    #[arg(long, global = true)]
+    on_conflict: Option<ttfm::config::ConflictPolicy>,
+
+    /// ハードリンク検出時のポリシー (abort, skip, all)
+    #[arg(long, global = true)]
+    on_hardlink: Option<ttfm::config::HardlinkPolicy>,
+
+    /// スキップ時の除外範囲 (item, fs-only)
+    #[arg(long, global = true)]
+    skip_scope: Option<ttfm::config::SkipScope>,
 }
 
 /// TTFM で利用可能なサブコマンド。
@@ -186,6 +202,7 @@ fn main() -> Result<()> {
 
     let store = Store::open(home.join("db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    registry.load_type_configs(&store)?;
 
     match &cli.command {
         Commands::Index { paths, dry_run } => {
@@ -306,7 +323,7 @@ fn main() -> Result<()> {
                 edit_query.as_deref(),
                 QueryType::Tag,
                 None,
-                WriteOptions { yes: cli.yes },
+                build_write_options(&cli, &config),
                 &mut ColorWarningSink {
                     writer: &mut stdout,
                 },
@@ -326,7 +343,7 @@ fn main() -> Result<()> {
                 Some(tag_query.as_str()),
                 QueryType::Untag,
                 condition.as_deref(),
-                WriteOptions { yes: cli.yes },
+                build_write_options(&cli, &config),
                 &mut ColorWarningSink {
                     writer: &mut stdout,
                 },
@@ -348,6 +365,20 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_write_options(cli: &Cli, config: &Config) -> WriteOptions {
+    let confirm = if cli.yes {
+        ttfm::config::ConfirmMode::Never
+    } else {
+        cli.confirm.unwrap_or(config.edit.confirm)
+    };
+    WriteOptions {
+        confirm,
+        on_conflict: cli.on_conflict.or(config.edit.on_conflict),
+        on_hardlink: cli.on_hardlink.or(config.edit.on_hardlink),
+        skip_scope: cli.skip_scope.unwrap_or(config.edit.skip_scope),
+    }
 }
 
 /// 文字列を指定された最大幅で切り詰めます。

@@ -1,11 +1,11 @@
 use super::sql::{self, UserTagDelete};
 use crate::db::{Col, Store, TargetTable, Tbl};
-use crate::types::{ItemId, Origin, SType, TagType, TypedTag};
+use crate::types::{BiticalType, ItemId, Origin, SType, TagType, TypedTag};
 use crate::util::{parquet_query, ParquetExt};
 use anyhow::Result;
 use sea_query::{Expr, Query};
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum WriteAction {
     Add {
         item: ItemId,
@@ -17,13 +17,13 @@ pub enum WriteAction {
     },
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TagOp {
     Append(TypedTag),
     Replace(TypedTag),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DeleteTarget {
     Type(TagType),
     Tag(TypedTag),
@@ -43,6 +43,7 @@ pub fn write(
     store: &Store,
     registry: &crate::tag::TagRegistry,
     actions: Vec<WriteAction>,
+    cast_migration: Option<(TagType, BiticalType)>,
 ) -> Result<WriteResponse> {
     // 1. Volatile/Settling → Stored 採番
     let (resolved, new_item_ids) = resolve_volatiles(store, actions)?;
@@ -141,6 +142,9 @@ pub fn write(
         }
     }
 
+    let casts: Vec<(TagType, BiticalType)> =
+        cast_migration.into_iter().collect();
+
     // 5. 書き込み（順序固定: item_references → user_tags → rank 更新）
     if !ir_inserts.is_empty() || !user_cascade.is_empty() {
         let path = store.path_for_target(TargetTable::ItemReferences);
@@ -159,6 +163,7 @@ pub fn write(
     if !ut_inserts.is_empty()
         || !ut_deletes.is_empty()
         || !all_cascade.is_empty()
+        || !casts.is_empty()
     {
         let path = store.path_for_target(TargetTable::UserTags);
         sql::user_tags_write(
@@ -166,6 +171,7 @@ pub fn write(
             ut_inserts,
             ut_deletes,
             &all_cascade,
+            &casts,
         )
         .save_parquet(&store.conn, &path)?;
     }
@@ -190,8 +196,10 @@ pub fn write_and_refresh(
     store: &Store,
     registry: &crate::tag::TagRegistry,
     actions: Vec<WriteAction>,
+    cast_migration: Option<(TagType, BiticalType)>,
 ) -> Result<WriteResponse> {
-    let resp = write(store, registry, actions)?;
+    let resp = write(store, registry, actions, cast_migration)?;
+    registry.load_type_configs(store)?;
     let all_cols = registry.get_all_columns();
     let reader = crate::query::lens_reader::Reader::build(
         registry,
@@ -448,6 +456,7 @@ mod tests {
                 item: ItemId::Volatile(0),
                 tags: vec![TagOp::Append(TypedTag::new(SType::Rank, 9i64))],
             }],
+            None,
         )
         .unwrap();
 

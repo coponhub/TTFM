@@ -1,9 +1,19 @@
 use tempfile::tempdir;
 use ttfm::db::{Store, TargetTable};
-use ttfm::edit::write::{write, DeleteTarget, TagOp, WriteAction};
+use ttfm::edit::write::{
+    write as raw_write, DeleteTarget, TagOp, WriteAction, WriteResponse,
+};
 use ttfm::indexing::Indexer;
 use ttfm::tag::TagRegistry;
 use ttfm::types::{Bitical, ItemId, SType, TagType, TypedTag};
+
+fn write(
+    store: &Store,
+    registry: &TagRegistry,
+    actions: Vec<WriteAction>,
+) -> anyhow::Result<WriteResponse> {
+    raw_write(store, registry, actions, None)
+}
 
 fn setup() -> (Store, TagRegistry, tempfile::TempDir) {
     let dir = tempdir().unwrap();

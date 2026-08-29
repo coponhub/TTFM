@@ -30,6 +30,7 @@ use ttfm::{
 };
 
 fn setup() -> (Store, TagRegistry, TempDir) {
+    crate::cases::raise_fd_limit();
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let root = base.join("files");
@@ -161,6 +162,7 @@ fn type_prefers_stored_definition_over_volatile_duplicate() -> anyhow::Result<()
                 TagOp::Append(TypedTag::new(SType::Rank, 999)),
             ],
         }],
+        None,
     )?;
     let stored_id = resp.new_item_ids[0];
 
@@ -212,6 +214,7 @@ fn type_stored_row_shows_user_attached_tags() -> anyhow::Result<()> {
                 TagOp::Append(TypedTag::new(SType::Rank, 999)),
             ],
         }],
+        None,
     )?;
     let stored_id = resp.new_item_ids[0];
 
@@ -1271,6 +1274,751 @@ fn type_glob_does_not_include_nonexistent_types() -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
         );
     }
+
+    Ok(())
+}
+
+fn setup_with_files(names: &[&str]) -> (Store, TagRegistry, TempDir) {
+    crate::cases::raise_fd_limit();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    for name in names {
+        std::fs::write(root.join(name), "content").unwrap();
+    }
+
+    let db_dir = base.join("db");
+    let registry = TagRegistry::with_standard();
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run_single(&root, None::<&fn(usize)>, false)
+        .unwrap();
+    (store, registry, dir)
+}
+
+// ──────────────────────────────────────────────
+// Type Definition Customization & Tag Cast
+// ──────────────────────────────────────────────
+
+#[test]
+fn custom_type_display_unit_formats_output() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("quota:1048576"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "type:quota",
+        Some("display_unit:binary"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let res = ttfm::search::search_nowarn(
+        &store,
+        &reg,
+        "filename:a.txt",
+        SearchOptions::default(),
+    )?;
+    let raw_quota = &res.results[0].get_all_values("quota")[0];
+    assert_eq!(reg.format_display("quota", raw_quota), "1.00MiB");
+    Ok(())
+}
+
+#[test]
+fn custom_type_strategy_replaces_previous_tag() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "type:status",
+        Some("strategy:replace"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("status:wip"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("status:done"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let res = ttfm::search::search_nowarn(
+        &store,
+        &reg,
+        "filename:a.txt",
+        SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res.results[0].get_all_values("status"),
+        vec!["done".to_string()]
+    );
+    Ok(())
+}
+
+#[test]
+fn type_mismatch_produces_helpful_error_message() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("score:100"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let err = edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some(r#"score:"high""#),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("type 'score' is integer"));
+    assert!(err.to_string().contains("change type definition"));
+    Ok(())
+}
+
+#[test]
+fn builtin_type_rejects_structural_metadata_override() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    let err = edit(
+        &store,
+        &reg,
+        "type:path",
+        Some("strategy:append"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("cannot modify strategy of built-in/plugin type"));
+    Ok(())
+}
+
+#[test]
+fn cast_fails_atomically_reporting_invalid_labels() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt", "b.txt"]);
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some(r#"score:"100""#),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "filename:b.txt",
+        Some(r#"score:"invalid""#),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let err = edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:integer"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("invalid"));
+
+    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
+    let count: i64 = store.conn.query_row(
+        &format!(
+            "SELECT count(*) FROM read_parquet('{}') WHERE type = 'score' AND label_int = 100",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(count, 0);
+
+    let type_count: i64 = store.conn.query_row(
+        &format!(
+            "SELECT count(*) FROM read_parquet('{}') WHERE type = 'bitical_type' AND label_str = 'integer'",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(type_count, 0);
+
+    Ok(())
+}
+
+#[test]
+fn cast_migrates_column_storage_on_success() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some(r#"score:"100""#),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:integer"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
+    let count: i64 = store.conn.query_row(
+        &format!(
+            "SELECT count(*) FROM read_parquet('{}') WHERE type = 'score' AND label_int = 100",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(count, 1);
+
+    Ok(())
+}
+
+#[test]
+fn multiple_type_cast_in_single_command_is_rejected() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    let err = edit(
+        &store,
+        &reg,
+        "type:*",
+        Some("bitical_type:integer"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("multiple type cast is not supported"));
+    Ok(())
+}
+
+#[test]
+fn cast_to_uuid_preserves_label_str_storage() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    let valid_uuid = "550e8400-e29b-41d4-a716-446655440000";
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some(&format!(r#"my_id:"{}""#, valid_uuid)),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    edit(
+        &store,
+        &reg,
+        "type:my_id",
+        Some("bitical_type:uuid"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
+    let str_val: String = store.conn.query_row(
+        &format!(
+            "SELECT label_str FROM read_parquet('{}') WHERE type = 'my_id'",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(str_val, valid_uuid);
+
+    Ok(())
+}
+
+#[test]
+fn meta_tag_multiple_edits_replace_previous_value() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "type:quota",
+        Some("display_unit:binary"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    // 2回目の設定（si に変更）
+    edit(
+        &store,
+        &reg,
+        "type:quota",
+        Some("display_unit:si"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
+    let count: i64 = store.conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM read_parquet('{}') WHERE type = 'display_unit'",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    // 重複せず1行だけ残っていること
+    assert_eq!(count, 1);
+
+    let val: String = store.conn.query_row(
+        &format!(
+            "SELECT label_str FROM read_parquet('{}') WHERE type = 'display_unit'",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(val, "si");
+
+    Ok(())
+}
+
+#[test]
+fn double_type_accepts_integer_literal_and_promotes() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    // 整数リテラル 100 を付与
+    edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("score:100"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
+    let dbl_val: f64 = store.conn.query_row(
+        &format!(
+            "SELECT label_double FROM read_parquet('{}') WHERE type = 'score'",
+            ut_path.to_string_lossy()
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(dbl_val, 100.0);
+
+    Ok(())
+}
+
+#[test]
+fn cast_builtin_type_fails_early_with_forbidden_error() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    let err = edit(
+        &store,
+        &reg,
+        "type:size",
+        Some("bitical_type:integer"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("cannot modify bitical_type of built-in/plugin type"),
+        "expected forbidden error, got: {}",
+        err
+    );
+
+    Ok(())
+}
+
+#[test]
+fn double_type_projection_search_returns_item() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("strategy:replace"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "filename:main.rs",
+        Some("score:20"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let res = ttfm::search::search(
+        &store,
+        &reg,
+        "filename:main.rs & score:",
+        SearchOptions::default(),
+        &mut Vec::new(),
+    )?;
+    assert_eq!(res.results.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn lens_resolves_double_storage_mapping() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let lens = ttfm::query::lens_schema::Lens::from_registry(&reg);
+    let desc = lens.look_up_or_default(&TagType::from("score"));
+    assert_eq!(
+        desc.storage,
+        ttfm::query::lens_schema::StorageMapping::Basic {
+            column: ttfm::db::Col::LabelDouble,
+            tag_type: "score".to_string(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn double_type_display_unit_formats_correctly() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "type:size_mb",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "type:size_mb",
+        Some("display_unit:binary"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let formatted = reg.format_display("size_mb", "1048576");
+    assert_eq!(formatted, "1.00MiB");
+    Ok(())
+}
+
+#[test]
+fn display_unit_invalid_value_rejected() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    let err = edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("display_unit:invalid_unit"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("invalid display_unit"));
+    Ok(())
+}
+
+#[test]
+fn lens_preserves_rank_fixed_storage_mapping() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "filename:main.rs",
+        Some("rank:10"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let lens = ttfm::query::lens_schema::Lens::from_registry(&reg);
+    let desc = lens.look_up_or_default(&TagType::Base(SType::Rank));
+    assert_eq!(
+        desc.storage,
+        ttfm::query::lens_schema::StorageMapping::Fixed(ttfm::db::Col::Rank)
+    );
+    Ok(())
+}
+
+#[test]
+fn cast_reloads_type_configs_before_oneview_recreate() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "filename:main.rs",
+        Some("score:10"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "type:score",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let res = ttfm::search::search(
+        &store,
+        &reg,
+        "score:>5",
+        SearchOptions::default(),
+        &mut Vec::new(),
+    )?;
+    assert_eq!(res.results.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn regular_file_item_accepts_multiple_strategy_tags_as_append(
+) -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    edit(
+        &store,
+        &reg,
+        "filename:main.rs",
+        Some("strategy:draft"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    edit(
+        &store,
+        &reg,
+        "filename:main.rs",
+        Some("strategy:final"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let res = ttfm::search::search(
+        &store,
+        &reg,
+        "filename:main.rs",
+        SearchOptions::default(),
+        &mut Vec::new(),
+    )?;
+    let strategy_values = res.results[0].get_all_values("strategy");
+    assert_eq!(strategy_values.len(), 2, "expected both draft and final to be preserved as append on regular file");
+    assert!(strategy_values.contains(&"draft".to_string()));
+    assert!(strategy_values.contains(&"final".to_string()));
+    Ok(())
+}
+
+#[test]
+fn lens_protects_builtin_and_plugin_types_from_type_config_overwrite(
+) -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    let default_reg = TagRegistry::with_standard();
+    let default_lens =
+        ttfm::query::lens_schema::Lens::from_registry(&default_reg);
+    let orig_desc =
+        default_lens.look_up_or_default(&TagType::Base(SType::Size));
+
+    edit(
+        &store,
+        &reg,
+        "type:size",
+        Some("display_unit:binary"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    reg.load_type_configs(&store)?;
+    let lens = ttfm::query::lens_schema::Lens::from_registry(&reg);
+    let desc = lens.look_up_or_default(&TagType::Base(SType::Size));
+    assert_eq!(
+        desc.logical_type, orig_desc.logical_type,
+        "size must maintain original logical_type"
+    );
+    assert_eq!(
+        desc.logical_function.is_some(),
+        orig_desc.logical_function.is_some(),
+        "size must maintain original logical_function"
+    );
+    Ok(())
+}
+
+#[test]
+fn zero_affected_cast_skips_conversion() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["main.rs"]);
+    let mut warnings = Vec::new();
+    // unused_tag を持つアイテムは 0 件の状態で bitical_type:double を設定
+    let resp = edit(
+        &store,
+        &reg,
+        "type:unused_tag",
+        Some("bitical_type:double"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut warnings,
+    )?;
+    assert_eq!(resp.updated, 6); // Volatile -> Stored の型定義アイテム 6 タグのみ更新
+    assert_eq!(resp.deleted, 0);
+
+    reg.load_type_configs(&store)?;
+    assert_eq!(
+        reg.type_config(&TagType::from("unused_tag"))
+            .and_then(|c| c.bitical_type),
+        Some(ttfm::types::BiticalType::Double)
+    );
+    Ok(())
+}
+
+#[test]
+fn test_uuid_tag_assignment_and_validation() -> anyhow::Result<()> {
+    let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
+    edit(
+        &store,
+        &reg,
+        "type:session_id",
+        Some("bitical_type:uuid"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let valid_uuid = "550e8400-e29b-41d4-a716-446655440000";
+    let resp = edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some(&format!("session_id:{}", valid_uuid)),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    assert!(resp.updated > 0);
+
+    let res = edit(
+        &store,
+        &reg,
+        "filename:a.txt",
+        Some("session_id:not-a-uuid"),
+        QueryType::Tag,
+        None,
+        WriteOptions::default(),
+        &mut Vec::new(),
+    );
+    assert!(res.is_err());
 
     Ok(())
 }

@@ -42,10 +42,16 @@ Tag Edit は、検索クエリにマッチしたアイテム群に対して、�
 
 - その type が registry に登録され**編集可能**なら、宣言された戦略
   (Append / Replace / RemoveOnly / Relocate / SetFileAttr) で実行する。
+- ユーザー定義型（または型定義カスタム設定を持つ型）の場合、型定義に `strategy:replace` または `strategy:append` が付与されていれば、その戦略が優先適用される。
 - 登録されているが**編集不可**なら **Forbidden** (即エラー)。**Forbidden は untag (`untag`/`TagQuery`)
   にも適用される** — `edit()` が `None` の type は付与も削除もできない。判定は「`edit()` が
   `Some` か否か」の一本の規則で行う (戦略の値そのものは untag 側では見ない)。
 - 未登録のユーザー定義型なら、デフォルトで **Append** (重複可で追記)。
+
+### 2.1 型定義と Tag Cast (物理型変更)
+- 型定義アイテムに対し `bitical_type:<type>` を付与することで、型の物理格納型（`integer`, `double`, `boolean`, `string`, `uuid`）を指定できる。
+- 型が定義されている場合、タグ付け時に値の型が自動検証され、不一致時は親切なエラー（`type '<type>' is <expected>, cannot assign <actual>`）が返される。
+- 既存の型定義の `bitical_type` を変更する操作（tag cast）では、既存データがすべて新フォーマットに適合するか事前検証され、確認プロンプトに `Converting N item(s)...` の概要が表示された後、単一パスで安全にカラム移行される。単一コマンドでの複数型 cast は禁止される。
 
 `type` / `tag` の定義アイテムをSearchQueryに記載すると、`type:` / `tag:` の定義アイテムにタグを付与できる
 (例: `ttfm tag tag:"project:A" rank:100` -> `tag:"project:A"`を登録し、tagに対し`rank:100`を付与)。

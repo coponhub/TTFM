@@ -23,6 +23,12 @@ ttfm search --short "extension:rs & path:" | head -n 5
 - 全カラムが端末幅に収まらない場合でも、折り返し表示や全カラムの縮小表示は行わない。
 - ランクの高いカラムから順に表示し、端末幅を使い切った時点で、以降のランクが低いカラムはそのまま表示範囲外とする。
 
+### 2.2 表示単位・フォーマット (`display_unit`)
+型定義アイテムに `display_unit` が設定されている場合（`binary`, `si`, またはプラグイン/組み込みの `DisplayFormats` オプション）、CLI 出力時に指定された単位フォーマットに従って自動整形される。
+- `binary`: 2進接頭辞（KiB, MiB, GiB 等）
+- `si`: 10進接頭辞（KB, MB, GB 等）
+- プラグイン/組み込み定義フォーマット: `display().formats().options` に定義されたカスタムフォーマット
+
 ## 3. データベースの初期化 (`ttfm clear`)
 索引データを削除し、再構築可能な状態に戻すためのコマンド。
 - `ttfm clear`: File Reference 関連のテーブル（`file_references` / `locations` / `base_tags` / `tags_by_location`）(STORE.md §1参照)を丸ごと削除する。

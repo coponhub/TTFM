@@ -1,4 +1,5 @@
-mod confirm;
+pub(crate) mod cast;
+pub mod confirm;
 pub(crate) mod fs_operate;
 pub(crate) mod glob_capture;
 mod lens_schema;
@@ -13,8 +14,11 @@ use crate::db::Store;
 use crate::query::error::WarningSink;
 use crate::tag::TagRegistry;
 use crate::types::TagType;
-use anyhow::Result;
+use anyhow::{bail, Result};
 
+pub use crate::config::{
+    ConfirmMode, ConflictPolicy, HardlinkPolicy, SkipScope,
+};
 pub use crate::tag::{Edit, EditStrategy};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,9 +27,71 @@ pub enum QueryType {
     Untag,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug)]
 pub struct WriteOptions {
-    pub yes: bool,
+    pub confirm: ConfirmMode,
+    pub on_conflict: Option<ConflictPolicy>,
+    pub on_hardlink: Option<HardlinkPolicy>,
+    pub skip_scope: SkipScope,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self::noconfirm()
+    }
+}
+
+impl WriteOptions {
+    pub fn noconfirm() -> Self {
+        Self {
+            confirm: ConfirmMode::Never,
+            on_conflict: Some(ConflictPolicy::Abort),
+            on_hardlink: Some(HardlinkPolicy::Abort),
+            skip_scope: SkipScope::Item,
+        }
+    }
+
+    pub fn interactive() -> Self {
+        Self {
+            confirm: ConfirmMode::Auto,
+            on_conflict: None,
+            on_hardlink: None,
+            skip_scope: SkipScope::Item,
+        }
+    }
+
+    pub fn on_confirm(mut self, mode: ConfirmMode) -> Self {
+        self.confirm = mode;
+        self
+    }
+
+    pub fn on_conflict(mut self, policy: ConflictPolicy) -> Self {
+        self.on_conflict = Some(policy);
+        self
+    }
+
+    pub fn on_hardlink(mut self, policy: HardlinkPolicy) -> Self {
+        self.on_hardlink = Some(policy);
+        self
+    }
+
+    pub fn skip_scope(mut self, scope: SkipScope) -> Self {
+        self.skip_scope = scope;
+        self
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        match self.confirm {
+            ConfirmMode::Never => false,
+            ConfirmMode::Always => true,
+            ConfirmMode::Auto => {
+                self.on_conflict.is_none()
+                    && self.on_hardlink.is_none()
+                    && std::io::stdin().is_terminal()
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -56,6 +122,61 @@ pub fn edit(
     options: WriteOptions,
     sink: &mut dyn WarningSink,
 ) -> Result<EditResponse> {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut output = std::io::stderr();
+    edit_with_io(
+        store,
+        registry,
+        search_query,
+        edit_query,
+        query_type,
+        tag_condition,
+        options,
+        sink,
+        &mut input,
+        &mut output,
+    )
+}
+
+pub fn edit_with_io<R: std::io::BufRead, W: std::io::Write>(
+    store: &Store,
+    registry: &TagRegistry,
+    search_query: &str,
+    edit_query: Option<&str>,
+    query_type: QueryType,
+    tag_condition: Option<&str>,
+    options: WriteOptions,
+    sink: &mut dyn WarningSink,
+    input: &mut R,
+    output: &mut W,
+) -> Result<EditResponse> {
+    let mut prompt = confirm::IoConfirmPrompt { input, output };
+    edit_with_prompt(
+        store,
+        registry,
+        search_query,
+        edit_query,
+        query_type,
+        tag_condition,
+        options,
+        sink,
+        &mut prompt,
+    )
+}
+
+pub fn edit_with_prompt(
+    store: &Store,
+    registry: &TagRegistry,
+    search_query: &str,
+    edit_query: Option<&str>,
+    query_type: QueryType,
+    tag_condition: Option<&str>,
+    options: WriteOptions,
+    sink: &mut dyn WarningSink,
+    prompt: &mut dyn confirm::ConfirmPrompt,
+) -> Result<EditResponse> {
+    registry.load_type_configs(store)?;
     let parsed = edit_query
         .map(|q| parse::parse_edit_query(q, query_type, registry))
         .transpose()?;
@@ -70,24 +191,58 @@ pub fn edit(
         parsed.as_ref(),
         sink,
     )?;
-    let (mut fs_plan, actions) = plan(
+    let (mut fs_plan, actions, cast_summary) = plan(
         store,
         registry,
         item_edits.clone(),
         query_type,
         tag_condition,
     )?;
-    let has_skipped = fs_plan.warn_unsupported(sink);
-    if !confirm::confirm(&item_edits, &actions, &fs_plan, &options)? {
+    let has_skipped_unsupported = fs_plan.warn_unsupported(sink);
+    let Some((fs_plan, actions)) = confirm::confirm_with_prompt(
+        fs_plan,
+        actions,
+        &item_edits,
+        &options,
+        cast_summary.clone(),
+        prompt,
+    )?
+    else {
         return Ok(EditResponse {
             updated: 0,
             deleted: 0,
             fs_ops: 0,
             has_skipped: false,
         });
+    };
+
+    let original_item_count = item_edits.len();
+    let mut processed_items = std::collections::HashSet::new();
+    for a in &actions {
+        match a {
+            write::WriteAction::Add { item, .. }
+            | write::WriteAction::Delete { item, .. } => {
+                processed_items.insert(item.clone());
+            }
+        }
     }
+
     let outcome = fs_operate::apply(store, registry, fs_plan)?;
-    let resp = write::write_and_refresh(store, registry, actions)?;
+    for m in &outcome.moved {
+        processed_items.insert(m.item.clone());
+    }
+    let resp = write::write_and_refresh(
+        store,
+        registry,
+        actions,
+        cast_summary
+            .filter(|c| c.count > 0)
+            .map(|c| (c.tag_type, c.to_type)),
+    )?;
+
+    let has_skipped = has_skipped_unsupported
+        || (processed_items.len() < original_item_count);
+
     Ok(EditResponse {
         updated: resp.updated,
         deleted: resp.deleted,
@@ -96,13 +251,89 @@ pub fn edit(
     })
 }
 
+fn detect_type_casts(
+    item_edits: &[(crate::response::Item, Option<parse::EditQuery>)],
+    registry: &TagRegistry,
+) -> Result<
+    Vec<(
+        TagType,
+        crate::types::BiticalType,
+        crate::types::BiticalType,
+    )>,
+> {
+    use std::str::FromStr;
+    let mut casts = Vec::new();
+    for (item, tag_query) in item_edits {
+        if modify::is_type_item(item) {
+            let type_name = item.raw_repr();
+            if let Some(q) = tag_query {
+                for node in &q.nodes {
+                    if node.tag_type.value() == "bitical_type" {
+                        if let Some(leaf) = &node.label {
+                            if let Ok(new_type) =
+                                crate::types::BiticalType::from_str(
+                                    &leaf.value(),
+                                )
+                            {
+                                let tag_type =
+                                    TagType::from(type_name.as_str());
+                                let current_bitical_type = registry
+                                    .type_config(&tag_type)
+                                    .and_then(|c| c.bitical_type)
+                                    .unwrap_or(
+                                        crate::types::BiticalType::String,
+                                    );
+                                if new_type != current_bitical_type {
+                                    casts.push((
+                                        tag_type.clone(),
+                                        current_bitical_type,
+                                        new_type,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(casts)
+}
+
 fn plan(
-    _store: &Store,
+    store: &Store,
     registry: &TagRegistry,
     item_edits: Vec<(crate::response::Item, Option<parse::EditQuery>)>,
     query_type: QueryType,
     tag_condition: Option<&str>,
-) -> Result<(fs_operate::FsPlan, Vec<write::WriteAction>)> {
+) -> Result<(
+    fs_operate::FsPlan,
+    Vec<write::WriteAction>,
+    Option<confirm::CastSummary>,
+)> {
+    let cast_targets = detect_type_casts(&item_edits, registry)?;
+    if cast_targets.len() > 1 {
+        bail!("multiple type cast is not supported in a single command");
+    }
+    let mut cast_summary = None;
+    if let Some((target_type, old_type, new_type)) =
+        cast_targets.into_iter().next()
+    {
+        if registry.get(target_type.as_str()).is_some() {
+            bail!(
+                "cannot modify bitical_type of built-in/plugin type '{}'",
+                target_type
+            );
+        }
+        let count = cast::pre_validate_cast(store, &target_type, new_type)?;
+        cast_summary = Some(confirm::CastSummary {
+            tag_type: target_type,
+            from_type: old_type,
+            to_type: new_type,
+            count,
+        });
+    }
+
     let condition = tag_condition
         .map(tag_filter::parse_tag_condition)
         .transpose()?;
@@ -137,7 +368,7 @@ fn plan(
         }
     }
     let fs_plan = fs_operate::plan_fs(registry, fs_inputs, query_type)?;
-    Ok((fs_plan, actions))
+    Ok((fs_plan, actions, cast_summary))
 }
 
 #[cfg(test)]
@@ -181,5 +412,25 @@ mod tests {
             strategy("content"),
             Some(EditStrategy::ModifyInjection)
         ));
+    }
+
+    #[test]
+    fn test_write_options_is_interactive() {
+        let noconfirm = WriteOptions::noconfirm();
+        assert!(!noconfirm.is_interactive());
+
+        let always = WriteOptions::noconfirm().on_confirm(ConfirmMode::Always);
+        assert!(always.is_interactive());
+
+        let never = WriteOptions::interactive().on_confirm(ConfirmMode::Never);
+        assert!(!never.is_interactive());
+
+        let policy_bypass =
+            WriteOptions::interactive().on_conflict(ConflictPolicy::Serial);
+        assert!(!policy_bypass.is_interactive());
+
+        let hardlink_bypass =
+            WriteOptions::interactive().on_hardlink(HardlinkPolicy::All);
+        assert!(!hardlink_bypass.is_interactive());
     }
 }

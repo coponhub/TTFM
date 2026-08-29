@@ -162,8 +162,123 @@ impl Store {
                 format!("Failed to remove cache directory: {:?}", cache_dir)
             })?;
         }
-
         Ok(())
+    }
+
+    pub fn load_type_registry(&self) -> Result<crate::tag::TypeRegistry> {
+        use crate::db::{Col, Tbl};
+        use crate::util;
+        use sea_query::{Expr, JoinType, PostgresQueryBuilder, Query};
+        use std::str::FromStr;
+
+        let ir_path = self.path_for_target(TargetTable::ItemReferences);
+        let ut_path = self.path_for_target(TargetTable::UserTags);
+        if !ir_path.exists() || !ut_path.exists() {
+            return Ok(crate::tag::TypeRegistry::default());
+        }
+
+        let ir_sub = util::parquet_query(&ir_path.to_string_lossy());
+        let ut_sub = util::parquet_query(&ut_path.to_string_lossy());
+
+        let query = Query::select()
+            .column((Tbl::ItemReferences, Col::Content))
+            .column((Tbl::UserTags, Col::Type))
+            .column((Tbl::UserTags, Col::LabelStr))
+            .from_subquery(ir_sub, Tbl::ItemReferences)
+            .join_subquery(
+                JoinType::InnerJoin,
+                ut_sub,
+                Tbl::UserTags,
+                Expr::col((Tbl::ItemReferences, Col::ItemId))
+                    .equals((Tbl::UserTags, Col::ItemId)),
+            )
+            .and_where(
+                Expr::col((Tbl::ItemReferences, Col::ItemKind)).eq("type"),
+            )
+            .to_string(PostgresQueryBuilder);
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+
+        let mut map: std::collections::HashMap<
+            crate::types::TagType,
+            crate::tag::TypeConfig,
+        > = std::collections::HashMap::new();
+
+        for row in rows {
+            let (type_name, tag_type, label_str) = row?;
+            let key = crate::types::TagType::from(type_name.as_str());
+            let cfg = map.entry(key).or_default();
+            cfg.is_explicit = true;
+            if let Some(val) = label_str {
+                match tag_type.as_str() {
+                    "display_unit" => cfg.display_unit = Some(val),
+                    "strategy" => {
+                        cfg.strategy = match val.as_str() {
+                            "replace" => {
+                                Some(crate::tag::EditStrategy::Replace)
+                            }
+                            "append" => Some(crate::tag::EditStrategy::Append),
+                            _ => None,
+                        };
+                    }
+                    "bitical_type" => {
+                        cfg.bitical_type =
+                            crate::types::BiticalType::from_str(&val).ok();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut inferred_select = Query::select();
+        inferred_select.column(Col::Type);
+        for col in BiticalType::to_columns() {
+            inferred_select
+                .expr(crate::db::CustomFunc::any_value(Expr::col(col)));
+        }
+        let ut_sub2 = util::parquet_query(&ut_path.to_string_lossy());
+        let inferred_query = inferred_select
+            .from_subquery(ut_sub2, Tbl::UserTags)
+            .group_by_col(Col::Type)
+            .to_string(PostgresQueryBuilder);
+
+        if let Ok(mut inferred_stmt) = self.conn.prepare(&inferred_query) {
+            let cols = BiticalType::to_columns();
+            if let Ok(inferred_rows) = inferred_stmt.query_map([], |r| {
+                let type_name: String = r.get(0)?;
+                let mut found_type = None;
+                for (idx, &col) in cols.iter().enumerate() {
+                    let val: Option<duckdb::types::Value> = r.get(idx + 1)?;
+                    if val.is_some() {
+                        found_type = Some(BiticalType::from_col(col));
+                        break;
+                    }
+                }
+                Ok((type_name, found_type))
+            }) {
+                for row in inferred_rows.flatten() {
+                    let (type_name, found_type) = row;
+                    let key = crate::types::TagType::from(type_name.as_str());
+                    let cfg = map.entry(key).or_default();
+                    if cfg.bitical_type.is_none() {
+                        cfg.bitical_type = found_type;
+                    }
+                }
+            }
+        }
+
+        let mut reg = crate::tag::TypeRegistry::default();
+        for (k, v) in map {
+            reg.insert(k, v);
+        }
+        Ok(reg)
     }
 }
 
@@ -693,6 +808,14 @@ mod tests {
                 .unwrap();
             assert_eq!(value, "false", "{setting} は無効であるべき");
         }
+    }
+
+    #[test]
+    fn test_store_load_type_registry_missing_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        let reg = store.load_type_registry().unwrap();
+        assert!(reg.is_empty());
     }
 
     #[test]

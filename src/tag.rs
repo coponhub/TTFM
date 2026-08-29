@@ -458,7 +458,7 @@ pub trait Display: Send + Sync {
 // Edit trait
 // ============================================================
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditStrategy {
     Append,
     Replace,
@@ -534,6 +534,49 @@ pub trait TagFunction: Send + Sync {
 }
 
 // ============================================================
+// TypeConfig / TypeRegistry
+// ============================================================
+
+/// 定義アイテムに付与された型の設定（フォーマット、編集戦略、基本型）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TypeConfig {
+    pub display_unit: Option<String>,
+    pub strategy: Option<EditStrategy>,
+    pub bitical_type: Option<crate::types::BiticalType>,
+    pub is_explicit: bool,
+}
+
+/// タグ型の個別設定（TypeConfig）を保持するインメモリレジストリ。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TypeRegistry {
+    types: std::collections::HashMap<crate::types::TagType, TypeConfig>,
+}
+
+impl TypeRegistry {
+    pub fn get(&self, tag_type: &crate::types::TagType) -> Option<&TypeConfig> {
+        self.types.get(tag_type)
+    }
+
+    pub fn insert(&mut self, tag_type: crate::types::TagType, cfg: TypeConfig) {
+        self.types.insert(tag_type, cfg);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&crate::types::TagType, &TypeConfig)> {
+        self.types.iter()
+    }
+}
+
+// ============================================================
 // TagRegistry
 // ============================================================
 
@@ -545,6 +588,7 @@ pub struct TagRegistry {
     /// `register_plugin()` では採番しない（プラグインは Sys 区画対象外）。
     builtin_offsets: std::collections::HashMap<String, u32>,
     next_builtin_offset: u32,
+    type_configs: std::sync::RwLock<TypeRegistry>,
 }
 
 impl Default for TagRegistry {
@@ -559,7 +603,33 @@ impl TagRegistry {
             functions: IndexMap::new(),
             builtin_offsets: std::collections::HashMap::new(),
             next_builtin_offset: 0,
+            type_configs: std::sync::RwLock::new(TypeRegistry::default()),
         }
+    }
+
+    pub fn load_type_configs(
+        &self,
+        store: &crate::db::Store,
+    ) -> anyhow::Result<()> {
+        let loaded = store.load_type_registry()?;
+        *self.type_configs.write().unwrap() = loaded;
+        Ok(())
+    }
+
+    pub fn type_config(
+        &self,
+        tag_type: &crate::types::TagType,
+    ) -> Option<TypeConfig> {
+        self.type_configs.read().unwrap().get(tag_type).cloned()
+    }
+
+    pub fn type_configs(&self) -> TypeRegistry {
+        self.type_configs.read().unwrap().clone()
+    }
+
+    #[cfg(test)]
+    pub fn set_type_configs_for_test(&self, reg: TypeRegistry) {
+        *self.type_configs.write().unwrap() = reg;
     }
 
     pub fn register(&mut self, func: impl TagFunction + 'static) {
@@ -683,20 +753,42 @@ impl TagRegistry {
         self.functions.insert(arc.name().to_string(), arc);
     }
 
-    /// タグ名とDB生値から、デフォルトDisplayフォーマットで表示用文字列を返す。
-    /// Display impl がなければ生値をそのまま返す。
     pub fn format_display(&self, tag_name: &str, raw: &str) -> String {
-        let Some(func) = self.get(tag_name) else {
-            return raw.to_string();
-        };
-        let Some(disp) = func.display() else {
-            return raw.to_string();
-        };
         let lv = raw
             .parse::<i64>()
             .map(Bitical::Integer)
+            .or_else(|_| raw.parse::<f64>().map(Bitical::Double))
             .unwrap_or_else(|_| Bitical::String(raw.to_string()));
-        disp.show(&lv, disp.formats().default)
+
+        let cfg = self.type_config(&crate::types::TagType::from(tag_name));
+
+        if let Some(disp) = self.get(tag_name).and_then(|f| f.display()) {
+            let format = cfg
+                .as_ref()
+                .and_then(|c| c.display_unit.as_deref())
+                .and_then(|u| {
+                    disp.formats().options.into_iter().find(|f| f.id == u)
+                })
+                .unwrap_or_else(|| disp.formats().default);
+            return disp.show(&lv, format);
+        }
+
+        if let Some(unit) = cfg.and_then(|c| c.display_unit) {
+            let bytes = match lv {
+                Bitical::Integer(bytes) => Some(bytes),
+                Bitical::Double(d) => Some(d as i64),
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                match unit.as_str() {
+                    "binary" => return format_size_binary(bytes),
+                    "si" => return format_size_si(bytes),
+                    _ => {}
+                }
+            }
+        }
+
+        raw.to_string()
     }
 
     /// ディレクトリから `.wasm` プラグインをロードし登録する。
@@ -4055,5 +4147,34 @@ mod tests {
 
         let bad_label = Label::from("2020-*-01");
         assert!(edit.file_attr(&bad_label).is_err());
+    }
+
+    #[test]
+    fn test_type_registry_insert_and_get() {
+        let mut reg = TypeRegistry::default();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+
+        let cfg = TypeConfig {
+            display_unit: Some("si".to_string()),
+            strategy: Some(EditStrategy::Replace),
+            bitical_type: Some(crate::types::BiticalType::Integer),
+            is_explicit: true,
+        };
+        reg.insert(crate::types::TagType::from("quota"), cfg.clone());
+
+        assert!(!reg.is_empty());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.get(&crate::types::TagType::from("quota")), Some(&cfg));
+        assert_eq!(reg.get(&crate::types::TagType::from("other")), None);
+    }
+
+    #[test]
+    fn test_tag_registry_type_configs_empty_default() {
+        let reg = TagRegistry::with_standard();
+        assert_eq!(
+            reg.type_config(&crate::types::TagType::from("quota")),
+            None
+        );
     }
 }

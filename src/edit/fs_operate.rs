@@ -52,6 +52,7 @@ pub fn file_attr_of(
         })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FsMove {
     pub item: ItemId,
     pub from: PathBuf,
@@ -123,12 +124,10 @@ impl FsOutcome {
 #[derive(Debug, PartialEq, Eq)]
 pub enum FsIssue {
     SourceMissing(ItemId, PathBuf),
-    TargetExists(ItemId, PathBuf),
     ChainedMove(ItemId, PathBuf),
-    DuplicateTarget(ItemId, PathBuf),
     TargetInsideSource(ItemId, PathBuf, PathBuf),
     TargetNotWritable(ItemId, PathBuf),
-    MultipleLocations(ItemId, Vec<PathBuf>),
+    MultipleLocations(ItemId, Vec<PathBuf>, Vec<FsMove>),
     NoLocation(ItemId),
     CreateUnsupported(ItemId),
     UntagPathUnsupported(ItemId),
@@ -139,12 +138,8 @@ impl fmt::Display for FsIssue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::SourceMissing(i, p) => write!(f, "{i}: source {p:?} is gone"),
-            Self::TargetExists(i, p) => write!(f, "{i}: {p:?} already exists"),
             Self::ChainedMove(i, p) => {
                 write!(f, "{i}: {p:?} is another item's source in this edit")
-            }
-            Self::DuplicateTarget(i, p) => {
-                write!(f, "{i}: several items are moved onto {p:?}")
             }
             Self::TargetInsideSource(i, s, p) => {
                 write!(f, "{i}: {p:?} is inside {s:?}")
@@ -152,7 +147,7 @@ impl fmt::Display for FsIssue {
             Self::TargetNotWritable(i, p) => {
                 write!(f, "{i}: cannot write {p:?}")
             }
-            Self::MultipleLocations(i, paths) => {
+            Self::MultipleLocations(i, paths, _) => {
                 let list: Vec<String> =
                     paths.iter().map(|p| format!("{p:?}")).collect();
                 write!(f, "{i}: has several paths: {}", list.join(", "))
@@ -254,6 +249,50 @@ pub fn plan_fs(
             continue;
         }
         let paths = location_paths(&item);
+        if paths.len() > 1 && writes_path(&nodes) {
+            let mut candidate_moves = Vec::new();
+            for from in &paths {
+                let mut parts = PathComponents::decompose(from);
+                for n in &nodes {
+                    if n.strategy == EditStrategy::Relocate {
+                        let comps = path_components(&n.tag_type, registry);
+                        let label = label_of(n)?;
+                        apply_node(&mut parts, comps, &label.as_str());
+                    }
+                }
+                let to = parts.join();
+                if !from.exists() {
+                    plan.issues.push(FsIssue::SourceMissing(
+                        item.id.clone(),
+                        from.clone(),
+                    ));
+                    continue;
+                }
+                if to == *from {
+                    continue;
+                }
+                let parent = to.parent().unwrap_or(Path::new("")).to_path_buf();
+                if parent.exists() && !writable(&parent) {
+                    plan.issues
+                        .push(FsIssue::TargetNotWritable(item.id.clone(), to));
+                    continue;
+                }
+                let target_dev_dir = existing_parent(&parent);
+                let crossed = device_of(from)? != device_of(target_dev_dir)?;
+                candidate_moves.push(FsMove {
+                    item: item.id.clone(),
+                    from: from.clone(),
+                    to,
+                    crossed,
+                });
+            }
+            plan.issues.push(FsIssue::MultipleLocations(
+                item.id.clone(),
+                paths,
+                candidate_moves,
+            ));
+            continue;
+        }
         let from = match paths.as_slice() {
             [] if writes_path(&nodes) => {
                 plan.issues
@@ -262,11 +301,6 @@ pub fn plan_fs(
             }
             [] => {
                 plan.issues.push(FsIssue::NoLocation(item.id.clone()));
-                continue;
-            }
-            [_, _, ..] if writes_path(&nodes) => {
-                plan.issues
-                    .push(FsIssue::MultipleLocations(item.id.clone(), paths));
                 continue;
             }
             [from, ..] => from.clone(),
@@ -334,10 +368,7 @@ fn classify_one(moves: &[FsMove], m: &FsMove) -> Option<FsIssue> {
     if moves.iter().any(|o| o.from == m.to) {
         return Some(FsIssue::ChainedMove(item, to));
     }
-    if moves.iter().filter(|o| o.to == m.to).count() > 1 {
-        return Some(FsIssue::DuplicateTarget(item, to));
-    }
-    m.to.exists().then(|| FsIssue::TargetExists(item, to))
+    None
 }
 
 fn classify_targets(plan: &mut FsPlan) {
@@ -655,7 +686,7 @@ mod tests {
         let id = ItemId::Stored(42);
         let p1 = PathBuf::from("/a/b.txt");
         let p2 = PathBuf::from("/a/c.txt");
-        let issue = FsIssue::MultipleLocations(id, vec![p1, p2]);
+        let issue = FsIssue::MultipleLocations(id, vec![p1, p2], Vec::new());
         let s = issue.to_string();
         assert!(s.contains("42"));
         assert!(s.contains("/a/b.txt"));

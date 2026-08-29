@@ -8,7 +8,9 @@ use crate::query::ast::{
 };
 use crate::response::Item;
 use crate::tag::TagRegistry;
-use crate::types::{Bitical, ItemId, Label, SType, TagType, TypedTag};
+use crate::types::{
+    Bitical, BiticalType, ItemId, Label, SType, TagType, TypedTag,
+};
 use crate::util::DotOk;
 use anyhow::{bail, Result};
 
@@ -33,32 +35,45 @@ impl Directive {
         item: &Item,
     ) -> Result<Vec<WriteAction>> {
         match self {
-            Directive::Tag(tag, EditStrategy::Append) => vec![WriteAction::Add {
-                item: id.clone(),
-                tags: vec![TagOp::Append(tag)],
-            }],
-            Directive::Tag(tag, EditStrategy::Replace) => vec![
-                WriteAction::Delete {
-                    item: id.clone(),
-                    tags: vec![DeleteTarget::Type(tag.tag_type())],
-                },
-                WriteAction::Add {
-                    item: id.clone(),
-                    tags: vec![TagOp::Replace(tag)],
-                },
-            ],
-            Directive::Tag(tag, EditStrategy::ModifyInjection) => bail!(
-                "tag type '{}' cannot be set via EditQuery (ModifyInjection)",
-                tag.tag_type()
-            ),
-            Directive::Tag(tag, EditStrategy::Relocate | EditStrategy::SetFileAttr) => bail!(
-                "tag type '{}' requires fs_operate, not modify (plan contract violation)",
-                tag.tag_type()
-            ),
-            Directive::Tag(tag, EditStrategy::RemoveOnly) => bail!(
-                "tag type '{}' cannot be added, only removed (RemoveOnly)",
-                tag.tag_type()
-            ),
+            Directive::Tag(tag, strategy) => {
+                let effective_strategy = if is_type_item(item)
+                    && matches!(
+                        tag.tag_type().as_str(),
+                        "display_unit" | "strategy" | "bitical_type"
+                    ) {
+                    EditStrategy::Replace
+                } else {
+                    strategy
+                };
+                match effective_strategy {
+                    EditStrategy::Append => vec![WriteAction::Add {
+                        item: id.clone(),
+                        tags: vec![TagOp::Append(tag)],
+                    }],
+                    EditStrategy::Replace => vec![
+                        WriteAction::Delete {
+                            item: id.clone(),
+                            tags: vec![DeleteTarget::Type(tag.tag_type())],
+                        },
+                        WriteAction::Add {
+                            item: id.clone(),
+                            tags: vec![TagOp::Replace(tag)],
+                        },
+                    ],
+                    EditStrategy::ModifyInjection => bail!(
+                        "tag type '{}' cannot be set via EditQuery (ModifyInjection)",
+                        tag.tag_type()
+                    ),
+                    EditStrategy::Relocate | EditStrategy::SetFileAttr => bail!(
+                        "tag type '{}' requires fs_operate, not modify (plan contract violation)",
+                        tag.tag_type()
+                    ),
+                    EditStrategy::RemoveOnly => bail!(
+                        "tag type '{}' cannot be added, only removed (RemoveOnly)",
+                        tag.tag_type()
+                    ),
+                }
+            }
             Directive::DeleteType(tag_type) => vec![WriteAction::Delete {
                 item: id.clone(),
                 tags: vec![DeleteTarget::Type(tag_type)],
@@ -129,29 +144,83 @@ fn interpret_tag_value(
     tag: TypedTag,
     registry: &TagRegistry,
 ) -> Result<TypedTag> {
-    let Some(f) = registry.get(tag.tag_type().as_str()) else {
-        return tag.to_ok();
+    let resolved = if let Some(f) = registry.get(tag.tag_type().as_str()) {
+        let predicate = f.query().interpret(
+            &Operand::TypeRef(tag.tag_type()),
+            ComparisonOp::Label(BasicOp::Eq),
+            &tag.label,
+        )?;
+        let not_single = || {
+            crate::query::error::tag_value_not_a_single_value(
+                tag.tag_type().as_str(),
+                &tag.label.as_str(),
+            )
+        };
+        let QueryNode::Comparison(ComparisonNode { rest, .. }) = predicate
+        else {
+            return Err(not_single());
+        };
+        let [(ComparisonOp::Label(BasicOp::Eq), Operand::Literal(value))] =
+            rest.as_slice()
+        else {
+            return Err(not_single());
+        };
+        TypedTag::retag(tag.tag_type(), value)
+    } else {
+        tag
     };
-    let predicate = f.query().interpret(
-        &Operand::TypeRef(tag.tag_type()),
-        ComparisonOp::Label(BasicOp::Eq),
-        &tag.label,
-    )?;
-    let not_single = || {
-        crate::query::error::tag_value_not_a_single_value(
-            tag.tag_type().as_str(),
-            &tag.label.as_str(),
-        )
+
+    let resolved = if let Some(expected) = registry
+        .type_config(&resolved.tag_type())
+        .and_then(|c| c.bitical_type)
+    {
+        match (expected, resolved.value()) {
+            (BiticalType::Double, Bitical::Integer(i)) => {
+                TypedTag::new(resolved.tag_type(), i as f64)
+            }
+            (BiticalType::Uuid, Bitical::String(s)) => {
+                if let Ok(u) = uuid::Uuid::parse_str(&s) {
+                    TypedTag::new(resolved.tag_type(), Bitical::Uuid(u))
+                } else {
+                    bail!(
+                        "type '{}' is uuid, cannot assign string. Please enter a uuid or change type definition.",
+                        resolved.tag_type()
+                    );
+                }
+            }
+            (expected, actual_val) if expected != actual_val.name() => {
+                let article = match expected {
+                    BiticalType::Integer => "an",
+                    _ => "a",
+                };
+                bail!(
+                    "type '{}' is {}, cannot assign {}. Please enter {article} {} or change type definition.",
+                    resolved.tag_type(),
+                    expected,
+                    actual_val.name(),
+                    expected
+                );
+            }
+            _ => resolved,
+        }
+    } else {
+        resolved
     };
-    let QueryNode::Comparison(ComparisonNode { rest, .. }) = predicate else {
-        return Err(not_single());
-    };
-    let [(ComparisonOp::Label(BasicOp::Eq), Operand::Literal(value))] =
-        rest.as_slice()
-    else {
-        return Err(not_single());
-    };
-    TypedTag::retag(tag.tag_type(), value).to_ok()
+
+    resolved.to_ok()
+}
+
+pub(crate) fn is_type_item(item: &Item) -> bool {
+    item.item_kind == crate::types::ItemKind::Type
+        || item.tags.entries.iter().any(|e| {
+            e.typed_tag.tag_type() == TagType::Base(SType::ItemKind)
+                && e.typed_tag.as_str() == "type"
+        })
+        || item
+            .representative
+            .tags
+            .iter()
+            .any(|t| t.tag_type() == TagType::Base(SType::Type))
 }
 
 fn get_strategy(
@@ -166,8 +235,80 @@ fn get_strategy(
                 tag_type
             ),
         },
-        None => Ok(EditStrategy::Append),
+        None => Ok(registry
+            .type_config(tag_type)
+            .and_then(|c| c.strategy)
+            .unwrap_or(EditStrategy::Append)),
     }
+}
+
+fn validate_type_config_assignment(
+    tag: &TypedTag,
+    target_type: &str,
+    registry: &TagRegistry,
+) -> Result<()> {
+    if registry.get(target_type).is_some()
+        && matches!(tag.tag_type().as_str(), "strategy" | "bitical_type")
+    {
+        bail!(
+            "cannot modify {} of built-in/plugin type '{}'",
+            tag.tag_type(),
+            target_type
+        );
+    }
+    match tag.tag_type().as_str() {
+        "strategy" => {
+            if !matches!(tag.label.as_str().as_str(), "append" | "replace") {
+                bail!(
+                    "invalid strategy '{}', must be 'append' or 'replace'",
+                    tag.label.as_str()
+                );
+            }
+        }
+        "bitical_type" => {
+            use std::str::FromStr;
+            if crate::types::BiticalType::from_str(tag.label.as_str().as_str())
+                .is_err()
+            {
+                bail!("invalid bitical_type '{}'", tag.label.as_str());
+            }
+        }
+        "display_unit" => {
+            validate_display_unit(
+                registry,
+                target_type,
+                tag.label.as_str().as_str(),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_display_unit(
+    registry: &TagRegistry,
+    target_type: &str,
+    unit: &str,
+) -> Result<()> {
+    if let Some(disp) = registry.get(target_type).and_then(|f| f.display()) {
+        let valid_options: Vec<_> =
+            disp.formats().options.into_iter().map(|f| f.id).collect();
+        if !valid_options.iter().any(|o| o == unit) {
+            bail!(
+                "invalid display_unit '{unit}' for type '{target_type}'. Valid values are: {}",
+                valid_options.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    const VALID_UNITS: &[&str] = &["binary", "si"];
+    if !VALID_UNITS.contains(&unit) {
+        bail!(
+            "invalid display_unit '{unit}'. Valid values are: {}",
+            VALID_UNITS.join(", ")
+        );
+    }
+    Ok(())
 }
 
 pub struct ResolvedNode {
@@ -355,6 +496,28 @@ pub fn modify(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+
+    if is_type_item(item) {
+        let type_name = item.raw_repr();
+        for d in &directives {
+            match d {
+                Directive::Tag(tag, _) => {
+                    validate_type_config_assignment(tag, &type_name, registry)?;
+                }
+                Directive::DeleteTag(tag) => {
+                    if tag.tag_type().as_str() == "bitical_type" {
+                        bail!("cannot untag 'bitical_type' on type definition, use cast instead");
+                    }
+                }
+                Directive::DeleteType(tag_type) => {
+                    if tag_type.as_str() == "bitical_type" {
+                        bail!("cannot untag 'bitical_type' on type definition, use cast instead");
+                    }
+                }
+            }
+        }
+    }
+
     let actions: Vec<WriteAction> = directives
         .into_iter()
         .map(|d| d.into_actions(&item.id, item))
@@ -1048,5 +1211,113 @@ mod tests {
             check_untag_allowed(&TagType::Base(SType::Mtime), &reg).is_err()
         );
         assert!(check_untag_allowed(&TagType::Base(SType::Size), &reg).is_err());
+    }
+
+    #[test]
+    fn test_validate_type_config_assignment() {
+        let reg = registry();
+        let tag_strategy = TypedTag::new(TagType::from("strategy"), "append");
+        assert!(validate_type_config_assignment(&tag_strategy, "path", &reg)
+            .is_err());
+        assert!(
+            validate_type_config_assignment(&tag_strategy, "quota", &reg)
+                .is_ok()
+        );
+
+        let tag_invalid_strategy =
+            TypedTag::new(TagType::from("strategy"), "invalid");
+        assert!(validate_type_config_assignment(
+            &tag_invalid_strategy,
+            "quota",
+            &reg
+        )
+        .is_err());
+
+        let tag_bitical =
+            TypedTag::new(TagType::from("bitical_type"), "integer");
+        assert!(validate_type_config_assignment(&tag_bitical, "path", &reg)
+            .is_err());
+        assert!(validate_type_config_assignment(&tag_bitical, "quota", &reg)
+            .is_ok());
+
+        let tag_invalid_bitical =
+            TypedTag::new(TagType::from("bitical_type"), "invalid");
+        assert!(validate_type_config_assignment(
+            &tag_invalid_bitical,
+            "quota",
+            &reg
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_get_strategy_uses_type_config() {
+        let reg = registry();
+        let tag_quota = TagType::from("quota");
+        assert_eq!(
+            get_strategy(&tag_quota, &reg).unwrap(),
+            EditStrategy::Append
+        );
+
+        let mut type_reg = crate::tag::TypeRegistry::default();
+        type_reg.insert(
+            tag_quota.clone(),
+            crate::tag::TypeConfig {
+                strategy: Some(EditStrategy::Replace),
+                ..Default::default()
+            },
+        );
+        let reg_with_cfg = TagRegistry::with_standard();
+        reg_with_cfg.set_type_configs_for_test(type_reg);
+        assert_eq!(
+            get_strategy(&tag_quota, &reg_with_cfg).unwrap(),
+            EditStrategy::Replace
+        );
+    }
+
+    #[test]
+    fn test_interpret_tag_value_rejects_mismatched_bitical_type() {
+        let tag_score = TagType::from("score");
+        let mut type_reg = crate::tag::TypeRegistry::default();
+        type_reg.insert(
+            tag_score.clone(),
+            crate::tag::TypeConfig {
+                bitical_type: Some(crate::types::BiticalType::Integer),
+                ..Default::default()
+            },
+        );
+        let reg = TagRegistry::with_standard();
+        reg.set_type_configs_for_test(type_reg);
+
+        let valid_tag = TypedTag::new(tag_score.clone(), 100i64);
+        assert!(interpret_tag_value(valid_tag, &reg).is_ok());
+
+        let invalid_tag = TypedTag::new(tag_score.clone(), "high");
+        let err = interpret_tag_value(invalid_tag, &reg).unwrap_err();
+        assert!(err.to_string().contains("type 'score' is integer"));
+        assert!(err.to_string().contains("cannot assign string"));
+    }
+
+    #[test]
+    fn test_modify_type_definition_rejects_bitical_type_untag() {
+        let reg = registry();
+        let item = Item {
+            id: ItemId::Stored(10),
+            item_kind: ItemKind::Type,
+            representative: vec![TypedTag::new(SType::Content, "score")].into(),
+            rank: 0,
+            intrinsic: crate::types::Intrinsic::default(),
+            tags: Tags::new(),
+            item_count: None,
+        };
+        let nodes = vec![ResolvedNode {
+            tag_type: TagType::from("bitical_type"),
+            label: None,
+            strategy: EditStrategy::RemoveOnly,
+        }];
+        let err = modify(&item, &nodes, QueryType::Untag, &reg).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot untag 'bitical_type' on type definition"));
     }
 }

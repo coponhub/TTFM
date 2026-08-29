@@ -638,7 +638,7 @@ mod tests {
             Some("testtag:true"),
             crate::edit::QueryType::Tag,
             None,
-            crate::edit::WriteOptions { yes: true },
+            crate::edit::WriteOptions::noconfirm(),
             &mut Vec::new(),
         )
         .unwrap();

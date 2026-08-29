@@ -381,7 +381,7 @@ fn modify_volatile_tag_def_gets_registered_with_rank() -> anyhow::Result<()> {
     let eq = parse_edit_query("rank:100", QueryType::Tag, &registry)?;
     let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
     let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
-    write_and_refresh(&store, &registry, actions)?;
+    write_and_refresh(&store, &registry, actions, None)?;
 
     // Stored になり rank が付いている
     let results2 = ttfm::search::search_nowarn(
@@ -422,7 +422,7 @@ fn modify_volatile_projection_gets_registered_as_note() -> anyhow::Result<()> {
     let eq = parse_edit_query("project:archived", QueryType::Tag, &registry)?;
     let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
     let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
-    write_and_refresh(&store, &registry, actions)?;
+    write_and_refresh(&store, &registry, actions, None)?;
 
     // item_references に note 行が存在する
     let path = store.path_for_target(TargetTable::ItemReferences);
@@ -469,7 +469,7 @@ fn modify_volatile_tag_def_no_edit_query_registers_only() -> anyhow::Result<()>
         1,
         "None query on Volatile should generate registration Add only"
     );
-    write_and_refresh(&store, &registry, actions)?;
+    write_and_refresh(&store, &registry, actions, None)?;
 
     // Stored になっている (rank は付かない)
     let results2 = ttfm::search::search_nowarn(
@@ -658,7 +658,7 @@ fn registered_tag_def_name_shown_in_projection() -> anyhow::Result<()> {
     let eq = parse_edit_query("rank:77", QueryType::Tag, &registry)?;
     let nodes = resolve_nodes(Some(&eq), QueryType::Tag, &registry)?;
     let actions = modify(item, &nodes, QueryType::Tag, &registry)?;
-    write_and_refresh(&store, &registry, actions)?;
+    write_and_refresh(&store, &registry, actions, None)?;
 
     // rank: projection の item 表示が 'unknown' でなく 'project:A' を含む
     let proj = ttfm::search::search_nowarn(

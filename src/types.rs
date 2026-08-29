@@ -411,11 +411,20 @@ impl ToSql for FileTimestamp {
 // ハードウェア・プロセッサレベルのプリミティブな型を指す。
 // アイテムの持つ値はこれらに収束する。
 #[derive(
-    Debug, PartialEq, Eq, Clone, Copy, strum::Display, strum::EnumIter,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
 #[repr(i32)]
 pub enum BiticalType {
+    #[strum(serialize = "string", serialize = "text")]
     String = 1,
     Integer = 2,
     Double = 3,
@@ -514,6 +523,18 @@ impl BiticalType {
         let mut cols = Self::to_columns();
         cols.sort_by_key(|c| *c == BiticalType::String.to_column());
         cols
+    }
+
+    /// ラベルカラム（走査順）をすべて VARCHAR にキャストして COALESCE する式を生成する。
+    pub fn label_coalesce_expr() -> sea_query::SimpleExpr {
+        use sea_query::{Expr, Func};
+        Func::coalesce(
+            Self::to_columns_scan_order()
+                .iter()
+                .map(|&c| Expr::col(c).cast_as(BiticalType::String).into())
+                .collect::<Vec<_>>(),
+        )
+        .into()
     }
 }
 
@@ -2715,6 +2736,30 @@ mod tests_types {
         assert_eq!(comps.stem, "Renamed");
         assert_eq!(comps.extension.as_deref(), Some("DOC"));
         assert_eq!(comps.join(), PathBuf::from("/path/to/Renamed.DOC"));
+    }
+
+    #[test]
+    fn test_bitical_type_from_str() {
+        use std::str::FromStr;
+        assert_eq!(
+            BiticalType::from_str("string").unwrap(),
+            BiticalType::String
+        );
+        assert_eq!(BiticalType::from_str("text").unwrap(), BiticalType::String);
+        assert_eq!(
+            BiticalType::from_str("integer").unwrap(),
+            BiticalType::Integer
+        );
+        assert_eq!(
+            BiticalType::from_str("double").unwrap(),
+            BiticalType::Double
+        );
+        assert_eq!(
+            BiticalType::from_str("boolean").unwrap(),
+            BiticalType::Boolean
+        );
+        assert_eq!(BiticalType::from_str("uuid").unwrap(), BiticalType::Uuid);
+        assert!(BiticalType::from_str("unknown").is_err());
     }
 }
 

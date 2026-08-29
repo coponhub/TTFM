@@ -607,7 +607,35 @@ impl Lens {
         for desc in base_column_descriptors() {
             lens.register(desc);
         }
+        // TypeConfig 定義（ユーザー定義・カスタム型の物理ストレージマッピング）
+        for (tag_type, bt) in registry
+            .type_configs()
+            .iter()
+            .filter(|(t, c)| {
+                c.is_explicit && registry.get(t.as_str()).is_none()
+            })
+            .filter_map(|(t, c)| c.bitical_type.map(|b| (t, b)))
+        {
+            lens.register(TagDescriptor {
+                tag_type: tag_type.clone(),
+                storage: StorageMapping::Basic {
+                    column: bt.to_column(),
+                    tag_type: tag_type.as_str().to_string(),
+                },
+                logical_type: sql_to_logical(bt),
+                logical_function: None,
+                sys_id: None,
+            });
+        }
         lens
+    }
+
+    /// 指定されたタグが Fixed（固定 DB カラム）ストレージを持つかを返します。
+    pub fn is_fixed(&self, tag: &TagType) -> bool {
+        matches!(
+            self.registry.get(tag).map(|d| &d.storage),
+            Some(StorageMapping::Fixed(_))
+        )
     }
 
     /// クエリ文字列を伴う、標準的な Focused Lens を生成します。
@@ -616,8 +644,10 @@ impl Lens {
     /// タグ定義を登録します。既存の定義がある場合はマージします。
     pub fn register(&mut self, descriptor: TagDescriptor) {
         if let Some(existing) = self.registry.get_mut(&descriptor.tag_type) {
-            // 物理ストレージ定義があれば上書き（Virtual は物理を上書きしない）
-            if descriptor.storage != StorageMapping::Composite {
+            // 物理ストレージ定義があれば上書き（Composite や既存の Fixed は上書きしない）
+            if descriptor.storage != StorageMapping::Composite
+                && !matches!(existing.storage, StorageMapping::Fixed(_))
+            {
                 existing.storage = descriptor.storage;
                 existing.logical_type = descriptor.logical_type;
             }

@@ -51,7 +51,7 @@ define_cases! {
                 Some("category:meeting"),
                 ttfm::edit::QueryType::Tag,
                 None,
-                ttfm::edit::WriteOptions { yes: true },
+                ttfm::edit::WriteOptions::noconfirm(),
                 &mut Vec::new(),
             )?;
             Ok(())

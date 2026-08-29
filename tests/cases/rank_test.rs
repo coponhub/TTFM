@@ -51,7 +51,7 @@ fn test_rank_sorting_files() {
         Some("rank:100"),
         QueryType::Tag,
         None,
-        WriteOptions { yes: true },
+        WriteOptions::noconfirm(),
         &mut Vec::new(),
     )
     .unwrap();
@@ -64,7 +64,7 @@ fn test_rank_sorting_files() {
         Some("rank:50"),
         QueryType::Tag,
         None,
-        WriteOptions { yes: true },
+        WriteOptions::noconfirm(),
         &mut Vec::new(),
     )
     .unwrap();
@@ -130,7 +130,7 @@ fn test_rank_batch_update() {
         Some("rank:10"),
         QueryType::Tag,
         None,
-        WriteOptions { yes: true },
+        WriteOptions::noconfirm(),
         &mut Vec::new(),
     )
     .unwrap();
@@ -205,7 +205,7 @@ fn user_rank_survives_reindex() {
         Some("rank:9"),
         QueryType::Tag,
         None,
-        WriteOptions { yes: true },
+        WriteOptions::noconfirm(),
         &mut Vec::new(),
     )
     .unwrap();

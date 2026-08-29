@@ -18,6 +18,24 @@
 use std::path::Path;
 use ttfm::response::SearchResponse;
 
+#[cfg(unix)]
+pub fn raise_fd_limit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            rlim.rlim_cur = rlim.rlim_max.min(1048576);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub fn raise_fd_limit() {}
+
 // ──────────────────────────────────────────────
 // 共通テストケース構造体
 // ──────────────────────────────────────────────
@@ -87,6 +105,7 @@ macro_rules! define_cases {
 
         fn get_fixture() -> &'static crate::cases::SharedFixture {
             FIXTURE.get_or_init(|| {
+                crate::cases::raise_fd_limit();
                 let root = tempfile::TempDir::new().expect("Failed to create temp dir");
                 let db_dir = root.path().join(".ttfm_test/db");
                 for case in CASES {
@@ -271,7 +290,7 @@ pub(super) fn apply_tags_batch(
             registry,
         )?);
     }
-    ttfm::edit::write::write_and_refresh(store, registry, actions)?;
+    ttfm::edit::write::write_and_refresh(store, registry, actions, None)?;
     Ok(())
 }
 
@@ -290,7 +309,7 @@ pub(super) fn tag_item_id(
         Some(tag_str),
         ttfm::edit::QueryType::Tag,
         None,
-        ttfm::edit::WriteOptions { yes: true },
+        ttfm::edit::WriteOptions::noconfirm(),
         &mut Vec::new(),
     )?;
     Ok(())
@@ -433,6 +452,7 @@ pub mod test_boolean_ops;
 pub mod test_calculation;
 mod test_chain_comparison;
 pub mod test_computation_fetching;
+pub mod test_confirm;
 pub mod test_date_regression;
 pub mod test_discrepancy;
 pub mod test_edit;

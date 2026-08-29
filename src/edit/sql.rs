@@ -1,5 +1,5 @@
 use crate::db::{Col, Tbl};
-use crate::types::{Bitical, BiticalType, TypedTag};
+use crate::types::{Bitical, BiticalType, TagType, TypedTag};
 use crate::util::parquet_query;
 use sea_query::{
     CaseStatement, Expr, Order, Query, SelectStatement, SimpleExpr, UnionType,
@@ -73,8 +73,38 @@ pub(crate) fn user_tags_write(
     inserts: Vec<(i64, TypedTag)>,
     deletes: Vec<UserTagDelete>,
     cascade_ids: &[i64],
+    casts: &[(TagType, BiticalType)],
 ) -> SelectStatement {
-    let mut q = parquet_query(path);
+    let mut q = Query::select();
+    q.column(Col::ItemId).column(Col::Type);
+
+    let coalesce_expr = BiticalType::label_coalesce_expr();
+
+    for target_col in BiticalType::to_columns() {
+        if casts.is_empty() {
+            q.column(target_col);
+        } else {
+            let col_bitical_type = BiticalType::from_col(target_col);
+            let mut case_stmt = CaseStatement::new();
+            for (tag_type, new_type) in casts {
+                if new_type.to_column() == target_col {
+                    case_stmt = case_stmt.case(
+                        Expr::col(Col::Type).eq(tag_type.as_str()),
+                        coalesce_expr.clone().cast_as(col_bitical_type),
+                    );
+                } else {
+                    case_stmt = case_stmt.case(
+                        Expr::col(Col::Type).eq(tag_type.as_str()),
+                        crate::util::null_as(col_bitical_type),
+                    );
+                }
+            }
+            q.expr_as(case_stmt.finally(Expr::col(target_col)), target_col);
+        }
+    }
+
+    let ut_sub = parquet_query(path);
+    q.from_subquery(ut_sub, Tbl::UserTags);
 
     if !cascade_ids.is_empty() {
         q.and_where(Expr::col(Col::ItemId).is_not_in(cascade_ids.to_vec()));
@@ -140,7 +170,7 @@ mod tests {
                     'x'::VARCHAR AS type, \
                     'x'::VARCHAR AS label_str, \
                     1::BIGINT AS label_int, \
-                    1.0::DOUBLE AS label_dbl, \
+                    1.0::DOUBLE AS label_double, \
                     true AS label_bool \
                  WHERE FALSE) TO '{}' (FORMAT 'parquet')",
                 path.to_string_lossy()
@@ -232,7 +262,8 @@ mod tests {
             (2i64, TypedTag::new("cate", "b")),
             (3i64, TypedTag::new("cate", "c")),
         ];
-        let q = user_tags_write(&path.to_string_lossy(), inserts, vec![], &[]);
+        let q =
+            user_tags_write(&path.to_string_lossy(), inserts, vec![], &[], &[]);
         save_parquet(&conn, &q, &path, None).unwrap();
 
         let count: i64 = conn
@@ -259,7 +290,13 @@ mod tests {
             let inserts: Vec<(i64, TypedTag)> = (0..n as i64)
                 .map(|i| (i, TypedTag::new("cate", format!("v{i}"))))
                 .collect();
-            let q = user_tags_write("dummy_path.parquet", inserts, vec![], &[]);
+            let q = user_tags_write(
+                "dummy_path.parquet",
+                inserts,
+                vec![],
+                &[],
+                &[],
+            );
             let sql = q.to_string(sea_query::PostgresQueryBuilder);
             sql.matches("UNION ALL").count()
         }
@@ -270,6 +307,56 @@ mod tests {
             small, large,
             "UNION ALL branch count must not grow with the number of inserted rows"
         );
+    }
+
+    #[test]
+    fn test_user_tags_write_cast_migration() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("user_tags.parquet");
+        let conn = Connection::open_in_memory().unwrap();
+        make_empty_user_tags(&conn, &path);
+
+        let inserts = vec![
+            (1i64, TypedTag::new("score", "100")),
+            (2i64, TypedTag::new("category", "alpha")),
+        ];
+        let q =
+            user_tags_write(&path.to_string_lossy(), inserts, vec![], &[], &[]);
+        save_parquet(&conn, &q, &path, None).unwrap();
+
+        let casts = vec![(TagType::from("score"), BiticalType::Integer)];
+        let q_cast = user_tags_write(
+            &path.to_string_lossy(),
+            vec![],
+            vec![],
+            &[],
+            &casts,
+        );
+        save_parquet(&conn, &q_cast, &path, None).unwrap();
+
+        let int_val: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT label_int FROM read_parquet('{}') WHERE type = 'score'",
+                    path.to_string_lossy()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(int_val, 100);
+
+        let str_val: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT label_str FROM read_parquet('{}') WHERE type = 'score'",
+                    path.to_string_lossy()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(str_val, None);
     }
 
     #[test]

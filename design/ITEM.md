@@ -88,6 +88,20 @@ Itemとしての`Type`や`TypedTag`を**定義アイテム**と呼ぶ。
 - TTFMの内的な定義(コードに記載された情報)から所得する
 - Itemに付与されたTypedTagから抽出する
 
+### 8.2 型定義設定 (TypeConfig) と構造保護
+型定義アイテム（`ItemKind::Type`）には、その型に属するタグの振る舞いをカスタマイズするプロパティを付与できる。
+
+- **設定可能なプロパティ**:
+  - `display_unit`: 表示単位・フォーマット（`binary`, `si`, またはプラグイン/組み込みの `DisplayFormats` オプション）。
+  - `strategy`: 編集戦略（`append` 重複追記 / `replace` 単一値置換）。
+  - `bitical_type`: 物理格納型（`string`, `integer`, `double`, `boolean`, `uuid`）。
+- **組み込み型の構造保護**:
+  - `origin:builtin` / `origin:system` の組み込み型に対して、構造的な `strategy` や `bitical_type` を付与・変更することは禁止される（`display_unit` などの表示設定のみ変更可能）。
+- **型の変更 (Tag Cast)**:
+  - `bitical_type` を変更する操作（tag cast）は単一のコマンドにつき1つの型のみ許可される。
+  - 変更前に既存のタグ値がすべて新しい型にパース可能であるか事前検証され、不正な値が含まれる場合はアトミックに拒否される。
+  - 型定義から `bitical_type` を `untag` することは禁止され、型変更には明示的な cast を使用する。
+
 ## 9. 削除
 Itemの削除については、**Origin**によって以下の通り分類される
 

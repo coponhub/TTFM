@@ -39,6 +39,7 @@ filetime = "0.2.27"
 filetime = "0.2.27"
 tempfile = "3.24.0"
 rstest = "0.25"
+libc = "0.2"
 
 # Optimize dependency build times and binary size
 [profile.dev.package."*"]

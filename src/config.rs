@@ -16,10 +16,89 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use anyhow::Result;
-use serde::Deserialize;
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+/// 確認プロンプトの動作モード。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmMode {
+    Auto,
+    Always,
+    Never,
+}
+
+/// 移動先の重複・衝突時の解決ポリシー。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPolicy {
+    Abort,
+    Skip,
+    Serial,
+    First,
+}
+
+/// ハードリンク（複数location）検出時の解決ポリシー。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HardlinkPolicy {
+    Abort,
+    Skip,
+    All,
+}
+
+/// スキップ発生時の除外範囲。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipScope {
+    Item,
+    #[serde(rename = "fs_only")]
+    #[value(name = "fs-only")]
+    FsOnly,
+}
+
+/// 編集操作に関する設定。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EditConfig {
+    #[serde(default = "default_confirm")]
+    pub confirm: ConfirmMode,
+    #[serde(default)]
+    pub on_conflict: Option<ConflictPolicy>,
+    #[serde(default)]
+    pub on_hardlink: Option<HardlinkPolicy>,
+    #[serde(default = "default_skip_scope")]
+    pub skip_scope: SkipScope,
+}
+
+fn default_confirm() -> ConfirmMode {
+    ConfirmMode::Auto
+}
+
+fn default_skip_scope() -> SkipScope {
+    SkipScope::Item
+}
+
+impl Default for EditConfig {
+    fn default() -> Self {
+        Self {
+            confirm: default_confirm(),
+            on_conflict: None,
+            on_hardlink: None,
+            skip_scope: default_skip_scope(),
+        }
+    }
+}
 
 /// TTFMの全体設定を保持する構造体。
 #[derive(Debug, Deserialize)]
@@ -27,6 +106,10 @@ pub struct Config {
     /// プラグインに関する設定
     #[serde(default)]
     pub plugins: PluginsConfig,
+
+    /// 編集操作に関する設定
+    #[serde(default)]
+    pub edit: EditConfig,
 }
 
 /// プラグインに関する設定。
@@ -65,6 +148,7 @@ impl Config {
     pub fn new() -> Self {
         Self {
             plugins: PluginsConfig::default(),
+            edit: EditConfig::default(),
         }
     }
 
@@ -126,5 +210,23 @@ mimetype = true"#;
         let toml = "";
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.plugins.enabled);
+        assert_eq!(config.edit.confirm, ConfirmMode::Auto);
+        assert_eq!(config.edit.on_conflict, None);
+        assert_eq!(config.edit.on_hardlink, None);
+        assert_eq!(config.edit.skip_scope, SkipScope::Item);
+    }
+
+    #[test]
+    fn test_parse_edit_config() {
+        let toml = r#"[edit]
+confirm = "never"
+on_conflict = "serial"
+on_hardlink = "all"
+skip_scope = "fs_only""#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.edit.confirm, ConfirmMode::Never);
+        assert_eq!(config.edit.on_conflict, Some(ConflictPolicy::Serial));
+        assert_eq!(config.edit.on_hardlink, Some(HardlinkPolicy::All));
+        assert_eq!(config.edit.skip_scope, SkipScope::FsOnly);
     }
 }
