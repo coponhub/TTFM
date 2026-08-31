@@ -125,6 +125,8 @@ impl<'a> Indexer<'a> {
             return Ok(count);
         }
 
+        crate::search::clear_cache(&self.store.db_dir);
+
         // 2. Diff Phase
         let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 

@@ -16,8 +16,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use super::{
-    apply_arithmetic_op, build_resolved_literal_expr,
-    build_storage_column_expr, build_tag_value_agg_expr,
+    apply_arithmetic_op, build_label_grouping_expr,
+    build_resolved_literal_expr, build_storage_column_expr,
+    build_tag_value_agg_expr,
 };
 use crate::query::lens_resolver::{ResolvedCalculationNode, ResolvedOperand};
 use sea_query::SimpleExpr;
@@ -38,6 +39,7 @@ fn build_resolved_operand_expr(operand: &ResolvedOperand) -> SimpleExpr {
         ResolvedOperand::TagRef { storage, bitical_type, .. } => {
             build_storage_column_expr(storage, *bitical_type)
         }
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
@@ -65,6 +67,7 @@ fn build_resolved_operand_eav_expr(operand: &ResolvedOperand) -> SimpleExpr {
         ResolvedOperand::TagRef { storage, bitical_type, .. } => {
             build_tag_value_agg_expr(storage, *bitical_type)
         }
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
@@ -84,7 +87,10 @@ pub(super) fn fold_simple_operand(
 ) -> Option<SimpleExpr> {
     match op {
         ResolvedOperand::Literal(lab) => Some(build_resolved_literal_expr(lab)),
-        ResolvedOperand::TagRef { .. } => Some(sea_query::Expr::val(0).into()),
+        ResolvedOperand::TagRef { .. }
+        | ResolvedOperand::LabelGrouping { .. } => {
+            Some(sea_query::Expr::val(0).into())
+        }
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();

@@ -71,6 +71,11 @@ pub enum ResolvedNode {
         tag: SType,
         label: Label,
     },
+    /// 物理カラムへの複数値 IN マッチ（オプティマイザによる集約）。
+    ColumnMatchIn {
+        target_col: Col,
+        labels: Vec<Label>,
+    },
     /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
     /// item_references の定義行（item_kind=kind, content=value）を参照し、
     /// 未登録なら value を representative とする Volatile を1行合成する。
@@ -86,6 +91,12 @@ pub enum ResolvedNode {
         bitical_type: BiticalType,
         op: ComparisonOp,
         label: Label,
+    },
+    /// 物理的な複数値 IN マッチ（オプティマイザによる集約）。
+    MatchIn {
+        tag_type: Option<TagType>,
+        target_col: Col,
+        labels: Vec<Label>,
     },
     Aggregation(ResolvedAggregationNode),
     /// 集約結果との比較。
@@ -285,6 +296,13 @@ pub enum ResolvedOperand {
         storage: StorageMapping,
         bitical_type: BiticalType,
     },
+    /// ラベルグルーピング（パターン抽出キー）
+    LabelGrouping {
+        tag_type: TagType,
+        pattern: String,
+        storage: StorageMapping,
+        bitical_type: BiticalType,
+    },
     /// ネストした算術演算
     Calculation(Box<ResolvedCalculationNode>),
     /// 集約関数（スカラー値を返す）
@@ -305,6 +323,11 @@ impl ResolvedOperand {
         match self {
             ResolvedOperand::Literal(_) => Condition::all(),
             ResolvedOperand::TagRef { storage, .. } => cond_projection(storage),
+            ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } => crate::query::sql::util::build_label_grouping_match_cond(
+                storage, pattern,
+            ),
             ResolvedOperand::Calculation(calc) => calc.to_condition(),
             ResolvedOperand::Aggregation(_) => Condition::all(),
         }
@@ -313,7 +336,8 @@ impl ResolvedOperand {
     /// タグ参照が含まれているかチェックします（EAV 計算比較用）。
     pub fn contains_tag(&self) -> bool {
         match self {
-            ResolvedOperand::TagRef { storage, .. } => {
+            ResolvedOperand::TagRef { storage, .. }
+            | ResolvedOperand::LabelGrouping { storage, .. } => {
                 matches!(storage, StorageMapping::Basic { .. })
             }
             ResolvedOperand::Calculation(calc) => calc.contains_tag(),
@@ -331,14 +355,16 @@ impl ResolvedOperand {
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_pure_scalar() && calc.right.is_pure_scalar()
             }
-            ResolvedOperand::TagRef { .. } => false,
+            ResolvedOperand::TagRef { .. }
+            | ResolvedOperand::LabelGrouping { .. } => false,
         }
     }
 
     /// オペランドの値（Value）を人間が読みやすいラベル文字列に変換します。
     pub fn resolve_label(&self, lens: &Lens, value: &Value) -> String {
         match self {
-            ResolvedOperand::TagRef { tag_type, .. } => {
+            ResolvedOperand::TagRef { tag_type, .. }
+            | ResolvedOperand::LabelGrouping { tag_type, .. } => {
                 lens.resolve_label(tag_type, value).as_str()
             }
             _ => {
@@ -364,6 +390,7 @@ impl ResolvedOperand {
                 !matches!(tag_type, TagType::Custom(_))
                     && matches!(bitical_type, BiticalType::String)
             }
+            ResolvedOperand::LabelGrouping { .. } => true,
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_string_type() && calc.right.is_string_type()
             }
@@ -607,6 +634,13 @@ impl ResolvedNode {
             ResolvedNode::ColumnMatch { tag, label } => {
                 cond_column_match(*tag, label)
             }
+            ResolvedNode::ColumnMatchIn { target_col, labels } => {
+                let exprs: Vec<SimpleExpr> = labels
+                    .iter()
+                    .map(|l| l.resolved_value().to_simple_expr())
+                    .collect();
+                Condition::all().add(Expr::col(*target_col).is_in(exprs))
+            }
             ResolvedNode::DefinitionRef { def, .. } => {
                 // 定義行: type='content' AND label_str=value AND item_kind=kind。
                 // （Volatile fallback は pick/fetch SQL 側で合成。Condition では Stored 部分のみ表現）
@@ -625,6 +659,24 @@ impl ResolvedNode {
                 label,
                 ..
             } => storage.to_condition(*op, label, *bitical_type),
+            ResolvedNode::MatchIn {
+                tag_type,
+                target_col,
+                labels,
+            } => {
+                let exprs: Vec<SimpleExpr> = labels
+                    .iter()
+                    .map(|l| l.resolved_value().to_simple_expr())
+                    .collect();
+                let mut cond = Condition::all();
+                if let Some(tag_type) = tag_type {
+                    cond =
+                        cond.add(crate::query::lens_schema::check_tag_match(
+                            tag_type.as_str(),
+                        ));
+                }
+                cond.add(Expr::col(*target_col).is_in(exprs))
+            }
             ResolvedNode::Aggregation(_)
             | ResolvedNode::AggregationMatch { .. } => {
                 // 集約は基本的に SELECT 句または HAVING 句で扱われる
@@ -1118,7 +1170,10 @@ fn get_nest_keys_len(node: &ResolvedNode) -> Option<usize> {
 /// ResolvedOperand から再帰的に最初の TagRef の TagType を抽出するヘルパー
 fn extract_tag_type_from_operand(op: &ResolvedOperand) -> Option<TagType> {
     match op {
-        ResolvedOperand::TagRef { tag_type, .. } => Some(tag_type.clone()),
+        ResolvedOperand::TagRef { tag_type, .. }
+        | ResolvedOperand::LabelGrouping { tag_type, .. } => {
+            Some(tag_type.clone())
+        }
         ResolvedOperand::Calculation(calc) => {
             extract_tag_type_from_operand(&calc.left)
                 .or_else(|| extract_tag_type_from_operand(&calc.right))
@@ -1132,7 +1187,8 @@ fn extract_storage_from_operand(
     op: &ResolvedOperand,
 ) -> Option<&StorageMapping> {
     match op {
-        ResolvedOperand::TagRef { storage, .. } => Some(storage),
+        ResolvedOperand::TagRef { storage, .. }
+        | ResolvedOperand::LabelGrouping { storage, .. } => Some(storage),
         ResolvedOperand::Calculation(calc) => {
             extract_storage_from_operand(&calc.left)
                 .or_else(|| extract_storage_from_operand(&calc.right))
@@ -1151,7 +1207,8 @@ fn collect_tag_types_from_operand(root: &ResolvedOperand) -> Vec<TagType> {
 
     while let Some(op) = queue.pop() {
         match op {
-            ResolvedOperand::TagRef { tag_type, .. } => {
+            ResolvedOperand::TagRef { tag_type, .. }
+            | ResolvedOperand::LabelGrouping { tag_type, .. } => {
                 result.push(tag_type);
             }
             ResolvedOperand::Calculation(calc) => {
@@ -1227,6 +1284,26 @@ pub(crate) fn resolve_operand(
     match op {
         Operand::Literal(label) => Ok(ResolvedOperand::Literal(label.clone())),
         Operand::TypeRef(tt) => resolve_type_ref_operand(lens, tt),
+        Operand::LabelGrouping { tag_type, pattern } => {
+            let (storage, bitical_type) = match lens.look_up(tag_type) {
+                Some(desc) => {
+                    (desc.storage.clone(), desc.logical_type.to_bitical())
+                }
+                None => (
+                    StorageMapping::Basic {
+                        column: Col::LabelStr,
+                        tag_type: tag_type.as_str().to_string(),
+                    },
+                    BiticalType::String,
+                ),
+            };
+            Ok(ResolvedOperand::LabelGrouping {
+                tag_type: tag_type.clone(),
+                pattern: pattern.clone(),
+                storage,
+                bitical_type,
+            })
+        }
         Operand::Calculation(calc) => {
             let resolved_calc = resolve_calculation_node(lens, calc)?;
             Ok(ResolvedOperand::Calculation(Box::new(resolved_calc)))
@@ -1558,6 +1635,11 @@ pub(crate) fn resolve_query_node(
         QueryNode::DateTimeRange { first, op, range } => {
             resolve_date_time_range(lens, first, op, range)
         }
+        QueryNode::Eval(_) => {
+            anyhow::bail!(
+                "QueryNode::Eval must be pre-expanded before lens resolution"
+            )
+        }
     }
 }
 
@@ -1631,6 +1713,9 @@ fn resolve_date_time_range(
         }
         Operand::Literal(_) => {
             bail!("DateTimeRange comparison first operand cannot be a literal")
+        }
+        Operand::LabelGrouping { .. } => {
+            bail!("DateTimeRange comparison first operand cannot be a LabelGrouping")
         }
     }
 }
@@ -2089,6 +2174,29 @@ fn resolve_nest_operand_extract_key(
     }
 }
 
+fn find_and_extract_nest(
+    nodes: &mut Vec<ResolvedNode>,
+) -> Option<(Vec<ResolvedOperand>, Option<Box<ResolvedNode>>)> {
+    for i in 0..nodes.len() {
+        if matches!(nodes[i], ResolvedNode::Nest { .. }) {
+            let nest = nodes.remove(i);
+            let ResolvedNode::Nest { keys, context, .. } = nest else {
+                unreachable!()
+            };
+            return Some((keys, context));
+        }
+        if let ResolvedNode::And(ref mut inner) = nodes[i] {
+            if let Some(res) = find_and_extract_nest(inner) {
+                if inner.is_empty() {
+                    nodes.remove(i);
+                }
+                return Some(res);
+            }
+        }
+    }
+    None
+}
+
 /// Nest の左辺から ResolvedOperand と、付随するコンテキスト (And などのフィルタ) を抽出するヘルパー。
 fn extract_projection_operand_with_context(
     left: ResolvedNode,
@@ -2096,15 +2204,7 @@ fn extract_projection_operand_with_context(
     match left {
         ResolvedNode::Nest { keys, context, .. } => Ok((keys, context)),
         ResolvedNode::And(mut nodes) => {
-            let nest_idx = nodes
-                .iter()
-                .position(|n| matches!(n, ResolvedNode::Nest { .. }));
-            if let Some(idx) = nest_idx {
-                let nest = nodes.remove(idx);
-                let ResolvedNode::Nest { keys, context, .. } = nest else {
-                    unreachable!()
-                };
-
+            if let Some((keys, context)) = find_and_extract_nest(&mut nodes) {
                 // 残りのノード（is_dir:false などのフィルタ）をコンテキストとして統合
                 let filter_ctx = if nodes.is_empty() {
                     None
@@ -2296,6 +2396,15 @@ fn resolve_operand_for_calc(
             let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedOperand::TagRef {
                 tag_type: tt,
+                storage,
+                bitical_type,
+            })
+        }
+        Operand::LabelGrouping { tag_type, pattern } => {
+            let (storage, bitical_type) = get_storage_and_type(lens, &tag_type);
+            Ok(ResolvedOperand::LabelGrouping {
+                tag_type,
+                pattern,
                 storage,
                 bitical_type,
             })
@@ -2875,29 +2984,13 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// クエリ文字列と TagRegistry から Resolver を生成
-    ///
-    /// 処理フロー:
-    /// 1. パース: Query文字列 → QueryNode (AST)
-    /// 2. 論理展開: logical_resolver::expand_query_node()
-    /// 3. 物理解決: resolve_query_node() → ResolvedNode
-    ///
-    /// 動的登録プラグインの interpret / expand_comparison を反映するには
-    /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
-    /// `&TagRegistry::with_standard()` を渡す。
-    ///
-    /// パース時・論理展開時に検出された警告は `sink` へ即時発出される。
-    pub fn new(
-        query: &str,
+    /// 展開済み QueryNode (AST) と TagRegistry から Resolver を直接生成
+    pub fn from_node(
+        node: QueryNode,
         registry: &crate::tag::TagRegistry,
         sink: &mut dyn crate::query::error::WarningSink,
     ) -> Result<Self> {
         let lens = Lens::from_registry(registry);
-        let node = if query.trim().is_empty() {
-            QueryNode::And(vec![])
-        } else {
-            crate::query::parser::parse(query, sink)?
-        };
 
         // 論理展開 + 型チェック（logical_resolver.rsに委譲）
         let expanded = crate::query::logical_resolver::expand_query_node(
@@ -2916,6 +3009,31 @@ impl Resolver {
             resolved_query: optimized,
             resolved_order: Vec::new(),
         })
+    }
+
+    /// クエリ文字列と TagRegistry から Resolver を生成
+    ///
+    /// 処理フロー:
+    /// 1. パース: Query文字列 → QueryNode (AST)
+    /// 2. 論理展開: logical_resolver::expand_query_node()
+    /// 3. 物理解決: resolve_query_node() → ResolvedNode
+    ///
+    /// 動的登録プラグインの interpret / expand_comparison を反映するには
+    /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
+    /// `&TagRegistry::with_standard()` を渡す。
+    ///
+    /// パース時・論理展開時に検出された警告は `sink` へ即時発出される。
+    pub fn new(
+        query: &str,
+        registry: &crate::tag::TagRegistry,
+        sink: &mut dyn crate::query::error::WarningSink,
+    ) -> Result<Self> {
+        let node = if query.trim().is_empty() {
+            QueryNode::And(vec![])
+        } else {
+            crate::query::parser::parse(query, sink)?
+        };
+        Self::from_node(node, registry, sink)
     }
 
     /// 警告を捨てて Resolver を生成する薄いラッパー。

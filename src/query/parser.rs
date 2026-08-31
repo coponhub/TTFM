@@ -248,6 +248,18 @@ fn build_factor(
 ) -> Result<QueryNode> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
+        Rule::eval_expr => {
+            let eval_inner = inner.into_inner().next().unwrap();
+            let node = match eval_inner.as_rule() {
+                Rule::bare_calculation => {
+                    let calc_inner = eval_inner.into_inner().next().unwrap();
+                    let calc = build_calculation(calc_inner, warnings)?;
+                    QueryNode::base_nest(Operand::Calculation(Box::new(calc)))
+                }
+                _ => build_ast(eval_inner, warnings)?,
+            };
+            Ok(QueryNode::Eval(Box::new(node)))
+        }
         Rule::expr => build_ast(inner, warnings),
         Rule::typed_tag => build_typed_tag(inner),
         Rule::comparison => build_comparison(inner, warnings),
@@ -605,6 +617,23 @@ fn is_base_key_operand(op: &Operand) -> bool {
     matches!(op, Operand::TypeRef(t) if t.is_base_key())
 }
 
+fn parse_pattern_projection(pair: Pair<Rule>) -> Result<(TagType, String)> {
+    let mut inner = pair.into_inner();
+    let tag_type_pair = inner.next().unwrap();
+    let tag_type = build_tag_type(tag_type_pair)?;
+    let pattern_pair = inner.next().unwrap();
+    let s = pattern_pair.as_str();
+    let pattern = if (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        let content = if s.len() >= 2 { &s[1..s.len() - 1] } else { s };
+        unescape_string(content)?
+    } else {
+        unescape_glob_string(s)?
+    };
+    Ok((tag_type, pattern))
+}
+
 /// `nest_lhs` または `nest_rhs` をパースして QueryNode を生成します。
 fn build_nest_operand(
     pair: Pair<Rule>,
@@ -617,6 +646,37 @@ fn build_nest_operand(
         pair
     };
     match inner.as_rule() {
+        Rule::pattern_projection => {
+            let (tag_type, pattern) = parse_pattern_projection(inner)?;
+            Ok(QueryNode::base_nest(Operand::LabelGrouping {
+                tag_type,
+                pattern,
+            }))
+        }
+        Rule::nest_lhs_grouped_and => {
+            let mut nodes = Vec::new();
+            for factor in inner.into_inner() {
+                for p in factor.into_inner() {
+                    match p.as_rule() {
+                        Rule::pattern_projection => {
+                            let (tag_type, pattern) =
+                                parse_pattern_projection(p)?;
+                            nodes.push(QueryNode::base_nest(
+                                Operand::LabelGrouping { tag_type, pattern },
+                            ));
+                        }
+                        Rule::primary => {
+                            nodes.push(build_primary(p, warnings)?);
+                        }
+                        Rule::factor => {
+                            nodes.push(build_factor(p, warnings)?);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(QueryNode::And(nodes))
+        }
         Rule::type_ref => {
             let inner_tag = inner.into_inner().next().unwrap();
             let tag_type = build_tag_type(inner_tag)?;
@@ -2111,5 +2171,152 @@ mod tests {
             "parentdir: &: ( (sum(size:) + count()) / 2 )";
         let res = parse_nowarn(query_with_inner_space);
         assert!(res.is_ok(), "Should now parse with spaces: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_parse_nest_lhs_label_grouping_direct() {
+        let node = parse_nowarn("path:/projects/*/: &: sum(size:)").unwrap();
+        match node {
+            QueryNode::Nest(NestNode {
+                left: Some(left), ..
+            }) => match *left {
+                QueryNode::Nest(NestNode {
+                    right: Operand::LabelGrouping { tag_type, pattern },
+                    ..
+                }) => {
+                    assert_eq!(tag_type.as_str(), "path");
+                    assert_eq!(pattern, "/projects/*/");
+                }
+                _ => panic!("Expected Nest with LabelGrouping, got {:?}", left),
+            },
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_lhs_grouped_and_commutative() {
+        let node1 =
+            parse_nowarn("(path:/projects/*/: & extension:rs) &: sum(size:)")
+                .unwrap();
+        let node2 =
+            parse_nowarn("(extension:rs & path:/projects/*/:) &: sum(size:)")
+                .unwrap();
+
+        fn extract_grouping_pattern(node: &QueryNode) -> Option<String> {
+            match node {
+                QueryNode::Nest(NestNode {
+                    left: Some(left), ..
+                }) => match &**left {
+                    QueryNode::And(nodes) => {
+                        nodes.iter().find_map(|n| match n {
+                            QueryNode::Nest(NestNode {
+                                right: Operand::LabelGrouping { pattern, .. },
+                                ..
+                            }) => Some(pattern.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
+        assert_eq!(
+            extract_grouping_pattern(&node1).as_deref(),
+            Some("/projects/*/")
+        );
+        assert_eq!(
+            extract_grouping_pattern(&node2).as_deref(),
+            Some("/projects/*/")
+        );
+    }
+
+    #[test]
+    fn test_parse_nest_lhs_grouped_and_multiple_filters() {
+        let node = parse_nowarn(
+            "(is_dir:false & path:/projects/*/: & extension:rs) &: count()",
+        )
+        .unwrap();
+        match node {
+            QueryNode::Nest(NestNode {
+                left: Some(left), ..
+            }) => match *left {
+                QueryNode::And(nodes) => {
+                    assert_eq!(nodes.len(), 3);
+                    let has_grouping = nodes.iter().any(|n| match n {
+                        QueryNode::Nest(NestNode {
+                            right: Operand::LabelGrouping { tag_type, pattern },
+                            ..
+                        }) => {
+                            tag_type.as_str() == "path"
+                                && pattern == "/projects/*/"
+                        }
+                        _ => false,
+                    });
+                    assert!(
+                        has_grouping,
+                        "Should contain LabelGrouping operand"
+                    );
+                }
+                _ => panic!("Expected And node, got {:?}", left),
+            },
+            _ => panic!("Expected Nest node, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_nest_lhs_quoted_pattern() {
+        let node = parse_nowarn("path:\"^/dir name/*/\": &: count()").unwrap();
+        match node {
+            QueryNode::Nest(NestNode {
+                left: Some(left), ..
+            }) => match *left {
+                QueryNode::Nest(NestNode {
+                    right: Operand::LabelGrouping { pattern, .. },
+                    ..
+                }) => {
+                    assert_eq!(pattern, "^/dir name/*/");
+                }
+                _ => panic!("Expected Nest with LabelGrouping, got {:?}", left),
+            },
+            _ => panic!("Expected Nest, got {:?}", node),
+        }
+    }
+
+    #[test]
+    fn test_parse_top_level_pattern_falls_back_to_typed_tag() {
+        let node = parse_nowarn("path:/projects/*/").unwrap();
+        assert!(matches!(node, QueryNode::TypedTag(_)));
+    }
+
+    #[test]
+    fn test_parse_preserves_existing_colons_and_unspaced_and() {
+        assert!(parse_nowarn("mtime:12:00").is_ok());
+        assert!(parse_nowarn("type:file&project:ttfm").is_ok());
+    }
+
+    #[test]
+    fn test_parse_eval_basic() {
+        let node = parse_nowarn("q(milestone:m1)").unwrap();
+        assert!(matches!(node, QueryNode::Eval(_)));
+    }
+
+    #[test]
+    fn test_parse_eval_bare_arithmetic() {
+        let node1 = parse_nowarn("q(1 - 2)").unwrap();
+        assert!(matches!(node1, QueryNode::Eval(_)));
+        let node2 = parse_nowarn("q(sum(size:) - 1)").unwrap();
+        assert!(matches!(node2, QueryNode::Eval(_)));
+    }
+
+    #[test]
+    fn test_parse_eval_nested() {
+        let node = parse_nowarn("q(q(category:core))").unwrap();
+        if let QueryNode::Eval(inner) = node {
+            assert!(matches!(*inner, QueryNode::Eval(_)));
+        } else {
+            panic!("Expected nested Eval");
+        }
     }
 }

@@ -1,5 +1,6 @@
 pub(crate) mod cast;
 pub mod confirm;
+pub mod error;
 pub(crate) mod fs_operate;
 pub(crate) mod glob_capture;
 mod lens_schema;
@@ -20,6 +21,7 @@ pub use crate::config::{
     ConfirmMode, ConflictPolicy, HardlinkPolicy, SkipScope,
 };
 pub use crate::tag::{Edit, EditStrategy};
+pub use fs_operate::FsMove;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum QueryType {
@@ -240,6 +242,10 @@ pub fn edit_with_prompt(
             .map(|c| (c.tag_type, c.to_type)),
     )?;
 
+    if outcome.count() > 0 {
+        crate::search::clear_cache(&store.db_dir);
+    }
+
     let has_skipped = has_skipped_unsupported
         || (processed_items.len() < original_item_count);
 
@@ -275,6 +281,9 @@ fn detect_type_casts(
                                     &leaf.value(),
                                 )
                             {
+                                if new_type == crate::types::BiticalType::Uuid {
+                                    bail!("type cast to 'uuid' is not allowed");
+                                }
                                 let tag_type =
                                     TagType::from(type_name.as_str());
                                 let current_bitical_type = registry

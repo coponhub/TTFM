@@ -19,12 +19,15 @@ use super::{
     apply_arithmetic_agg, apply_arithmetic_op, build_agg_calc_eav_expr,
     build_agg_calc_expr, build_agg_operand_eav_expr,
     build_aggregation_context_for_operand, build_calculation_eav_expr,
-    build_calculation_expr, build_nest_pivot_cte, build_nest_pivot_cte_no_agg,
-    build_nvalue_cte, build_nvalue_cte_nest, build_nvalue_standalone_subquery,
-    build_pick, label_to_simple_expr, nvalue_rhs_condition, wrap_to_item_ids,
-    AggregationContext, BuildPick, NestContext, PickNode,
+    build_calculation_expr, build_label_grouping_expr,
+    build_label_grouping_expr_for_row, build_label_grouping_match_cond,
+    build_label_grouping_match_cond_for_row, build_nest_pivot_cte,
+    build_nest_pivot_cte_no_agg, build_nvalue_cte, build_nvalue_cte_nest,
+    build_nvalue_standalone_subquery, build_pick, label_to_simple_expr,
+    nvalue_rhs_condition, wrap_to_item_ids, AggregationContext, BuildPick,
+    NestContext, PickNode,
 };
-use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, Src, Tbl};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun, Pronoun::*, Src, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
     LabelSetOpKind, NestMatchCondition, NestMatchOp, NestMatchRhs, NvalueRhs,
@@ -60,6 +63,20 @@ pub(super) fn build_resolved_projection_sql(
                 q.and_where(Expr::col(Col::TypedTag).is_not_null());
             } else if let TagType::Base(SType::Origin) = tag_type {
                 q.and_where(Expr::col(Col::Origin).is_not_null());
+            }
+            q
+        }
+        ResolvedOperand::LabelGrouping {
+            tag_type, storage, ..
+        } => {
+            let mut q = Query::select();
+            q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+                .distinct()
+                .from(src);
+            let cond = op.to_condition();
+            q.cond_where(cond);
+            if let StorageMapping::Basic { .. } = storage {
+                q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
             }
             q
         }
@@ -198,6 +215,27 @@ pub(super) fn build_multi_key_labels_sql(
                 );
                 pivot.and_having(max_expr.is_not_null());
             }
+            ResolvedOperand::LabelGrouping {
+                tag_type, storage, ..
+            } => {
+                let group_expr = build_label_grouping_expr(key);
+                let max_expr: SimpleExpr = match storage {
+                    StorageMapping::Basic { .. } => {
+                        type_filters.insert(tag_type.as_str().to_string());
+                        let case_expr = Expr::case(
+                            Expr::col(Col::Type).eq(tag_type.as_str()),
+                            group_expr,
+                        );
+                        Func::max(case_expr).into()
+                    }
+                    _ => Func::max(group_expr).into(),
+                };
+                pivot.expr_as(
+                    max_expr.clone(),
+                    Alias::new(&format!("key{}", i)),
+                );
+                pivot.and_having(max_expr.is_not_null());
+            }
             _ => {
                 return Err(anyhow::anyhow!(
                     "build_multi_key_labels_sql: unsupported key type at index {}",
@@ -287,6 +325,29 @@ fn resolve_simple_filter_condition<T: sea_query::Iden + Clone + 'static>(
                 Condition::all()
                     .add(Expr::col((table.clone(), *tag)).eq(s_val)),
             )
+        }
+        ResolvedNode::ColumnMatchIn { target_col, labels } => {
+            let s_vals: Vec<_> = labels.iter().map(|l| l.as_str()).collect();
+            Some(
+                Condition::all()
+                    .add(Expr::col((table.clone(), *target_col)).is_in(s_vals)),
+            )
+        }
+        ResolvedNode::MatchIn {
+            tag_type,
+            target_col,
+            labels,
+        } => {
+            let s_vals: Vec<_> = labels.iter().map(|l| l.as_str()).collect();
+            let mut cond = Condition::all();
+            if let Some(tag_type) = tag_type {
+                cond = cond.add(
+                    Expr::col((table.clone(), Col::Type)).eq(tag_type.as_str()),
+                );
+            }
+            cond =
+                cond.add(Expr::col((table.clone(), *target_col)).is_in(s_vals));
+            Some(cond)
         }
         ResolvedNode::And(_) => {
             let mut required_tags = required_tag_types(n);
@@ -434,8 +495,63 @@ fn build_merged_nvalue_agg_expr(
             apply_arithmetic_op(&calc.op, left_val, right_val, false)
         }
         ResolvedOperand::Literal(l) => label_to_simple_expr(l),
-        ResolvedOperand::TagRef { .. } => Expr::val(1i32).into(),
+        ResolvedOperand::TagRef { .. }
+        | ResolvedOperand::LabelGrouping { .. } => Expr::val(1i32).into(),
     })
+}
+
+pub(super) struct NestKeyProjParts {
+    pub tag_type: Option<String>,
+    pub expr: SimpleExpr,
+    pub match_cond: Option<sea_query::Condition>,
+}
+
+pub(super) fn resolve_nest_key_proj_parts(
+    key: &ResolvedOperand,
+    row_type: Option<Pronoun>,
+) -> NestKeyProjParts {
+    match key {
+        ResolvedOperand::LabelGrouping {
+            tag_type,
+            storage,
+            pattern,
+            ..
+        } => {
+            let tt = match storage {
+                StorageMapping::Basic { .. } => {
+                    Some(tag_type.as_str().to_string())
+                }
+                _ => None,
+            };
+            let expr = build_label_grouping_expr_for_row(key, row_type);
+            let cond = build_label_grouping_match_cond_for_row(
+                storage, pattern, row_type,
+            );
+            NestKeyProjParts {
+                tag_type: tt,
+                expr,
+                match_cond: Some(cond),
+            }
+        }
+        _ => {
+            let (proj_col, tag_type) = match key.get_storage() {
+                Some(StorageMapping::Basic { column, tag_type }) => {
+                    (*column, Some(tag_type.as_str().to_string()))
+                }
+                Some(StorageMapping::Fixed(col)) => (*col, None),
+                _ => panic!("NestMatch key must have Basic or Fixed storage"),
+            };
+            let expr = match row_type {
+                Some(p) => Expr::col((p, proj_col)).into(),
+                None => Expr::col(proj_col).into(),
+            };
+            NestKeyProjParts {
+                tag_type,
+                expr,
+                match_cond: None,
+            }
+        }
+    }
 }
 
 pub(super) fn build_nest_having_sql(
@@ -445,17 +561,12 @@ pub(super) fn build_nest_having_sql(
     is_or: bool,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let (proj_col, proj_tag_type) = match key.get_storage() {
-        Some(StorageMapping::Basic { column, tag_type }) => {
-            (*column, Some(tag_type.as_str()))
-        }
-        Some(StorageMapping::Fixed(col)) => (*col, None),
-        _ => panic!("NestMatch key must have Basic or Fixed storage"),
-    };
+    let inner_parts = resolve_nest_key_proj_parts(key, Some(Proj));
+    let outer_parts = resolve_nest_key_proj_parts(key, None);
 
     let mut nfilter = Query::select();
     nfilter.expr_as(
-        CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+        CustomFunc::as_representative(inner_parts.expr.clone()),
         Group,
     );
     nfilter.from_as(src, Proj);
@@ -465,10 +576,13 @@ pub(super) fn build_nest_having_sql(
         View,
         Expr::col((Proj, Col::ItemId)).equals((View, Col::ItemId)),
     );
-    if let Some(tag_type) = proj_tag_type {
-        nfilter.and_where(Expr::col((Proj, Col::Type)).eq(tag_type));
+    if let Some(tag_type) = &inner_parts.tag_type {
+        nfilter.and_where(Expr::col((Proj, Col::Type)).eq(tag_type.as_str()));
     }
-    nfilter.group_by_col((Proj, proj_col));
+    if let Some(cond) = inner_parts.match_cond {
+        nfilter.cond_where(cond);
+    }
+    nfilter.add_group_by([inner_parts.expr]);
 
     let mut having_cond = if is_or {
         Condition::any()
@@ -492,11 +606,14 @@ pub(super) fn build_nest_having_sql(
     stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
     stmt.distinct();
     stmt.from(src);
-    if let Some(tag_type) = proj_tag_type {
-        stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+    if let Some(tag_type) = &outer_parts.tag_type {
+        stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+    }
+    if let Some(cond) = outer_parts.match_cond {
+        stmt.cond_where(cond);
     }
     stmt.and_where(
-        CustomFunc::as_representative(Expr::col(proj_col))
+        CustomFunc::as_representative(outer_parts.expr)
             .in_subquery(group_label_sub),
     );
     stmt
@@ -534,23 +651,19 @@ pub(super) fn build_nest_match_sql(
             is_string,
         ));
 
-        let (proj_col, proj_tag_type) = match keys[0].get_storage() {
-            Some(StorageMapping::Basic { column, tag_type }) => {
-                (*column, Some(tag_type.as_str()))
-            }
-            Some(StorageMapping::Fixed(col)) => (*col, None),
-            _ => panic!("NestMatch key must have Basic or Fixed storage"),
-        };
+        let parts = resolve_nest_key_proj_parts(&keys[0], None);
         let mut stmt = Query::select();
         stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
         stmt.distinct();
         stmt.from(src);
-        if let Some(tag_type) = proj_tag_type {
-            stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+        if let Some(tag_type) = &parts.tag_type {
+            stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+        }
+        if let Some(cond) = parts.match_cond {
+            stmt.cond_where(cond);
         }
         stmt.and_where(
-            CustomFunc::as_representative(Expr::col(proj_col))
-                .in_subquery(nfilter),
+            CustomFunc::as_representative(parts.expr).in_subquery(nfilter),
         );
         stmt
     } else {
@@ -688,17 +801,15 @@ pub(super) fn build_nest_nest_match_sql(
                         .binary(bin_op, Expr::col((R, Nvalue))),
                 )
                 .to_owned();
-            let proj_col = match left_keys[0].get_storage() {
-                Some(StorageMapping::Basic { column, .. }) => column,
-                Some(StorageMapping::Fixed(col)) => col,
-                _ => panic!(
-                    "unexpected NestNestMatch with non-TagRef keys: {:?}",
-                    left_keys
-                ),
-            };
+            let parts = resolve_nest_key_proj_parts(&left_keys[0], None);
+            if let Some(tag_type) = &parts.tag_type {
+                stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            }
+            if let Some(cond) = parts.match_cond {
+                stmt.cond_where(cond);
+            }
             stmt.and_where(
-                CustomFunc::as_representative(Expr::col(*proj_col))
-                    .in_subquery(join_sql),
+                CustomFunc::as_representative(parts.expr).in_subquery(join_sql),
             );
             stmt
         }
@@ -714,17 +825,12 @@ fn build_merged_nest_having_sql(
     is_or: bool,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let (proj_col, proj_tag_type) = match key.get_storage() {
-        Some(StorageMapping::Basic { column, tag_type }) => {
-            (*column, Some(tag_type.as_str()))
-        }
-        Some(StorageMapping::Fixed(col)) => (*col, None),
-        _ => panic!("NestMatch key must have Basic or Fixed storage"),
-    };
+    let inner_parts = resolve_nest_key_proj_parts(key, Some(Proj));
+    let outer_parts = resolve_nest_key_proj_parts(key, None);
 
     let mut nfilter = Query::select();
     nfilter.expr_as(
-        CustomFunc::as_representative(Expr::col((Proj, proj_col))),
+        CustomFunc::as_representative(inner_parts.expr.clone()),
         Group,
     );
     nfilter.from_as(src, Proj);
@@ -734,10 +840,13 @@ fn build_merged_nest_having_sql(
         View,
         Expr::col((Proj, Col::ItemId)).equals((View, Col::ItemId)),
     );
-    if let Some(tag_type) = proj_tag_type {
-        nfilter.and_where(Expr::col((Proj, Col::Type)).eq(tag_type));
+    if let Some(tag_type) = &inner_parts.tag_type {
+        nfilter.and_where(Expr::col((Proj, Col::Type)).eq(tag_type.as_str()));
     }
-    nfilter.group_by_col((Proj, proj_col));
+    if let Some(cond) = inner_parts.match_cond {
+        nfilter.cond_where(cond);
+    }
+    nfilter.add_group_by([inner_parts.expr]);
 
     let mut having_cond = if is_or {
         Condition::any()
@@ -774,11 +883,14 @@ fn build_merged_nest_having_sql(
     stmt.columns([Col::ItemId, Col::Rank, Col::ItemKind]);
     stmt.distinct();
     stmt.from(src);
-    if let Some(tag_type) = proj_tag_type {
-        stmt.and_where(Expr::col(Col::Type).eq(tag_type));
+    if let Some(tag_type) = &outer_parts.tag_type {
+        stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+    }
+    if let Some(cond) = outer_parts.match_cond {
+        stmt.cond_where(cond);
     }
     stmt.and_where(
-        CustomFunc::as_representative(Expr::col(proj_col))
+        CustomFunc::as_representative(outer_parts.expr)
             .in_subquery(group_label_sub),
     );
     stmt
@@ -974,6 +1086,26 @@ fn build_nest_pivot_multi_nv_cte(
             ResolvedOperand::Calculation(calc) => {
                 let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
                 stmt.expr_as(calc_expr, Alias::new(&format!("key{}", i)));
+            }
+            ResolvedOperand::LabelGrouping {
+                tag_type, storage, ..
+            } => {
+                let group_expr = build_label_grouping_expr(key);
+                let max_expr: SimpleExpr = match storage {
+                    StorageMapping::Basic { .. } => {
+                        let case_expr = Expr::case(
+                            Expr::col(Col::Type).eq(tag_type.as_str()),
+                            group_expr,
+                        );
+                        Func::max(case_expr).into()
+                    }
+                    _ => Func::max(group_expr).into(),
+                };
+                stmt.expr_as(
+                    max_expr.clone(),
+                    Alias::new(&format!("key{}", i)),
+                );
+                stmt.and_having(max_expr.is_not_null());
             }
             _ => {}
         }
@@ -1201,6 +1333,43 @@ pub(super) fn nest(
                     false,
                 )
             }
+        } else if let crate::query::lens_resolver::ResolvedOperand::LabelGrouping {
+            tag_type,
+            storage,
+            pattern,
+            ..
+        } = &proj_operands[0]
+        {
+            let group_expr = build_label_grouping_expr(&proj_operands[0]);
+            let mut computed_q = Query::select();
+            computed_q
+                .distinct()
+                .column(Col::ItemId)
+                .expr_as(group_expr, Alias::new("label_group"))
+                .column(Col::Rank)
+                .from(src)
+                .cond_where(build_label_grouping_match_cond(storage, pattern))
+                .and_where(
+                    Expr::col(Col::ItemId).in_subquery(
+                        Query::select()
+                            .column(Col::ItemId)
+                            .from(PickedIds)
+                            .to_owned(),
+                    ),
+                );
+            if let StorageMapping::Basic { .. } = storage {
+                computed_q.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
+            }
+            let computed_cte = CommonTableExpression::new()
+                .query(computed_q)
+                .table_name(Alias::new("computed"))
+                .to_owned();
+            with_clause.cte(computed_cte);
+            (
+                "label_group".to_string(),
+                Some("computed".to_string()),
+                false,
+            )
         } else if matches!(&desc.storage, StorageMapping::Fixed(_)) {
             // OneView は item_references を複数行に unpivot し intrinsic Fixed 列
             // (rank/origin/item_id/item_kind) を全行に複製するため、window 関数の前に
@@ -2266,6 +2435,35 @@ mod tests {
         assert!(
             after_labels.contains("'cat'"),
             "labels CTE should use first operand tag type 'cat', got: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_build_fetch_nest_sql_label_grouping() {
+        let registry = crate::tag::TagRegistry::with_standard();
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
+            "path:/projects/*/: &: sum(size:)",
+            &registry,
+        )
+        .unwrap();
+        let sql = build_fetch_nest_sql(&Src::OneView, &resolver, 100, 0)
+            .unwrap()
+            .to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql.contains("computed"),
+            "should have computed CTE, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("regexp_extract"),
+            "should contain regexp_extract for label grouping, got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("label_group"),
+            "should partition by label_group, got: {}",
             sql
         );
     }

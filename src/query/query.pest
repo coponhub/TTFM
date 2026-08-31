@@ -46,7 +46,8 @@ primary = { factor }
 // --- Factors ---
 // PEG priority: Try specific rules first.
 factor = {
-    comparison
+    eval_expr
+  | comparison
   | nest_expr
   | typed_tag
   | projection
@@ -55,11 +56,33 @@ factor = {
   | label
 }
 
+eval_expr = ${ "q(" ~ WHITESPACE* ~ (bare_calculation | expr) ~ WHITESPACE* ~ ")" }
+
 // Nest expression: &: operator, higher priority than set operations.
 // Requires at least one &: to match; standalone operands fall through to other factor alternatives.
 nest_expr = ${ nest_lhs ~ (WHITESPACE+ ~ ampersand_colon ~ WHITESPACE+ ~ nest_rhs)+ }
 
-nest_lhs = { type_ref | nest_parenthesized_expr | "(" ~ expr ~ ")" }
+nest_lhs = {
+    nest_lhs_grouped_and
+  | pattern_projection
+  | type_ref
+  | nest_parenthesized_expr
+  | "(" ~ expr ~ ")"
+}
+
+nest_lhs_grouped_and = {
+    "(" ~ WHITESPACE*
+    ~ nest_lhs_factor ~ (WHITESPACE+ ~ ampersand ~ WHITESPACE+ ~ nest_lhs_factor)+
+    ~ WHITESPACE* ~ ")"
+}
+nest_lhs_factor = {
+    pattern_projection
+  | primary
+}
+
+pattern_projection = ${ tag_type ~ ":" ~ pattern_label ~ ":" }
+pattern_label = @{ quoted_string | (escape | (!(WHITESPACE | ":" | "&" | "|" | "(" | ")" | "\"" | "'") ~ ANY))+ }
+
 nest_rhs = { scalar_comparison | aggregation | projection | "(" ~ expr ~ ")" | label }
 
 projection = { type_ref | calculation }

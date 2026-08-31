@@ -280,6 +280,7 @@ fn is_set_operation(node: &QueryNode) -> bool {
             !matches!(nest.right, Operand::Literal(_))
         }
         QueryNode::Nest(_) => true,
+        QueryNode::Eval(inner) => is_set_operation(inner),
     }
 }
 
@@ -365,6 +366,7 @@ fn returns_projection(node: &QueryNode) -> bool {
             None => true,
             Some(left) => returns_projection(left),
         },
+        QueryNode::Eval(inner) => returns_projection(inner),
     }
 }
 
@@ -420,6 +422,10 @@ fn expand_operand(
             }
         }
         Operand::TypeRef(tag_type) => Ok(Operand::TypeRef(tag_type)),
+        Operand::LabelGrouping { tag_type, pattern } => {
+            error::check_label_grouping_type(schema, &tag_type)?;
+            Ok(Operand::LabelGrouping { tag_type, pattern })
+        }
         Operand::Calculation(calc) => {
             let expanded = expand_calculation(schema, *calc, sink)?;
             Ok(try_fold_calculation(expanded))
@@ -913,7 +919,7 @@ fn operand_has_only_aggregations_and_literals(operand: &Operand) -> bool {
             QueryNode::Aggregation(_) => true,
             _ => false,
         },
-        Operand::TypeRef(_) => false,
+        Operand::TypeRef(_) | Operand::LabelGrouping { .. } => false,
     }
 }
 
@@ -952,11 +958,12 @@ fn distribute_nest_over_calc(
 }
 
 /// Operand に Nest キーを分配する。
-/// - Aggregation → Query(Nest(key, Aggregation))
-/// - Calculation → 再帰的に両辺に分配
-/// - Literal     → そのまま（スカラーは Nest 不要）
-/// - TypeRef     → Query(Nest(key, Projection(TypeRef)))
-/// - Query       → Query(Nest(key, Query))
+/// - Aggregation -> Query(Nest(key, Aggregation))
+/// - Calculation -> 再帰的に両辺に分配
+/// - Literal     -> そのまま（スカラーは Nest 不要）
+/// - TypeRef     -> Query(Nest(key, Projection(TypeRef)))
+/// - LabelGrouping -> Query(Nest(key, Projection(LabelGrouping)))
+/// - Query       -> Query(Nest(key, Query))
 fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
     match operand {
         Operand::Literal(l) => Operand::Literal(l),
@@ -973,6 +980,12 @@ fn distribute_nest_over_operand(key: &QueryNode, operand: Operand) -> Operand {
             Operand::Query(Box::new(QueryNode::Nest(NestNode {
                 left: Some(Box::new(key.clone())),
                 right: Operand::TypeRef(tt),
+            })))
+        }
+        Operand::LabelGrouping { tag_type, pattern } => {
+            Operand::Query(Box::new(QueryNode::Nest(NestNode {
+                left: Some(Box::new(key.clone())),
+                right: Operand::LabelGrouping { tag_type, pattern },
             })))
         }
         Operand::Query(node) => {
@@ -1007,7 +1020,7 @@ fn is_unnestable_right(right: &QueryNode) -> bool {
 /// Nest の右辺 (Operand 化済み) が unnest 対象かを判定します。
 fn is_unnestable_operand(op: &Operand) -> bool {
     match op {
-        Operand::TypeRef(_) => true,
+        Operand::TypeRef(_) | Operand::LabelGrouping { .. } => true,
         Operand::Query(node) => is_unnestable_right(node),
         _ => false,
     }
@@ -1161,6 +1174,7 @@ fn infer_type(
             Ok(label.value().infer_logical_type_with_range())
         }
         Operand::TypeRef(tag_type) => Ok(schema.get_logical_type(tag_type)),
+        Operand::LabelGrouping { .. } => Ok(LogicalType::String),
         Operand::Calculation(calc) => {
             validate_calculation(calc, schema)?;
             let left_type = infer_type(&calc.left, schema)?;
@@ -2484,6 +2498,64 @@ mod tests {
                 "a tag with no TagFn must keep its raw value; only a TagFn may \
                  read a notation like 1MB as bytes ({q})"
             );
+        }
+    }
+
+    #[test]
+    fn test_expand_nest_label_grouping_with_filter() {
+        let lens = Lens::base_standard();
+        let parsed = crate::query::parser::parse_nowarn(
+            "(path:/projects/*/: & extension:rs) &: count()",
+        )
+        .unwrap();
+        let expanded =
+            expand_query_node(&lens, parsed, &mut Vec::new()).unwrap();
+
+        match expanded {
+            QueryNode::And(nodes) => {
+                let nest_node = nodes.iter().find_map(|n| match n {
+                    QueryNode::Nest(nest) => Some(nest),
+                    _ => None,
+                });
+                assert!(
+                    nest_node.is_some(),
+                    "Should contain Nest node in outer And"
+                );
+                let nest = nest_node.unwrap();
+                match &nest.left {
+                    Some(left) => match &**left {
+                        QueryNode::Nest(NestNode {
+                            right: Operand::LabelGrouping { tag_type, pattern },
+                            ..
+                        }) => {
+                            assert_eq!(tag_type.as_str(), "path");
+                            assert_eq!(pattern, "/projects/*/");
+                        }
+                        _ => panic!(
+                            "Expected base_nest(LabelGrouping), got {:?}",
+                            left
+                        ),
+                    },
+                    None => panic!("Expected left operand in Nest"),
+                }
+            }
+            QueryNode::Nest(nest) => match &nest.left {
+                Some(left) => match &**left {
+                    QueryNode::Nest(NestNode {
+                        right: Operand::LabelGrouping { tag_type, pattern },
+                        ..
+                    }) => {
+                        assert_eq!(tag_type.as_str(), "path");
+                        assert_eq!(pattern, "/projects/*/");
+                    }
+                    _ => panic!(
+                        "Expected base_nest(LabelGrouping), got {:?}",
+                        left
+                    ),
+                },
+                None => panic!("Expected left operand in Nest"),
+            },
+            _ => panic!("Expected And or Nest node, got {:?}", expanded),
         }
     }
 }

@@ -457,6 +457,7 @@ pub mod test_date_regression;
 pub mod test_discrepancy;
 pub mod test_edit;
 pub mod test_errors;
+pub mod test_eval;
 pub mod test_fs_operate;
 pub mod test_glob_values;
 pub mod test_item_refactoring;

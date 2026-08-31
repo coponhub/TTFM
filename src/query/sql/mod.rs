@@ -26,7 +26,7 @@ mod pick;
 mod precompute;
 mod scalar;
 pub(crate) mod schema_pieces;
-mod util;
+pub(crate) mod util;
 use agg_pieces::{
     agg_expr, build_agg, build_agg_calc_eav_expr, build_agg_calc_expr,
     build_agg_calc_subquery, build_agg_calc_subquery_nest, build_agg_nest,
@@ -61,12 +61,17 @@ pub use precompute::{
     needs_nest_context,
 };
 use scalar::{
-    build_column_match_sql, build_resolved_date_time_match_sql,
+    build_column_match_in_sql, build_column_match_sql,
+    build_resolved_date_time_match_sql, build_resolved_match_in_sql,
     build_resolved_match_sql, build_resolved_scalar_sql,
     build_resolved_tag_tag_match_sql, build_scalar_match_sql,
     date_time_condition_expr,
 };
 use util::*;
+pub(crate) use util::{
+    build_label_grouping_expr, build_label_grouping_expr_for_row,
+    build_label_grouping_match_cond, build_label_grouping_match_cond_for_row,
+};
 pub use util::{to_tag_condition, AggregationContext, NestContext};
 
 use crate::db::{Col, CustomFunc, Pronoun::*, Src};

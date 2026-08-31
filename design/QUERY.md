@@ -64,14 +64,24 @@
         - `type:` (全アイテムの型一覧を取得。値からの逆引き検索 `label:foo & type:` も可能)
         - `path:` (各アイテムのパスを取得)
 - **ネスト (Nest)**:
-    - `[Projection|Nest] &: [Projection|Scalar|(Scalar comparison)|Aggregation|Nest]` 形式
+    - `[Projection(LabelGrouping)|Nest] &: [Projection|Scalar|(Scalar comparison)|Aggregation|Nest]` 形式
     - `&:` をネスト演算子(Nest Operator) と呼ぶ 
     - 右辺がProjectionの場合、ProjectionがGroup Byのキーのように両辺のProjectionの組み合わせとなる。
+    - **ラベルグルーピング (Label Grouping)**:
+        - Projection として `Type:Pattern:` 形式を使用できる（ネスト演算 `&:` の左辺のオペランドとしてのみ使用可）。
+        - パターンにマッチする部分文字列をラベルとして抽出し、配下の全アイテムを束ねて集計・展開する。
+        - ワイルドカード `*` は最短一致で評価される。
+        - 先頭一致 `^` や末尾一致 `$` も指定可能。
+        - パターンにワイルドカードを含まない場合（例: `path:/projects/test:`）は、その指定を単一ラベルとして扱う。
     - 例: 
         - `Project: &: extension:`で以下のようなProjectionの結果を取得できる(`...`は省略)
             `:rs &: :ProjectA ... item1, item2, ...`
             `:rs &: :ProjectB ... item3, item4, ...,`
             `:txt &: :ProjectA ... item4, item6, ...,`
+        - `filename:*.rs$: &: count()` 同名のRust ファイル（.rs）のファイル数を集計する
+        - `path:^/mnt/*/: &: sum(size:)` マウントされた各ドライブの合計ファイルサイズを集計する
+        - `path:*/my_works/past_project/*/: &: sum(size:)` my_works/past_project/直下のフォルダ・ファイル毎の合計ファイルサイズを集計する
+        - `(path:*/my_works/past_project/*/: & extension:rs) &: sum(size:)` 各プロジェクトフォルダ内の Rust ファイルのみの合計サイズを集計する
         - `(extension: &: count(*:*)) := (parentdir: &: count(*:*))`「そのフォルダ内にあるファイルが、すべて特定の拡張子（例えば .jpg）で統一されている」状態のアイテムを取得する
     - Nest同士の結合も可能。
         - `(A: &: B:) &: (C: &: D:)` = `(A: &: B: &: C: &: D:)`

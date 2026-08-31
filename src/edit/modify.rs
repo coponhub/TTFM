@@ -266,11 +266,11 @@ fn validate_type_config_assignment(
             }
         }
         "bitical_type" => {
-            use std::str::FromStr;
-            if crate::types::BiticalType::from_str(tag.label.as_str().as_str())
-                .is_err()
-            {
-                bail!("invalid bitical_type '{}'", tag.label.as_str());
+            let label_s = tag.label.as_str();
+            match label_s.as_str() {
+                "integer" | "double" | "boolean" | "string" => {}
+                "uuid" => bail!("type cast to 'uuid' is not allowed"),
+                _ => bail!("invalid bitical_type '{}'", label_s),
             }
         }
         "display_unit" => {

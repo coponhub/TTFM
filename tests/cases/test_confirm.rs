@@ -122,7 +122,7 @@ impl ConfirmPrompt for MockPrompt {
     fn ask_hardlink_resolution(
         &mut self,
         _item: &ItemId,
-        _paths: &[PathBuf],
+        _candidate_moves: &[ttfm::edit::FsMove],
     ) -> anyhow::Result<HardlinkChoice> {
         Ok(self.hardlink_answer.clone())
     }
@@ -270,6 +270,41 @@ fn prompt_interactive_hardlink_path_selection() {
     assert_eq!(res.fs_ops, 1);
     assert!(root.join("renamed.txt").exists());
     assert!(sub.join("a.txt").exists());
+}
+
+#[test]
+fn test_hardlink_interactive_candidate_move_index_alignment() {
+    let (store, registry, _d, root) = setup(&["a.txt"]);
+    let sub = root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::hard_link(root.join("a.txt"), sub.join("a.txt")).unwrap();
+    Indexer::new(&store, &registry)
+        .run(&[&root], None::<&fn(usize)>, false)
+        .unwrap();
+
+    let dest = root.join("dest");
+    let opts = WriteOptions::interactive().on_confirm(ConfirmMode::Always);
+    let mut prompt = MockPrompt {
+        answer: true,
+        conflict_answer: ConflictChoice::Abort,
+        hardlink_answer: HardlinkChoice::Selected(vec![0]),
+        replace_answer: None,
+        mkdir_answer: true,
+        recorded_summary: None,
+    };
+    let res = edit_with_prompt(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Some(&format!("parentdir:{}", dest.display())),
+        QueryType::Tag,
+        None,
+        opts,
+        &mut Vec::new(),
+        &mut prompt,
+    )
+    .unwrap();
+    assert_eq!(res.fs_ops, 1);
 }
 
 #[test]

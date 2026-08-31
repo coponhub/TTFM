@@ -581,6 +581,11 @@ fn build_resolved_operand_eav_row_expr(
             storage,
             bitical_type,
             ..
+        }
+        | ResolvedOperand::LabelGrouping {
+            storage,
+            bitical_type,
+            ..
         } => build_tag_value_eav_row_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =

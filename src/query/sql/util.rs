@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun, Pronoun::*};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
@@ -137,39 +137,89 @@ pub(super) fn apply_arithmetic_agg(
     }
 }
 
+pub(super) fn build_storage_column_expr_for_row(
+    storage: &StorageMapping,
+    bitical_type: BiticalType,
+    row_type: Option<Pronoun>,
+) -> SimpleExpr {
+    match storage {
+        StorageMapping::Fixed(col) => match row_type {
+            Some(p) => Expr::col((p, *col)).into(),
+            None => Expr::col(*col).into(),
+        },
+        StorageMapping::Basic { column, .. } if *column == Col::LabelStr => {
+            match bitical_type {
+                BiticalType::Integer => match row_type {
+                    Some(p) => Expr::col((p, Col::LabelInt))
+                        .cast_as(BiticalType::Double)
+                        .into(),
+                    None => Expr::col(Col::LabelInt)
+                        .cast_as(BiticalType::Double)
+                        .into(),
+                },
+                BiticalType::Double => match row_type {
+                    Some(p) => Expr::col((p, Col::LabelDouble)).into(),
+                    None => Expr::col(Col::LabelDouble).into(),
+                },
+                _ => coalesce_label_columns_as_string_for_row(row_type),
+            }
+        }
+        StorageMapping::Basic { column, .. } => match row_type {
+            Some(p) => Expr::col((p, *column)).into(),
+            None => Expr::col(*column).into(),
+        },
+        StorageMapping::Composite => {
+            coalesce_label_columns_as_string_for_row(row_type)
+        }
+    }
+}
+
 pub(super) fn build_storage_column_expr(
     storage: &StorageMapping,
     bitical_type: BiticalType,
 ) -> SimpleExpr {
-    match storage {
-        StorageMapping::Fixed(col) => Expr::col(*col).into(),
-        StorageMapping::Basic { column, .. } if *column == Col::LabelStr => {
-            match bitical_type {
-                BiticalType::Integer => {
-                    Expr::col(Col::LabelInt).cast_as(BiticalType::Double).into()
-                }
-                BiticalType::Double => Expr::col(Col::LabelDouble).into(),
-                _ => coalesce_label_columns_as_string(),
-            }
-        }
-        StorageMapping::Basic { column, .. } => Expr::col(*column).into(),
-        StorageMapping::Composite => coalesce_label_columns_as_string(),
-    }
+    build_storage_column_expr_for_row(storage, bitical_type, None)
 }
 
-pub(super) fn coalesce_label_columns_as_string() -> SimpleExpr {
-    Func::coalesce([
-        Expr::col(Col::LabelStr).into(),
-        Expr::col(Col::LabelInt).cast_as(BiticalType::String).into(),
-        Expr::col(Col::LabelDouble)
+pub(super) fn coalesce_label_columns_as_string_for_row(
+    row_type: Option<Pronoun>,
+) -> SimpleExpr {
+    let col_str: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelStr)).into(),
+        None => Expr::col(Col::LabelStr).into(),
+    };
+    let col_int: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelInt))
             .cast_as(BiticalType::String)
             .into(),
+        None => Expr::col(Col::LabelInt).cast_as(BiticalType::String).into(),
+    };
+    let col_double: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelDouble))
+            .cast_as(BiticalType::String)
+            .into(),
+        None => Expr::col(Col::LabelDouble)
+            .cast_as(BiticalType::String)
+            .into(),
+    };
+    let col_bool = match row_type {
+        Some(p) => Expr::col((p, Col::LabelBool)),
+        None => Expr::col(Col::LabelBool),
+    };
+    Func::coalesce([
+        col_str,
+        col_int,
+        col_double,
         sea_query::CaseStatement::new()
-            .case(Expr::col(Col::LabelBool).eq(true), "true")
-            .case(Expr::col(Col::LabelBool).eq(false), "false")
+            .case(col_bool.clone().eq(true), "true")
+            .case(col_bool.eq(false), "false")
             .into(),
     ])
     .into()
+}
+
+pub(super) fn coalesce_label_columns_as_string() -> SimpleExpr {
+    coalesce_label_columns_as_string_for_row(None)
 }
 
 // ── AggregationContext / NestContext ───────────────────────────────────────
@@ -321,4 +371,129 @@ pub(super) fn apply_arithmetic_op(
         Mod => BinOper::Custom("%"),
     };
     Expr::expr(left).binary(bin_op, right)
+}
+
+pub(super) fn pattern_to_regex(pattern: &str) -> String {
+    let mut has_start = pattern.starts_with('^');
+    let mut has_end = pattern.ends_with('$');
+    let s = if has_start { &pattern[1..] } else { pattern };
+    let s = if has_end && !s.is_empty() {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
+    if s.starts_with('*') {
+        has_start = true;
+    }
+    if s.ends_with('*') {
+        has_end = true;
+    }
+    let mut regex = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if let Some(next_ch) = chars.next() {
+                    regex.push('\\');
+                    regex.push(next_ch);
+                }
+            }
+            '*' => regex.push_str(".*?"),
+            '?' => regex.push('.'),
+            '.' | '+' | '(' | ')' | '|' | '{' | '}' | '[' | ']' | '^' | '$' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            other => regex.push(other),
+        }
+    }
+    let body = format!("({})", regex);
+    match (has_start, has_end) {
+        (true, true) => format!("^{}$", body),
+        (true, false) => format!("^{}", body),
+        (false, true) => format!("{}$", body),
+        (false, false) => body,
+    }
+}
+
+fn build_label_grouping_extract_call_for_row(
+    storage: &StorageMapping,
+    pattern: &str,
+    row_type: Option<Pronoun>,
+) -> sea_query::FunctionCall {
+    let col_expr = build_storage_column_expr_for_row(
+        storage,
+        BiticalType::String,
+        row_type,
+    );
+    let regex_pat = pattern_to_regex(pattern);
+    Func::cust("regexp_extract")
+        .arg(col_expr)
+        .arg(Expr::val(regex_pat))
+        .arg(Expr::val(1))
+}
+
+pub fn build_label_grouping_expr_for_row(
+    op: &crate::query::lens_resolver::ResolvedOperand,
+    row_type: Option<Pronoun>,
+) -> SimpleExpr {
+    use crate::query::lens_resolver::ResolvedOperand;
+    match op {
+        ResolvedOperand::LabelGrouping {
+            pattern, storage, ..
+        } => {
+            let extract_call = build_label_grouping_extract_call_for_row(
+                storage, pattern, row_type,
+            );
+            Func::cust("NULLIF")
+                .arg(extract_call)
+                .arg(Expr::val(""))
+                .into()
+        }
+        _ => panic!("Expected ResolvedOperand::LabelGrouping"),
+    }
+}
+
+pub fn build_label_grouping_expr(
+    op: &crate::query::lens_resolver::ResolvedOperand,
+) -> SimpleExpr {
+    build_label_grouping_expr_for_row(op, None)
+}
+
+pub fn build_label_grouping_match_cond_for_row(
+    storage: &StorageMapping,
+    pattern: &str,
+    row_type: Option<Pronoun>,
+) -> Condition {
+    let extract_call =
+        build_label_grouping_extract_call_for_row(storage, pattern, row_type);
+    Condition::all()
+        .add(Expr::expr(extract_call.clone()).is_not_null())
+        .add(Expr::expr(extract_call).ne(Expr::val("")))
+}
+
+pub fn build_label_grouping_match_cond(
+    storage: &StorageMapping,
+    pattern: &str,
+) -> Condition {
+    build_label_grouping_match_cond_for_row(storage, pattern, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pattern_to_regex_conversion() {
+        assert_eq!(pattern_to_regex("/projects/*/"), "(/projects/.*?/)");
+        assert_eq!(pattern_to_regex("^/projects/*/"), "^(/projects/.*?/)");
+        assert_eq!(pattern_to_regex("/projects/*/$"), "(/projects/.*?/)$");
+        assert_eq!(pattern_to_regex("^/projects/*/$"), "^(/projects/.*?/)$");
+        assert_eq!(pattern_to_regex("foo.bar"), "(foo\\.bar)");
+        assert_eq!(pattern_to_regex("a+b(c)"), "(a\\+b\\(c\\))");
+        assert_eq!(pattern_to_regex("*"), "^(.*?)$");
+        assert_eq!(pattern_to_regex("alpha*"), "(alpha.*?)$");
+        assert_eq!(pattern_to_regex("*.rs"), "^(.*?\\.rs)");
+        assert_eq!(pattern_to_regex("*src*"), "^(.*?src.*?)$");
+    }
 }

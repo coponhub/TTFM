@@ -44,10 +44,8 @@ pub use types::{
     FileRef, ItemKind, Label, Origin, Progress, TagType, TypedTag,
 };
 
-mod cache;
-pub use cache::CacheManager;
 pub mod search;
-pub use search::SearchOptions;
+pub use search::{CacheManager, SearchOptions};
 pub mod edit;
 pub mod tagging;
 pub use rank::{get_type_ranks, set_rank_by_id};

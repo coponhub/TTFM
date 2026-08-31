@@ -212,6 +212,9 @@ pub fn write_and_refresh(
         reader,
         &store.db_dir,
     )?;
+    if resp.updated > 0 || resp.deleted > 0 {
+        crate::search::clear_cache(&store.db_dir);
+    }
     Ok(resp)
 }
 

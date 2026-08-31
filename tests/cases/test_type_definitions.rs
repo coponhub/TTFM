@@ -1551,7 +1551,7 @@ fn multiple_type_cast_in_single_command_is_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn cast_to_uuid_preserves_label_str_storage() -> anyhow::Result<()> {
+fn cast_to_uuid_is_rejected() -> anyhow::Result<()> {
     let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
     let valid_uuid = "550e8400-e29b-41d4-a716-446655440000";
     edit(
@@ -1565,7 +1565,7 @@ fn cast_to_uuid_preserves_label_str_storage() -> anyhow::Result<()> {
         &mut Vec::new(),
     )?;
 
-    edit(
+    let res = edit(
         &store,
         &reg,
         "type:my_id",
@@ -1574,18 +1574,8 @@ fn cast_to_uuid_preserves_label_str_storage() -> anyhow::Result<()> {
         None,
         WriteOptions::default(),
         &mut Vec::new(),
-    )?;
-
-    let ut_path = store.path_for_target(ttfm::TargetTable::UserTags);
-    let str_val: String = store.conn.query_row(
-        &format!(
-            "SELECT label_str FROM read_parquet('{}') WHERE type = 'my_id'",
-            ut_path.to_string_lossy()
-        ),
-        [],
-        |r| r.get(0),
-    )?;
-    assert_eq!(str_val, valid_uuid);
+    );
+    assert!(res.is_err(), "Casting to uuid must be rejected");
 
     Ok(())
 }
@@ -1984,7 +1974,7 @@ fn zero_affected_cast_skips_conversion() -> anyhow::Result<()> {
 #[test]
 fn test_uuid_tag_assignment_and_validation() -> anyhow::Result<()> {
     let (store, reg, _tmp) = setup_with_files(&["a.txt"]);
-    edit(
+    let res = edit(
         &store,
         &reg,
         "type:session_id",
@@ -1993,32 +1983,8 @@ fn test_uuid_tag_assignment_and_validation() -> anyhow::Result<()> {
         None,
         WriteOptions::default(),
         &mut Vec::new(),
-    )?;
-
-    let valid_uuid = "550e8400-e29b-41d4-a716-446655440000";
-    let resp = edit(
-        &store,
-        &reg,
-        "filename:a.txt",
-        Some(&format!("session_id:{}", valid_uuid)),
-        QueryType::Tag,
-        None,
-        WriteOptions::default(),
-        &mut Vec::new(),
-    )?;
-    assert!(resp.updated > 0);
-
-    let res = edit(
-        &store,
-        &reg,
-        "filename:a.txt",
-        Some("session_id:not-a-uuid"),
-        QueryType::Tag,
-        None,
-        WriteOptions::default(),
-        &mut Vec::new(),
     );
-    assert!(res.is_err());
+    assert!(res.is_err(), "Setting bitical_type:uuid must be rejected");
 
     Ok(())
 }

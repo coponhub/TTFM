@@ -2720,3 +2720,412 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_nest_label_grouping_sum_size() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let app1 = root.join("projects/app1/src");
+    let app2 = root.join("projects/app2");
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::create_dir_all(&docs)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(root.join("projects/app1/Cargo.toml"), "[package]")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+    std::fs::write(docs.join("readme.md"), "# Hello")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "path:/projects/*/: &: sum(size:)",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res.results.len(), 2, "Should group into app1 and app2");
+    for item in &res.results {
+        assert_eq!(
+            item.representative.tags.first().map(|t| t.tag_type()),
+            Some(ttfm::types::TagType::from("path")),
+            "Representative tag type must be 'path'"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_commutative_and_composition() -> anyhow::Result<()>
+{
+    let dir = tempdir()?;
+    let root = dir.path();
+    let app1 = root.join("projects/app1");
+    let app2 = root.join("projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(app1.join("Cargo.toml"), "[package]")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res1 = search::search_nowarn(
+        &store,
+        &registry,
+        "(path:/projects/*/: & extension:rs) &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res1.results.len(), 1, "Only app1 has .rs files");
+
+    let res2 = search::search_nowarn(
+        &store,
+        &registry,
+        "(extension:rs & path:/projects/*/:) &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res2.results.len(),
+        1,
+        "Commutative order should yield same result"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_anchored_and_quoted_pattern() -> anyhow::Result<()>
+{
+    let dir = tempdir()?;
+    let root = dir.path();
+    let app1 = root.join("projects/app1");
+    let other = root.join("other/projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&other)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(other.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res1 = search::search_nowarn(
+        &store,
+        &registry,
+        &format!("path:^{}/projects/*/: &: count()", root.display()),
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res1.results.len(),
+        1,
+        "Only root /projects should match anchored pattern"
+    );
+
+    let res2 = search::search_nowarn(
+        &store,
+        &registry,
+        &format!("path:\"^{}/projects/*/\": &: count()", root.display()),
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res2.results.len(),
+        1,
+        "Quoted pattern should match anchored pattern"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_unmatched_rows_excluded() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&docs)?;
+    std::fs::write(docs.join("readme.md"), "# Hello")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "path:/nonexistent/*/: &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res.results.len(), 0, "Unmatched rows must be excluded");
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_multi_key() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let root = dir.path();
+    let app1 = root.join("projects/app1");
+    let app2 = root.join("projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(app1.join("lib.rs"), "pub fn f() {}")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "(path:/projects/*/: &: extension:) &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res.results.len(), 2, "app1:rs and app2:js");
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_count_typed() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    let app1 = root.join("projects/app1");
+    let app2 = root.join("projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(app1.join("lib.rs"), "pub fn f() {}")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "path:/projects/*/: &: count(size:)",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res.results.len(),
+        2,
+        "app1 and app2 groups with count(size:)"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_multi_key_comparison() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    let app1 = root.join("projects/app1");
+    let app2 = root.join("projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(app1.join("lib.rs"), "pub fn f() {}")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "(path:/projects/*/: &: extension:) &: count() > 0",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res.results.len(),
+        3,
+        "3 files matched (main.rs, lib.rs, index.js)"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_nest_label_grouping_scalar_comparison() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    let app1 = root.join("projects/app1");
+    let app2 = root.join("projects/app2");
+    std::fs::create_dir_all(&app1)?;
+    std::fs::create_dir_all(&app2)?;
+    std::fs::write(app1.join("main.rs"), "fn main() {}")?;
+    std::fs::write(app1.join("lib.rs"), "pub fn f() {}")?;
+    std::fs::write(app2.join("index.js"), "console.log();")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "path:/projects/*/: &: count() > 1",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(
+        res.results.len(),
+        2,
+        "Only app1 files (main.rs, lib.rs) match count > 1"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_label_grouping_on_user_defined_tag() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    std::fs::write(root.join("a.txt"), "a")?;
+    std::fs::write(root.join("b.txt"), "b")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    ttfm::edit::edit(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Some("project:alpha_1"),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    ttfm::edit::edit(
+        &store,
+        &registry,
+        "filename:b.txt",
+        Some("project:alpha_2"),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "project:*alpha*: &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert!(
+        !res.results.is_empty(),
+        "LabelGrouping on user-defined tag must succeed"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_label_grouping_boundary_wildcards() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    std::fs::write(root.join("a.txt"), "a")?;
+    std::fs::write(root.join("b.txt"), "b")?;
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
+    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
+
+    ttfm::edit::edit(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Some("project:alpha_1"),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+    ttfm::edit::edit(
+        &store,
+        &registry,
+        "filename:b.txt",
+        Some("project:alpha_2"),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions::default(),
+        &mut Vec::new(),
+    )?;
+
+    let res_wildcard_all = search::search_nowarn(
+        &store,
+        &registry,
+        "project:*: &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res_wildcard_all.results.len(), 2);
+
+    let res_trailing_wildcard = search::search_nowarn(
+        &store,
+        &registry,
+        "project:alpha*: &: count()",
+        ttfm::SearchOptions::default(),
+    )?;
+    assert_eq!(res_trailing_wildcard.results.len(), 2);
+
+    Ok(())
+}

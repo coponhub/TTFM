@@ -82,6 +82,10 @@ pub enum AggregationNode {
 pub enum Operand {
     Literal(Label),
     TypeRef(TagType),
+    LabelGrouping {
+        tag_type: TagType,
+        pattern: String,
+    },
     Calculation(Box<CalculationNode>),
     /// 集約演算結果 (sum(size:), count(*) など)
     Aggregation(Box<AggregationNode>),
@@ -159,6 +163,8 @@ pub enum QueryNode {
         op: BasicOp,
         range: DateTimeRange,
     },
+    /// 動的クエリ展開（Eval: `q([query])`）
+    Eval(Box<QueryNode>),
 }
 
 impl QueryNode {
@@ -247,6 +253,9 @@ impl QueryNode {
             QueryNode::DateTimeRange { first, .. } => {
                 first.collect_types(types);
             }
+            QueryNode::Eval(inner) => {
+                inner.collect_types(types);
+            }
         }
     }
 
@@ -268,6 +277,9 @@ impl QueryNode {
                     left.collect_projections(projections);
                 }
                 nest.right.collect_projections(projections);
+            }
+            QueryNode::Eval(inner) => {
+                inner.collect_projections(projections);
             }
             _ => {}
         }
@@ -314,6 +326,9 @@ impl Operand {
             Operand::TypeRef(tt) => {
                 types.insert(tt.as_str().to_string());
             }
+            Operand::LabelGrouping { tag_type, .. } => {
+                types.insert(tag_type.as_str().to_string());
+            }
             Operand::Calculation(calc) => {
                 calc.left.collect_types(types);
                 calc.right.collect_types(types);
@@ -332,6 +347,9 @@ impl Operand {
             Operand::Literal(_) => {}
             Operand::TypeRef(tt) => {
                 projections.insert(tt.as_str().to_string());
+            }
+            Operand::LabelGrouping { tag_type, .. } => {
+                projections.insert(tag_type.as_str().to_string());
             }
             Operand::Calculation(calc) => {
                 calc.left.collect_projections(projections);

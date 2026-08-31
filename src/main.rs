@@ -162,6 +162,10 @@ enum Commands {
 
 /// アプリケーションのエントリポイント。
 fn main() -> Result<()> {
+    if ttfm::search::maybe_run_worker()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     // Clear コマンドの場合は完全な初期化をスキップし、破損したDBでも削除できるようにする
@@ -988,6 +992,39 @@ mod tests {
             has_skipped: false,
         };
         assert_eq!(format_untag_result(&resp), "Deleted tags: 3, files: 0.");
+    }
+
+    #[test]
+    fn test_print_results_no_generating_warning_on_completed_cache_with_has_more(
+    ) {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "500");
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+
+        let mut response = ttfm::search::search_nowarn(
+            &store,
+            &registry,
+            "type:*",
+            ttfm::SearchOptions::default(),
+        )
+        .unwrap();
+
+        response.has_more = true;
+        response.progress.is_done = true;
+
+        let mut out = Vec::<u8>::new();
+        print_results(&store, &registry, &response, "type:*", 10, &mut out);
+        std::env::remove_var("COLUMNS");
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            !output.contains("Background cache generating"),
+            "Completed cache with has_more=true must not display generating warning, got:\n{}",
+            output
+        );
     }
 }
 

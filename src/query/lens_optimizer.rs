@@ -40,6 +40,7 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             // DuckDB has a bug evaluating `HAVING A OR B` when A or B contains an `IN` subquery with `INTERSECT`.
             // By NOT merging ORs, it falls back to UNION which works perfectly.
             // merge_nest_matches(&mut optimized_children, true);
+            collapse_same_column_matches(&mut optimized_children);
             if optimized_children.len() == 1 {
                 optimized_children.pop().unwrap()
             } else {
@@ -368,13 +369,200 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
     *children = remaining;
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum CollapseKey {
+    Col(crate::db::Col),
+    Match(Option<crate::types::TagType>, crate::db::Col),
+}
+
+impl CollapseKey {
+    fn extract(node: &ResolvedNode) -> Option<(Self, crate::types::Label)> {
+        match node {
+            ResolvedNode::ColumnMatch { tag, label } if is_plain(label) => {
+                let target_col = if *tag == crate::types::SType::Label {
+                    crate::db::Col::from(label.value().name().to_column())
+                } else {
+                    crate::db::Col::from(*tag)
+                };
+                Some((Self::Col(target_col), label.clone()))
+            }
+            ResolvedNode::Match {
+                tag_type,
+                storage,
+                op,
+                label,
+                ..
+            } if is_plain(label)
+                && matches!(
+                    op,
+                    crate::query::ast::ComparisonOp::Scalar(
+                        crate::query::ast::BasicOp::Eq
+                    ) | crate::query::ast::ComparisonOp::Label(
+                        crate::query::ast::BasicOp::Eq
+                    )
+                ) =>
+            {
+                match storage {
+                    crate::query::lens_schema::StorageMapping::Fixed(col) => {
+                        Some((Self::Match(None, *col), label.clone()))
+                    }
+                    crate::query::lens_schema::StorageMapping::Basic {
+                        ..
+                    } => {
+                        let target_col = crate::db::Col::from(
+                            label.value().name().to_column(),
+                        );
+                        Some((
+                            Self::Match(Some(tag_type.clone()), target_col),
+                            label.clone(),
+                        ))
+                    }
+                    crate::query::lens_schema::StorageMapping::Composite => {
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn into_node(self, labels: Vec<crate::types::Label>) -> ResolvedNode {
+        let mut unique_labels: Vec<crate::types::Label> = Vec::new();
+        for l in labels {
+            if !unique_labels.iter().any(|u| u.value() == l.value()) {
+                unique_labels.push(l);
+            }
+        }
+        match self {
+            Self::Col(target_col) => ResolvedNode::ColumnMatchIn {
+                target_col,
+                labels: unique_labels,
+            },
+            Self::Match(tag_type, target_col) => ResolvedNode::MatchIn {
+                tag_type,
+                target_col,
+                labels: unique_labels,
+            },
+        }
+    }
+}
+
+fn is_plain(label: &crate::types::Label) -> bool {
+    let s = label.to_string();
+    !s.contains(['*', '?', '[', '\\'])
+}
+
+fn collapse_same_column_matches(children: &mut Vec<ResolvedNode>) {
+    use std::collections::{HashMap, HashSet};
+
+    let mut groups: HashMap<CollapseKey, Vec<crate::types::Label>> =
+        HashMap::new();
+    for (key, label) in children.iter().filter_map(CollapseKey::extract) {
+        groups.entry(key).or_default().push(label);
+    }
+    groups.retain(|_, v| v.len() >= 2);
+    if groups.is_empty() {
+        return;
+    }
+
+    let target_keys: HashSet<CollapseKey> = groups.keys().cloned().collect();
+    let mut new_children = Vec::new();
+
+    for child in children.drain(..) {
+        let Some((key, _)) = CollapseKey::extract(&child) else {
+            new_children.push(child);
+            continue;
+        };
+
+        if let Some(labels) = groups.remove(&key) {
+            new_children.push(key.into_node(labels));
+        } else if !target_keys.contains(&key) {
+            new_children.push(child);
+        }
+    }
+
+    *children = new_children;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::query::ResolvedOperand;
     use crate::tag::TagRegistry;
+    use crate::types::{Label, SType};
 
     use crate::query::lens_resolver::Resolver;
+
+    #[test]
+    fn test_collapse_same_column_matches_into_in_list() {
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("1"),
+            },
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("2"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert_eq!(
+            optimized,
+            ResolvedNode::ColumnMatchIn {
+                target_col: crate::db::Col::ItemId,
+                labels: vec![Label::from("1"), Label::from("2")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_collapse_does_not_group_mixed_bitical_types_for_basic_tags() {
+        use crate::query::ast::{BasicOp, ComparisonOp};
+        use crate::query::lens_schema::StorageMapping;
+        use crate::types::{BiticalType, TagType};
+
+        let storage = StorageMapping::Basic {
+            column: crate::db::Col::LabelStr,
+            tag_type: "x".to_string(),
+        };
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::Match {
+                tag_type: TagType::from("x"),
+                storage: storage.clone(),
+                bitical_type: BiticalType::String,
+                op: ComparisonOp::Scalar(BasicOp::Eq),
+                label: Label::from(1i64),
+            },
+            ResolvedNode::Match {
+                tag_type: TagType::from("x"),
+                storage,
+                bitical_type: BiticalType::String,
+                op: ComparisonOp::Scalar(BasicOp::Eq),
+                label: Label::from("abc"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert!(
+            matches!(optimized, ResolvedNode::Or(_)),
+            "Mixed integer and string on basic tags must not be grouped into single IN"
+        );
+    }
+
+    #[test]
+    fn test_collapse_ignores_glob_and_non_eq_matches() {
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("*1"),
+            },
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("2"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert!(matches!(optimized, ResolvedNode::Or(_)));
+    }
 
     #[test]
     fn test_optimize_same_key_merge_logical() {

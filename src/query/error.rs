@@ -21,6 +21,7 @@ use crate::query::ast::{
     AggregationNode, ArithmeticAggOp, BasicOp, CalculationNode, ComparisonNode,
     ComparisonOp, NestNode, Operand, QueryNode,
 };
+use crate::types::TagType;
 
 // =========================================================================
 // Parser Errors
@@ -118,6 +119,13 @@ pub fn definition_count_in_nest_warning_msg() -> Warning {
         "count(type:*) inside a Nest ('&:') counts the type definitions, \
          which is the same for every group. Did you mean count(type:) \
          to count the types actually attached in each group?"
+            .to_string(),
+    )
+}
+
+pub fn eval_capture_ignored_warning_msg() -> Warning {
+    Warning(
+        "Wildcard patterns inside 'q(...)' cannot be captured via '{n}' references in edit operations."
             .to_string(),
     )
 }
@@ -713,7 +721,9 @@ fn operand_is_scalar_only(op: &Operand) -> bool {
     match op {
         Operand::Literal(_) | Operand::Aggregation(_) => true,
         Operand::Calculation(c) => calc_is_scalar_only(c),
-        Operand::TypeRef(_) | Operand::Query(_) => false,
+        Operand::TypeRef(_)
+        | Operand::LabelGrouping { .. }
+        | Operand::Query(_) => false,
     }
 }
 
@@ -824,7 +834,7 @@ fn operand_is_agg_or_literal(operand: &Operand) -> bool {
             QueryNode::Aggregation(_) => true,
             _ => false,
         },
-        Operand::TypeRef(_) => false,
+        Operand::TypeRef(_) | Operand::LabelGrouping { .. } => false,
     }
 }
 
@@ -994,6 +1004,26 @@ mod tests {
         let err = aggregator_requires_argument("sum");
         assert_eq!(err.to_string(), "Aggregator 'sum' requires an argument");
     }
+
+    #[test]
+    fn test_check_label_grouping_type() {
+        let lens = crate::query::lens_schema::Lens::base_standard();
+
+        assert!(
+            check_label_grouping_type(&lens, &TagType::from("path")).is_ok()
+        );
+
+        let size_err = check_label_grouping_type(&lens, &TagType::from("size"));
+        assert!(size_err.is_err());
+        assert!(size_err
+            .unwrap_err()
+            .to_string()
+            .contains("requires string type"));
+
+        let type_err = check_label_grouping_type(&lens, &TagType::from("type"));
+        assert!(type_err.is_err());
+        assert!(type_err.unwrap_err().to_string().contains("definition tag"));
+    }
 }
 fn check_arithmetic_parentheses_misuse(
     line_str: &str,
@@ -1114,4 +1144,26 @@ fn check_boundary_at_whitespace(chars: &[char], space_idx: usize) -> bool {
         return !(next_idx + 1 < chars.len() && chars[next_idx + 1] == ':');
     }
     ":><=".contains(nc)
+}
+
+pub fn check_label_grouping_type(
+    schema: &dyn crate::query::logical_schema::LogicalSchema,
+    tag_type: &TagType,
+) -> anyhow::Result<()> {
+    use crate::query::logical_schema::LogicalType;
+    let logical_type = schema.get_logical_type(tag_type);
+    if !matches!(logical_type, LogicalType::String | LogicalType::Any) {
+        anyhow::bail!(
+            "Label Grouping requires string type, but '{}' is {:?}",
+            tag_type,
+            logical_type
+        );
+    }
+    if schema.item_kind(tag_type).is_some() {
+        anyhow::bail!(
+            "Label Grouping cannot be applied to definition tag '{}'",
+            tag_type
+        );
+    }
+    Ok(())
 }

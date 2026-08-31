@@ -96,5 +96,7 @@ fn refresh_view(store: &Store, registry: &TagRegistry) -> Result<()> {
         &all_columns,
         reader,
         &store.db_dir,
-    )
+    )?;
+    crate::search::clear_cache(&store.db_dir);
+    Ok(())
 }

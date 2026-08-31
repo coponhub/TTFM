@@ -325,6 +325,9 @@ fn resolve_hardlinks(
     for issue in issues {
         if let FsIssue::MultipleLocations(item, paths, candidate_moves) = issue
         {
+            if candidate_moves.is_empty() {
+                continue;
+            }
             let choice = match policy_override {
                 Some(HardlinkPolicy::Abort) => HardlinkChoice::Abort,
                 Some(HardlinkPolicy::Skip) => HardlinkChoice::Skip,
@@ -332,7 +335,8 @@ fn resolve_hardlinks(
                 None => match for_all_choice.clone() {
                     Some(c) => c,
                     None if interactive => {
-                        let c = prompt.ask_hardlink_resolution(item, paths)?;
+                        let c = prompt
+                            .ask_hardlink_resolution(item, candidate_moves)?;
                         if matches!(
                             c,
                             HardlinkChoice::SkipAll
@@ -488,7 +492,7 @@ pub trait ConfirmPrompt {
     fn ask_hardlink_resolution(
         &mut self,
         item: &ItemId,
-        paths: &[PathBuf],
+        candidate_moves: &[FsMove],
     ) -> Result<HardlinkChoice>;
     fn ask_mkdir_confirmation(&mut self, dir: &Path) -> Result<bool>;
 }
@@ -572,16 +576,16 @@ impl<'a, R: BufRead, W: Write> ConfirmPrompt for IoConfirmPrompt<'a, R, W> {
     fn ask_hardlink_resolution(
         &mut self,
         item: &ItemId,
-        paths: &[PathBuf],
+        candidate_moves: &[FsMove],
     ) -> Result<HardlinkChoice> {
         writeln!(self.output, "Multiple hardlinks detected for item {item}:")?;
-        let n = paths.len();
-        for (i, p) in paths.iter().enumerate() {
+        let n = candidate_moves.len();
+        for (i, m) in candidate_moves.iter().enumerate() {
             writeln!(
                 self.output,
                 "  [{}] move \"{}\" only",
                 i + 1,
-                p.display()
+                m.from.display()
             )?;
         }
         writeln!(self.output, "  [{}] move all paths", n + 1)?;
@@ -834,7 +838,7 @@ mod tests {
         fn ask_hardlink_resolution(
             &mut self,
             _item: &ItemId,
-            _paths: &[PathBuf],
+            _candidate_moves: &[FsMove],
         ) -> Result<HardlinkChoice> {
             Ok(HardlinkChoice::Abort)
         }
@@ -1100,7 +1104,7 @@ mod tests {
         fn ask_hardlink_resolution(
             &mut self,
             _: &ItemId,
-            _: &[PathBuf],
+            _: &[FsMove],
         ) -> Result<HardlinkChoice> {
             Ok(HardlinkChoice::Abort)
         }

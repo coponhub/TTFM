@@ -72,7 +72,7 @@ pub(crate) fn definition_reserved_names(
 }
 
 /// タグの物理的な格納場所
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum StorageMapping {
     /// oneview の専用カラム（Fixed タグ）
     Fixed(Col),
@@ -507,6 +507,7 @@ fn find_tag_type_in_comparison(node: &ComparisonNode) -> Option<TagType> {
     fn from_operand(op: &Operand) -> Option<TagType> {
         match op {
             Operand::TypeRef(tt) => Some(tt.clone()),
+            Operand::LabelGrouping { tag_type, .. } => Some(tag_type.clone()),
             Operand::Aggregation(agg) => from_aggregation(agg),
             Operand::Calculation(calc) => {
                 from_operand(&calc.left).or_else(|| from_operand(&calc.right))

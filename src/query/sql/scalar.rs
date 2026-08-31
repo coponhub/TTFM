@@ -269,6 +269,44 @@ pub(super) fn build_column_match_sql(
     q
 }
 
+pub(super) fn build_column_match_in_sql(
+    src: &Src,
+    target_col: Col,
+    labels: &[Label],
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(src);
+    let exprs: Vec<SimpleExpr> =
+        labels.iter().map(|l| label_to_simple_expr(l)).collect();
+    q.and_where(Expr::col(target_col).is_in(exprs));
+    q
+}
+
+pub(super) fn build_resolved_match_in_sql(
+    src: &Src,
+    tag_type: Option<&crate::types::TagType>,
+    target_col: Col,
+    labels: &[Label],
+) -> SelectStatement {
+    let mut q = Query::select();
+    q.columns([Col::ItemId, Col::Rank, Col::ItemKind])
+        .distinct()
+        .from(src);
+    let exprs: Vec<SimpleExpr> =
+        labels.iter().map(|l| label_to_simple_expr(l)).collect();
+    let mut cond = Condition::all();
+    if let Some(tag_type) = tag_type {
+        cond = cond.add(crate::query::lens_schema::check_tag_match(
+            tag_type.as_str(),
+        ));
+    }
+    cond = cond.add(Expr::col(target_col).is_in(exprs));
+    q.cond_where(cond);
+    q
+}
+
 pub(super) fn build_resolved_tag_tag_match_sql(
     src: &Src,
     left_storage: &StorageMapping,
@@ -694,5 +732,50 @@ mod tests {
         assert!(sql.contains("MONTH"), "should extract month: {}", sql);
         assert!(!sql.contains("DAY"), "day is free: {}", sql);
         assert!(sql.contains("> 2"), "should compare month > 2: {}", sql);
+    }
+
+    #[test]
+    fn test_build_column_match_in_sql_preserves_distinct() {
+        use sea_query::PostgresQueryBuilder;
+        let src = Src::OneView;
+        let labels = vec![Label::from("1"), Label::from("2")];
+        let stmt = build_column_match_in_sql(&src, Col::ItemId, &labels);
+        let sql = stmt.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("DISTINCT"),
+            "should preserve DISTINCT: {}",
+            sql
+        );
+        assert!(
+            sql.contains("IN ('1', '2')"),
+            "should generate IN list: {}",
+            sql
+        );
+    }
+
+    #[test]
+    fn test_build_resolved_match_in_sql_preserves_distinct() {
+        use crate::types::TagType;
+        use sea_query::PostgresQueryBuilder;
+        let src = Src::OneView;
+        let tag_type = TagType::from("project");
+        let labels = vec![Label::from("A"), Label::from("B")];
+        let stmt = build_resolved_match_in_sql(
+            &src,
+            Some(&tag_type),
+            Col::LabelStr,
+            &labels,
+        );
+        let sql = stmt.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("DISTINCT"),
+            "should preserve DISTINCT: {}",
+            sql
+        );
+        assert!(
+            sql.contains("IN ('A', 'B')"),
+            "should generate IN list: {}",
+            sql
+        );
     }
 }

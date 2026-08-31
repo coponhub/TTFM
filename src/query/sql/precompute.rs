@@ -399,6 +399,11 @@ fn build_filter_operand_expr(
             storage,
             bitical_type,
             ..
+        }
+        | ResolvedOperand::LabelGrouping {
+            storage,
+            bitical_type,
+            ..
         } => build_tag_value_agg_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =

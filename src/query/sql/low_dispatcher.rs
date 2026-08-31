@@ -17,10 +17,12 @@
 
 use super::nest::filter;
 use super::{
-    build_column_match_sql, build_label_set_op_pick_sql,
-    build_resolved_and_sql, build_resolved_date_time_match_sql,
-    build_resolved_diff_sql, build_resolved_match_sql, build_resolved_or_sql,
-    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
+    build_column_match_in_sql, build_column_match_sql,
+    build_label_set_op_pick_sql, build_resolved_and_sql,
+    build_resolved_date_time_match_sql, build_resolved_diff_sql,
+    build_resolved_match_in_sql, build_resolved_match_sql,
+    build_resolved_or_sql, build_resolved_tag_tag_match_sql,
+    build_scalar_match_sql,
 };
 use crate::db::Src;
 use crate::query::lens_resolver::ResolvedNode;
@@ -47,6 +49,9 @@ pub(super) fn try_dispatch_common(
         ResolvedNode::ColumnMatch { tag, label } => {
             Ok(build_column_match_sql(src, *tag, label))
         }
+        ResolvedNode::ColumnMatchIn { target_col, labels } => {
+            Ok(build_column_match_in_sql(src, *target_col, labels))
+        }
         ResolvedNode::DefinitionRef { def, .. } => {
             Ok(super::definition::build_definition_pick_sql(src, def))
         }
@@ -62,6 +67,16 @@ pub(super) fn try_dispatch_common(
             *bitical_type,
             *op,
             label,
+        )),
+        ResolvedNode::MatchIn {
+            tag_type,
+            target_col,
+            labels,
+        } => Ok(build_resolved_match_in_sql(
+            src,
+            tag_type.as_ref(),
+            *target_col,
+            labels,
         )),
         ResolvedNode::TagTagMatch {
             left_storage,

@@ -32,7 +32,9 @@ pub fn search_and_apply_captures(
     )?;
     resp.query_into_tags();
 
-    let units = parsed.map(|_| collect_units(search_query)).transpose()?;
+    let units = parsed
+        .map(|_| collect_units(search_query, sink))
+        .transpose()?;
 
     resp.results
         .into_iter()
@@ -105,14 +107,28 @@ fn walk(
     pairs: Pairs<Rule>,
     units: &mut Vec<Unit>,
     next: &mut usize,
+    sink: &mut dyn WarningSink,
 ) -> Result<()> {
     for pair in pairs {
         match pair.as_rule() {
+            Rule::eval_expr => {
+                let s = pair.as_str();
+                if s.contains('*') || s.contains('?') || s.contains('[') {
+                    sink.warn(
+                        crate::query::error::eval_capture_ignored_warning_msg(),
+                    );
+                }
+            }
             Rule::typed_tag => {
                 let mut inner = pair.into_inner();
                 let ty = build_pattern(leaf(inner.next().unwrap()), next)?;
                 let label = build_pattern(leaf(inner.next().unwrap()), next)?;
                 units.push(Unit::Pair { ty, label });
+            }
+            Rule::pattern_projection => {
+                return Err(
+                    super::error::label_grouping_in_capture_editing_err(),
+                );
             }
             Rule::type_ref => {
                 let ty = build_pattern(
@@ -127,19 +143,28 @@ fn walk(
             | Rule::number => {
                 units.push(Unit::Label(build_pattern(pair, next)?));
             }
-            _ => walk(pair.into_inner(), units, next)?,
+            _ => walk(pair.into_inner(), units, next, sink)?,
         }
     }
     Ok(())
 }
 
-fn collect_units(search_query: &str) -> Result<(Vec<Unit>, usize)> {
+fn collect_units(
+    search_query: &str,
+    sink: &mut dyn WarningSink,
+) -> Result<(Vec<Unit>, usize)> {
     let pairs = PestQueryParser::parse(Rule::query, search_query)
         .map_err(|e| anyhow!("{e}"))?;
     let mut units = Vec::new();
     let mut next = 1usize;
-    walk(pairs, &mut units, &mut next)?;
+    walk(pairs, &mut units, &mut next, sink)?;
     Ok((units, next - 1))
+}
+
+#[cfg(test)]
+fn collect_units_nowarn(search_query: &str) -> Result<(Vec<Unit>, usize)> {
+    let mut discard: Vec<crate::query::error::Warning> = Vec::new();
+    collect_units(search_query, &mut discard)
 }
 
 impl Pattern {
@@ -430,7 +455,7 @@ mod tests {
 
     #[test]
     fn numbers_run_left_to_right_across_label_and_type() {
-        let (units, total) = collect_units("a*:b* | c*:d*").unwrap();
+        let (units, total) = collect_units_nowarn("a*:b* | c*:d*").unwrap();
         assert_eq!(
             units,
             vec![
@@ -449,7 +474,8 @@ mod tests {
 
     #[test]
     fn metachar_inside_quotes_is_numbered() {
-        let (units, total) = collect_units(r#"project:"al*pha""#).unwrap();
+        let (units, total) =
+            collect_units_nowarn(r#"project:"al*pha""#).unwrap();
         assert_eq!(
             units,
             vec![Unit::Pair {
@@ -462,7 +488,7 @@ mod tests {
 
     #[test]
     fn escaped_metachar_is_not_numbered() {
-        let (units, total) = collect_units(r"project:al\*pha").unwrap();
+        let (units, total) = collect_units_nowarn(r"project:al\*pha").unwrap();
         assert_eq!(
             units,
             vec![Unit::Pair {
@@ -475,14 +501,14 @@ mod tests {
 
     #[test]
     fn count_shorthand_consumes_no_number() {
-        let (units, total) = collect_units("count() > 0").unwrap();
+        let (units, total) = collect_units_nowarn("count() > 0").unwrap();
         assert_eq!(units, vec![Unit::Label(literal("0"))]);
         assert_eq!(total, 0);
     }
 
     #[test]
     fn explicit_count_star_star_consumes_two() {
-        let (units, total) = collect_units("count(*:*) > 0").unwrap();
+        let (units, total) = collect_units_nowarn("count(*:*) > 0").unwrap();
         assert_eq!(
             units,
             vec![
@@ -498,7 +524,7 @@ mod tests {
 
     #[test]
     fn bare_token_on_stuck_comparison_rhs_is_numbered() {
-        let (units, total) = collect_units("size:>al*pha").unwrap();
+        let (units, total) = collect_units_nowarn("size:>al*pha").unwrap();
         assert_eq!(
             units,
             vec![
@@ -511,7 +537,7 @@ mod tests {
 
     #[test]
     fn arithmetic_star_is_not_numbered() {
-        let (units, total) = collect_units("(size: * 2)").unwrap();
+        let (units, total) = collect_units_nowarn("(size: * 2)").unwrap();
         assert_eq!(
             units,
             vec![Unit::Type(glob("size", &[])), Unit::Label(literal("2"))]
@@ -522,7 +548,7 @@ mod tests {
     #[test]
     fn aggregate_and_difference_operands_follow_same_rule() {
         let (units, total) =
-            collect_units("count(pro*:al*) - count(a*:b*)").unwrap();
+            collect_units_nowarn("count(pro*:al*) - count(a*:b*)").unwrap();
         assert_eq!(
             units,
             vec![
@@ -541,7 +567,7 @@ mod tests {
 
     #[test]
     fn or_branches_are_collected_like_any_other_position() {
-        let (units, total) = collect_units("x*:y* | z*:w*").unwrap();
+        let (units, total) = collect_units_nowarn("x*:y* | z*:w*").unwrap();
         assert_eq!(
             units,
             vec![
@@ -560,7 +586,7 @@ mod tests {
 
     #[test]
     fn escaped_metachar_in_type_position_is_not_numbered() {
-        let (units, total) = collect_units(r"\*:x").unwrap();
+        let (units, total) = collect_units_nowarn(r"\*:x").unwrap();
         assert_eq!(
             units,
             vec![Unit::Pair {
@@ -573,7 +599,7 @@ mod tests {
 
     #[test]
     fn quoted_type_pattern_is_numbered() {
-        let (units, total) = collect_units(r#""ext*":txt"#).unwrap();
+        let (units, total) = collect_units_nowarn(r#""ext*":txt"#).unwrap();
         assert_eq!(
             units,
             vec![Unit::Pair {
@@ -586,7 +612,7 @@ mod tests {
 
     #[test]
     fn type_side_precedes_label_side_in_a_pair() {
-        let (units, _total) = collect_units("pro*:al*").unwrap();
+        let (units, _total) = collect_units_nowarn("pro*:al*").unwrap();
         assert_eq!(
             units,
             vec![Unit::Pair {
@@ -643,7 +669,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "pha");
@@ -659,7 +685,7 @@ mod tests {
             TypedTag::new("grp", "y"),
         ]);
         let parsed = edit_query("note:{1}-{2}");
-        let (units, total) = collect_units("cat:* | grp:*").unwrap();
+        let (units, total) = collect_units_nowarn("cat:* | grp:*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         let mut values: Vec<String> = out
             .nodes
@@ -675,7 +701,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![]);
         let parsed = edit_query("project:{1} static:y");
-        let (units, total) = collect_units("project:*").unwrap();
+        let (units, total) = collect_units_nowarn("project:*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].tag_type.value(), "static");
@@ -686,7 +712,8 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("x:{1} y:{2}");
-        let (units, total) = collect_units("cat:* | project:al*").unwrap();
+        let (units, total) =
+            collect_units_nowarn("cat:* | project:al*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].tag_type.value(), "y");
@@ -698,7 +725,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "tt")]);
         let parsed = edit_query("note:pre{1}post");
-        let (units, total) = collect_units("project:tt*").unwrap();
+        let (units, total) = collect_units_nowarn("project:tt*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "prepost");
@@ -709,7 +736,8 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("x:{1}-{2}");
-        let (units, total) = collect_units("count(pro*:al*) > 0").unwrap();
+        let (units, total) =
+            collect_units_nowarn("count(pro*:al*) > 0").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "ject-pha");
@@ -723,7 +751,7 @@ mod tests {
             TypedTag::new("zz_dog", "b1"),
         ]);
         let parsed = edit_query("note:{1}_{2}");
-        let (units, total) = collect_units("zz_*:a*").unwrap();
+        let (units, total) = collect_units_nowarn("zz_*:a*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "cat_1");
@@ -737,7 +765,7 @@ mod tests {
             TypedTag::new("zz_dog", "200"),
         ]);
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("zz_*:100").unwrap();
+        let (units, total) = collect_units_nowarn("zz_*:100").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "cat");
@@ -751,7 +779,7 @@ mod tests {
             TypedTag::new("cat", "b"),
         ]);
         let parsed = edit_query("note:{1} static:z");
-        let (units, total) = collect_units("cat:*").unwrap();
+        let (units, total) = collect_units_nowarn("cat:*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         let static_count = out
             .nodes
@@ -775,7 +803,7 @@ mod tests {
             TypedTag::new("project", "alpha"),
         ]);
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "pha");
@@ -786,7 +814,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{0}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         assert!(apply_captures(&item, &parsed, &units, total, &reg).is_err());
     }
 
@@ -795,7 +823,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{abc}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         assert!(apply_captures(&item, &parsed, &units, total, &reg).is_err());
     }
 
@@ -804,7 +832,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{99999999999999999999999999}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         assert!(apply_captures(&item, &parsed, &units, total, &reg).is_err());
     }
 
@@ -813,7 +841,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{01}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "pha");
     }
@@ -823,7 +851,7 @@ mod tests {
         let reg = reg();
         let item = item_with(vec![TypedTag::new("project", "alpha")]);
         let parsed = edit_query("note:{2}");
-        let (units, total) = collect_units("project:al*").unwrap();
+        let (units, total) = collect_units_nowarn("project:al*").unwrap();
         assert!(apply_captures(&item, &parsed, &units, total, &reg).is_err());
     }
 
@@ -835,7 +863,7 @@ mod tests {
             local_at(2026, 8, 3, 12).timestamp(),
         )]);
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("mtime:*-08-03").unwrap();
+        let (units, total) = collect_units_nowarn("mtime:*-08-03").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "2026");
@@ -850,7 +878,7 @@ mod tests {
             TypedTag::new("zz_ex3", "txt"),
         ]);
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("zz_*:txt").unwrap();
+        let (units, total) = collect_units_nowarn("zz_*:txt").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         let mut values: Vec<String> = out
             .nodes
@@ -904,7 +932,7 @@ mod tests {
             item_count: None,
         };
         let parsed = edit_query("note:{1}");
-        let (units, total) = collect_units("type:proj*").unwrap();
+        let (units, total) = collect_units_nowarn("type:proj*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "ect");
@@ -928,7 +956,7 @@ mod tests {
         let item = item_with(vec![]);
         let parsed = edit_query(r"cat:\*");
         assert!(reject_glob(&parsed).is_ok());
-        let (units, total) = collect_units("x:y").unwrap();
+        let (units, total) = collect_units_nowarn("x:y").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "*");
@@ -940,7 +968,7 @@ mod tests {
         let item = item_with(vec![TypedTag::new("project", "a*b")]);
         let parsed = edit_query("note:{1}");
         assert!(reject_glob(&parsed).is_ok());
-        let (units, total) = collect_units("project:a*").unwrap();
+        let (units, total) = collect_units_nowarn("project:a*").unwrap();
         let out = apply_captures(&item, &parsed, &units, total, &reg).unwrap();
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nodes[0].label.as_ref().unwrap().value(), "*b");
@@ -950,5 +978,28 @@ mod tests {
     fn reject_glob_does_not_look_at_bindings() {
         let parsed = edit_query("note:x*{1}");
         assert!(reject_glob(&parsed).is_err());
+    }
+
+    #[test]
+    fn test_label_grouping_in_capture_editing_is_rejected() {
+        let res = collect_units_nowarn("path:/projects/*/: &: count()");
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Label Grouping pattern projection cannot be used in capture editing"));
+    }
+
+    #[test]
+    fn test_eval_capture_ignored_warns() {
+        let mut warnings = Vec::new();
+        let (units, total) =
+            collect_units("q(milestone:*)", &mut warnings).unwrap();
+        assert_eq!(units.len(), 0);
+        assert_eq!(total, 0);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .to_string()
+            .contains("Wildcard patterns inside 'q(...)'"));
     }
 }

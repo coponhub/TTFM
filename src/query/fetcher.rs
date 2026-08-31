@@ -81,6 +81,65 @@ impl<'a> Fetcher<'a> {
         Ok(results)
     }
 
+    pub fn fetch_for_eval(&self, n: usize, offset: usize) -> Result<Vec<Item>> {
+        use sea_query::PostgresQueryBuilder;
+        let resolver = &self.resolver;
+
+        let sql = crate::query::sql::build_fetch_sql(
+            &Src::OneView,
+            resolver,
+            n,
+            offset,
+        )?;
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+
+        if std::env::var("TTFM_DEBUG").is_ok() {
+            eprintln!("DEBUG: FETCH FOR EVAL SQL: {}", sql_str);
+        }
+
+        if resolver.has_representative() {
+            let mut stmt = self.conn.prepare(&sql_str)?;
+            let results = stmt
+                .query_map([], |row| self.decode_nest_item_from_row(row))?
+                .collect::<duckdb::Result<Vec<_>>>()?;
+            return Ok(results);
+        }
+
+        let mut stmt = self.conn.prepare(&sql_str)?;
+        let mut results = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+        for item in stmt.query_map([], |row| {
+            let (mut res, raw_tags) = read_base_from_row(row)?;
+            for tag_row in raw_tags {
+                if tag_row.tag_type == "name" {
+                    if let Some(bitical) = tag_row.value {
+                        let s = bitical.as_display_name();
+                        let s = s
+                            .parse::<f64>()
+                            .map(|f| f.to_string())
+                            .unwrap_or(s);
+                        res.representative =
+                            vec![crate::types::TypedTag::new(SType::Name, s)]
+                                .into();
+                    }
+                } else if matches!(
+                    tag_row.tag_type.as_str(),
+                    "content" | "tag" | "value"
+                ) {
+                    #[allow(deprecated)]
+                    res.apply_raw_tag(tag_row);
+                }
+            }
+            Ok(res)
+        })? {
+            let item = item?;
+            if seen_ids.insert(item.id.clone()) {
+                results.push(item);
+            }
+        }
+        Ok(results)
+    }
+
     /// 平坦なタグデータのリストを取得（メモリ上での利用・デバッグ用）
     pub fn fetch_flat_table(
         &self,
@@ -179,6 +238,10 @@ impl<'a> Fetcher<'a> {
                 if let Some(ops) = operands {
                     if let Some(op) = ops.get(i) {
                         if let crate::query::lens_resolver::ResolvedOperand::TagRef {
+                            tag_type,
+                            ..
+                        }
+                        | crate::query::lens_resolver::ResolvedOperand::LabelGrouping {
                             tag_type,
                             ..
                         } = op

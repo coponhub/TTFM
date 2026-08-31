@@ -86,6 +86,7 @@ pub fn set_rank_by_id(
         reader,
         &store.db_dir,
     )?;
+    crate::search::clear_cache(&store.db_dir);
     Ok(())
 }
 
