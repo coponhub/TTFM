@@ -13,39 +13,18 @@ TTFMは、**Typed Tag（型付きタグ）** を用いてファイルを管理�
 
 例: `filename:readme.md`, `extension:markdown`
 
-タグには大きく分けて2つのカテゴリが存在する。
-- **SystemTag**: システムによってファイルから自動的に抽出されるタグ（拡張子、サイズ、更新日時など）。
-- **UserTag**: ユーザーが手動で定義・付与するタグ。
+タグにはその由来(**Origin**)により、2つに分かれる。
+- **System**: システムによってファイルから自動的に抽出されるタグ（拡張子、サイズ、更新日時など）。
+- **User**: ユーザーが手動で定義・付与するタグ。
 
 ### 2.2 参照ベース設計 (Item/Reference-Based)
 システムが管理する全ての参照は **Item（アイテム）** と定義し、
-永続的なアイテムは、一意のIDを持つ。アイテムは以下の2つのどちらかの参照を持つ。
+永続的なアイテムは、一意のIDを持つ。
+すべてのItemにはTypedTagを付与する事が可能である。
+これにより、ファイルだけでなく、TypedTagやDBに格納したデータ自体に対してTypedTagを付与する事も可能。
 
-- **File Reference**: ファイルシステム上の実ファイルを示す参照。InodeおよびDevice IDによって同一性が追跡される。
-- **Item Reference**: ファイル以外の対象を示す参照。
-    - **ItemKinds**:
-        `tag`: `Type:Label` 形式のTypedTagそのもの
-        `type` : TypedTagのType
-        `label`：TypedTagのLabel
-        `note`: (noteはユーザーがDBに格納可能なメモ)
-
-アイテムはすべてタグ付けの対象となる。これにより、ファイルだけでなくタグ定義自体にメタデータを付与したり、メモ情報を記録・管理したりすることが可能となる。
-
-### 2.3 Item Name Abstraction (アイテム名の抽象化)
-「アイテムの名前」(name)を、ファイルシステム上の「ファイル名」(filename)から分離し、ユーザーが認識・操作する対象をnameとする
-- **name**: GUIやCLIでユーザーに提示されるアイテムの名称。
-- **filename**: ファイルシステム上の物理的な識別子。
-
-デフォルトでは `name` は `filename` と同一だが、ユーザーは任意の `name` をタグとして付与できる。
-これにより、ファイルシステム上のファイル名を変更することなく、コンテキストに応じたわかりやすい名前で管理可能となる。
-
-なお、タグの種類としての `type:name` は `origin:system` であるが、ユーザーが付与した個別のタグ値（例: `name:foo`）は `origin:user` として扱われる。一方で、ファイル名から自動解決された `name` は `origin:system` となる。
-
-### 2.4 優先度システム (RANK)
-全てのアイテムは `rank` と呼ばれる整数値の優先度を保持する。
-- **アイテムのソート**: 検索結果は `rank` の降順で表示される。
-- **列の表示順序**: タグの型（type）自体が持つ `rank` に基づき、値が大きい
-  タグほど CLI の表示において左側の列に配置される。
+### 2.3 Itemの詳細な設計
+詳細なItemの設計については `ITEM.md` を参照。
 
 ## 3. 非ディレクトリ指向
 ファイルシステム上の「パス」は単なる属性の一つとして扱われ、ユーザーは「どのフォルダにあるか」ではなく「どのようなタグを持っているか」に基づいてファイルを管理する。
@@ -67,22 +46,21 @@ TTFMは、**Typed Tag（型付きタグ）** を用いてファイルを管理�
 
 テーブル定義・スキーマについては `STORE.md` を参照
 
-### 4.3 プラグイン・コンポーネント設計 (Function パターン)
-新しいタグ機能を追加していくための拡張基盤として、以下のトレイトの包含関係を維持する。
+### 4.3 プラグイン・コンポーネント設計 (TagFunction パターン)
+新しいタグ機能を追加していくための拡張基盤として、`TagFunction` を中心とした構成を採用する。
+これにより、インデックス・検索・表示の各機能を TypedTag の型 (Type) 単位で一元管理し、プラグインによる追加・上書きを可能にする。
 
-#### A. `IndexingFunction` trait (`src/functions.rs`)
-特定の TypedTag に関する**定義・抽出の統合単位**。
-- **タグ名の管理**: 担当する識別子（例: `"path"`, `"extension"`) を `NAME` 定数として保持する。
-- **Taggerの提供**: 内部に `Tagger` を必ず持ち、インデックス作成時の抽出ロジックをシステムへ提供する。 
+#### A. `TagFunction`
+特定の TypedTag に関する**定義の統合単位**。タグ名と優先度を保持し、以下の3つの機能コンポーネントを任意に束ねる（いずれも省略可能で、必要なものだけ実装する）。
+- **Index**: インデックス時にファイルから Label を抽出する。抽出方法・Label の型・格納先テーブルを定義する。
+- **Query**: 検索時のクエリ展開（Volatile Tag の具体化等）と Label の正規化ロジック、および各タグの論理型・論理的な格納役割を提供する。これらは論理スキーマ (LogicalSchema) を構成し、Logical Resolver による論理解決に用いられる。
+- **Display**: Label の表示フォーマット変換を担う。省略時は生の値がそのまま表示される。
 
-#### B. `Tagger` trait (`src/taggers.rs`)
-**「実際のタグ付け」を行う実行部**。`IndexingFunction` に内包される。
-- **DB定義**: そのタグをインデックス登録する際に必要なデータベースカラム（名前、型）を定義する (`get_columns`)。
-- **タグ付けロジック**: ファイルパスを受け取り、具体的な抽出・生成ロジックを実行して値を生成する (`tag_file`)。
-
-#### C. `FunctionRegistry` (`src/lib.rs`)
-個別の `IndexingFunction` を一括管理するハブ。
-- インデックス作成時は `IndexingFunction` から `Tagger` を取得して実行し、検索時はクエリに対応する `IndexingFunction` にSQL変換を委譲する。
+#### B. `TagRegistry`
+個別の `TagFunction` を一括管理するハブ。
+- 標準タグ群（インデックス機能を持つもの・クエリ専用のもの）をまとめて登録する。
+- インデックス作成時は Index を持つ関数に抽出を委譲し、検索時はクエリに対応する関数の Query に展開・SQL変換を委譲する。
+- Wasm プラグインも `TagFunction` を実装するアダプタとして本レジストリに登録され、組み込みのタグ機能と同一に扱われる（詳細は `PLUGIN.md`）。
 
 ### 4.4 永続化とアトミック性 (IndexStore)
 インデックス（Parquetファイル）の更新において、データの整合性と堅牢性を確保するため、`IndexStore` は以下の設計指針に基づくアトミックな書き込みを提供する。
@@ -109,24 +87,23 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 1.  **Scan Phase (並列メタデータ収集)**:
     - **高速並列トラバース**: `ignore` クレートを用いて、マルチスレッドでディレクトリ階層を走査する。
     - **メタデータ取得**: 各ファイルについて、ファイルシステムから最新のメタデータ（Inode, Size, Mtime等）を取得する。
-    - **一時保存**: 取得した全エントリのメタデータを `current_scan.parquet` に書き出す。
+    - **変更検知**: パス・Mtime・Size から `scan_hash` を算出し、変更されたファイルを検知。
+    - **一時保存**: 変更されたファイルを`current_scan.parquet`に、変更されていないファイルを `current_ids.parquet` に書き出す。
 
 2.  **Diff Phase (Auditing)**:
+    - **Rediscover**: スキャン結果のうち、ファイルの識別子が`removed_files`内の識別子と等しいものを `file_references` へ戻し、`removed_files` から取り除く。
     - **DiffAuditor** を用いて、`current_scan.parquet` (最新) と既存の Parquet ファイルを比較し、以下のカテゴリに分類する。
-        - **To Process**: 新規、または Mtime/Size が変化したファイル。
-        - **Moved**: `FileId` は一致するが、Path が異なるファイル。
-          - アクション: **Location (path, parentdir, filename, extension) の情報を再生成する。**
-        - **Unchanged**: 全てのメタデータが一致、または上位ディレクトリの `mtime` 判定でスキップされたファイル。
-        - **Deleted**: 既存インデックスにあるが、今回の走査で見つからず、かつ親ディレクトリが「不一致 (Modified)」判定されていたファイル。
+        - **To Process**: 新規、または内容/Mtime/Size/ファイル名が変化したファイル。
+        - **DirChanged**: `basename_scan_hash` が一致しパスのみが変化したファイル（ディレクトリ移動のみ）。
+        - **Deleted**: インデックス済みのファイルのうち、今回の走査範囲内で失われているファイル。
 
 3.  **Triage Phase (Selection & Assembly)**:
     - **ItemTriager** を実行し、抽出されたメタデータを各テーブルへ振り分ける。
-    - **Extraction**: **To Process** のリストに対して並列で `Tagger` を実行し、メタデータを抽出する。
-    - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/Tags）へ選別（トリアージ）する。
-    - **Reconstruction**: **Moved** のリストに対し、ファイルを開かずにパス情報から場所情報を再構築する。
+    - **Extraction**: **To Process** に対しては全 `TagFunction` の Index を実行してメタデータを抽出する。**DirChanged** に対してはパス依存（`TargetTable::TagsByLocation`）の `TagFunction` のみを実行し、`base_tags` の再抽出をスキップする。
+    - **Triage**: 抽出された「生の値」を、ItemID の付与と共に、性質に応じて適切なバケツ（Entities/Locations/BaseTags/TagsByLocation）へ選別（トリアージ）する。
 
 4.  **Merge Phase (Integration)**:
-    - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `file_references`, `locations`, `base_tags` 等のParquetファイルを更新・保存する。
+    - 既存データ、新規抽出データ、および更新された場所情報をDuckDB上で統合し、最終的な `removed_files`, `file_references`, `locations`, `base_tags`, `tags_by_location` 等のParquetファイルを更新・保存する。
 
 ### 5.2 検索システム (`ttfm search`)
 
@@ -143,7 +120,7 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 2.  **Logical Resolution Phase (論理解決)**:
     -   **Logical Resolver** が AST を走査し、意味的な展開を行う。
     -   **機能**:
-        -   **Virtual Tag の具体化**: エイリアスを物理的なタグ条件へ変換 (例: `directory:` → `is_dir:true`)。
+        -   **Volatile Tag の具体化**: 物理ストレージを持たないタグをクエリ時に物理的なタグ条件へ変換 (例: `directory:` → `is_dir:true`)。
         -   **日付範囲の展開**: 相対日付等を範囲条件へ展開 (例: `mtime:today` → `mtime >= Start AND mtime <= End`)。
         -   **型チェック**: 演算の論理的な妥当性検証。
 
@@ -204,24 +181,23 @@ DuckDB の `COPY` コマンドを使用して Parquet を書き出す際、対�
 - TTQLの構文エラーについては`query/error.rs` にて明確なエラーメッセージとして記述する。
 - また、`query.pest`による構文の定義を優先し、文法の定義を厳しく保ったままエラーメッセージを親切な内容に変更する
 
-### 5.3 優先度 (`ttfm rank`)
-ユーザーは検索クエリを用いて、マッチしたアイテムの優先度を一括で変更できる。
-1.  指定されたクエリで検索を実行。
-2.  マッチ件数を表示し、ユーザーに確認を求める。
-3.  対象の `rank` カラムを更新。
+### 5.3 優先度の変更
+アイテムの `rank` の変更は編集パイプラインに一本化する（`ttfm tag <SearchQuery> rank:<N>`。詳細は EDIT.md）。
+対象の定義アイテムが未登録 (Volatile) の場合は、rank の付与に伴い登録 (Stored 化) される。
 
 #### システムデフォルト優先度 (SystemRank)
-インデックス作成時、標準的なタグ型には以下の優先度が割り当てられる。
+標準的なタグ型には以下のデフォルト優先度が定義されている。DB への初期登録は行わず、
+未登録の定義アイテムの rank (ITEM.md §7) や列の表示順序の決定に用いられる。
+ユーザーが rank を登録済みの型はその値が優先される。
 - 10: `name` (絶対優先)
-- 9: `filename` (ファイル名優先)
 - 8: `size`
 - 7: `mtime`
 - 6: `parentdir`
 - 5: `item_kind`
 - 4: `content`
-- 2: その他システムタグ
-- 1: 初期値（ユーザータグ等）
-- 0: 未指定（フォールバック）
+- 2: `filename`
+- 0: 未指定（デフォルト。その他システムタグ・ユーザータグ）
+- -1: `path`
 
 ## 6. **プラグインシステム**
 詳細なプラグインシステムの設計については `PLUGIN.md` を参照。

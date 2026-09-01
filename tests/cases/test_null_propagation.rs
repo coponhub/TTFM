@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -28,7 +30,7 @@ define_cases! {
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1);
             assert_eq!(res.results[0].raw_repr(), "NULL");
-            assert!(res.results[0].get_all_values("type").contains(&"boolean".to_string()));
+            assert!(res.results[0].get_all_values("bitical_type").contains(&"boolean".to_string()));
             Ok(())
         },
     },
@@ -68,7 +70,7 @@ define_cases! {
         assert: |res, _dir| {
             assert_eq!(res.results.len(), 1);
             assert_eq!(res.results[0].raw_repr(), "NULL");
-            assert!(res.results[0].get_all_values("type").contains(&"numeric".to_string()));
+            assert!(res.results[0].get_all_values("bitical_type").contains(&"numeric".to_string()));
             assert!(res.results[0].get_all_values("value").contains(&"NULL".to_string()));
             Ok(())
         },

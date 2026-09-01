@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,8 +17,9 @@
 
 use std::fs;
 use tempfile::tempdir;
-use ttfm::{search, tagging};
+use ttfm::edit::{edit, QueryType, WriteOptions};
 use ttfm::types::ItemId;
+use ttfm::{search, tagging};
 
 #[test]
 fn test_rank_sorting_files() {
@@ -31,22 +34,49 @@ fn test_rank_sorting_files() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 2. クエリでランクを設定
     // high.txt を 100 に
-    let res_high = search::search(&store, &registry, &cache, "filename:high.txt", Default::default()).unwrap();
-    ttfm::rank::update_ranks(&store, &registry, &res_high.results, 100).unwrap();
+    edit(
+        &store,
+        &registry,
+        "filename:high.txt",
+        Some("rank:100"),
+        QueryType::Tag,
+        None,
+        WriteOptions::noconfirm(),
+        &mut Vec::new(),
+    )
+    .unwrap();
 
     // mid.txt を 50 に
-    let res_mid = search::search(&store, &registry, &cache, "filename:mid.txt", Default::default()).unwrap();
-    ttfm::rank::update_ranks(&store, &registry, &res_mid.results, 50).unwrap();
+    edit(
+        &store,
+        &registry,
+        "filename:mid.txt",
+        Some("rank:50"),
+        QueryType::Tag,
+        None,
+        WriteOptions::noconfirm(),
+        &mut Vec::new(),
+    )
+    .unwrap();
 
     // 3. 検索して順序を確認
-    let results = search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 3);
 
     // 順序: high (100) -> mid (50) -> low (0)
@@ -76,19 +106,43 @@ fn test_rank_batch_update() {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
-    let results = search::search(&store, &registry, &cache, "extension:txt", Default::default()).unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results.len(), 2);
-    ttfm::rank::update_ranks(&store, &registry, &results.results, 10).unwrap();
+    edit(
+        &store,
+        &registry,
+        "extension:txt",
+        Some("rank:10"),
+        QueryType::Tag,
+        None,
+        WriteOptions::noconfirm(),
+        &mut Vec::new(),
+    )
+    .unwrap();
 
     // 2. 結果を確認
-    let res = search::search(&store, &registry, &cache, "extension:txt | extension:rs", Default::default())
-        .unwrap();
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "extension:txt | extension:rs",
+        Default::default(),
+    )
+    .unwrap();
     // ランク順に a.txt(10), b.txt(10), c.rs(0) のはず
     assert_eq!(res.results.len(), 3);
     assert!(res.results[0].primary_value().unwrap().contains(".txt"));
@@ -102,18 +156,132 @@ fn test_rank_set_by_id_low_level() {
     let db_dir = dir.path().join(".ttfm/db");
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables().unwrap();
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let (store, registry) = (db_dir_store, db_dir_registry);
 
     fs::create_dir_all(&db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).run(dir.path(), None::<&fn(usize)>, false)
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(dir.path(), None::<&fn(usize)>, false)
         .unwrap();
 
     let id = tagging::add_item(&store, &registry, "note", "test note").unwrap();
     ttfm::rank::set_rank_by_id(&store, &registry, id, false, 500).unwrap();
 
-    let results = search::search(&store, &registry, &cache, "item_kind:note", Default::default()).unwrap();
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "item_kind:note",
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(results.results[0].id, ItemId::from(id));
     // ランクに基づいたソートが効いているか（他にアイテムがあればより明確）
+}
+
+#[test]
+fn user_rank_survives_reindex() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    fs::write(root.join("a.txt"), "original content").unwrap();
+
+    let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
+    let db_dir_store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()
+        .unwrap();
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    edit(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Some("rank:9"),
+        QueryType::Tag,
+        None,
+        WriteOptions::noconfirm(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    fs::write(root.join("a.txt"), "changed content").unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "filename:a.txt",
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(results.results[0].rank, 9);
+}
+
+// `type:filename` (DefinitionRef) の rank は、定義行が未登録(Volatile)の場合
+// ハードコードされた 0 ではなく、registry の default_rank にフォールバックすべき。
+#[test]
+fn test_definition_ref_rank_falls_back_to_registry_default() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let db_dir = root.join(".ttfm/db");
+
+    fs::write(root.join("a.txt"), "a").unwrap();
+
+    let registry = ttfm::tag::TagRegistry::with_standard();
+    let store = ttfm::db::Store::open(&db_dir).unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .initialize_tables()
+        .unwrap();
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    // `filename` の type 定義行は index 時に registry のデフォルト rank を
+    // ベタ書きされて eager 登録される。これを物理的に削除し、
+    // 「未登録（Volatile）」な type 定義を再現する。
+    let path = store.path_for_target(ttfm::db::TargetTable::ItemReferences);
+    let tmp = path.with_extension("parquet.tmp");
+    store
+        .conn
+        .execute(
+            &format!(
+                "COPY (SELECT * FROM read_parquet('{p}') WHERE NOT (item_kind = 'type' AND content = 'filename')) TO '{t}' (FORMAT PARQUET)",
+                p = path.to_string_lossy(),
+                t = tmp.to_string_lossy(),
+            ),
+            [],
+        )
+        .unwrap();
+    std::fs::rename(&tmp, &path).unwrap();
+
+    // `type:filename` は DefinitionRef。未登録なので COALESCE のデフォルト値が使われる。
+    // registry の default_rank (SystemRank::FILENAME) にフォールバックすべきで、
+    // ハードコードされた 0 になってはいけない。
+    let expected = ttfm::rank::get_rank_by_name(&registry, "filename");
+    assert_ne!(
+        expected, 0,
+        "sanity: filename should have a nonzero default rank in the registry"
+    );
+
+    let results = search::search_nowarn(
+        &store,
+        &registry,
+        "type:filename",
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(results.results.len(), 1);
+    assert_eq!(
+        results.results[0].rank, expected,
+        "DefinitionRef rank fallback should use the registry's default_rank ({}), not the hardcoded COALESCE default of 0",
+        expected
+    );
 }

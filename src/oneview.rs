@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, SqlType, TargetTable, Tbl, Val};
-use crate::taggers::ColumnDef;
-use crate::types::ItemKind;
+use crate::db::{BiticalType, Col, ColumnDef, TargetTable, Tbl};
+use crate::query::lens_reader::Reader;
+use crate::tag::TagRegistry;
+use crate::types::{ItemKind, SType};
 use duckdb::{Connection, Result};
-use sea_query::{CaseStatement, Expr, Func, PostgresQueryBuilder, Query};
+use sea_query::{
+    CaseStatement, Expr, Func, IntoIden, PostgresQueryBuilder, Query,
+};
 use std::path::Path;
 
 // ============================================================================
@@ -38,6 +43,10 @@ const TAG_SOURCES: &[TagSource] = &[
         target: TargetTable::BaseTags,
     },
     TagSource {
+        table: Tbl::TagsByLocation,
+        target: TargetTable::TagsByLocation,
+    },
+    TagSource {
         table: Tbl::SystemTags,
         target: TargetTable::SystemTags,
     },
@@ -53,8 +62,6 @@ struct PhysicalSource {
     target: TargetTable,
     /// FileReferences との JOIN が必要か（自テーブルなら不要）
     needs_file_ref_join: bool,
-    /// name/filename エイリアスを追加するか
-    add_location_aliases: bool,
 }
 
 const PHYSICAL_SOURCES: &[PhysicalSource] = &[
@@ -62,13 +69,11 @@ const PHYSICAL_SOURCES: &[PhysicalSource] = &[
         table: Tbl::FileReferences,
         target: TargetTable::FileReferences,
         needs_file_ref_join: false,
-        add_location_aliases: false,
     },
     PhysicalSource {
         table: Tbl::Locations,
         target: TargetTable::Locations,
         needs_file_ref_join: true,
-        add_location_aliases: true,
     },
 ];
 
@@ -82,10 +87,10 @@ fn build_label_str_expr(tbl: Tbl) -> sea_query::SimpleExpr {
         .args([
             Expr::col((tbl, Col::LabelStr)).into(),
             Expr::col((tbl, Col::LabelInt))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into(),
             Expr::col((tbl, Col::LabelDouble))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into(),
             CaseStatement::new()
                 .case(Expr::col((tbl, Col::LabelBool)).eq(true), "true")
@@ -107,7 +112,10 @@ fn build_rank_expr() -> sea_query::SimpleExpr {
 }
 
 /// item_kind の CASE 式を生成
-/// 注意: これは FileReferences と ItemReferences の両方が JOIN されている環境（Tag Source）でのみ使用可能。
+/// 注意: これは FileReferences・ItemReferences が JOIN されている環境
+/// （Tag Source）でのみ使用可能。RemovedFiles によるフォールバック
+/// （削除後も残る user_tags を 'volatile' に落とさない）は
+/// `resolved_sources_sql` が外側で一括して行う。
 fn build_item_kind_expr() -> sea_query::SimpleExpr {
     CaseStatement::new()
         .case(
@@ -128,10 +136,12 @@ enum OneViewSource<'a> {
     Tag(&'a TagSource),
     /// 物理テーブル (FileReferences, Locations) の一般カラム
     Physical { cd: &'a ColumnDef, tbl: Tbl },
-    /// Locations テーブルの name/filename エイリアス
-    LocationAlias(Val),
     /// ItemReferences (非ファイルアイテム) の unpivot カラム
     ItemRef(Col),
+    /// RemovedFiles の unpivot カラム (removed_file_* 型)。
+    /// `ty` は投影する論理型 (removed_file_path 等)、`col` はその値を
+    /// 保持する RemovedFiles 上の物理カラム (Path 等)。
+    Removed { ty: SType, col: Col },
 }
 
 // ----------------------------------------------------------------------------
@@ -139,15 +149,34 @@ enum OneViewSource<'a> {
 // ----------------------------------------------------------------------------
 
 fn spec_origin(source: &OneViewSource) -> sea_query::SimpleExpr {
-    // UserTags の時だけ User、それ以外は System
-    if matches!(source, OneViewSource::Tag(s) if s.table == Tbl::UserTags) {
-        Expr::val(Into::<&'static str>::into(Val::User))
-            .cast_as(SqlType::VARCHAR)
-            .into()
-    } else {
-        Expr::val(Into::<&'static str>::into(Val::System))
-            .cast_as(SqlType::VARCHAR)
-            .into()
+    use crate::types::Origin;
+    match source {
+        OneViewSource::Tag(s) if s.table == Tbl::UserTags => {
+            Expr::val(Origin::User.as_str())
+                .cast_as(BiticalType::String)
+                .into()
+        }
+        OneViewSource::Tag(s) if s.table == Tbl::SystemTags => {
+            Expr::val(Origin::Builtin.as_str())
+                .cast_as(BiticalType::String)
+                .into()
+        }
+        OneViewSource::ItemRef(_) => sea_query::Expr::cust(
+            &crate::db::CustomFunc::item_id_origin_qualified(
+                Tbl::ItemReferences,
+                Col::ItemId,
+            ),
+        )
+        .into(),
+        OneViewSource::Tag(_)
+        | OneViewSource::Physical { .. }
+        | OneViewSource::Removed { .. } => {
+            // base_tags (スキャン抽出タグ)・Physical (FileReferences/Locations)・
+            // Removed (RemovedFiles) はいずれも File 由来。
+            Expr::val(Origin::File.as_str())
+                .cast_as(BiticalType::String)
+                .into()
+        }
     }
 }
 
@@ -158,32 +187,31 @@ fn spec_rank(source: &OneViewSource) -> sea_query::SimpleExpr {
 
         // Physical系（FileReferences, Locations）
         OneViewSource::Physical { tbl, .. } => {
-            if *tbl == Tbl::FileReferences {
+            let system = if *tbl == Tbl::FileReferences {
                 // FileReferences 自身なら直のカラム
-                Expr::col((*tbl, Col::Rank)).into()
+                Expr::col((*tbl, Col::Rank))
             } else {
                 // Locations なら FileReferences を JOIN している
-                Func::cust(crate::db::DuckDbFunc::Coalesce)
-                    .args([
-                        Expr::col((Tbl::FileReferences, Col::Rank)).into(),
-                        Expr::val(0).into(),
-                    ])
-                    .into()
-            }
+                Expr::col((Tbl::FileReferences, Col::Rank))
+            };
+            Func::cust(crate::db::DuckDbFunc::Coalesce)
+                .args([system.into(), Expr::val(0).into()])
+                .into()
         }
 
-        // LocationAlias も Locations 同様
-        OneViewSource::LocationAlias(_) => {
+        // ItemRef は自身のテーブルの Rank カラムを使う
+        OneViewSource::ItemRef(_) => {
             Func::cust(crate::db::DuckDbFunc::Coalesce)
                 .args([
-                    Expr::col((Tbl::FileReferences, Col::Rank)).into(),
+                    Expr::col((Tbl::ItemReferences, Col::Rank)).into(),
                     Expr::val(0).into(),
                 ])
                 .into()
         }
 
-        // ItemRef は自身のテーブルの Rank カラムを直接使う
-        OneViewSource::ItemRef(_) => Expr::col(Col::Rank).into(),
+        // RemovedFiles には system rank が無い。user rank は
+        // `resolved_sources_sql` が外側で一括して解決する。
+        OneViewSource::Removed { .. } => Expr::val(0).into(),
     }
 }
 
@@ -191,19 +219,19 @@ fn spec_item_kind(source: &OneViewSource) -> sea_query::SimpleExpr {
     match source {
         // Tag系は両方の JOIN があるため共通ロジックが使える
         OneViewSource::Tag(_) => {
-            build_item_kind_expr().cast_as(SqlType::VARCHAR).into()
+            build_item_kind_expr().cast_as(BiticalType::String).into()
         }
 
-        // Physical系およびエイリアスは常に File 確定
-        OneViewSource::Physical { .. } | OneViewSource::LocationAlias(_) => {
+        // Physical系・Removed系は常に File 確定
+        OneViewSource::Physical { .. } | OneViewSource::Removed { .. } => {
             Expr::val(Into::<&'static str>::into(ItemKind::File))
-                .cast_as(SqlType::VARCHAR)
+                .cast_as(BiticalType::String)
                 .into()
         }
 
         // ItemRef は自身のカラムを直接使う
         OneViewSource::ItemRef(_) => {
-            Expr::col(Col::ItemKind).cast_as(SqlType::VARCHAR).into()
+            Expr::col(Col::ItemKind).cast_as(BiticalType::String).into()
         }
     }
 }
@@ -212,14 +240,12 @@ fn spec_type(source: &OneViewSource) -> sea_query::SimpleExpr {
     let expr = match source {
         OneViewSource::Tag(s) => Expr::col((s.table, Col::Type)),
         OneViewSource::Physical { cd, .. } => Expr::val(&cd.name[..]),
-        OneViewSource::LocationAlias(v) => {
-            Expr::val(Into::<&'static str>::into(*v))
-        }
         OneViewSource::ItemRef(col) => {
             Expr::val(Into::<&'static str>::into(*col))
         }
+        OneViewSource::Removed { ty, .. } => Expr::val(ty.as_str()),
     };
-    expr.cast_as(SqlType::VARCHAR).into()
+    expr.cast_as(BiticalType::String).into()
 }
 
 fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
@@ -230,10 +256,10 @@ fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
         OneViewSource::Physical { cd, tbl } => {
             Expr::col((*tbl, crate::util::col_to_iden(&cd.name))).into()
         }
-        OneViewSource::LocationAlias(_) => {
-            Expr::col((Tbl::Locations, Col::Filename)).into()
-        }
         OneViewSource::ItemRef(col) => Expr::col(*col).into(),
+        OneViewSource::Removed { col, .. } => {
+            Expr::col((Tbl::RemovedFiles, *col)).into()
+        }
     };
 
     // "type:value" 形式で結合
@@ -241,7 +267,7 @@ fn spec_typed_tag(source: &OneViewSource) -> sea_query::SimpleExpr {
         .args([
             type_expr.into(),
             Expr::val(":").into(),
-            val_expr.cast_as(SqlType::VARCHAR).into(),
+            val_expr.cast_as(BiticalType::String).into(),
         ])
         .into()
 }
@@ -268,33 +294,6 @@ fn add_col(
     q.expr_as(f(s), col);
 }
 
-/// Locations テーブルの name/filename エイリアス用クエリを生成
-fn build_location_alias_query(
-    type_val: Val,
-    parquet_path: &str,
-    file_ref_path: &str,
-) -> String {
-    let mut q = Query::select();
-    q.column((Tbl::Locations, Col::ItemId))
-        .expr_as(Expr::col((Tbl::Locations, Col::Filename)), Col::LabelStr)
-        .expr_as(crate::util::null_as(SqlType::BIGINT), Col::LabelInt)
-        .expr_as(crate::util::null_as(SqlType::DOUBLE), Col::LabelDouble)
-        .expr_as(crate::util::null_as(SqlType::BOOLEAN), Col::LabelBool);
-
-    // 【仕様の完全集約】全共通カラムをエンジンに委託
-    apply_oneview_schema(&mut q, OneViewSource::LocationAlias(type_val));
-
-    q.from_subquery(crate::util::parquet_query(parquet_path), Tbl::Locations)
-        .join_subquery(
-            sea_query::JoinType::LeftJoin,
-            crate::util::parquet_query(file_ref_path),
-            Tbl::FileReferences,
-            Expr::col((Tbl::Locations, Col::ItemId))
-                .eq(Expr::col((Tbl::FileReferences, Col::ItemId))),
-        );
-    q.to_string(PostgresQueryBuilder)
-}
-
 /// ラベルカラム（label_str, label_int, label_double, label_bool）をクエリに追加
 ///
 /// SQLTypeに応じて適切なカラムに値を設定し、他はNULLで埋める。
@@ -306,26 +305,25 @@ fn apply_label_columns(
     q: &mut sea_query::SelectStatement,
     tbl: Tbl,
     iden: &sea_query::DynIden,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
 ) {
-    let label_col = Col::from_sql_type(sql_type);
+    let label_col = bitical_type.to_column();
 
-    // LabelStr は常に設定（値をVARCHARにキャスト）
-    q.expr_as(
-        Expr::col((tbl, iden.clone())).cast_as(SqlType::VARCHAR),
-        Col::LabelStr,
-    );
-
-    // 型付きカラムは該当する型のみ値を設定、他はNULL
     let label_columns = [
-        (Col::LabelInt, SqlType::BIGINT),
-        (Col::LabelDouble, SqlType::DOUBLE),
-        (Col::LabelBool, SqlType::BOOLEAN),
+        (Col::LabelStr, BiticalType::String),
+        (Col::LabelInt, BiticalType::Integer),
+        (Col::LabelDouble, BiticalType::Double),
+        (Col::LabelBool, BiticalType::Boolean),
     ];
 
     for (col, null_type) in label_columns {
         if col == label_col {
-            q.expr_as(Expr::col((tbl, iden.clone())), col);
+            let expr = Expr::col((tbl, iden.clone()));
+            if col == Col::LabelStr {
+                q.expr_as(expr.cast_as(BiticalType::String), col);
+            } else {
+                q.expr_as(expr, col);
+            }
         } else {
             q.expr_as(crate::util::null_as(null_type), col);
         }
@@ -334,7 +332,7 @@ fn apply_label_columns(
 
 /// Physical Table (FileReferences, Locations) のカラムからクエリを生成
 fn build_physical_column_query(
-    cd: &crate::taggers::ColumnDef,
+    cd: &ColumnDef,
     tbl_alias: Tbl,
     parquet_path: &str,
     file_ref_path: Option<&str>,
@@ -345,7 +343,7 @@ fn build_physical_column_query(
     q.column((tbl_alias, Col::ItemId));
 
     // ラベルカラムの設定（型に応じて分岐）
-    apply_label_columns(&mut q, tbl_alias, &iden, cd.sql_type);
+    apply_label_columns(&mut q, tbl_alias, &iden, cd.bitical_type);
 
     // 【仕様の完全集約】全共通カラムをエンジンに委託
     apply_oneview_schema(
@@ -370,9 +368,10 @@ fn build_physical_column_query(
 
 /// ItemReferences のカラムからクエリを生成
 fn build_item_ref_query(col: Col, items_path: &str) -> String {
-    let label_col = Col::from_sql_type(SqlType::VARCHAR);
+    let label_col = BiticalType::String.to_column();
     let mut q = Query::select();
-    q.column(Col::ItemId).expr_as(Expr::col(col), label_col);
+    q.column((Tbl::ItemReferences, Col::ItemId))
+        .expr_as(Expr::col((Tbl::ItemReferences, col)), label_col);
 
     // 【仕様の完全集約】全共通カラムをエンジンに委託
     apply_oneview_schema(&mut q, OneViewSource::ItemRef(col));
@@ -381,6 +380,31 @@ fn build_item_ref_query(col: Col, items_path: &str) -> String {
         crate::util::parquet_query(items_path),
         Tbl::ItemReferences,
     );
+
+    q.to_string(PostgresQueryBuilder)
+}
+
+/// RemovedFiles のカラムから removed_file_* 型の SELECT 文を生成
+fn build_removed_file_query(
+    registry: &TagRegistry,
+    ty: SType,
+    col: Col,
+    removed_path: &str,
+) -> String {
+    let bitical = registry
+        .get(ty.into())
+        .map(|f| f.query().logical_type().to_bitical())
+        .unwrap_or(BiticalType::String);
+
+    let mut q = Query::select();
+    q.column((Tbl::RemovedFiles, Col::ItemId));
+    apply_label_columns(&mut q, Tbl::RemovedFiles, &col.into_iden(), bitical);
+    apply_oneview_schema(&mut q, OneViewSource::Removed { ty, col });
+    q.from_subquery(
+        crate::util::parquet_query(removed_path),
+        Tbl::RemovedFiles,
+    );
+
     q.to_string(PostgresQueryBuilder)
 }
 
@@ -390,11 +414,10 @@ fn build_tag_query(
     path_fn: impl Fn(TargetTable) -> String,
 ) -> String {
     let tbl = source.table;
-    let label_str = build_label_str_expr(tbl);
 
     let mut q = Query::select();
     q.column((tbl, Col::ItemId))
-        .expr_as(label_str, Col::LabelStr)
+        .column((tbl, Col::LabelStr))
         .column((tbl, Col::LabelInt))
         .column((tbl, Col::LabelDouble))
         .column((tbl, Col::LabelBool));
@@ -427,7 +450,9 @@ impl OneView {
     /// データベース上に oneview ビューを構築（または置換）します。
     pub fn recreate(
         conn: &Connection,
+        registry: &TagRegistry,
         all_columns: &[ColumnDef],
+        reader: Option<Reader>,
         db_dir: &Path,
     ) -> anyhow::Result<()> {
         let path = |t| {
@@ -438,6 +463,7 @@ impl OneView {
         };
 
         let mut query_parts = Vec::new();
+        let user_tags_path = path(TargetTable::UserTags);
 
         // Tag系テーブル（BaseTags, SystemTags, UserTags）
         for source in TAG_SOURCES {
@@ -465,20 +491,6 @@ impl OneView {
                         )
                     }),
             );
-
-            // Locations用のname/filenameエイリアス
-            if source.add_location_aliases {
-                query_parts.push(build_location_alias_query(
-                    Val::Name,
-                    &parquet_path,
-                    &file_ref_path,
-                ));
-                query_parts.push(build_location_alias_query(
-                    Val::Filename,
-                    &parquet_path,
-                    &file_ref_path,
-                ));
-            }
         }
 
         // 5. ItemReferences (非ファイルアイテム) の unpivot
@@ -490,10 +502,77 @@ impl OneView {
             query_parts.push(build_item_ref_query(col, &items_path));
         }
 
-        create_view_union_by_name(conn, "oneview", &query_parts)?;
+        // 6. RemovedFiles の unpivot (removed_file_* 型)
+        let removed_path = path(TargetTable::RemovedFiles);
+        for (ty, col) in Col::removed_file_columns() {
+            query_parts.push(build_removed_file_query(
+                registry,
+                ty,
+                col,
+                &removed_path,
+            ));
+        }
+
+        // read 解決（reader）があれば、生の合流を中間ビュー `_oneview` に置き、
+        // 解決済み SELECT 群を `oneview` として合成する（fetcher/nest は解決済みを読むだけ）。
+        // rank/item_kind の解決（user_rank・removed_files JOIN）はここで union の
+        // 外側に1回だけ適用する（各ブランチへの重複 JOIN を避ける）。
+        let raw = resolved_sources_sql(
+            &query_parts.join("\nUNION ALL BY NAME\n"),
+            &user_tags_path,
+            &removed_path,
+        );
+        let oneview = sea_query::Iden::to_string(&Tbl::OneView);
+        match reader {
+            None => create_view(conn, &oneview, &raw)?,
+            Some(reader) => {
+                let _oneview = sea_query::Iden::to_string(&Tbl::_OneView);
+                create_view(conn, &_oneview, &raw)?;
+                create_view_union_by_name(conn, &oneview, reader.selects())?;
+            }
+        }
 
         Ok(())
     }
+}
+
+/// union の外側で user_rank・removed_files を1回だけ JOIN し、
+/// rank と item_kind を解決した SELECT 文を生成します。
+fn resolved_sources_sql(
+    union_sql: &str,
+    user_tags_path: &str,
+    removed_path: &str,
+) -> String {
+    let volatile: &str = ItemKind::Volatile.into();
+    let file: &str = ItemKind::File.into();
+    format!(
+        "SELECT \"u\".* REPLACE(\
+           coalesce(\"user_rank\".\"rank\", \"u\".\"rank\") AS \"rank\", \
+           (CASE WHEN \"u\".\"item_kind\" = '{volatile}' \
+                  AND \"rf\".\"item_id\" IS NOT NULL \
+                 THEN '{file}' ELSE \"u\".\"item_kind\" END) AS \"item_kind\") \
+         FROM ({union_sql}) AS \"u\" \
+         LEFT JOIN (SELECT \"item_id\", MAX(\"label_int\") AS \"rank\" \
+                    FROM read_parquet('{user_tags_path}') \
+                    WHERE \"type\" = 'rank' GROUP BY \"item_id\") \
+                AS \"user_rank\" \
+           ON \"u\".\"item_id\" = \"user_rank\".\"item_id\" \
+         LEFT JOIN (SELECT DISTINCT \"item_id\" \
+                    FROM read_parquet('{removed_path}')) AS \"rf\" \
+           ON \"u\".\"item_id\" = \"rf\".\"item_id\""
+    )
+}
+
+/// 指定された SQL をそのままビューとして作成します。
+fn create_view(conn: &Connection, view_name: &str, sql: &str) -> Result<()> {
+    if std::env::var("TTFM_DEBUG").is_ok() {
+        println!("DEBUG ONEVIEW SQL:\n{}", sql);
+    }
+    conn.execute(
+        &format!("CREATE OR REPLACE VIEW {} AS {}", view_name, sql),
+        [],
+    )?;
+    Ok(())
 }
 
 /// 指定されたSQLパーツを UNION ALL BY NAME で結合し、ビューを作成します。
@@ -517,10 +596,22 @@ fn create_view_union_by_name(
 
 #[cfg(test)]
 mod tests {
-    use crate::tag::TagRegistry;
-    use crate::{tagging, indexing};
+    use super::*;
     use crate::db::Store;
+    use crate::tag::TagRegistry;
+    use crate::{indexing, tagging};
     use tempfile::tempdir;
+
+    #[test]
+    fn resolved_sources_sql_projects_only_the_union_columns() {
+        let sql = resolved_sources_sql(
+            "SELECT 1 AS item_id",
+            "u.parquet",
+            "r.parquet",
+        );
+        assert!(sql.contains("SELECT \"u\".*"));
+        assert!(!sql.contains("SELECT * "));
+    }
 
     #[test]
     fn test_oneview_consistency() {
@@ -528,11 +619,29 @@ mod tests {
         let db_dir = dir.path().join(".ttfm/db");
         let store = Store::open(&db_dir).unwrap();
         let registry = TagRegistry::with_standard();
-        indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
+        indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
 
         // Noteを作成してタグを付ける
-        let note_id = tagging::add_item(&store, &registry, "note", "Consistency Test Memo").unwrap();
-        tagging::tag_item(&store, &registry, &note_id.to_string(), "testtag:true").unwrap();
+        let note_id = tagging::add_item(
+            &store,
+            &registry,
+            "note",
+            "Consistency Test Memo",
+        )
+        .unwrap();
+        crate::edit::edit(
+            &store,
+            &registry,
+            &format!("item_id:{note_id}"),
+            Some("testtag:true"),
+            crate::edit::QueryType::Tag,
+            None,
+            crate::edit::WriteOptions::noconfirm(),
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         // oneview ビューを直接クエリして不整合をチェック
         // 同じIDなのに異なるNameまたは異なるRankを持つグループがあるか探す
@@ -558,5 +667,12 @@ mod tests {
              across all its tag rows.",
             inconsistent_ids
         );
+    }
+
+    #[test]
+    fn test_oneview_tag_sources_includes_tags_by_location() {
+        assert!(TAG_SOURCES
+            .iter()
+            .any(|s| s.target == TargetTable::TagsByLocation));
     }
 }

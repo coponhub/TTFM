@@ -135,6 +135,7 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **Open Operations**: Support `ttfm open <QUERY>` with system-default apps.
 - [ ] **Item Operations**: `split` (separate multi-location items) and `merge` (combine entities).
 - [ ] **Remote Support**: Integrate `RemoteID` (ETag/VersionID) for online files.
+- [ ] **Unique Tag Types**: Allow a user-defined type to be marked unique (e.g. a `unique:true` meta tag on the Type item) so its tag is single-valued, rejecting or replacing duplicates on edit.
 
 ### Search & UI Enhancements
 - [ ] **Sorting**: Sort results by Size, Date Modified, or Name.
@@ -142,10 +143,16 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **Rank Display Scaling**: Decimal representation of BigInt ranks.
 - [ ] **UI/UX Improvements**:
     - Tab completion (CLI) and Search Suggestions (GUI).
+      - Suggestions search the full `type:label` tag string and use progressive lazy search with deduplication, appending results to the displayed list as each phase completes:
+        `label_cache(tag)` → `item_references(content partial match, item_kind=tag)` → full scan of `base_tags`/`user_tags`
+      - `label_cache` is optional; if absent, the first phase is skipped. When present, sorted by `tag ASC` to benefit from ZoneMap on prefix search.
+      - Search results are registered as tag/type definition items in `item_references`, naturally building a suggestion cache over time.
     - Enhanced Help: Syntax examples in `--help` and detailed Query syntax guide.
 - [ ] **Query Strictness**: Investigate implementing tag existence verification in `lens_resolver` to improve query strictness and detect typos.
 
 ### System & Maintenance
+- [ ] **Query SQL Lensification**: Move SQL construction out of the `fetcher`/`query::sql` builders and behind the Lens. The builders should only compose Lens-provided functions/combinators (as `NameFn` composes `Prefer`), leaving physical SQL construction entirely to the Lens. This makes read uniformly go through the StorageMapping abstraction (STORE.md §5) instead of touching `oneview` directly.
+    - [ ] Optimize performance by delaying name deduplication (uniquification) until after item ID selection.
 - [ ] **Plugin System Optimization**:
     - WASM instance management optimization (parallel initialization).
     - WASI security (restricting `preopened_dir`).

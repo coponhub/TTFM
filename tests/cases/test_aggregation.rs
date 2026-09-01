@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 /// 集約機能 (Aggregation) の統合テスト
 use super::inject_path_scope;
 use path_slash::PathExt;
 use tempfile::tempdir;
+use ttfm::search;
 
 define_cases! {
     count_items_txt: {
@@ -61,7 +63,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].raw_repr(), "1.1KB");
+            assert_eq!(res.results[0].raw_repr(), "1.07KB");
             Ok(())
         },
     },
@@ -134,8 +136,8 @@ define_cases! {
         query: "max(nonexistent_tag:)",
         assert: |res, _dir| {
             let r = res.results.first().expect("Expected a result for MAX aggregation");
-            let types = r.get_all_values("type");
-            assert!(types.contains(&"numeric".to_string()), "Expected type:numeric, got {:?}", types);
+            let types = r.get_all_values("bitical_type");
+            assert!(types.contains(&"numeric".to_string()), "Expected bitical_type:numeric, got {:?}", types);
             Ok(())
         },
     },
@@ -275,17 +277,30 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res1 = search::search(&store, &registry, &cache, "count(extension:txt) ^ 0", Default::default())?;
+    let res1 = search::search_nowarn(
+        &store,
+        &registry,
+        "count(extension:txt) ^ 0",
+        Default::default(),
+    )?;
     assert_eq!(
         res1.total_count,
         Some(1),
         "Should match root directory (calc is true)"
     );
 
-    let res2 = search::search(&store, &registry, &cache, "count(extension:txt) ^ 2", Default::default())?;
+    let res2 = search::search_nowarn(
+        &store,
+        &registry,
+        "count(extension:txt) ^ 2",
+        Default::default(),
+    )?;
     assert_eq!(res2.results[0].raw_repr(), "FALSE");
 
     Ok(())
@@ -305,34 +320,72 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res = search::search(&store, &registry, &cache, "count(item_id:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(item_id:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(item_id) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(item_kind:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(item_kind:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(item_kind) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(rank:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(rank:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(rank) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(origin:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(origin:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(origin) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(path:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(path:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 3.0, "count(path) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(parentdir:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(parentdir:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(parentdir) failed: {}", val);
 
-    let res = search::search(&store, &registry, &cache, "count(filename:)", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "count(filename:)",
+        Default::default(),
+    )?;
     let val: f64 = res.results[0].raw_repr().parse().unwrap();
     assert!(val >= 1.0, "count(filename) failed: {}", val);
 
@@ -353,10 +406,18 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res2 = search::search(&store, &registry, &cache, "max(mtime:) < 2027-01-01", Default::default())?;
+    let res2 = search::search_nowarn(
+        &store,
+        &registry,
+        "max(mtime:) < 2027-01-01",
+        Default::default(),
+    )?;
     assert_eq!(res2.results.len(), 1);
     assert_eq!(res2.results[0].raw_repr(), "TRUE");
 
@@ -377,10 +438,15 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res = search::search(&store, &registry, &cache, 
+    let res = search::search_nowarn(
+        &store,
+        &registry,
         "max(extension:txt & mtime:) < 2027-02-01",
         Default::default(),
     )?;
@@ -402,15 +468,28 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res = search::search(&store, &registry, &cache, "max(mtime:) == 2026", Default::default())?;
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "max(mtime:) == 2026",
+        Default::default(),
+    )?;
     assert_eq!(res.results.len(), 1);
     assert_eq!(res.results[0].raw_repr(), "TRUE");
     assert!(res.results[0].id.is_volatile());
 
-    let res_false = search::search(&store, &registry, &cache, "max(mtime:) == 2025", Default::default())?;
+    let res_false = search::search_nowarn(
+        &store,
+        &registry,
+        "max(mtime:) == 2025",
+        Default::default(),
+    )?;
     assert_eq!(res_false.results.len(), 1);
     assert_eq!(res_false.results[0].raw_repr(), "FALSE");
     assert!(res_false.results[0].id.is_volatile());
@@ -443,12 +522,20 @@ impl TestContext {
 
     fn search(&self, query: &str) -> ttfm::response::SearchResponse {
         let registry = ttfm::tag::TagRegistry::with_standard();
-    let store = ttfm::db::Store::open(&self.db_dir).unwrap();
-    ttfm::indexing::Indexer::new(&store, &registry).initialize_tables().unwrap();
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-        ttfm::indexing::Indexer::new(&store, &registry).run(&self.root, None::<&fn(usize)>, false)
+        let store = ttfm::db::Store::open(&self.db_dir).unwrap();
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
             .unwrap();
-        search::search(&store, &registry, &cache, query, ttfm::SearchOptions::default()).unwrap()
+        ttfm::indexing::Indexer::new(&store, &registry)
+            .run_single(&self.root, None::<&fn(usize)>, false)
+            .unwrap();
+        search::search_nowarn(
+            &store,
+            &registry,
+            query,
+            ttfm::SearchOptions::default(),
+        )
+        .unwrap()
     }
 }
 
@@ -479,10 +566,13 @@ fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res = search::search(&store, &registry, &cache, 
+    let res = search::search_nowarn(&store, &registry,
         "sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)",
         Default::default(),
     )?;
@@ -526,17 +616,38 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-    ttfm::indexing::Indexer::new(&store, &registry).run(&root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        &root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
-    let res_any_top = search::search(&store, &registry, &cache, "count()", Default::default())?;
-    let res_wild_top = search::search(&store, &registry, &cache, "count(*:*)", Default::default())?;
-    assert_eq!(res_any_top.results[0].raw_repr(), res_wild_top.results[0].raw_repr());
+    let res_any_top = search::search_nowarn(
+        &store,
+        &registry,
+        "count()",
+        Default::default(),
+    )?;
+    let res_wild_top = search::search_nowarn(
+        &store,
+        &registry,
+        "count(*:*)",
+        Default::default(),
+    )?;
+    assert_eq!(
+        res_any_top.results[0].raw_repr(),
+        res_wild_top.results[0].raw_repr()
+    );
 
     let root_str = root.to_slash_lossy();
     let query_indirect =
         format!("count() - count(*:* - parentdir:\"{}\")", root_str);
-    let res_indirect = search::search(&store, &registry, &cache, &query_indirect, Default::default())?;
+    let res_indirect = search::search_nowarn(
+        &store,
+        &registry,
+        &query_indirect,
+        Default::default(),
+    )?;
     assert_eq!(res_indirect.results[0].raw_repr(), "5");
 
     Ok(())

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,7 +17,7 @@
 
 use crate::db::Col;
 use crate::tag::{Scan, ScanColumn, ScanField};
-use crate::types::DBType;
+use crate::types::BiticalAssociate;
 use crate::util::alias_from;
 use anyhow::Result;
 use duckdb::types::FromSql;
@@ -33,7 +35,7 @@ pub fn name_to_iden(name: &str) -> sea_query::DynIden {
 pub fn get_column_def<F: Scan>() -> ScanColumn {
     ScanColumn {
         name: F::name(),
-        sql_type: <<F as Scan>::Value as DBType>::db_type(),
+        bitical_type: <<F as Scan>::Value as BiticalAssociate>::BITICAL,
         role: F::SCAN_ROLE,
     }
 }
@@ -110,7 +112,7 @@ macro_rules! define_scan_entry {
                 Self::schema().into_iter().map(|cd| {
                     (
                         Self::name_to_iden(&cd.name),
-                        cd.sql_type.into_iden(),
+                        cd.bitical_type.into_iden(),
                     )
                 }).collect()
             }
@@ -158,24 +160,63 @@ macro_rules! define_scan_entry {
     };
 }
 
-/// Item関連のカラム順序を一元管理するマクロ。
-/// 構造体定義、SELECTプロジェクション、カラムリスト生成を一度の定義で行います。
+/// `OperandFormat` を宣言順で試す推論レジストリを生成するマクロ。
+/// 宣言順は「全形式が譲ったら最後の形式に落ちる」という最下位保証のためだけに使う。
 #[macro_export]
-macro_rules! define_item_schema {
-    ($($field:ident => $col:ident),* $(,)?) => {
-        pub(crate) struct ItemRow {
-            $(pub $field: ::sea_query::SimpleExpr,)*
-        }
-
-        impl ItemRow {
-            pub fn select(self) -> ::sea_query::SelectStatement {
-                let mut q = ::sea_query::Query::select();
-                $(q.expr_as(self.$field, $crate::db::Col::$col);)*
-                q
+macro_rules! define_operand_formats {
+    ( $( $name:ident ),+ $(,)? ) => {
+        impl $crate::types::Bitical {
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式が報告する
+            /// `LogicalType` を返す。どれも主張しなければ文字列のまま。
+            pub fn infer_logical_type_with_range(
+                &self,
+            ) -> $crate::query::logical_schema::LogicalType {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return self.logical_type();
+                };
+                $(
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return <$name as OperandFormat>::logical_type(&value);
+                    }
+                )+
+                self.logical_type()
             }
 
-            pub fn all_columns() -> [$crate::db::Col; 6] {
-                [$($crate::db::Col::$col),*]
+            /// 全 `OperandFormat` に宣言順で尋ね、最初に主張した形式のパース結果を
+            /// 型ごと保つ。どれも主張しなければ `Formatted::Bitical` のまま。
+            pub fn to_formatted(&self) -> $crate::query::format::Formatted {
+                use $crate::query::format::OperandFormat;
+                let $crate::types::Bitical::String(s) = self else {
+                    return $crate::query::format::Formatted::Bitical(self.clone());
+                };
+                $(
+                    if let Some(Ok(value)) = <$name as OperandFormat>::parse(s) {
+                        return $crate::query::format::Formatted::$name(value);
+                    }
+                )+
+                $crate::query::format::Formatted::Bitical(self.clone())
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        pub enum Formatted {
+            $( $name($name), )+
+        }
+
+        impl Formatted {
+            pub fn is_point(&self) -> bool {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::is_point(v), )+
+                }
+            }
+
+            pub fn as_bitical(&self) -> $crate::types::Bitical {
+                use $crate::query::format::OperandFormat;
+                match self {
+                    $( Formatted::$name(v) => <$name as OperandFormat>::as_bitical(v), )+
+                }
             }
         }
     };

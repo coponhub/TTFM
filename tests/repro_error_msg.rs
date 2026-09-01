@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,13 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::query::parser::parse;
+use ttfm::query::parser::parse_nowarn;
 
 #[test]
 fn test_repro_arithmetic_error_msg() {
     let input =
         "(parentdir: &: count(extension:rs)) / (parentdir: &: count()) :> 1";
-    let err = parse(input).unwrap_err();
+    let err = parse_nowarn(input).unwrap_err();
     let err_msg = format!("{}", err);
     println!("Actual Error Output:\n{}", err_msg);
 
@@ -30,7 +32,7 @@ fn test_repro_arithmetic_error_msg() {
 #[test]
 fn test_repro_top_level_arithmetic_error_msg() {
     let input = "parentdir: &: count(extension:rs) / parentdir: &: count()";
-    let err = parse(input).unwrap_err();
+    let err = parse_nowarn(input).unwrap_err();
     let err_msg = format!("{}", err);
     println!("Actual Error Output:\n{}", err_msg);
 
@@ -43,7 +45,7 @@ fn test_repro_top_level_arithmetic_error_msg() {
 fn test_repro_nested_arithmetic_error_msg() {
     let input =
         "(parentdir: &: count(extension:rs) / parentdir: &: count()) :> 1";
-    let err = parse(input).unwrap_err();
+    let err = parse_nowarn(input).unwrap_err();
     let err_msg = format!("{}", err);
     println!("Actual Error Output:\n{}", err_msg);
 
@@ -54,7 +56,7 @@ fn test_repro_nested_arithmetic_error_msg() {
 #[test]
 fn test_repro_simple_error_msg() {
     let input = "count() :> 1";
-    let err = parse(input).unwrap_err();
+    let err = parse_nowarn(input).unwrap_err();
     let err_msg = format!("{}", err);
 
     // 単純な誤用ケース（リグレッション防止用）

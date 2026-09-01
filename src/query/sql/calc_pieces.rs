@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,8 +16,9 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use super::{
-    apply_arithmetic_op, build_resolved_literal_expr,
-    build_storage_column_expr, build_tag_value_agg_expr,
+    apply_arithmetic_op, build_label_grouping_expr,
+    build_resolved_literal_expr, build_storage_column_expr,
+    build_tag_value_agg_expr,
 };
 use crate::query::lens_resolver::{ResolvedCalculationNode, ResolvedOperand};
 use sea_query::SimpleExpr;
@@ -33,9 +36,10 @@ pub(super) fn build_calculation_expr(
 fn build_resolved_operand_expr(operand: &ResolvedOperand) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_storage_column_expr(storage, *sql_type)
+        ResolvedOperand::TagRef { storage, bitical_type, .. } => {
+            build_storage_column_expr(storage, *bitical_type)
         }
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
@@ -60,9 +64,10 @@ pub(super) fn build_calculation_eav_expr(
 fn build_resolved_operand_eav_expr(operand: &ResolvedOperand) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_tag_value_agg_expr(storage, *sql_type)
+        ResolvedOperand::TagRef { storage, bitical_type, .. } => {
+            build_tag_value_agg_expr(storage, *bitical_type)
         }
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] = child_results.try_into().unwrap();
             let is_string = calc.left.is_string_type() && calc.right.is_string_type();
@@ -81,42 +86,11 @@ pub(super) fn fold_simple_operand(
     child_results: Vec<SimpleExpr>,
 ) -> Option<SimpleExpr> {
     match op {
-        ResolvedOperand::Literal(lab) => {
-            let expr =
-                if let Some(bytes) = crate::util::parse_size(&lab.as_str()) {
-                    sea_query::Expr::val(bytes)
-                        .cast_as(crate::db::SqlType::DOUBLE)
-                        .into()
-                } else {
-                    match lab.value() {
-                        crate::types::LabelValue::Integer(i) => {
-                            sea_query::Expr::val(i)
-                                .cast_as(crate::db::SqlType::DOUBLE)
-                                .into()
-                        }
-                        crate::types::LabelValue::String(s)
-                        | crate::types::LabelValue::Literal(s) => {
-                            sea_query::Expr::val(s.clone()).into()
-                        }
-                        crate::types::LabelValue::Boolean(b) => {
-                            sea_query::Expr::val(b).into()
-                        }
-                        crate::types::LabelValue::Double(bits) => {
-                            sea_query::Expr::val(f64::from_bits(bits)).into()
-                        }
-                        crate::types::LabelValue::Null => {
-                            sea_query::Expr::val(None::<i32>).into()
-                        }
-                        crate::types::LabelValue::Date(dt) => {
-                            sea_query::Expr::val(dt.to_timestamp())
-                                .cast_as(crate::db::SqlType::DOUBLE)
-                                .into()
-                        }
-                    }
-                };
-            Some(expr)
+        ResolvedOperand::Literal(lab) => Some(build_resolved_literal_expr(lab)),
+        ResolvedOperand::TagRef { .. }
+        | ResolvedOperand::LabelGrouping { .. } => {
+            Some(sea_query::Expr::val(0).into())
         }
-        ResolvedOperand::TagRef { .. } => Some(sea_query::Expr::val(0).into()),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();

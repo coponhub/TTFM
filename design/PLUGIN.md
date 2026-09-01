@@ -25,6 +25,7 @@ interface core {
 ```wit
 interface indexing {
     enum value-type { text, big-int, boolean, double }
+    enum target-table { base-tags, tags-by-location }
     variant tag-value {
         text(string),
         big-int(s64),
@@ -33,6 +34,7 @@ interface indexing {
         empty,
     }
     get-value-type: func() -> value-type;
+    target-table: func() -> target-table;
     tag-file: func(path: string) -> list<tag-value>;
 }
 ```
@@ -63,9 +65,9 @@ interface display {
 
 ## 3. ホスト側の責務 (Rust)
 
-1. **プラグインロード順序**: ユーザープラグイン → ビルトインプラグインの順でロード。同名のプラグインが既に登録されている場合はスキップ（ユーザープラグインが常に優先）。
-2. **ビルトインプラグイン**: バイナリに `include_bytes!` で埋め込み、ディスクへのコピーなしにメモリから直接ロード。常にバイナリと同じバージョンが使われる。
-3. **ユーザープラグイン**: `~/.ttfm/plugins/` をスキャンし、`.wasm` ファイルをロード。ビルトインと同名のファイルを置けばビルトインより優先される（古いバージョンの固定も可能）。
+1. **プラグインロード順序**: ユーザープラグイン → 組み込みプラグインの順でロード。同名のプラグインが既に登録されている場合はスキップ（ユーザープラグインが常に優先）。
+2. **組み込み(Embedded)プラグイン**: バイナリに `include_bytes!` で埋め込み、ディスクへのコピーなしにメモリから直接ロード。常にバイナリと同じバージョンが使われる。
+3. **ユーザープラグイン**: `~/.ttfm/plugins/` をスキャンし、`.wasm` ファイルをロード。Embeddedと同名のファイルを置けばEmbeddedより優先される（古いバージョンの固定も可能）。
 4. **WASI構成**: プラグインが対象ファイルを読み込めるよう、実行時にWASIのファイルシステムアクセス権限（Read-Only）を付与。
 5. **SQL生成**: Wasm側にはSQL生成ロジックを持たせず、ホスト側が標準的なSQLを自動生成。
 6. **実行最適化**: `thread_local` による Wasm インスタンスキャッシュで高速化。
@@ -75,7 +77,7 @@ interface display {
 `core` は必須。それ以外は必要なものだけ実装する。
 
 - **core**: `name()` でプラグイン識別名、`version()` でバージョンを返す。
-- **indexing**（省略可能）: 渡されたファイルパスを解析し `tag-value` のリストを返す。空の場合は `empty` を返す。
+- **indexing**（省略可能）: 渡されたファイルパスを解析し `tag-value` のリストを返す。書き込み先テーブル（`base-tags` または `tags-by-location`）を `target-table()` で宣言する（省略時は `base-tags`）。空の場合は `empty` を返す。
 - **query**（省略可能）: ラベル正規化・クエリ展開ロジックを実装する。省略時はホスト側のデフォルト動作が使われる。
 - **display**（省略可能）: 値の表示フォーマットを実装する。省略時は生値がそのまま表示される。
 
@@ -104,6 +106,9 @@ impl exports::ttfm::plugin::core::Guest for MyPlugin {
 impl exports::ttfm::plugin::indexing::Guest for MyPlugin {
     fn get_value_type() -> exports::ttfm::plugin::indexing::ValueType {
         exports::ttfm::plugin::indexing::ValueType::Text
+    }
+    fn target_table() -> exports::ttfm::plugin::indexing::TargetTable {
+        exports::ttfm::plugin::indexing::TargetTable::BaseTags
     }
     fn tag_file(path: String) -> Vec<exports::ttfm::plugin::indexing::TagValue> {
         vec![exports::ttfm::plugin::indexing::TagValue::Text("value".to_string())]
@@ -165,8 +170,8 @@ my_tag = true
 
 デフォルトは有効（エントリがなければ `true` 扱い）。
 
-## 7. ビルトインプラグインの更新
+## 7. 組み込みプラグインの更新
 
-ビルトインプラグイン（`mimetype` など）はバイナリに埋め込まれているため、ttfm本体を再ビルドするだけで自動的に更新される。ユーザープラグイン（`~/.ttfm/plugins/` 内のファイル）は上書きされない。
+組み込みプラグイン（`mimetype` など）はバイナリに埋め込まれているため、ttfm本体を再ビルドするだけで自動的に更新される。ユーザープラグイン（`~/.ttfm/plugins/` 内のファイル）は上書きされない。
 
 ビルトインを更新する場合は `plugins_src/` 以下のソースを修正後、「6. プラグインのビルド手順」に従って `plugins/` 以下の `.component.wasm` を更新し、ttfm本体を再ビルドする。

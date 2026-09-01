@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,10 +19,10 @@ use super::agg_pieces::{
     build_agg, build_agg_calc_expr, build_agg_calc_subquery,
 };
 use super::{
-    build_aggregation_context, label_to_unit_aware_expr, subquery,
-    wrap_in_subquery, BuildPick, PickNode,
+    build_aggregation_context, label_to_simple_expr, nvalue_rhs_condition,
+    subquery, wrap_in_subquery, BuildPick, PickNode,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, Src, SqlType};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun::*, Src};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{LabelSetOpKind, ResolvedNode};
 use crate::query::lens_schema::to_bin_op;
@@ -33,31 +35,29 @@ fn bool_to_volatile_row(bool_expr: SimpleExpr) -> SimpleExpr {
             .finally(Expr::val("FALSE"));
     let name_sp = CustomFunc::struct_pack_tag(
         Expr::val("name").into(),
-        CustomFunc::union_value(SqlType::VARCHAR, name_str),
+        CustomFunc::union_value(BiticalType::String, name_str),
         Expr::val("system").into(),
     );
     let type_sp = CustomFunc::struct_pack_tag(
-        Expr::val("type").into(),
-        CustomFunc::union_value(SqlType::VARCHAR, Expr::val("boolean")),
+        Expr::val("bitical_type").into(),
+        CustomFunc::union_value(
+            BiticalType::String,
+            Expr::val(BiticalType::Boolean.to_string()),
+        ),
         Expr::val("system").into(),
     );
     let value_sp = CustomFunc::struct_pack_tag(
         Expr::val("value").into(),
-        CustomFunc::union_value(SqlType::BOOLEAN, bool_expr),
+        CustomFunc::union_value(BiticalType::Boolean, bool_expr),
         Expr::val("system").into(),
     );
     CustomFunc::list_value([name_sp, type_sp, value_sp])
 }
 
-fn build_boolean_comparison_sql(
-    left: SimpleExpr,
-    op: ComparisonOp,
-    right: SimpleExpr,
-) -> SelectStatement {
-    let bin_op = to_bin_op(op);
-    let bool_expr = Expr::expr(left).binary(bin_op, right).into();
+fn build_boolean_condition_sql(bool_expr: SimpleExpr) -> SelectStatement {
     let mut q = Query::select();
-    q.expr_as(Expr::val(0i64), Col::ItemId)
+    // 揮発 id は SQL 側では NULL とし、fetch 後に Rust 側で採番する。
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId)
         .expr_as(Expr::val(0i64), Col::Rank)
         .expr_as(Expr::val("volatile"), Col::ItemKind)
         .expr_as(
@@ -67,13 +67,22 @@ fn build_boolean_comparison_sql(
     q
 }
 
+fn build_boolean_comparison_sql(
+    left: SimpleExpr,
+    op: ComparisonOp,
+    right: SimpleExpr,
+) -> SelectStatement {
+    let bin_op = to_bin_op(op);
+    build_boolean_condition_sql(Expr::expr(left).binary(bin_op, right).into())
+}
+
 pub(super) fn build_boolean_existence_sql(
     pick_sql: SelectStatement,
 ) -> SelectStatement {
     let bool_expr =
         CustomFunc::any_value(Expr::col((Pk, Col::ItemId))).is_not_null();
     let mut q = Query::select();
-    q.expr_as(Expr::val(0i64), Col::ItemId)
+    q.expr_as(Expr::val(None::<i64>), Col::ItemId)
         .expr_as(Expr::val(0i64), Col::Rank)
         .expr_as(Expr::val("volatile"), Col::ItemKind)
         .expr_as(
@@ -158,15 +167,20 @@ pub(super) fn build_label_set_op_pick_sql(
     }
 }
 
-pub(super) fn build_boolean_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
+pub(super) fn build_boolean_sql(
+    src: &Src,
+    node: &ResolvedNode,
+) -> SelectStatement {
     let agg_ctx = build_aggregation_context(src, node);
     match node {
-        ResolvedNode::AggregationMatch { agg, op, label } => {
-            build_boolean_comparison_sql(
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
+            let cond = nvalue_rhs_condition(
                 subquery(build_agg(src, agg, &agg_ctx)),
                 *op,
-                label_to_unit_aware_expr(label),
-            )
+                rhs,
+                agg.is_string_type(),
+            );
+            build_boolean_condition_sql(cond.into())
         }
         ResolvedNode::AggregationAggregationMatch { left, op, right } => {
             build_boolean_comparison_sql(
@@ -193,9 +207,9 @@ pub(super) fn build_boolean_sql(src: &Src, node: &ResolvedNode) -> SelectStateme
         }
         ResolvedNode::ScalarMatch { left, op, right } => {
             build_boolean_comparison_sql(
-                label_to_unit_aware_expr(left),
+                label_to_simple_expr(left),
                 *op,
-                label_to_unit_aware_expr(right),
+                label_to_simple_expr(right),
             )
         }
         _ => {
@@ -225,7 +239,7 @@ mod tests {
         assert!(s.contains("tags"), "should have tags: {}", s);
         assert!(s.contains("tag_type"), "should have tag_type: {}", s);
         assert!(
-            s.contains("union_value(s :="),
+            s.contains("union_value(\"string\" :="),
             "should have string union arm: {}",
             s
         );
@@ -251,7 +265,7 @@ mod tests {
         assert!(s.contains("item_kind"), "should have item_kind: {}", s);
         assert!(s.contains("tags"), "should have tags: {}", s);
         assert!(
-            s.contains("union_value(s :="),
+            s.contains("union_value(\"string\" :="),
             "should have string union arm: {}",
             s
         );

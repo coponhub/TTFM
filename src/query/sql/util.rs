@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,12 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, CustomFunc, Pronoun::*, SqlType};
+use crate::db::{BiticalType, Col, CustomFunc, Pronoun, Pronoun::*};
 use crate::query::ast::{ArithmeticAggOp, ArithmeticOp, QueryNode};
 use crate::query::lens_resolver::ResolvedNode;
 use crate::query::lens_schema::StorageMapping;
 use crate::types::Label;
-use sea_query::{BinOper, Expr, Func, Query, SelectStatement, SimpleExpr};
+use sea_query::{
+    BinOper, Condition, Expr, Func, Query, SelectStatement, SimpleExpr,
+};
 use std::collections::HashMap;
 
 /// `SelectStatement` をインライン副問合せ式 (`SimpleExpr`) に変換します。
@@ -43,58 +47,69 @@ pub(super) fn wrap_in_subquery(q: SelectStatement) -> SelectStatement {
         .to_owned()
 }
 
+/// SQL を `SELECT * FROM (sql) AS sub` でラップします。
+/// fetch 行スキーマ（全カラム）のまま UNION で結合する際に使用します。
+pub(super) fn wrap_in_subquery_star(q: SelectStatement) -> SelectStatement {
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from_subquery(q, Sub)
+        .to_owned()
+}
+
 /// `Label` の値を単純な SQL 式に変換します。
 pub(super) fn label_to_simple_expr(label: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
-    match label.value() {
-        LabelValue::Integer(i) => Expr::val(i).into(),
-        LabelValue::Boolean(b) => Expr::val(b).into(),
-        LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-        LabelValue::Null => Expr::val(Option::<i32>::None).into(),
-        LabelValue::String(s) | LabelValue::Literal(s) => Expr::val(s).into(),
-        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
-    }
+    label.resolved_value().to_simple_expr()
 }
 
-/// `Label` の値をサイズ単位を考慮した SQL 式に変換します（例: "1MB" → 1048576）。
-pub(super) fn label_to_unit_aware_expr(label: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
-    match label.value() {
-        LabelValue::Integer(i) => Expr::val(i).into(),
-        LabelValue::String(s) | LabelValue::Literal(s) => {
-            if let Some(bytes) = crate::util::parse_size(&s) {
-                Expr::val(bytes).into()
-            } else {
-                Expr::val(s.clone()).into()
-            }
-        }
-        LabelValue::Boolean(b) => Expr::val(b).into(),
-        LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-        LabelValue::Null => Expr::val(None::<i32>).into(),
-        LabelValue::Date(dt) => Expr::val(dt.to_timestamp()).into(),
-    }
-}
-
-/// リテラルラベルを SQL 式に変換します。サイズ単位のパース（"1MB" → 1048576）および
-/// 数値リテラルの DOUBLE キャストを行います。
+/// リテラルラベルを SQL 式に変換します。数値リテラルは DOUBLE へキャストします。
 pub(super) fn build_resolved_literal_expr(lab: &Label) -> SimpleExpr {
-    use crate::types::LabelValue;
-    let s = lab.as_str();
-    if let Some(bytes) = crate::util::parse_size(&s) {
-        Expr::val(bytes).cast_as(SqlType::DOUBLE).into()
-    } else {
-        match lab.value() {
-            LabelValue::Integer(i) => {
-                Expr::val(i).cast_as(SqlType::DOUBLE).into()
-            }
-            LabelValue::String(s) | LabelValue::Literal(s) => {
-                Expr::val(s.clone()).into()
-            }
-            LabelValue::Boolean(b) => Expr::val(b).into(),
-            LabelValue::Double(bits) => Expr::val(f64::from_bits(bits)).into(),
-            LabelValue::Null => Expr::val(None::<i32>).into(),
-            LabelValue::Date(dt) => {
-                Expr::val(dt.to_timestamp()).cast_as(SqlType::DOUBLE).into()
+    use crate::types::Bitical;
+    match lab.resolved_value() {
+        Bitical::Integer(i) => Expr::val(i).cast_as(BiticalType::Double).into(),
+        other => other.to_simple_expr(),
+    }
+}
+
+/// nvalue 比較の右辺制約（`NvalueRhs`）を Condition へ変換する共有ヘルパ。
+/// Label は `is_string` に応じて数値/文字列で描画し、文字列 × glob は
+/// Eq → GLOB / Ne → NOT GLOB（`check_string_match` と同じ規則）。
+/// DateTime は区間/スロット条件（`date_time_condition_expr` に op 行列を集約）。
+pub(super) fn nvalue_rhs_condition(
+    lhs: SimpleExpr,
+    op: crate::query::ast::ComparisonOp,
+    rhs: &crate::query::lens_resolver::NvalueRhs,
+    is_string: bool,
+) -> Condition {
+    use crate::query::ast::{BasicOp, ComparisonOp};
+    use crate::query::lens_resolver::NvalueRhs;
+
+    let basic_op = match op {
+        ComparisonOp::Scalar(b) | ComparisonOp::Label(b) => b,
+    };
+    match rhs {
+        NvalueRhs::DateTime(range) => {
+            super::date_time_condition_expr(&lhs, basic_op, range)
+        }
+        NvalueRhs::Label(label) => {
+            let bin_op = crate::query::lens_schema::to_bin_op(op);
+            if is_string {
+                let s = label.as_str();
+                if crate::util::is_glob_pattern(&s) {
+                    let glob = Expr::expr(lhs)
+                        .binary(BinOper::Custom("GLOB"), Expr::val(s));
+                    let expr = if basic_op == BasicOp::Ne {
+                        glob.not()
+                    } else {
+                        glob
+                    };
+                    Condition::all().add(expr)
+                } else {
+                    Condition::all()
+                        .add(Expr::expr(lhs).binary(bin_op, Expr::val(s)))
+                }
+            } else {
+                let rhs_expr = label_to_simple_expr(label);
+                Condition::all().add(Expr::expr(lhs).binary(bin_op, rhs_expr))
             }
         }
     }
@@ -122,28 +137,89 @@ pub(super) fn apply_arithmetic_agg(
     }
 }
 
-/// `StorageMapping` からカラム式を生成します。
-/// 数値演算が必要な `LabelStr` には `TRY_CAST` を適用します。
-pub(super) fn build_storage_column_expr(
+pub(super) fn build_storage_column_expr_for_row(
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
+    row_type: Option<Pronoun>,
 ) -> SimpleExpr {
     match storage {
-        StorageMapping::Fixed(col) => Expr::col(*col).into(),
-        StorageMapping::Basic { column, .. } => {
-            let col_expr = Expr::col(*column);
-            if *column == Col::LabelStr
-                && matches!(sql_type, SqlType::BIGINT | SqlType::DOUBLE)
-            {
-                CustomFunc::try_cast_double(col_expr)
-            } else {
-                col_expr.into()
+        StorageMapping::Fixed(col) => match row_type {
+            Some(p) => Expr::col((p, *col)).into(),
+            None => Expr::col(*col).into(),
+        },
+        StorageMapping::Basic { column, .. } if *column == Col::LabelStr => {
+            match bitical_type {
+                BiticalType::Integer => match row_type {
+                    Some(p) => Expr::col((p, Col::LabelInt))
+                        .cast_as(BiticalType::Double)
+                        .into(),
+                    None => Expr::col(Col::LabelInt)
+                        .cast_as(BiticalType::Double)
+                        .into(),
+                },
+                BiticalType::Double => match row_type {
+                    Some(p) => Expr::col((p, Col::LabelDouble)).into(),
+                    None => Expr::col(Col::LabelDouble).into(),
+                },
+                _ => coalesce_label_columns_as_string_for_row(row_type),
             }
         }
+        StorageMapping::Basic { column, .. } => match row_type {
+            Some(p) => Expr::col((p, *column)).into(),
+            None => Expr::col(*column).into(),
+        },
         StorageMapping::Composite => {
-            CustomFunc::any_value(Expr::col(Col::LabelStr)).into()
+            coalesce_label_columns_as_string_for_row(row_type)
         }
     }
+}
+
+pub(super) fn build_storage_column_expr(
+    storage: &StorageMapping,
+    bitical_type: BiticalType,
+) -> SimpleExpr {
+    build_storage_column_expr_for_row(storage, bitical_type, None)
+}
+
+pub(super) fn coalesce_label_columns_as_string_for_row(
+    row_type: Option<Pronoun>,
+) -> SimpleExpr {
+    let col_str: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelStr)).into(),
+        None => Expr::col(Col::LabelStr).into(),
+    };
+    let col_int: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelInt))
+            .cast_as(BiticalType::String)
+            .into(),
+        None => Expr::col(Col::LabelInt).cast_as(BiticalType::String).into(),
+    };
+    let col_double: SimpleExpr = match row_type {
+        Some(p) => Expr::col((p, Col::LabelDouble))
+            .cast_as(BiticalType::String)
+            .into(),
+        None => Expr::col(Col::LabelDouble)
+            .cast_as(BiticalType::String)
+            .into(),
+    };
+    let col_bool = match row_type {
+        Some(p) => Expr::col((p, Col::LabelBool)),
+        None => Expr::col(Col::LabelBool),
+    };
+    Func::coalesce([
+        col_str,
+        col_int,
+        col_double,
+        sea_query::CaseStatement::new()
+            .case(col_bool.clone().eq(true), "true")
+            .case(col_bool.eq(false), "false")
+            .into(),
+    ])
+    .into()
+}
+
+pub(super) fn coalesce_label_columns_as_string() -> SimpleExpr {
+    coalesce_label_columns_as_string_for_row(None)
 }
 
 // ── AggregationContext / NestContext ───────────────────────────────────────
@@ -157,10 +233,15 @@ pub struct AggregationContext {
     pub agg_filters: HashMap<usize, SelectStatement>,
     /// Count(inner) かつ inner_tag_type が None の場合の inner 全体 SQL (Phase 3 で参照)
     pub agg_inner_sqls: HashMap<usize, SelectStatement>,
+    /// Count(inner) が定義枝 (DefinitionRef, Or 経由も含む) を含む場合の
+    /// 定義枝 distinct 件数 SQL。キーは inner_node ポインタ（Phase 3 で参照）。
+    pub definition_counts: HashMap<usize, SelectStatement>,
     /// Phase 1 収集: フィルタノード (Phase 2 で SQL 化して agg_filters へ移動)
     pub filter_nodes: HashMap<usize, ResolvedNode>,
     /// Phase 1 収集: Count inner ノード (Phase 2 で SQL 化して agg_inner_sqls へ移動)
     pub inner_nodes: HashMap<usize, ResolvedNode>,
+    /// Phase 1 収集: 定義枝ノード群 (Phase 2 で SQL 化して definition_counts へ移動)
+    pub definition_count_nodes: HashMap<usize, Vec<ResolvedNode>>,
 }
 
 impl AggregationContext {
@@ -168,8 +249,10 @@ impl AggregationContext {
         Self {
             agg_filters: HashMap::new(),
             agg_inner_sqls: HashMap::new(),
+            definition_counts: HashMap::new(),
             filter_nodes: HashMap::new(),
             inner_nodes: HashMap::new(),
+            definition_count_nodes: HashMap::new(),
         }
     }
 }
@@ -197,14 +280,19 @@ impl NestContext {
 /// StorageMapping から集計式を生成します（EAV 構造用の MAX CASE WHEN 形式）。
 pub(super) fn build_tag_value_agg_expr(
     storage: &StorageMapping,
-    _sql_type: SqlType,
+    _sql_type: BiticalType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Fixed(col) => {
             CustomFunc::any_value(Expr::col(*col)).into()
         }
         StorageMapping::Basic { column, tag_type } => {
-            let cast_expr = CustomFunc::try_cast_double(Expr::col(*column));
+            let value_expr = if *column == Col::LabelStr {
+                coalesce_label_columns_as_string()
+            } else {
+                Expr::col(*column).into()
+            };
+            let cast_expr = CustomFunc::try_cast_double(value_expr);
             let case_expr = Expr::case(
                 Expr::col(Col::Type).eq(tag_type.as_str()),
                 cast_expr,
@@ -246,7 +334,7 @@ pub fn to_tag_condition(node: &QueryNode) -> sea_query::Condition {
     let mut fixed_types = Vec::new();
     let glob_op = sea_query::BinOper::Custom("GLOB");
     for t in types {
-        if t.contains('*') || t.contains('?') || t.contains('[') {
+        if crate::util::is_glob_pattern(&t) {
             cond = cond.add(Expr::col(Col::Type).binary(glob_op, Expr::val(t)));
         } else {
             fixed_types.push(t);
@@ -283,4 +371,129 @@ pub(super) fn apply_arithmetic_op(
         Mod => BinOper::Custom("%"),
     };
     Expr::expr(left).binary(bin_op, right)
+}
+
+pub(super) fn pattern_to_regex(pattern: &str) -> String {
+    let mut has_start = pattern.starts_with('^');
+    let mut has_end = pattern.ends_with('$');
+    let s = if has_start { &pattern[1..] } else { pattern };
+    let s = if has_end && !s.is_empty() {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
+    if s.starts_with('*') {
+        has_start = true;
+    }
+    if s.ends_with('*') {
+        has_end = true;
+    }
+    let mut regex = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if let Some(next_ch) = chars.next() {
+                    regex.push('\\');
+                    regex.push(next_ch);
+                }
+            }
+            '*' => regex.push_str(".*?"),
+            '?' => regex.push('.'),
+            '.' | '+' | '(' | ')' | '|' | '{' | '}' | '[' | ']' | '^' | '$' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            other => regex.push(other),
+        }
+    }
+    let body = format!("({})", regex);
+    match (has_start, has_end) {
+        (true, true) => format!("^{}$", body),
+        (true, false) => format!("^{}", body),
+        (false, true) => format!("{}$", body),
+        (false, false) => body,
+    }
+}
+
+fn build_label_grouping_extract_call_for_row(
+    storage: &StorageMapping,
+    pattern: &str,
+    row_type: Option<Pronoun>,
+) -> sea_query::FunctionCall {
+    let col_expr = build_storage_column_expr_for_row(
+        storage,
+        BiticalType::String,
+        row_type,
+    );
+    let regex_pat = pattern_to_regex(pattern);
+    Func::cust("regexp_extract")
+        .arg(col_expr)
+        .arg(Expr::val(regex_pat))
+        .arg(Expr::val(1))
+}
+
+pub fn build_label_grouping_expr_for_row(
+    op: &crate::query::lens_resolver::ResolvedOperand,
+    row_type: Option<Pronoun>,
+) -> SimpleExpr {
+    use crate::query::lens_resolver::ResolvedOperand;
+    match op {
+        ResolvedOperand::LabelGrouping {
+            pattern, storage, ..
+        } => {
+            let extract_call = build_label_grouping_extract_call_for_row(
+                storage, pattern, row_type,
+            );
+            Func::cust("NULLIF")
+                .arg(extract_call)
+                .arg(Expr::val(""))
+                .into()
+        }
+        _ => panic!("Expected ResolvedOperand::LabelGrouping"),
+    }
+}
+
+pub fn build_label_grouping_expr(
+    op: &crate::query::lens_resolver::ResolvedOperand,
+) -> SimpleExpr {
+    build_label_grouping_expr_for_row(op, None)
+}
+
+pub fn build_label_grouping_match_cond_for_row(
+    storage: &StorageMapping,
+    pattern: &str,
+    row_type: Option<Pronoun>,
+) -> Condition {
+    let extract_call =
+        build_label_grouping_extract_call_for_row(storage, pattern, row_type);
+    Condition::all()
+        .add(Expr::expr(extract_call.clone()).is_not_null())
+        .add(Expr::expr(extract_call).ne(Expr::val("")))
+}
+
+pub fn build_label_grouping_match_cond(
+    storage: &StorageMapping,
+    pattern: &str,
+) -> Condition {
+    build_label_grouping_match_cond_for_row(storage, pattern, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pattern_to_regex_conversion() {
+        assert_eq!(pattern_to_regex("/projects/*/"), "(/projects/.*?/)");
+        assert_eq!(pattern_to_regex("^/projects/*/"), "^(/projects/.*?/)");
+        assert_eq!(pattern_to_regex("/projects/*/$"), "(/projects/.*?/)$");
+        assert_eq!(pattern_to_regex("^/projects/*/$"), "^(/projects/.*?/)$");
+        assert_eq!(pattern_to_regex("foo.bar"), "(foo\\.bar)");
+        assert_eq!(pattern_to_regex("a+b(c)"), "(a\\+b\\(c\\))");
+        assert_eq!(pattern_to_regex("*"), "^(.*?)$");
+        assert_eq!(pattern_to_regex("alpha*"), "(alpha.*?)$");
+        assert_eq!(pattern_to_regex("*.rs"), "^(.*?\\.rs)");
+        assert_eq!(pattern_to_regex("*src*"), "^(.*?src.*?)$");
+    }
 }

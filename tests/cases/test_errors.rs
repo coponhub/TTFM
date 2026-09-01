@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,33 +15,30 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 use anyhow::Result;
 use tempfile::tempdir;
+use ttfm::search;
 
 // =========================================================================
 // Over-aggregation error tests (集約過剰エラー)
 // =========================================================================
 
 fn make_store_registry_cache(
-) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry, ttfm::CacheManager)>
-{
+) -> Result<(ttfm::db::Store, ttfm::tag::TagRegistry)> {
     let dir = tempdir()?;
     let db_dir = dir.path().join(".ttfm/db");
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache =
-        ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
     // dir を drop させないためリーク（テスト内の短命な用途）
     std::mem::forget(dir);
-    Ok((store, registry, cache))
+    Ok((store, registry))
 }
 
 fn assert_over_agg_error(query: &str) {
-    let (store, registry, cache) = make_store_registry_cache().unwrap();
+    let (store, registry) = make_store_registry_cache().unwrap();
     let result =
-        search::search(&store, &registry, &cache, query, Default::default());
+        search::search_nowarn(&store, &registry, query, Default::default());
     assert!(
         result.is_err(),
         "Expected error for over-aggregation query '{query}', but got Ok"
@@ -84,13 +83,22 @@ fn test_mismatched_comparison_error_message() -> Result<()> {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        &files_dir,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // size: > 100 という形式（本来は :> であるべき）を実行
-    let result = search::search(&store, &registry, &cache, "size: > 100", Default::default());
+    let result = search::search_nowarn(
+        &store,
+        &registry,
+        "size: > 100",
+        Default::default(),
+    );
 
     assert!(
         result.is_err(),
@@ -127,15 +135,20 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(&files_dir, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        &files_dir,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     // --- Investigation ---
     // 1.1 正常系: プレーンなプロジェクション同士の演算（size: + mtime:）
     let ok_query1 = "(size: + mtime:) :> 10";
-    let ok_result1 = search::search(&store, &registry, &cache, ok_query1, Default::default());
+    let ok_result1 =
+        search::search_nowarn(&store, &registry, ok_query1, Default::default());
     if let Err(e) = &ok_result1 {
         println!("QUERY 1 ERROR: {:?}", e);
     }
@@ -147,7 +160,8 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // 1.2 Nest 内での非集約タグ算術: 仕様上は最後の値（Calculation）を使って比較する
     // (parentdir: &: (size: + mtime:)) :> 10 → parentdir ごとに size+mtime を評価して比較
     let query2 = "(parentdir: &: (size: + mtime:)) :> 10";
-    let result2 = search::search(&store, &registry, &cache, query2, Default::default());
+    let result2 =
+        search::search_nowarn(&store, &registry, query2, Default::default());
     assert!(
         result2.is_ok(),
         "Arithmetic over non-aggregated tags within Nest should succeed: {:?}",
@@ -158,7 +172,8 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     // (parentdir: &: count()) / (extension: &: count()) はエラーではなく、
     // 深いネスト (merged_keys = [parentdir, extension]) として解釈される
     let query = "((parentdir: &: count()) / (extension: &: count())) :> 1";
-    let result = search::search(&store, &registry, &cache, query, Default::default());
+    let result =
+        search::search_nowarn(&store, &registry, query, Default::default());
 
     assert!(
         result.is_ok(),
@@ -167,4 +182,21 @@ fn test_repro_mismatched_group_by_keys_error_msg() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[test]
+fn test_nest_lhs_calculation_is_syntax_error() {
+    let (store, registry) = make_store_registry_cache().unwrap();
+    let query = "(size: / 1024) &: count()";
+    let result =
+        search::search_nowarn(&store, &registry, query, Default::default());
+    assert!(
+        result.is_err(),
+        "Expected syntax error for calculation on nest LHS"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("Calculations or scalar expressions cannot be used on the left-hand side of nest operator"),
+        "Error message should explain that nest LHS cannot be a calculation or scalar expression, got: {err_msg}"
+    );
 }

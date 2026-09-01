@@ -4,7 +4,8 @@ An innovative file manager based on typed tags (`type:label` format).
 
 ## License
 
-Copyright (C) 2026 coponhub
+Copyright (C) 2026 The TTFM Project Contributors
+See the CONTRIBUTORS file at the top-level directory of this distribution for a list of copyright holders.
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 

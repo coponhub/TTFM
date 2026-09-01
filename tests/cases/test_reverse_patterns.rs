@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,7 +17,7 @@
 
 use anyhow::Result;
 use tempfile::tempdir;
-use ttfm::{search, tagging};
+use ttfm::search;
 
 // ──────────────────────────────────────────────
 // define_cases! 移行済みケース
@@ -34,7 +36,16 @@ define_cases! {
         modify: None,
         format_query: super::default_scope,
         query: "width:>height:",
-        assert: |_res, _dir| Ok(()),
+        assert_warnings: |warnings| {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.0.contains("width: :> height:")),
+                "Expected a warning suggesting 'width: :> height:', got: {:?}",
+                warnings
+            );
+            Ok(())
+        },
     },
     calc_reverse_consistency_gt: {
         setup: |dir| {
@@ -68,24 +79,10 @@ define_cases! {
             std::fs::write(dir.join("tall_image.jpg"), "")?;
             Ok(())
         },
-        modify: Some(|store, registry, dir| {
-            let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
-            let wide_path = format!("name:wide_image.jpg & path:{}/*", dir.to_string_lossy());
-            let res_wide = search::search(store, registry, &cache, &wide_path, Default::default())?;
-            anyhow::ensure!(!res_wide.results.is_empty(), "wide_image.jpg not found");
-            let wide_id = res_wide.results[0].id.to_string();
-
-            let tall_path = format!("name:tall_image.jpg & path:{}/*", dir.to_string_lossy());
-            let res_tall = search::search(store, registry, &cache, &tall_path, Default::default())?;
-            anyhow::ensure!(!res_tall.results.is_empty(), "tall_image.jpg not found");
-            let tall_id = res_tall.results[0].id.to_string();
-
-            tagging::tag_item(store, registry, &wide_id, "width:1000")?;
-            tagging::tag_item(store, registry, &wide_id, "height:400")?;
-            tagging::tag_item(store, registry, &tall_id, "width:1000")?;
-            tagging::tag_item(store, registry, &tall_id, "height:600")?;
-            Ok(())
-        }),
+        tags: &[
+            ("wide_image.jpg", "width:1000 height:400"),
+            ("tall_image.jpg", "width:1000 height:600"),
+        ],
         format_query: super::default_scope,
         query: "width: :> (height: * 2)",
         assert: |res, _dir| {
@@ -108,9 +105,13 @@ fn test_reverse_pattern_scalar_gt_projection() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "100 > size:", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "100 > size:",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -137,9 +138,13 @@ fn test_reverse_pattern_aggregation_label_op() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "sum(size:) :> 100", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "sum(size:) :> 100",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -166,9 +171,13 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "1 :> 100", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "1 :> 100",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();
@@ -179,7 +188,12 @@ fn test_unified_error_scalar_label_op() -> Result<()> {
     );
     assert!(err_msg.contains("-->"), "Expected pretty printing");
 
-    let res = search::search(&store, &registry, &cache, "100 :< size:", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "100 :< size:",
+        Default::default(),
+    );
     assert!(
         res.is_ok(),
         "Valid query '100 :< size:' should be allowed. Error: {:?}",
@@ -196,9 +210,13 @@ fn test_double_colon_suggestion_fix() -> Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    let cache = ttfm::CacheManager::new(store.db_dir.join("cache"), 0);
 
-    let res = search::search(&store, &registry, &cache, "size: > path:", Default::default());
+    let res = search::search_nowarn(
+        &store,
+        &registry,
+        "size: > path:",
+        Default::default(),
+    );
     assert!(res.is_err());
 
     let err_msg = res.unwrap_err().to_string();

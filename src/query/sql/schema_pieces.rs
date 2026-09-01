@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,12 +16,13 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::db::{Col, Pronoun::Representative, Src};
-use sea_query::{BinOper, Condition, Expr, Query, SelectStatement, SimpleExpr};
+use sea_query::{BinOper, Expr, Query, SelectStatement, SimpleExpr};
 
 // ── to_label_select 用 ────────────────────────────────────────────────────
 
 /// Column ストレージ用ラベル SELECT。`WHERE type = ?` フィルタなし。
-pub(crate) fn build_lens_select_column(src: &Src,
+pub(crate) fn build_lens_select_column(
+    src: &Src,
     col: Col,
     ids_sql: SelectStatement,
 ) -> SelectStatement {
@@ -34,7 +37,8 @@ pub(crate) fn build_lens_select_column(src: &Src,
 }
 
 /// タグ用ラベル SELECT。`WHERE type = tag_type` フィルタあり。
-pub(crate) fn build_lens_select_tag(src: &Src,
+pub(crate) fn build_lens_select_tag(
+    src: &Src,
     col: Col,
     tag_type: &str,
     ids_sql: SelectStatement,
@@ -77,25 +81,7 @@ pub(crate) fn type_filter(op: BinOper, tag_type: &str) -> SimpleExpr {
     Expr::col(Col::Type).binary(op, tag_type)
 }
 
-/// カラムの NULL 判定式を生成。
-pub(crate) fn col_is_null(col: Col) -> SimpleExpr {
-    Expr::col(col).is_null()
-}
-
 /// 浮動小数点値条件の `Condition` を生成。
-pub(crate) fn build_double_condition(op: BinOper, bits: u64) -> Condition {
-    Condition::any().add(col_cmp_f64(
-        Col::LabelDouble,
-        op,
-        f64::from_bits(bits),
-    ))
-}
-
-/// NULL 条件の `Condition` を生成。
-pub(crate) fn build_null_condition() -> Condition {
-    Condition::any().add(col_is_null(Col::LabelStr))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,8 +96,9 @@ mod tests {
     #[test]
     fn test_build_lens_select_column_no_type_filter() {
         use sea_query::SqliteQueryBuilder;
-        let sql = build_lens_select_column(&Src::OneView, Col::Type, dummy_ids())
-            .to_string(SqliteQueryBuilder);
+        let sql =
+            build_lens_select_column(&Src::OneView, Col::Type, dummy_ids())
+                .to_string(SqliteQueryBuilder);
         assert!(
             !sql.contains("\"type\" = "),
             "Column select must not have type filter"
@@ -122,9 +109,13 @@ mod tests {
     #[test]
     fn test_build_lens_select_tag_has_type_filter() {
         use sea_query::SqliteQueryBuilder;
-        let sql =
-            build_lens_select_tag(&Src::OneView, Col::LabelStr, "parentdir", dummy_ids())
-                .to_string(SqliteQueryBuilder);
+        let sql = build_lens_select_tag(
+            &Src::OneView,
+            Col::LabelStr,
+            "parentdir",
+            dummy_ids(),
+        )
+        .to_string(SqliteQueryBuilder);
         assert!(
             sql.contains("parentdir"),
             "tag select must filter by tag_type"

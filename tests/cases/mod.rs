@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,6 +18,24 @@
 use std::path::Path;
 use ttfm::response::SearchResponse;
 
+#[cfg(unix)]
+pub fn raise_fd_limit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            rlim.rlim_cur = rlim.rlim_max.min(1048576);
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+pub fn raise_fd_limit() {}
+
 // ──────────────────────────────────────────────
 // 共通テストケース構造体
 // ──────────────────────────────────────────────
@@ -31,18 +51,39 @@ pub(super) struct QueryTestCase {
             &Path,
         ) -> anyhow::Result<()>,
     >,
+    /// 宣言的タグ指定: (case_dir 相対パス, タグ列) のリスト。
+    /// 全ケース分をまとめて1回の write で適用するため、modify フックでの
+    /// tag_item_id 逐次呼び出しより大幅に速い。単純なタグ付与はこちらを使う。
+    pub tags: &'static [(&'static str, &'static str)],
     /// クエリを実行前に加工する関数。デフォルトは `default_scope`。
     /// outer-agg クエリ等、特殊なスコープ付与が必要なケースで上書きする。
     pub format_query: fn(&str, &Path) -> String,
     pub query: &'static str,
     pub assert: fn(&SearchResponse, &Path) -> anyhow::Result<()>,
+    /// 警告を検証したいケースのみ上書きする。デフォルトは無検証。
+    pub assert_warnings:
+        fn(&[ttfm::query::error::Warning]) -> anyhow::Result<()>,
+}
+
+impl QueryTestCase {
+    /// define_cases! の struct update 用デフォルト値。
+    /// ケース定義で省略されたフィールドはここから補われる。
+    pub(super) const DEFAULTS: QueryTestCase = QueryTestCase {
+        name: "",
+        setup: |_| Ok(()),
+        modify: None,
+        tags: &[],
+        format_query: default_scope,
+        query: "",
+        assert: |_, _| Ok(()),
+        assert_warnings: |_| Ok(()),
+    };
 }
 
 pub(super) struct SharedFixture {
     pub root: tempfile::TempDir,
     pub store: std::sync::Mutex<ttfm::db::Store>,
     pub registry: ttfm::tag::TagRegistry,
-    pub cache: ttfm::CacheManager,
 }
 
 // ──────────────────────────────────────────────
@@ -52,7 +93,11 @@ pub(super) struct SharedFixture {
 macro_rules! define_cases {
     ($( $name:ident: { $($field:tt)* } ),* $(,)?) => {
         static CASES: &[crate::cases::QueryTestCase] = &[
-            $(crate::cases::QueryTestCase { name: stringify!($name), $($field)* }),*
+            $(crate::cases::QueryTestCase {
+                name: stringify!($name),
+                $($field)*
+                ..crate::cases::QueryTestCase::DEFAULTS
+            }),*
         ];
 
         static FIXTURE: std::sync::OnceLock<crate::cases::SharedFixture>
@@ -60,6 +105,7 @@ macro_rules! define_cases {
 
         fn get_fixture() -> &'static crate::cases::SharedFixture {
             FIXTURE.get_or_init(|| {
+                crate::cases::raise_fd_limit();
                 let root = tempfile::TempDir::new().expect("Failed to create temp dir");
                 let db_dir = root.path().join(".ttfm_test/db");
                 for case in CASES {
@@ -77,8 +123,20 @@ macro_rules! define_cases {
                     .initialize_tables()
                     .expect("initialize_tables");
                 ttfm::indexing::Indexer::new(&store, &registry)
-                    .run(root.path(), None::<&fn(usize)>, false)
+                    .run_single(root.path(), None::<&fn(usize)>, false)
                     .expect("index_directory");
+                // 宣言的タグ指定（tags フィールド）を全ケース分集めて 1 回の write で適用
+                let tag_specs: Vec<(std::path::PathBuf, &str)> = CASES
+                    .iter()
+                    .flat_map(|case| {
+                        let case_dir = root.path().join(case.name);
+                        case.tags.iter().map(move |(rel, tags)| {
+                            (case_dir.join(rel), *tags)
+                        })
+                    })
+                    .collect();
+                crate::cases::apply_tags_batch(&store, &registry, &tag_specs)
+                    .unwrap_or_else(|e| panic!("apply_tags_batch failed: {}", e));
                 for case in CASES {
                     if let Some(modify) = case.modify {
                         let case_dir = root.path().join(case.name);
@@ -87,15 +145,10 @@ macro_rules! define_cases {
                         });
                     }
                 }
-                let cache = ttfm::CacheManager::new(
-                    store.db_dir.join("cache"),
-                    0,
-                );
                 crate::cases::SharedFixture {
                     root,
                     store: std::sync::Mutex::new(store),
                     registry,
-                    cache,
                 }
             })
         }
@@ -106,14 +159,16 @@ macro_rules! define_cases {
             let case = CASES.iter().find(|c| c.name == name).unwrap();
             let case_dir = fix.root.path().join(case.name);
             let query = (case.format_query)(case.query, &case_dir);
+            let mut warnings: Vec<ttfm::query::error::Warning> = Vec::new();
             let res = ttfm::search::search(
                 &store,
                 &fix.registry,
-                &fix.cache,
                 &query,
                 ttfm::SearchOptions::default(),
+                &mut warnings,
             )?;
-            (case.assert)(&res, &case_dir)
+            (case.assert)(&res, &case_dir)?;
+            (case.assert_warnings)(&warnings)
         }
 
         $(
@@ -129,39 +184,135 @@ macro_rules! define_cases {
 // 共通ヘルパー関数
 // ──────────────────────────────────────────────
 
-pub(super) fn get_nvalue(item: &ttfm::SearchResult) -> Option<String> {
+pub(super) fn get_nvalue(item: &ttfm::Item) -> Option<String> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type() == ttfm::types::TagType::from("nvalue"))
-        .map(|e| e.label.as_str().to_string())
+        .find(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("nvalue")
+        })
+        .map(|e| e.typed_tag.as_str().to_string())
 }
 
-pub(super) fn get_nvalue_f64(item: &ttfm::SearchResult) -> Option<f64> {
+pub(super) fn get_nvalue_display(item: &ttfm::Item) -> Option<String> {
+    item.representative.nvalue.as_ref().map(|l| l.as_str())
+}
+
+pub(super) fn get_nvalue_f64(item: &ttfm::Item) -> Option<f64> {
     item.tags
         .entries
         .iter()
-        .find(|e| e.label.tag_type().as_str() == "nvalue")
-        .map(|e| match e.label.value() {
-            ttfm::types::LabelValue::Double(d_bits) => f64::from_bits(d_bits),
-            ttfm::types::LabelValue::Integer(i) => i as f64,
+        .find(|e| e.typed_tag.tag_type().as_str() == "nvalue")
+        .map(|e| match e.typed_tag.value() {
+            ttfm::types::Bitical::Double(d) => d,
+            ttfm::types::Bitical::Integer(i) => i as f64,
             _ => panic!("Unexpected nvalue type"),
         })
 }
 
 /// 結果が item: タグを持つか（グループ表示 / projection パス）を判定します。
-pub(super) fn has_item_tags(results: &[ttfm::SearchResult]) -> bool {
+pub(super) fn has_item_tags(results: &[ttfm::Item]) -> bool {
     results.iter().any(|r| {
-        r.tags
-            .entries
-            .iter()
-            .any(|e| e.label.tag_type() == ttfm::types::TagType::from("item"))
+        r.tags.entries.iter().any(|e| {
+            e.typed_tag.tag_type() == ttfm::types::TagType::from("item")
+        })
     })
 }
 
 /// デフォルト: `(Q) & path:<dir>/*` — 通常の nest / 比較クエリ用
 pub(super) fn default_scope(query: &str, dir: &Path) -> String {
     format!("({}) & path:{}/*", query, dir.to_string_lossy())
+}
+
+/// 宣言的タグ指定（QueryTestCase::tags）の一括適用。
+/// path→item_id を 1 クエリで解決し、modify で WriteAction を収集して
+/// write_and_refresh を 1 回だけ呼ぶ（parquet 書き換え＋ビュー再作成が全体で1回）。
+pub(super) fn apply_tags_batch(
+    store: &ttfm::db::Store,
+    registry: &ttfm::tag::TagRegistry,
+    specs: &[(std::path::PathBuf, &str)],
+) -> anyhow::Result<()> {
+    use ttfm::types::{Intrinsic, ItemId, Rank, Tags};
+
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let loc_path = store.path_for_target(ttfm::TargetTable::Locations);
+    let in_list = specs
+        .iter()
+        .map(|(p, _)| format!("'{}'", p.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT path, item_id FROM read_parquet('{}') WHERE path IN ({})",
+        loc_path.to_string_lossy(),
+        in_list
+    );
+    let mut ids = std::collections::HashMap::new();
+    let mut stmt = store.conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (path, id) = row?;
+        ids.insert(path, id);
+    }
+
+    let mut actions = Vec::new();
+    for (path, tags) in specs {
+        let path_str = path.to_string_lossy();
+        let id = *ids.get(path_str.as_ref()).ok_or_else(|| {
+            anyhow::anyhow!("apply_tags_batch: not indexed: {}", path.display())
+        })?;
+        let item = ttfm::Item {
+            id: ItemId::Stored(id),
+            item_kind: ttfm::ItemKind::File,
+            representative: vec![].into(),
+            rank: Rank::default(),
+            intrinsic: Intrinsic::default(),
+            tags: Tags::new(),
+            item_count: None,
+        };
+        let eq = ttfm::edit::parse::parse_edit_query(
+            tags,
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?;
+        let nodes = ttfm::edit::modify::resolve_nodes(
+            Some(&eq),
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?;
+        actions.extend(ttfm::edit::modify::modify(
+            &item,
+            &nodes,
+            ttfm::edit::QueryType::Tag,
+            registry,
+        )?);
+    }
+    ttfm::edit::write::write_and_refresh(store, registry, actions, None)?;
+    Ok(())
+}
+
+/// item_id 指定で 1 タグを付与する簡易ラッパー（旧 tagging::tag_item 由来の
+/// テスト移行用）。複数タグをまとめて付与するなら `apply_tags_batch` を使う。
+pub(super) fn tag_item_id(
+    store: &ttfm::db::Store,
+    registry: &ttfm::tag::TagRegistry,
+    item_id: i64,
+    tag_str: &str,
+) -> anyhow::Result<()> {
+    ttfm::edit::edit(
+        store,
+        registry,
+        &format!("item_id:{item_id}"),
+        Some(tag_str),
+        ttfm::edit::QueryType::Tag,
+        None,
+        ttfm::edit::WriteOptions::noconfirm(),
+        &mut Vec::new(),
+    )?;
+    Ok(())
 }
 
 /// クエリ内の `path:` を `path:<dir>/` に書き換えて相対サブパスを絶対パスに解決し、
@@ -289,6 +440,7 @@ pub(super) fn inject_path_scope(query: &str, dir: &Path) -> String {
 // ──────────────────────────────────────────────
 
 pub mod cache_paged_test;
+pub mod identifier_test;
 pub mod indexing_integration;
 pub mod integration_tags;
 pub mod rank_test;
@@ -300,9 +452,14 @@ pub mod test_boolean_ops;
 pub mod test_calculation;
 mod test_chain_comparison;
 pub mod test_computation_fetching;
+pub mod test_confirm;
 pub mod test_date_regression;
 pub mod test_discrepancy;
+pub mod test_edit;
 pub mod test_errors;
+pub mod test_eval;
+pub mod test_fs_operate;
+pub mod test_glob_values;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
 pub mod test_literal_ops;
@@ -310,15 +467,21 @@ pub mod test_nest;
 pub mod test_null_propagation;
 pub mod test_optimize_sql;
 pub mod test_projection;
+pub mod test_projection_as_nest;
 pub mod test_query_full;
+pub mod test_quoted_glob;
 pub mod test_reverse_patterns;
 pub mod test_scalar_format;
+pub mod test_search_order;
 pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
+pub mod test_type_definitions;
+pub mod test_typedtag_label_node;
 pub mod test_validation;
 pub mod test_validation_toplevel;
 pub mod test_volatile_typed_tags;
 pub mod verify_search;
 pub mod verify_search_all;
 pub mod wasm_plugin_test;
+pub mod write_engine;

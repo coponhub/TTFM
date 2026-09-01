@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -27,7 +29,7 @@ define_cases! {
         query: "sum(extension:txt & size:)",
         assert: |res, _dir| {
             assert!(!res.results.is_empty());
-            assert_eq!(res.results[0].raw_repr(), "1.1KB");
+            assert_eq!(res.results[0].raw_repr(), "1.07KB");
             Ok(())
         },
     },

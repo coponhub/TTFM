@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,11 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::search;
 use super::default_scope;
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
+use ttfm::search;
 
 define_cases! {
     size_large_gt_1pb: {
@@ -55,10 +57,14 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
 
     let db_dir_registry = ttfm::tag::TagRegistry::with_standard();
     let db_dir_store = ttfm::db::Store::open(&db_dir)?;
-    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry).initialize_tables()?;
-    let db_dir_cache = ttfm::CacheManager::new(db_dir_store.db_dir.join("cache"), 0);
-    let (store, registry, cache) = (db_dir_store, db_dir_registry, db_dir_cache);
-    ttfm::indexing::Indexer::new(&store, &registry).run(root, None::<&fn(usize)>, false)?;
+    ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
+        .initialize_tables()?;
+    let (store, registry) = (db_dir_store, db_dir_registry);
+    ttfm::indexing::Indexer::new(&store, &registry).run_single(
+        root,
+        None::<&fn(usize)>,
+        false,
+    )?;
 
     let cases = vec![
         ("size: :>= 512KB & is_dir:false", 3),
@@ -71,10 +77,17 @@ fn test_size_unit_queries() -> anyhow::Result<()> {
         ("size: :^= 0B & is_dir:false", 3),
         ("size: := 10m & is_dir:false", 1),
         ("size: := 512k & is_dir:false", 1),
+        ("size: :< \"1MB\" & is_dir:false", 2),
+        ("size: :>= \"512KB\" & is_dir:false", 3),
     ];
 
     for (query, expected) in cases {
-        let results = search::search(&store, &registry, &cache, query, Default::default())?;
+        let results = search::search_nowarn(
+            &store,
+            &registry,
+            query,
+            Default::default(),
+        )?;
         assert_eq!(
             results.results.len(),
             expected,

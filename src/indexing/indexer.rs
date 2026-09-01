@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,20 +15,25 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::db::{Col, DuckDbFunc, Pronoun::*, Store, TargetTable, Tbl};
+use crate::db::{Col, Store, TargetTable, Tbl};
+// use crate::db::{identifier, DuckDbFunc, Pronoun::*};
+use crate::db::ColumnDef;
 use crate::indexing::ScanEntry;
 use crate::tag::TagRegistry;
-use crate::taggers::{ColumnDef, TagValue};
-use crate::types::ItemId;
-use crate::util::{self, ExecuteSql, IdenExt, ParquetExt, SelectExt};
+use crate::types::{Bitical, Biticals, ItemId};
+// use crate::types::Origin;
+use crate::util::{self, ExecuteSql, IdenExt, SelectExt};
+// use crate::util::ParquetExt;
 use anyhow::{Context, Result};
 use duckdb::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rustc_hash::FxHashMap;
-use sea_query::{Expr, ExprTrait, Func, PostgresQueryBuilder, Query, Table};
-use std::path::Path;
+use sea_query::{Expr, PostgresQueryBuilder, Query, Table};
+// use sea_query::{ExprTrait, Func};
+use std::path::{Path, PathBuf};
 
 use super::diff;
-use super::merge::{self, MergeQueryParts};
+use super::merge;
+// use super::merge::MergeQueryParts;
 use super::scan;
 use super::triage;
 
@@ -38,22 +45,21 @@ pub struct TaggingResult {
     pub entity_row: DynamicRow,
     pub location_row: DynamicRow,
     pub tags: Vec<TagRow>,
+    pub location_tags: Vec<TagRow>,
     pub scan_hash: ScanHash,
+    pub basename_scan_hash: ScanHash,
 }
 
 pub struct DynamicRow {
     pub id: i64,
-    pub values: Vec<TagValue>,
+    pub values: Biticals,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct TagRow {
     pub item_id: i64,
     pub tag_type: String,
-    pub label_str: Option<String>,
-    pub label_int: Option<i64>,
-    pub label_double: Option<f64>,
-    pub label_bool: Option<bool>,
+    pub value: Bitical,
 }
 
 // ========================================================
@@ -65,6 +71,20 @@ pub struct Indexer<'a> {
     pub(crate) registry: &'a TagRegistry,
 }
 
+fn normalize_roots<P: AsRef<Path>>(roots: &[P]) -> Result<Vec<PathBuf>> {
+    let mut abs: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| r.as_ref().canonicalize())
+        .collect::<std::io::Result<_>>()?;
+    abs.sort();
+    abs.dedup();
+    Ok(abs
+        .iter()
+        .filter(|r| !abs.iter().any(|o| *o != **r && r.starts_with(o)))
+        .cloned()
+        .collect())
+}
+
 impl<'a> Indexer<'a> {
     pub fn new(store: &'a Store, registry: &'a TagRegistry) -> Self {
         Self { store, registry }
@@ -73,7 +93,7 @@ impl<'a> Indexer<'a> {
     /// インデックス作成の全体ワークフローを実行します。
     pub fn run<P, F>(
         &self,
-        root_path: P,
+        roots: &[P],
         on_progress: Option<&F>,
         dry_run: bool,
     ) -> Result<usize>
@@ -81,6 +101,11 @@ impl<'a> Indexer<'a> {
         P: AsRef<Path>,
         F: Fn(usize) + Sync + Send,
     {
+        let roots = normalize_roots(roots)?;
+        if roots.is_empty() {
+            return Ok(0);
+        }
+
         // 既存のハッシュをロード
         let cache = self.load_metadata_cache()?;
 
@@ -90,7 +115,7 @@ impl<'a> Indexer<'a> {
             &self.store.db_dir,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            root_path.as_ref(),
+            &roots,
             &cache,
             on_progress,
             dry_run,
@@ -100,29 +125,47 @@ impl<'a> Indexer<'a> {
             return Ok(count);
         }
 
+        crate::search::clear_cache(&self.store.db_dir);
+
         // 2. Diff Phase
-        let diff = diff::run_diff(&self.store.conn, &self.store)?;
+        let diff = diff::run_diff(&self.store.conn, &self.store, &roots)?;
 
         // 3. Triage Phase
-        let (results, moved_rows) =
-            triage::run_triage(self.registry, diff.to_process, || {
-                self.max_file_id()
-            })?;
-
+        let (results, dir_changed_results) = triage::run_triage(
+            &self.store,
+            self.registry,
+            diff.to_process,
+            diff.dir_changed,
+        )?;
         // 4. Merge Phase
         merge::run_merge(
             &self.store.conn,
             self.registry,
             &self.store,
             results,
-            moved_rows,
+            dir_changed_results,
             diff.deleted_ids,
             &self.store.temp_scan_path(),
             &self.store.temp_live_path(),
-            |data| self.update_system_items(data),
+            &roots,
+            // |data| self.update_system_items(data),
+            |_data| Ok(()),
         )?;
 
         Ok(count)
+    }
+
+    pub fn run_single<P, F>(
+        &self,
+        root: P,
+        on_progress: Option<&F>,
+        dry_run: bool,
+    ) -> Result<usize>
+    where
+        P: AsRef<Path>,
+        F: Fn(usize) + Sync + Send,
+    {
+        self.run(&[root], on_progress, dry_run)
     }
 
     /// 既存のインデックスから変更検知用のメタデータ・キャッシュをロードします。
@@ -142,7 +185,8 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let mut stmt = self
-            .store.conn
+            .store
+            .conn
             .prepare(&sql)
             .context("Failed to prepare cache load query")?;
 
@@ -174,14 +218,20 @@ impl<'a> Indexer<'a> {
             self.ensure_empty_parquet_if_missing(&path, target, &all_cols)?;
         }
 
+        let reader = crate::query::lens_reader::Reader::build(
+            self.registry,
+            crate::db::Tbl::_OneView,
+        );
         crate::oneview::OneView::recreate(
             &self.store.conn,
+            self.registry,
             &all_cols,
+            reader,
             &self.store.db_dir,
         )?;
 
         self.ensure_data_types()?;
-        self.update_system_items(None)?;
+        // self.update_system_items(None)?;
         Ok(())
     }
 
@@ -203,7 +253,8 @@ impl<'a> Indexer<'a> {
             .to_string(PostgresQueryBuilder);
 
         let count: i64 = self
-            .store.conn
+            .store
+            .conn
             .query_row(&count_sql, [], |r| r.get(0))
             .unwrap_or(0);
 
@@ -212,19 +263,19 @@ impl<'a> Indexer<'a> {
         }
 
         // デフォルトのデータ型定義を挿入
-        use crate::db::SqlType;
+        use crate::db::BiticalType;
         let defaults = vec![
-            ("size", SqlType::BIGINT),
-            ("mtime", SqlType::BIGINT),
-            ("rank", SqlType::BIGINT),
-            ("name", SqlType::VARCHAR),
-            ("kind", SqlType::VARCHAR),
-            ("content", SqlType::VARCHAR),
+            ("size", BiticalType::Integer),
+            ("mtime", BiticalType::Integer),
+            ("rank", BiticalType::Integer),
+            ("name", BiticalType::String),
+            ("kind", BiticalType::String),
+            ("content", BiticalType::String),
             // 将来的にはここで標準タグも追加
-            ("filename", SqlType::VARCHAR),
-            ("extension", SqlType::VARCHAR),
-            ("path", SqlType::VARCHAR),
-            ("parent_dir", SqlType::VARCHAR),
+            ("filename", BiticalType::String),
+            ("extension", BiticalType::String),
+            ("path", BiticalType::String),
+            ("parent_dir", BiticalType::String),
         ];
 
         let mut insert = Query::insert();
@@ -270,195 +321,163 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-    /// システム定義アイテム（拡張子、タグ型など）をデータベースに登録・更新します。
-    pub fn update_system_items(
-        &self,
-        data_candidates: Option<sea_query::SelectStatement>,
-    ) -> Result<()> {
-        let items_path =
-            self.store.path_for_target(TargetTable::ItemReferences);
-        let system_tags_path =
-            self.store.path_for_target(TargetTable::SystemTags);
-        let items_str = items_path.to_string_lossy();
-
-        let mut all_candidates =
-            MergeQueryParts::registry_variants(self.registry);
-        if let Some(data) = data_candidates {
-            all_candidates.union(sea_query::UnionType::Distinct, data);
-        }
-
-        MergeQueryParts::filter_new(all_candidates, &items_str)
-            .create_temp_table_as(&self.store.conn, Tbl::Item)?;
-
-        if self.count_table(Tbl::Item)? == 0 {
-            Tbl::Item.drop_table(&self.store.conn)?;
-            return Ok(());
-        }
-
-        let start_id = self.next_item_id(&items_str)?;
-        let tmp_items = items_path.with_extension("parquet.tmp");
-        let tmp_stags = system_tags_path.with_extension("parquet.tmp");
-
-        MergeQueryParts::assign_ids(start_id)
-            .create_temp_table_as(&self.store.conn, Tbl::IdItem)?;
-
-        // query_union.union(sea_query::UnionType::All, ...);
-
-        let mut lhs = Query::select();
-        lhs.columns(Col::item_references_columns()).from_function(
-            Func::cust(DuckDbFunc::ReadParquet)
-                .arg(Expr::val(items_str.to_string())),
-            Diff,
-        );
-
-        let mut query_union = lhs;
-        query_union.union(
-            sea_query::UnionType::All,
-            Query::select()
-                .columns(Col::item_references_columns())
-                .from(Tbl::IdItem)
-                .to_owned(),
-        );
-        query_union.save_parquet(&self.store.conn, &tmp_items)?;
-        // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
-        let p1 = Query::select()
-            .column(sea_query::Asterisk)
-            .from_subquery(
-                crate::util::parquet_query(&system_tags_path.to_string_lossy()),
-                Tbl::SystemTags,
-            )
-            .to_owned();
-
-        // 共通のメタデータタグ (kind)
-        let p2 = Query::select()
-            .column(Col::ItemId)
-            .expr_as(Expr::val("type"), Col::Type)
-            .expr_as(
-                Expr::case(
-                    Expr::col(Col::ItemKind).eq("tag"),
-                    Expr::col(Col::Type),
-                )
-                .finally(Expr::col(Col::ItemKind))
-                .cast_as(crate::db::SqlType::VARCHAR),
-                Col::LabelStr,
-            )
-            .from(Tbl::IdItem)
-            .to_owned();
-
-        // 型付きタグのラベル部分
-        let p3 = Query::select()
-            .column(Col::ItemId)
-            .expr_as(Expr::val("label"), Col::Type)
-            .expr_as(
-                Expr::col(Col::Label).cast_as(crate::db::SqlType::VARCHAR),
-                Col::LabelStr,
-            )
-            .from(Tbl::IdItem)
-            .and_where(Expr::col(Col::ItemKind).eq("tag"))
-            .to_owned();
-
-        let ordered_sql = Self::build_ordered_system_tags_sql(
-            &p1.to_string(PostgresQueryBuilder),
-            &p2.to_string(PostgresQueryBuilder),
-            &p3.to_string(PostgresQueryBuilder),
-        );
-
-        self.store.conn.execute(
-            &format!(
-                "COPY ({}) TO '{}' (FORMAT PARQUET)",
-                ordered_sql,
-                tmp_stags.to_string_lossy()
-            ),
-            [],
-        )?;
-
-        self.finalize_updates(
-            &items_path,
-            &system_tags_path,
-            &tmp_items,
-            &tmp_stags,
-        )
-    }
-
-    // --- Shared Helpers ---
-
-    /// ファイルエンティティの現在の最大ID（正の整数）を取得します。
-    pub(crate) fn max_file_id(&self) -> Result<i64> {
-        let ents_path = self.store.path_for_target(TargetTable::FileReferences);
-        if !ents_path.exists() {
-            return Ok(0);
-        }
-        let ents_str = ents_path.to_string_lossy();
-        let query = Query::select()
-            .expr(Func::cust(DuckDbFunc::Coalesce).args([
-                Expr::col(Col::ItemId).max().into(),
-                Expr::val(0).into(),
-            ]))
-            .from_subquery(util::parquet_query(&ents_str), Tbl::FileReferences)
-            .to_string(PostgresQueryBuilder);
-
-        self.store.conn
-            .query_row(&query, [], |r| r.get(0))
-            .map_err(Into::into)
-    }
-
-    /// 次の負のアイテムIDを取得します（システムアイテム用）。
-    pub(crate) fn next_item_id(&self, items_path: &str) -> Result<i64> {
-        let query_min = Query::select()
-            .expr(Func::cust(DuckDbFunc::Coalesce).args([
-                Expr::col(Col::ItemId).min().into(),
-                Expr::val(0).into(),
-            ]))
-            .from_subquery(util::parquet_query(items_path), Tbl::ItemReferences)
-            .to_string(PostgresQueryBuilder);
-
-        let min_id: i64 = self.store.conn.query_row(&query_min, [], |r| r.get(0))?;
-        Ok(if min_id > -1 { -1 } else { min_id - 1 })
-    }
-
-    /// テーブルのレコード数を取得します（共有ロジック）。
-    pub(crate) fn count_table(
-        &self,
-        table: impl sea_query::Iden + Clone + 'static,
-    ) -> Result<i64> {
-        let sql = Query::select()
-            .expr(Expr::cust("COUNT(*)"))
-            .from(table)
-            .to_string(PostgresQueryBuilder);
-        self.store.conn
-            .query_row(&sql, [], |r| r.get(0))
-            .map_err(Into::into)
-    }
-
-    fn finalize_updates(
-        &self,
-        items_path: &Path,
-        stags_path: &Path,
-        tmp_items: &Path,
-        tmp_stags: &Path,
-    ) -> Result<()> {
-        std::fs::rename(tmp_items, items_path)?;
-        std::fs::rename(tmp_stags, stags_path)?;
-        Tbl::Item.drop_table(&self.store.conn)?;
-        Tbl::IdItem.drop_table(&self.store.conn)?;
-        Ok(())
-    }
-
-    /// システムタグ更新用のソート済みUNIONクエリを構築します。
-    fn build_ordered_system_tags_sql(
-        p1_sql: &str,
-        p2_sql: &str,
-        p3_sql: &str,
-    ) -> String {
-        let union_sql = format!(
-            "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
-            p1_sql, p2_sql, p3_sql
-        );
-        format!(
-            "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
-            union_sql
-        )
-    }
+    //     /// システム定義アイテム（拡張子、タグ型など）をデータベースに登録・更新します。
+    //     pub fn update_system_items(
+    //         &self,
+    //         data_candidates: Option<sea_query::SelectStatement>,
+    //     ) -> Result<()> {
+    //         let items_path =
+    //             self.store.path_for_target(TargetTable::ItemReferences);
+    //         let system_tags_path =
+    //             self.store.path_for_target(TargetTable::SystemTags);
+    //         let items_str = items_path.to_string_lossy();
+    //
+    //         let mut all_candidates =
+    //             MergeQueryParts::registry_variants(self.registry);
+    //         if let Some(data) = data_candidates {
+    //             all_candidates.union(sea_query::UnionType::Distinct, data);
+    //         }
+    //
+    //         MergeQueryParts::filter_new(all_candidates, &items_str)
+    //             .create_temp_table_as(&self.store.conn, Tbl::Item)?;
+    //
+    //         if self.count_table(Tbl::Item)? == 0 {
+    //             Tbl::Item.drop_table(&self.store.conn)?;
+    //             return Ok(());
+    //         }
+    //
+    //         let start_id = identifier::next(&self.store, Origin::Builtin, 1)?[0];
+    //         let tmp_items = items_path.with_extension("parquet.tmp");
+    //         let tmp_stags = system_tags_path.with_extension("parquet.tmp");
+    //
+    //         MergeQueryParts::assign_ids(start_id)
+    //             .create_temp_table_as(&self.store.conn, Tbl::IdItem)?;
+    //
+    //         // query_union.union(sea_query::UnionType::All, ...);
+    //
+    //         let mut lhs = Query::select();
+    //         lhs.columns(Col::item_references_columns()).from_function(
+    //             Func::cust(DuckDbFunc::ReadParquet)
+    //                 .arg(Expr::val(items_str.to_string())),
+    //             Diff,
+    //         );
+    //
+    //         let mut query_union = lhs;
+    //         query_union.union(
+    //             sea_query::UnionType::All,
+    //             Query::select()
+    //                 .columns(Col::item_references_columns())
+    //                 .from(Tbl::IdItem)
+    //                 .to_owned(),
+    //         );
+    //         query_union.order_by(Col::ItemId, sea_query::Order::Asc);
+    //         query_union.save_parquet(&self.store.conn, &tmp_items)?;
+    //         // UNION ALL BY NAME を使用して、既存のタグと新しいメタデータ/ラベルを統合します。
+    //         let p1 = Query::select()
+    //             .column(sea_query::Asterisk)
+    //             .from_subquery(
+    //                 crate::util::parquet_query(&system_tags_path.to_string_lossy()),
+    //                 Tbl::SystemTags,
+    //             )
+    //             .to_owned();
+    //
+    //         // 共通のメタデータタグ (kind)
+    //         let p2 = Query::select()
+    //             .column(Col::ItemId)
+    //             .expr_as(Expr::val("type"), Col::Type)
+    //             .expr_as(
+    //                 Expr::case(
+    //                     Expr::col(Col::ItemKind).eq("tag"),
+    //                     Expr::col(Col::Type),
+    //                 )
+    //                 .finally(Expr::col(Col::ItemKind))
+    //                 .cast_as(crate::db::BiticalType::String),
+    //                 Col::LabelStr,
+    //             )
+    //             .from(Tbl::IdItem)
+    //             .to_owned();
+    //
+    //         // 型付きタグのラベル部分
+    //         let p3 = Query::select()
+    //             .column(Col::ItemId)
+    //             .expr_as(Expr::val("label"), Col::Type)
+    //             .expr_as(
+    //                 Expr::col(Col::Label).cast_as(crate::db::BiticalType::String),
+    //                 Col::LabelStr,
+    //             )
+    //             .from(Tbl::IdItem)
+    //             .and_where(Expr::col(Col::ItemKind).eq("tag"))
+    //             .to_owned();
+    //
+    //         let ordered_sql = Self::build_ordered_system_tags_sql(
+    //             &p1.to_string(PostgresQueryBuilder),
+    //             &p2.to_string(PostgresQueryBuilder),
+    //             &p3.to_string(PostgresQueryBuilder),
+    //         );
+    //
+    //         self.store.conn.execute(
+    //             &format!(
+    //                 "COPY ({}) TO '{}' (FORMAT PARQUET)",
+    //                 ordered_sql,
+    //                 tmp_stags.to_string_lossy()
+    //             ),
+    //             [],
+    //         )?;
+    //
+    //         self.finalize_updates(
+    //             &items_path,
+    //             &system_tags_path,
+    //             &tmp_items,
+    //             &tmp_stags,
+    //         )
+    //     }
+    //
+    //     // --- Shared Helpers ---
+    //
+    //     /// テーブルのレコード数を取得します（共有ロジック）。
+    //     pub(crate) fn count_table(
+    //         &self,
+    //         table: impl sea_query::Iden + Clone + 'static,
+    //     ) -> Result<i64> {
+    //         let sql = Query::select()
+    //             .expr(Expr::cust("COUNT(*)"))
+    //             .from(table)
+    //             .to_string(PostgresQueryBuilder);
+    //         self.store
+    //             .conn
+    //             .query_row(&sql, [], |r| r.get(0))
+    //             .map_err(Into::into)
+    //     }
+    //
+    //     fn finalize_updates(
+    //         &self,
+    //         items_path: &Path,
+    //         stags_path: &Path,
+    //         tmp_items: &Path,
+    //         tmp_stags: &Path,
+    //     ) -> Result<()> {
+    //         std::fs::rename(tmp_items, items_path)?;
+    //         std::fs::rename(tmp_stags, stags_path)?;
+    //         Tbl::Item.drop_table(&self.store.conn)?;
+    //         Tbl::IdItem.drop_table(&self.store.conn)?;
+    //         Ok(())
+    //     }
+    //
+    //     /// システムタグ更新用のソート済みUNIONクエリを構築します。
+    //     fn build_ordered_system_tags_sql(
+    //         p1_sql: &str,
+    //         p2_sql: &str,
+    //         p3_sql: &str,
+    //     ) -> String {
+    //         let union_sql = format!(
+    //             "{} UNION ALL BY NAME {} UNION ALL BY NAME {}",
+    //             p1_sql, p2_sql, p3_sql
+    //         );
+    //         format!(
+    //             "SELECT * FROM ({}) ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC",
+    //             union_sql
+    //         )
+    //     }
 }
 
 /// スキャン時の高速フィルタリングに使用するメタデータハッシュ。
@@ -491,6 +510,7 @@ impl ToSql for ScanHash {
 pub struct TempScanEntry {
     pub entry: ScanEntry,
     pub hash: ScanHash,
+    pub basename_hash: ScanHash,
 }
 
 impl TempScanEntry {
@@ -498,17 +518,25 @@ impl TempScanEntry {
     pub fn params(&self) -> Vec<&dyn duckdb::ToSql> {
         let mut p = self.entry.as_params();
         p.push(&self.hash);
+        p.push(&self.basename_hash);
         p
     }
 
     /// Tbl::Scan テーブル作成用のカラム構成リストを取得します。
     pub fn columns_with_type() -> Vec<(sea_query::DynIden, sea_query::DynIden)>
     {
-        use crate::db::{Col, SqlType};
+        use crate::db::{BiticalType, Col};
         use sea_query::IntoIden;
 
         let mut cols = ScanEntry::columns_with_type();
-        cols.push((Col::ScanHash.into_iden(), SqlType::BIGINT.into_iden()));
+        cols.push((
+            Col::ScanHash.into_iden(),
+            BiticalType::Integer.into_iden(),
+        ));
+        cols.push((
+            Col::BasenameScanHash.into_iden(),
+            BiticalType::Integer.into_iden(),
+        ));
         cols
     }
 
@@ -520,13 +548,20 @@ impl TempScanEntry {
     ) -> duckdb::Result<Self> {
         let entry = ScanEntry::from_row_with_offset(row, offset)?;
         let hash: ScanHash = row.get(offset + loader.hash_idx)?;
-        Ok(Self { entry, hash })
+        let basename_hash: ScanHash =
+            row.get(offset + loader.basename_hash_idx)?;
+        Ok(Self {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
 /// `TempScanEntry` をデータベースの行から効率的に読み出すためのローダー。
 pub struct ScanEntryLoader {
     hash_idx: usize,
+    basename_hash_idx: usize,
 }
 
 impl Default for ScanEntryLoader {
@@ -538,8 +573,10 @@ impl Default for ScanEntryLoader {
 impl ScanEntryLoader {
     /// 新しいローダーを作成します。ハッシュのカラム位置を事前に計算します。
     pub fn new() -> Self {
+        let hash_idx = ScanEntry::schema().len();
         Self {
-            hash_idx: ScanEntry::schema().len(),
+            hash_idx,
+            basename_hash_idx: hash_idx + 1,
         }
     }
 
@@ -547,7 +584,12 @@ impl ScanEntryLoader {
     pub fn load(&self, row: &duckdb::Row) -> duckdb::Result<TempScanEntry> {
         let entry = ScanEntry::from_row(row)?;
         let hash: ScanHash = row.get(self.hash_idx)?;
-        Ok(TempScanEntry { entry, hash })
+        let basename_hash: ScanHash = row.get(self.basename_hash_idx)?;
+        Ok(TempScanEntry {
+            entry,
+            hash,
+            basename_hash,
+        })
     }
 }
 
@@ -560,11 +602,49 @@ pub(crate) fn calc_scanhash(path: &str, mtime: i64, size: i64) -> ScanHash {
     ScanHash(hasher.finish() as i64)
 }
 
+/// basename・mtime・size・inode から ScanHash を計算します。
+/// ディレクトリを跨いだ移動では一致し、別 inode への分裂では一致しません。
+pub(crate) fn calc_basename_scan_hash(
+    path: &str,
+    mtime: i64,
+    size: i64,
+    inode: crate::types::FileRef,
+) -> ScanHash {
+    use crate::types::PathComponents;
+    use rustc_hash::FxHasher;
+    use std::hash::{Hash, Hasher};
+    let parts = PathComponents::decompose(Path::new(path));
+    let base = parts
+        .join()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut hasher = FxHasher::default();
+    (base.as_str(), mtime, size, inode.as_u64_pair().1).hash(&mut hasher);
+    ScanHash(hasher.finish() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tag::TagRegistry;
     use tempfile::tempdir;
+
+    #[test]
+    fn normalize_roots_dedups_and_drops_nested() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let outer = base.join("outer");
+        let inner = outer.join("inner");
+        let other = base.join("other");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        let got = normalize_roots(&[&outer, &inner, &outer, &other]).unwrap();
+
+        assert_eq!(got, vec![other.clone(), outer.clone()]);
+    }
 
     #[test]
     fn test_calc_scanhash() {
@@ -578,6 +658,31 @@ mod tests {
         assert_ne!(h1, h3, "mtimeが変わればハッシュが変わること");
         assert_ne!(h1, h4, "pathが変わればハッシュが変わること");
         assert_ne!(h1, h5, "sizeが変わればハッシュが変わること");
+    }
+
+    #[test]
+    fn test_calc_basename_scan_hash() {
+        use crate::types::FileRef;
+
+        let inode_a = FileRef::from_u64_pair(0, 1);
+        let inode_b = FileRef::from_u64_pair(0, 2);
+
+        let h1 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_a);
+        let h2 =
+            calc_basename_scan_hash("/another/dir/a.txt", 100, 500, inode_a);
+        let h3 = calc_basename_scan_hash("/one/dir/a.txt", 101, 500, inode_a);
+        let h4 = calc_basename_scan_hash("/one/dir/b.txt", 100, 500, inode_a);
+        let h5 = calc_basename_scan_hash("/one/dir/a.txt", 100, 501, inode_a);
+        let h6 = calc_basename_scan_hash("/one/dir/a.txt", 100, 500, inode_b);
+
+        assert_eq!(
+            h1, h2,
+            "hash must not change when only the directory changes"
+        );
+        assert_ne!(h1, h3, "hash must change when mtime changes");
+        assert_ne!(h1, h4, "hash must change when basename changes");
+        assert_ne!(h1, h5, "hash must change when size changes");
+        assert_ne!(h1, h6, "hash must change when inode changes");
     }
 
     #[test]
@@ -612,19 +717,23 @@ mod tests {
         let item_id: ItemId = ItemId::from(1);
         let locs_path = store.path_for_target(TargetTable::Locations);
 
-        store.conn.execute(
-            "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
-            [item_id.as_i64(), hash_val.0],
-        )
-        .unwrap();
-        store.conn.execute(
-            &format!(
-                "COPY temp_locs TO '{}' (FORMAT PARQUET)",
-                locs_path.to_string_lossy()
-            ),
-            [],
-        )
-        .unwrap();
+        store
+            .conn
+            .execute(
+                "CREATE TABLE temp_locs AS SELECT ? as item_id, ? as scan_hash",
+                [item_id.as_i64(), hash_val.0],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                &format!(
+                    "COPY temp_locs TO '{}' (FORMAT PARQUET)",
+                    locs_path.to_string_lossy()
+                ),
+                [],
+            )
+            .unwrap();
 
         // 3. ロードして検証
         let cache = indexer.load_metadata_cache().unwrap();
@@ -646,37 +755,24 @@ mod tests {
         assert!(db_dir.join("file_references.parquet").exists());
     }
 
-    #[test]
-    fn test_indexer_next_item_id_logic() {
-        fn calc_next(min_id: i64) -> i64 {
-            if min_id > -1 {
-                -1
-            } else {
-                min_id - 1
-            }
-        }
-        assert_eq!(calc_next(0), -1);
-        assert_eq!(calc_next(-1), -2);
-    }
-
-    #[test]
-    fn test_build_ordered_system_tags_sql() {
-        let sql = Indexer::build_ordered_system_tags_sql(
-            "SELECT * FROM system_tags",
-            "SELECT * FROM p2",
-            "SELECT * FROM p3",
-        );
-        assert!(
-            sql.contains("UNION ALL BY NAME"),
-            "Should contain UNION ALL BY NAME"
-        );
-        assert!(
-            sql.contains(
-                "ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"
-            ),
-            "Should contain correct ORDER BY clause"
-        );
-        assert!(sql.starts_with("SELECT * FROM ("));
-        assert!(sql.ends_with("ASC"));
-    }
+    // #[test]
+    // fn test_build_ordered_system_tags_sql() {
+    //     let sql = Indexer::build_ordered_system_tags_sql(
+    //         "SELECT * FROM system_tags",
+    //         "SELECT * FROM p2",
+    //         "SELECT * FROM p3",
+    //     );
+    //     assert!(
+    //         sql.contains("UNION ALL BY NAME"),
+    //         "Should contain UNION ALL BY NAME"
+    //     );
+    //     assert!(
+    //         sql.contains(
+    //             "ORDER BY type ASC, label_int ASC, label_str ASC, item_id ASC"
+    //         ),
+    //         "Should contain correct ORDER BY clause"
+    //     );
+    //     assert!(sql.starts_with("SELECT * FROM ("));
+    //     assert!(sql.ends_with("ASC"));
+    // }
 }

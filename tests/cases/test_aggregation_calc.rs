@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -41,7 +43,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & ((size: - 1000)))",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].raw_repr(), "9.0KB", "sum(size: - 1000) should be 9.0KB");
+            assert_eq!(res.results[0].raw_repr(), "9.02KB", "sum(size: - 1000) should be 9.02KB");
             Ok(())
         },
     },
@@ -54,7 +56,7 @@ define_cases! {
         format_query: inject_path_scope,
         query: "sum(extension:txt & ((size: - (1000 / 2))))",
         assert: |res, _dir| {
-            assert_eq!(res.results[0].raw_repr(), "9.5KB", "sum(size: - 1000 / 2) should be 9.5KB");
+            assert_eq!(res.results[0].raw_repr(), "9.51KB", "sum(size: - 1000 / 2) should be 9.51KB");
             Ok(())
         },
     },
@@ -69,8 +71,8 @@ define_cases! {
         assert: |res, _dir| {
             assert_eq!(res.results[0].raw_repr(), "NULL", "sum of unknown tag + 1 should be NULL");
             assert!(
-                res.results[0].get_all_values("type").contains(&"numeric".to_string()),
-                "type should be 'numeric' for NULL aggregation result"
+                res.results[0].get_all_values("bitical_type").contains(&"numeric".to_string()),
+                "bitical_type should be 'numeric' for NULL aggregation result"
             );
             Ok(())
         },

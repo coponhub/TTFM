@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,17 +22,19 @@ use super::{
     build_merged_nest_match_sql, build_nest_context, build_nest_match_sql,
     build_nest_nest_match_sql, build_resolved_literal_expr,
     build_storage_column_expr, build_tag_value_agg_expr,
-    label_to_unit_aware_expr, needs_aggregation_context, needs_nest_context,
+    needs_aggregation_context, needs_nest_context, nvalue_rhs_condition,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src, SqlType};
+use crate::db::{
+    BiticalType, Col, CustomFunc, Pronoun::Sub, QueryResultCol, Src,
+};
 use crate::query::ast::ComparisonOp;
 use crate::query::lens_resolver::{
-    ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
+    NvalueRhs, ResolvedAggregationNode, ResolvedCalculationNode, ResolvedNode,
     ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
-use crate::types::{ItemKind, Label};
+use crate::types::ItemKind;
 use sea_query::{Condition, Expr, Query, SelectStatement, SimpleExpr};
 
 // ── Pick 型システム ────────────────────────────────────────────────────────
@@ -180,24 +184,29 @@ pub fn build_pick_agg(
                     keys,
                     matches,
                     is_or,
-                } => {
-                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
-                }
+                } => build_merged_nest_match_sql(
+                    src, keys, matches, *is_or, agg_ctx,
+                ),
                 ResolvedNode::Aggregation(agg) => build_agg(src, agg, agg_ctx),
-                ResolvedNode::AggregationMatch { agg, op, label } => {
-                    build_agg_match(src, agg, *op, label, agg_ctx)
+                ResolvedNode::AggregationMatch { agg, op, rhs } => {
+                    build_agg_match(src, agg, *op, rhs, agg_ctx)
                 }
-                ResolvedNode::CalculationMatch { calc, op, label } => {
-                    build_calculation_match_sql(src, calc, *op, label, agg_ctx)
+                ResolvedNode::CalculationMatch { calc, op, rhs } => {
+                    build_calculation_match_sql(src, calc, *op, rhs, agg_ctx)
                 }
                 ResolvedNode::TagCalculationMatch {
                     storage,
-                    sql_type,
+                    bitical_type,
                     op,
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    src, storage, *sql_type, *op, calc, agg_ctx,
+                    src,
+                    storage,
+                    *bitical_type,
+                    *op,
+                    calc,
+                    agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
                     build_agg_calc_match(src, agg, *op, calc, agg_ctx)
@@ -218,9 +227,16 @@ pub fn build_pick_agg(
                     agg,
                     op,
                     storage,
-                    sql_type,
+                    bitical_type,
                     ..
-                } => build_agg_tag_match(src, agg, *op, storage, *sql_type, agg_ctx),
+                } => build_agg_tag_match(
+                    src,
+                    agg,
+                    *op,
+                    storage,
+                    *bitical_type,
+                    agg_ctx,
+                ),
                 _ => unreachable!(
                     "build_pick_agg called with nest node: use build_pick_nest"
                 ),
@@ -244,29 +260,36 @@ pub fn build_pick_nest(
                     keys,
                     matches,
                     is_or,
-                } => {
-                    build_merged_nest_match_sql(src, keys, matches, *is_or, agg_ctx)
-                }
+                } => build_merged_nest_match_sql(
+                    src, keys, matches, *is_or, agg_ctx,
+                ),
                 ResolvedNode::Aggregation(agg) => {
                     build_agg_nest(src, agg, agg_ctx, nest_ctx)
                 }
-                ResolvedNode::AggregationMatch { agg, op, label } => {
-                    build_agg_match(src, agg, *op, label, agg_ctx)
+                ResolvedNode::AggregationMatch { agg, op, rhs } => {
+                    build_agg_match(src, agg, *op, rhs, agg_ctx)
                 }
-                ResolvedNode::CalculationMatch { calc, op, label } => {
-                    build_calculation_match_sql(src, calc, *op, label, agg_ctx)
+                ResolvedNode::CalculationMatch { calc, op, rhs } => {
+                    build_calculation_match_sql(src, calc, *op, rhs, agg_ctx)
                 }
                 ResolvedNode::TagCalculationMatch {
                     storage,
-                    sql_type,
+                    bitical_type,
                     op,
                     calc,
                     ..
                 } => build_tag_calculation_match_sql(
-                    src, storage, *sql_type, *op, calc, agg_ctx,
+                    src,
+                    storage,
+                    *bitical_type,
+                    *op,
+                    calc,
+                    agg_ctx,
                 ),
                 ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
-                    build_agg_calc_match_nest(src, agg, *op, calc, agg_ctx, nest_ctx)
+                    build_agg_calc_match_nest(
+                        src, agg, *op, calc, agg_ctx, nest_ctx,
+                    )
                 }
                 ResolvedNode::CalculationCalculationMatch {
                     left_calc,
@@ -286,19 +309,25 @@ pub fn build_pick_nest(
                     agg,
                     op,
                     storage,
-                    sql_type,
+                    bitical_type,
                     ..
                 } => build_agg_tag_match_nest(
-                    src, agg, *op, storage, *sql_type, agg_ctx, nest_ctx,
+                    src,
+                    agg,
+                    *op,
+                    storage,
+                    *bitical_type,
+                    agg_ctx,
+                    nest_ctx,
                 ),
                 ResolvedNode::NestMatch {
                     keys,
                     nvalue,
                     op,
-                    label,
+                    rhs,
                     context,
                 } => build_nest_match_sql(
-                    src, keys, nvalue, *op, label, context, agg_ctx, nest_ctx,
+                    src, keys, nvalue, *op, rhs, context, agg_ctx, nest_ctx,
                 ),
                 ResolvedNode::NestNestMatch {
                     left_keys,
@@ -330,19 +359,15 @@ fn build_calculation_match_sql(
     src: &Src,
     calc: &ResolvedCalculationNode,
     op: ComparisonOp,
-    label: &Label,
+    rhs: &NvalueRhs,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
+    let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     if calc.contains_tag() {
         let mut stmt = Query::select();
-        stmt.column(Col::ItemId)
-            .from(src)
-            .group_by_col(Col::ItemId);
+        stmt.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
         let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
-        let label_expr = label_to_unit_aware_expr(label);
-        stmt.and_having(
-            Expr::expr(calc_expr).binary(to_bin_op(op), label_expr),
-        );
+        stmt.cond_having(nvalue_rhs_condition(calc_expr, op, rhs, is_string));
         stmt
     } else {
         let mut stmt = Query::select();
@@ -353,8 +378,7 @@ fn build_calculation_match_sql(
         } else {
             build_agg_calc_expr(calc, agg_ctx)
         };
-        let label_expr = label_to_unit_aware_expr(label);
-        let cond = Expr::expr(calc_expr).binary(to_bin_op(op), label_expr);
+        let cond = nvalue_rhs_condition(calc_expr, op, rhs, is_string);
         stmt.cond_where(cond);
         if !calc.contains_aggregation() {
             add_type_filters(&mut stmt, calc);
@@ -366,20 +390,27 @@ fn build_calculation_match_sql(
 fn build_tag_calculation_match_sql(
     src: &Src,
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     op: ComparisonOp,
     calc: &ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let needs_eav = calc.contains_tag()
-        || matches!(storage, StorageMapping::Basic { .. });
+    let needs_eav =
+        calc.contains_tag() || matches!(storage, StorageMapping::Basic { .. });
     if needs_eav {
-        build_tag_calc_match_eav_sql(src, storage, sql_type, op, calc, agg_ctx)
+        build_tag_calc_match_eav_sql(
+            src,
+            storage,
+            bitical_type,
+            op,
+            calc,
+            agg_ctx,
+        )
     } else {
         let mut stmt = Query::select();
         stmt.from(src);
         stmt.column(Col::ItemId);
-        let tag_expr = build_storage_column_expr(storage, sql_type);
+        let tag_expr = build_storage_column_expr(storage, bitical_type);
         let calc_expr = if calc.contains_aggregation() {
             build_agg_calc_subquery(src, calc, agg_ctx)
         } else {
@@ -443,9 +474,7 @@ fn build_calculation_calculation_match_sql(
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
-    stmt.column(Col::ItemId)
-        .from(src)
-        .group_by_col(Col::ItemId);
+    stmt.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
     let left_expr = build_agg_calc_eav_expr(left_calc, agg_ctx);
     let right_expr = build_agg_calc_eav_expr(right_calc, agg_ctx);
     stmt.and_having(Expr::expr(left_expr).binary(to_bin_op(op), right_expr));
@@ -490,14 +519,14 @@ fn build_agg_tag_match(
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut stmt = Query::select();
     stmt.from(src);
     stmt.column(Col::ItemId);
     let agg_expr = subquery(build_agg(src, agg, agg_ctx));
-    let tag_expr = build_storage_column_expr(storage, sql_type);
+    let tag_expr = build_storage_column_expr(storage, bitical_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
     if let StorageMapping::Basic { tag_type, .. } = storage {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
@@ -510,7 +539,7 @@ fn build_agg_tag_match_nest(
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
     storage: &StorageMapping,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SelectStatement {
@@ -518,7 +547,7 @@ fn build_agg_tag_match_nest(
     stmt.from(src);
     stmt.column(Col::ItemId);
     let agg_expr = subquery(build_agg_nest(src, agg, agg_ctx, nest_ctx));
-    let tag_expr = build_storage_column_expr(storage, sql_type);
+    let tag_expr = build_storage_column_expr(storage, bitical_type);
     stmt.cond_where(Expr::expr(agg_expr).binary(to_bin_op(op), tag_expr));
     if let StorageMapping::Basic { tag_type, .. } = storage {
         stmt.and_where(Expr::col(Col::Type).eq(tag_type.as_str()));
@@ -529,15 +558,13 @@ fn build_agg_tag_match_nest(
 fn build_tag_calc_match_eav_sql(
     src: &Src,
     left_storage: &StorageMapping,
-    left_sql_type: SqlType,
+    left_sql_type: BiticalType,
     op: ComparisonOp,
     calc: &ResolvedCalculationNode,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let mut q = Query::select();
-    q.column(Col::ItemId)
-        .from(src)
-        .group_by_col(Col::ItemId);
+    q.column(Col::ItemId).from(src).group_by_col(Col::ItemId);
     let left_expr = build_tag_value_agg_expr(left_storage, left_sql_type);
     let calc_expr = build_agg_calc_eav_expr(calc, agg_ctx);
     q.and_having(left_expr.binary(to_bin_op(op), calc_expr));
@@ -551,8 +578,15 @@ fn build_resolved_operand_eav_row_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_tag_value_eav_row_expr(storage, *sql_type),
+            storage,
+            bitical_type,
+            ..
+        }
+        | ResolvedOperand::LabelGrouping {
+            storage,
+            bitical_type,
+            ..
+        } => build_tag_value_eav_row_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -613,7 +647,7 @@ fn decompose_agg(
             } else {
                 let tag_row_expr = build_tag_value_eav_row_expr(
                     &storage.unwrap(),
-                    SqlType::DOUBLE,
+                    BiticalType::Double,
                 );
                 apply_arithmetic_agg(op, tag_row_expr, false)
             };
@@ -626,16 +660,15 @@ fn build_agg_match(
     src: &Src,
     agg: &ResolvedAggregationNode,
     op: ComparisonOp,
-    label: &Label,
+    rhs: &NvalueRhs,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
     let (agg_expr, cond, tag_type) = decompose_agg(agg, agg_ctx);
     let mut stmt = Query::select();
     stmt.from(src);
 
-    let op_bin = to_bin_op(op);
-    let rhs = Expr::val(label.as_i64());
-    let condition = Expr::expr(agg_expr).binary(op_bin, rhs);
+    let condition =
+        nvalue_rhs_condition(agg_expr, op, rhs, agg.is_string_type());
 
     let _target_type = match agg {
         ResolvedAggregationNode::Count(inner) => inner.get_projection(),
@@ -646,8 +679,7 @@ fn build_agg_match(
 
     let mut final_cond = Condition::all();
     if let Some(key) = tag_type {
-        final_cond =
-            final_cond.add(Expr::col(Col::Type).eq(key));
+        final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
     }
 
     if cond.is_some() {
@@ -685,11 +717,11 @@ fn build_agg_match(
 
 fn build_tag_value_eav_row_expr(
     storage: &StorageMapping,
-    sql_type: crate::db::SqlType,
+    bitical_type: crate::db::BiticalType,
 ) -> SimpleExpr {
     match storage {
         StorageMapping::Basic { tag_type, .. } => {
-            let col_expr = build_storage_column_expr(storage, sql_type);
+            let col_expr = build_storage_column_expr(storage, bitical_type);
             Expr::case(Expr::col(Col::Type).eq(tag_type.as_str()), col_expr)
                 .finally(Expr::val(None::<f64>))
                 .into()

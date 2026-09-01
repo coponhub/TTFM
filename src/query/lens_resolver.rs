@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -33,10 +35,16 @@
 //! SQL文（OneViewに対するクエリ）
 //! ```
 
-use crate::db::{Col, SqlType};
-use crate::query::ast::{ComparisonNode, ComparisonOp, Operand, QueryNode};
-use crate::query::lens_schema::{Lens, StorageMapping};
-use crate::types::{Label, LabelValue, SType, TagType};
+use crate::db::{BiticalType, Col};
+use crate::query::ast::{
+    ComparisonNode, ComparisonOp, NestNode, Operand, QueryNode,
+};
+use crate::query::lens_schema::{
+    definition_candidates, definition_reserved_names, Lens, StorageMapping,
+};
+use crate::query::logical_schema::LogicalSchema;
+use crate::query::sql::definition::ResolvedDefinition;
+use crate::types::{Bitical, ItemKind, Label, Origin, Rank, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
@@ -63,32 +71,51 @@ pub enum ResolvedNode {
         tag: SType,
         label: Label,
     },
+    /// 物理カラムへの複数値 IN マッチ（オプティマイザによる集約）。
+    ColumnMatchIn {
+        target_col: Col,
+        labels: Vec<Label>,
+    },
+    /// 定義アイテム参照 (`tag:"X"` / `type:"X"`)。
+    /// item_references の定義行（item_kind=kind, content=value）を参照し、
+    /// 未登録なら value を representative とする Volatile を1行合成する。
+    DefinitionRef {
+        def: crate::query::sql::definition::ResolvedDefinition,
+        /// representative の型解決用オペランド（value.tag_type() の TagRef）。
+        operand: ResolvedOperand,
+    },
     /// 物理的な条件。
     Match {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
         op: ComparisonOp,
         label: Label,
+    },
+    /// 物理的な複数値 IN マッチ（オプティマイザによる集約）。
+    MatchIn {
+        tag_type: Option<TagType>,
+        target_col: Col,
+        labels: Vec<Label>,
     },
     Aggregation(ResolvedAggregationNode),
     /// 集約結果との比較。
     AggregationMatch {
         agg: ResolvedAggregationNode,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
     },
     /// 算術演算とリテラルの比較 (例: (1 + 2) :> size:)
     CalculationMatch {
         calc: ResolvedCalculationNode,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
     },
     /// タグと算術演算の比較 (例: size: > (1000 + 500))
     TagCalculationMatch {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
         op: ComparisonOp,
         calc: ResolvedCalculationNode,
     },
@@ -109,15 +136,15 @@ pub enum ResolvedNode {
         op: ComparisonOp,
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
     },
     /// タグ同士の比較 (例: width: > height:)
     TagTagMatch {
         left_storage: StorageMapping,
-        left_sql_type: SqlType,
+        left_sql_type: BiticalType,
         op: ComparisonOp,
         right_storage: StorageMapping,
-        right_sql_type: SqlType,
+        right_sql_type: BiticalType,
     },
     /// 算術演算同士の比較 (例: (size: - 100) :> (size: * 0.1))
     CalculationCalculationMatch {
@@ -143,7 +170,7 @@ pub enum ResolvedNode {
         keys: Vec<ResolvedOperand>,
         nvalue: ResolvedOperand,
         op: ComparisonOp,
-        label: Label,
+        rhs: NvalueRhs,
         /// このプロジェクション（およびそのnvalue集計）に適用されるべきフィルタ
         context: Option<Box<ResolvedNode>>,
     },
@@ -165,6 +192,16 @@ pub enum ResolvedNode {
         keys: Vec<ResolvedOperand>,
         matches: Vec<NestMatchCondition>,
         is_or: bool,
+    },
+    /// 日付の絞り込み（区間 or 周期的なスロット制約）への物理マッチ。
+    /// `Match` から独立した変種にしている理由は `sql/nest.rs` の
+    /// `resolve_simple_filter_condition` 参照（フィールド追加だと `op`/`range` を
+    /// 無視した誤った SQL が高速経路で作られてしまう）。
+    DateTimeMatch {
+        tag_type: TagType,
+        storage: StorageMapping,
+        op: crate::query::ast::BasicOp,
+        range: crate::types::DateTimeRange,
     },
 }
 
@@ -188,8 +225,23 @@ pub enum NestMatchOp {
 pub struct NestMatchCondition {
     pub nvalue: ResolvedOperand,
     pub op: NestMatchOp,
-    pub right: ResolvedOperand,
+    pub right: NestMatchRhs,
     pub context: Option<Box<ResolvedNode>>,
+}
+
+/// nvalue 比較の右辺制約。ラベルの等値/順序比較、または日付の区間・スロット制約。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NvalueRhs {
+    Label(Label),
+    DateTime(crate::types::DateTimeRange),
+}
+
+/// `NestMatchCondition` の右辺。他の nvalue オペランドとの比較（同士比較の合流）も
+/// 起こりうるため `NvalueRhs` とは別に `ResolvedOperand` も保持できる。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NestMatchRhs {
+    Operand(ResolvedOperand),
+    DateTime(crate::types::DateTimeRange),
 }
 #[derive(Debug, PartialEq, Clone)]
 pub enum ResolvedAggregationNode {
@@ -242,7 +294,14 @@ pub enum ResolvedOperand {
     TagRef {
         tag_type: TagType,
         storage: StorageMapping,
-        sql_type: SqlType,
+        bitical_type: BiticalType,
+    },
+    /// ラベルグルーピング（パターン抽出キー）
+    LabelGrouping {
+        tag_type: TagType,
+        pattern: String,
+        storage: StorageMapping,
+        bitical_type: BiticalType,
     },
     /// ネストした算術演算
     Calculation(Box<ResolvedCalculationNode>),
@@ -264,6 +323,11 @@ impl ResolvedOperand {
         match self {
             ResolvedOperand::Literal(_) => Condition::all(),
             ResolvedOperand::TagRef { storage, .. } => cond_projection(storage),
+            ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } => crate::query::sql::util::build_label_grouping_match_cond(
+                storage, pattern,
+            ),
             ResolvedOperand::Calculation(calc) => calc.to_condition(),
             ResolvedOperand::Aggregation(_) => Condition::all(),
         }
@@ -272,7 +336,8 @@ impl ResolvedOperand {
     /// タグ参照が含まれているかチェックします（EAV 計算比較用）。
     pub fn contains_tag(&self) -> bool {
         match self {
-            ResolvedOperand::TagRef { storage, .. } => {
+            ResolvedOperand::TagRef { storage, .. }
+            | ResolvedOperand::LabelGrouping { storage, .. } => {
                 matches!(storage, StorageMapping::Basic { .. })
             }
             ResolvedOperand::Calculation(calc) => calc.contains_tag(),
@@ -290,20 +355,21 @@ impl ResolvedOperand {
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_pure_scalar() && calc.right.is_pure_scalar()
             }
-            ResolvedOperand::TagRef { .. } => false,
+            ResolvedOperand::TagRef { .. }
+            | ResolvedOperand::LabelGrouping { .. } => false,
         }
     }
 
     /// オペランドの値（Value）を人間が読みやすいラベル文字列に変換します。
     pub fn resolve_label(&self, lens: &Lens, value: &Value) -> String {
         match self {
-            ResolvedOperand::TagRef { tag_type, .. } => {
-                lens.resolve_label(tag_type, value).to_string()
+            ResolvedOperand::TagRef { tag_type, .. }
+            | ResolvedOperand::LabelGrouping { tag_type, .. } => {
+                lens.resolve_label(tag_type, value).as_str()
             }
             _ => {
                 // Calculation 等の場合はデフォルトの 'nvalue' として解決（数値フォーマット等）。
-                lens.resolve_label(&TagType::from("nvalue"), value)
-                    .to_string()
+                lens.resolve_label(&TagType::from("nvalue"), value).as_str()
             }
         }
     }
@@ -311,18 +377,20 @@ impl ResolvedOperand {
     /// 文字列型かどうかを判定します。
     pub fn is_string_type(&self) -> bool {
         match self {
-            ResolvedOperand::Literal(label) => matches!(
-                label.value(),
-                LabelValue::String(_) | LabelValue::Literal(_)
-            ),
+            ResolvedOperand::Literal(label) => {
+                matches!(label.resolved_value(), Bitical::String(_))
+            }
             ResolvedOperand::TagRef {
-                tag_type, sql_type, ..
+                tag_type,
+                bitical_type,
+                ..
             } => {
                 // 標準タグ (Base) の VARCHAR は確実に文字列として扱う。
                 // カスタムタグ (Custom) は、暗黙の数値演算を許容するため、ここでの文字列判定からは除外する。
                 !matches!(tag_type, TagType::Custom(_))
-                    && matches!(sql_type, SqlType::VARCHAR)
+                    && matches!(bitical_type, BiticalType::String)
             }
+            ResolvedOperand::LabelGrouping { .. } => true,
             ResolvedOperand::Calculation(calc) => {
                 calc.left.is_string_type() && calc.right.is_string_type()
             }
@@ -566,13 +634,49 @@ impl ResolvedNode {
             ResolvedNode::ColumnMatch { tag, label } => {
                 cond_column_match(*tag, label)
             }
+            ResolvedNode::ColumnMatchIn { target_col, labels } => {
+                let exprs: Vec<SimpleExpr> = labels
+                    .iter()
+                    .map(|l| l.resolved_value().to_simple_expr())
+                    .collect();
+                Condition::all().add(Expr::col(*target_col).is_in(exprs))
+            }
+            ResolvedNode::DefinitionRef { def, .. } => {
+                // 定義行: type='content' AND label_str=value AND item_kind=kind。
+                // （Volatile fallback は pick/fetch SQL 側で合成。Condition では Stored 部分のみ表現）
+                Condition::all()
+                    .add(Expr::col(Col::Type).eq("content"))
+                    .add(
+                        Expr::col(Col::LabelStr)
+                            .eq(def.value.value().as_display_name()),
+                    )
+                    .add(Expr::col(Col::ItemKind).eq(def.kind.as_str()))
+            }
             ResolvedNode::Match {
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 label,
                 ..
-            } => storage.to_condition(*op, label, *sql_type),
+            } => storage.to_condition(*op, label, *bitical_type),
+            ResolvedNode::MatchIn {
+                tag_type,
+                target_col,
+                labels,
+            } => {
+                let exprs: Vec<SimpleExpr> = labels
+                    .iter()
+                    .map(|l| l.resolved_value().to_simple_expr())
+                    .collect();
+                let mut cond = Condition::all();
+                if let Some(tag_type) = tag_type {
+                    cond =
+                        cond.add(crate::query::lens_schema::check_tag_match(
+                            tag_type.as_str(),
+                        ));
+                }
+                cond.add(Expr::col(*target_col).is_in(exprs))
+            }
             ResolvedNode::Aggregation(_)
             | ResolvedNode::AggregationMatch { .. } => {
                 // 集約は基本的に SELECT 句または HAVING 句で扱われる
@@ -588,10 +692,14 @@ impl ResolvedNode {
             | ResolvedNode::NestNestMatch { .. }
             | ResolvedNode::MergedNestMatch { .. }
             | ResolvedNode::ScalarMatch { .. }
-            | ResolvedNode::LabelSetOp { .. } => {
+            | ResolvedNode::LabelSetOp { .. }
+            | ResolvedNode::DateTimeMatch { .. } => {
                 // 算術演算や集約比較は、単一の WHERE 句の Condition だけでは不十分な場合が多いため、
                 // build_pick_sql 側で完全に SelectStatement を構築する。
                 // 連結用には Condition::any() を返しておく。
+                // DateTimeMatch も同様: Match の高速経路（sql/nest.rs の
+                // resolve_simple_filter_condition）を通さず専用ビルダーで扱うため、
+                // ここでは条件を作らない。
                 Condition::any()
             }
         }
@@ -670,6 +778,60 @@ impl ResolvedNode {
         }
     }
 
+    /// 結果行が representative を持ち nest decode 経路でデコードすべきか。
+    /// projection に加え、Or 経由で到達可能な DefinitionRef 枝を含む場合も
+    /// true（fetch SQL の representative 列の有無と decode 経路の選択を
+    /// 同一条件に揃える）。
+    pub fn has_representative(&self) -> bool {
+        self.get_projection().is_some() || self.has_definition_branch()
+    }
+
+    /// ルートから Or だけを辿って DefinitionRef 枝に到達できるか。
+    fn has_definition_branch(&self) -> bool {
+        match self {
+            ResolvedNode::DefinitionRef { .. } => true,
+            ResolvedNode::Or(nodes) => {
+                nodes.iter().any(|n| n.has_definition_branch())
+            }
+            _ => false,
+        }
+    }
+
+    /// ルートから Or だけで到達可能な DefinitionRef 枝と、それ以外の枝に
+    /// 分割する。定義枝を含まない場合は None。
+    /// 残りの枝は単一なら元のノード、複数なら Or として返す。
+    pub fn split_definition_branches(
+        &self,
+    ) -> Option<(Vec<&ResolvedNode>, Option<ResolvedNode>)> {
+        fn walk<'a>(
+            node: &'a ResolvedNode,
+            defs: &mut Vec<&'a ResolvedNode>,
+            rest: &mut Vec<ResolvedNode>,
+        ) {
+            match node {
+                ResolvedNode::Or(nodes) => {
+                    for child in nodes {
+                        walk(child, defs, rest);
+                    }
+                }
+                ResolvedNode::DefinitionRef { .. } => defs.push(node),
+                other => rest.push(other.clone()),
+            }
+        }
+        let mut defs = Vec::new();
+        let mut rest = Vec::new();
+        walk(self, &mut defs, &mut rest);
+        if defs.is_empty() {
+            return None;
+        }
+        let rest_node = match rest.len() {
+            0 => None,
+            1 => rest.pop(),
+            _ => Some(ResolvedNode::Or(rest)),
+        };
+        Some((defs, rest_node))
+    }
+
     /// Or が異なるタグ型のオペランドを混在させる「混在投影」クエリかどうかを返します。
     pub fn is_mixed_projection_query(&self) -> bool {
         match self {
@@ -737,6 +899,7 @@ impl ResolvedNode {
                 nodes.iter().find_map(|n| n.get_projection_operand())
             }
             ResolvedNode::Difference(l, _) => l.get_projection_operand(),
+            ResolvedNode::DefinitionRef { operand, .. } => Some(operand),
             _ => None,
         }
     }
@@ -858,24 +1021,25 @@ impl ResolvedNode {
     }
 
     /// NestMatch の比較条件を再帰的に探索して返します。
-    pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
+    pub fn get_nvalue_condition(&self) -> Option<(ComparisonOp, NvalueRhs)> {
         match self {
-            ResolvedNode::NestMatch { op, label, .. } => Some((op, label)),
+            ResolvedNode::NestMatch { op, rhs, .. } => Some((*op, rhs.clone())),
             ResolvedNode::And(nodes) | ResolvedNode::Or(nodes) => {
                 nodes.iter().find_map(|n| n.get_nvalue_condition())
             }
             ResolvedNode::Difference(l, _) => l.get_nvalue_condition(),
             ResolvedNode::MergedNestMatch { matches, .. } => {
                 matches.iter().find_map(|m| {
-                    let crate::query::lens_resolver::NestMatchOp::Comparison(
-                        op,
-                    ) = &m.op;
-                    if let crate::query::ResolvedOperand::Literal(label) =
-                        &m.right
-                    {
-                        return Some((op, label));
+                    let NestMatchOp::Comparison(op) = &m.op;
+                    match &m.right {
+                        NestMatchRhs::DateTime(range) => {
+                            Some((*op, NvalueRhs::DateTime(range.clone())))
+                        }
+                        NestMatchRhs::Operand(ResolvedOperand::Literal(
+                            label,
+                        )) => Some((*op, NvalueRhs::Label(label.clone()))),
+                        NestMatchRhs::Operand(_) => None,
                     }
-                    None
                 })
             }
             _ => None,
@@ -887,19 +1051,43 @@ impl ResolvedNode {
     /// count() / Literal は型を伝播しない。
     pub fn get_scalar_result_label_type(&self) -> Option<TagType> {
         match self {
-            ResolvedNode::Aggregation(ResolvedAggregationNode::Count(_)) => None,
-            ResolvedNode::Aggregation(ResolvedAggregationNode::Arithmetic {
-                inner, ..
-            }) => {
+            ResolvedNode::And(nodes) => {
+                nodes.iter().find_map(|n| n.get_scalar_result_label_type())
+            }
+            ResolvedNode::Aggregation(ResolvedAggregationNode::Count(_)) => {
+                None
+            }
+            ResolvedNode::Aggregation(
+                ResolvedAggregationNode::Arithmetic { inner, .. },
+            ) => {
                 let (_, _, operand) = inner.extract_agg_parts();
                 let operand = operand?;
                 let mut types = collect_tag_types_from_operand(operand);
                 types.sort();
                 types.dedup();
-                if types.len() == 1 { Some(types.remove(0)) } else { None }
+                if types.len() == 1 {
+                    Some(types.remove(0))
+                } else {
+                    None
+                }
+            }
+            ResolvedNode::Nest {
+                nvalue: Some(nvalue),
+                ..
+            } => {
+                let mut types = collect_tag_types_from_operand(nvalue);
+                types.sort();
+                types.dedup();
+                if types.len() == 1 {
+                    Some(types.remove(0))
+                } else {
+                    None
+                }
             }
             // sum(size:) + count() 等、top-level Nest{keys:[Calculation(Agg,...)]}
-            ResolvedNode::Nest { keys, nvalue: None, .. } => {
+            ResolvedNode::Nest {
+                keys, nvalue: None, ..
+            } => {
                 let op = keys.first()?;
                 if !op.contains_aggregation() && !op.is_pure_scalar() {
                     return None;
@@ -907,7 +1095,11 @@ impl ResolvedNode {
                 let mut types = collect_tag_types_from_operand(op);
                 types.sort();
                 types.dedup();
-                if types.len() == 1 { Some(types.remove(0)) } else { None }
+                if types.len() == 1 {
+                    Some(types.remove(0))
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -978,7 +1170,10 @@ fn get_nest_keys_len(node: &ResolvedNode) -> Option<usize> {
 /// ResolvedOperand から再帰的に最初の TagRef の TagType を抽出するヘルパー
 fn extract_tag_type_from_operand(op: &ResolvedOperand) -> Option<TagType> {
     match op {
-        ResolvedOperand::TagRef { tag_type, .. } => Some(tag_type.clone()),
+        ResolvedOperand::TagRef { tag_type, .. }
+        | ResolvedOperand::LabelGrouping { tag_type, .. } => {
+            Some(tag_type.clone())
+        }
         ResolvedOperand::Calculation(calc) => {
             extract_tag_type_from_operand(&calc.left)
                 .or_else(|| extract_tag_type_from_operand(&calc.right))
@@ -992,7 +1187,8 @@ fn extract_storage_from_operand(
     op: &ResolvedOperand,
 ) -> Option<&StorageMapping> {
     match op {
-        ResolvedOperand::TagRef { storage, .. } => Some(storage),
+        ResolvedOperand::TagRef { storage, .. }
+        | ResolvedOperand::LabelGrouping { storage, .. } => Some(storage),
         ResolvedOperand::Calculation(calc) => {
             extract_storage_from_operand(&calc.left)
                 .or_else(|| extract_storage_from_operand(&calc.right))
@@ -1011,7 +1207,8 @@ fn collect_tag_types_from_operand(root: &ResolvedOperand) -> Vec<TagType> {
 
     while let Some(op) = queue.pop() {
         match op {
-            ResolvedOperand::TagRef { tag_type, .. } => {
+            ResolvedOperand::TagRef { tag_type, .. }
+            | ResolvedOperand::LabelGrouping { tag_type, .. } => {
                 result.push(tag_type);
             }
             ResolvedOperand::Calculation(calc) => {
@@ -1065,27 +1262,14 @@ fn cond_projection(storage: &StorageMapping) -> Condition {
 fn cond_column_match(tag: SType, label: &Label) -> Condition {
     // 直接の物理カラム指定
     let col = tag;
-    let val = match label.value() {
-        crate::types::LabelValue::Integer(i) => Expr::val(i),
-        crate::types::LabelValue::Boolean(b) => Expr::val(b),
-        crate::types::LabelValue::Double(bits) => {
-            Expr::val(f64::from_bits(bits))
-        }
-        crate::types::LabelValue::Null => Expr::val(None::<i32>),
-        crate::types::LabelValue::String(s)
-        | crate::types::LabelValue::Literal(s) => Expr::val(s),
-        crate::types::LabelValue::Date(dt) => Expr::val(dt.to_timestamp()),
-    };
+    let val = label.value().to_simple_expr();
     // ColumnMatch の場合は型固有のルールは適用せず、単純にマッピング
     Condition::all().add(Expr::col(col).eq(val))
 }
 
 fn check_tag_match(tag_type: &str) -> SimpleExpr {
     let mut tag_op = BinOper::Equal;
-    if tag_type.contains('*')
-        || tag_type.contains('?')
-        || tag_type.contains('[')
-    {
+    if crate::util::is_glob_pattern(tag_type) {
         tag_op = BinOper::Custom("GLOB");
     }
     Expr::col(Col::Type).binary(tag_op, tag_type)
@@ -1100,6 +1284,26 @@ pub(crate) fn resolve_operand(
     match op {
         Operand::Literal(label) => Ok(ResolvedOperand::Literal(label.clone())),
         Operand::TypeRef(tt) => resolve_type_ref_operand(lens, tt),
+        Operand::LabelGrouping { tag_type, pattern } => {
+            let (storage, bitical_type) = match lens.look_up(tag_type) {
+                Some(desc) => {
+                    (desc.storage.clone(), desc.logical_type.to_bitical())
+                }
+                None => (
+                    StorageMapping::Basic {
+                        column: Col::LabelStr,
+                        tag_type: tag_type.as_str().to_string(),
+                    },
+                    BiticalType::String,
+                ),
+            };
+            Ok(ResolvedOperand::LabelGrouping {
+                tag_type: tag_type.clone(),
+                pattern: pattern.clone(),
+                storage,
+                bitical_type,
+            })
+        }
         Operand::Calculation(calc) => {
             let resolved_calc = resolve_calculation_node(lens, calc)?;
             Ok(ResolvedOperand::Calculation(Box::new(resolved_calc)))
@@ -1122,25 +1326,25 @@ fn resolve_type_ref_operand(
     lens: &Lens,
     tt: &TagType,
 ) -> Result<ResolvedOperand> {
-    let (storage, sql_type) = match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type()),
+    let (storage, bitical_type) = match lens.look_up(tt) {
+        Some(desc) => (desc.storage.clone(), desc.logical_type.to_bitical()),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
-            SqlType::VARCHAR,
+            BiticalType::String,
         ),
     };
     let res = Ok(ResolvedOperand::TagRef {
         tag_type: tt.clone(),
         storage,
-        sql_type,
+        bitical_type,
     });
     if std::env::var("TTFM_DEBUG").is_ok() {
         println!(
-            "DEBUG: resolve_type_ref_operand: tag={:?}, sql_type={:?}",
-            tt, sql_type
+            "DEBUG: resolve_type_ref_operand: tag={:?}, bitical_type={:?}",
+            tt, bitical_type
         );
     }
     res
@@ -1214,30 +1418,65 @@ fn resolve_aggregation_node(
     }
 }
 
+/// 定義アイテム参照の解決に要る材料（投影先・候補・予約名・既定 rank）を集める。
+fn definition_context(
+    lens: &Lens,
+    tag_type: &TagType,
+    target_name: &str,
+    kind: ItemKind,
+    origins: &[Origin],
+) -> Result<(
+    ResolvedOperand,
+    Vec<crate::query::ast::Candidate>,
+    Vec<String>,
+    Rank,
+)> {
+    let operand = resolve_type_ref_operand(lens, tag_type)?;
+    let default_rank = lens
+        .look_up(&TagType::from(target_name))
+        .and_then(|desc| desc.logical_function.as_ref())
+        .map(|f| f.default_rank())
+        .unwrap_or(crate::rank::SystemRank::DEFAULT);
+    let entries = lens.iter_all_for_rank();
+    let candidates = definition_candidates(&entries, kind, origins);
+    let reserved = definition_reserved_names(&entries);
+    Ok((operand, candidates, reserved, default_rank))
+}
+
 pub(crate) fn resolve_query_node(
     lens: &Lens,
     node: QueryNode,
 ) -> Result<ResolvedNode> {
     match node {
         QueryNode::TypedTag(tt) => {
-            let tag_type = tt.label.tag_type();
-            let (storage, sql_type) = match lens.look_up(&tag_type) {
-                Some(desc) => (desc.storage.clone(), desc.sql_type()),
-                None => (
-                    StorageMapping::Basic {
-                        column: Col::LabelStr,
-                        tag_type: tag_type.as_str().to_string(),
-                    },
-                    SqlType::VARCHAR,
-                ),
+            if let Some(kind) = lens.item_kind(&tt.tag_type()) {
+                let (operand, candidates, reserved, default_rank) =
+                    definition_context(
+                        lens,
+                        &tt.tag_type(),
+                        &tt.value().as_display_name(),
+                        kind,
+                        &[],
+                    )?;
+                return Ok(ResolvedNode::DefinitionRef {
+                    def: ResolvedDefinition::for_tag(
+                        kind,
+                        tt,
+                        candidates,
+                        reserved,
+                        default_rank,
+                    ),
+                    operand,
+                });
+            }
+            let inner = match tt.node().into_owned() {
+                crate::query::Node::Query(qn)
+                | crate::query::Node::Expanded(qn) => *qn,
+                crate::query::Node::Resolved(_) => {
+                    bail!("TypedTag's Node must not already be Resolved before lens resolution")
+                }
             };
-            Ok(ResolvedNode::Match {
-                tag_type,
-                storage,
-                sql_type,
-                op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
-                label: tt.label,
-            })
+            resolve_query_node(lens, inner)
         }
         QueryNode::ColumnMatch { tag, label } => {
             let tag_type = TagType::Base(tag);
@@ -1247,9 +1486,28 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Match {
                 tag_type,
                 storage: desc.storage.clone(),
-                sql_type: desc.sql_type(),
+                bitical_type: desc.logical_type.to_bitical(),
                 op: ComparisonOp::Scalar(crate::query::ast::BasicOp::Eq),
                 label,
+            })
+        }
+        QueryNode::OriginRef(origin) => {
+            let (operand, candidates, reserved, default_rank) =
+                definition_context(
+                    lens,
+                    &TagType::Base(crate::types::SType::Type),
+                    "*",
+                    ItemKind::Type,
+                    &[origin],
+                )?;
+            Ok(ResolvedNode::DefinitionRef {
+                def: ResolvedDefinition::for_origin(
+                    origin,
+                    candidates,
+                    reserved,
+                    default_rank,
+                ),
+                operand,
             })
         }
         QueryNode::Comparison(cmp) => resolve_comparison(lens, cmp),
@@ -1352,12 +1610,16 @@ pub(crate) fn resolve_query_node(
 
         // Projection(Calculation{Query(Nest(A,agg1)), op, Query(Nest(A,agg2))})
         // → logical_resolver が算術分配した形式。resolve_projection_arithmetic に委譲。
-        QueryNode::Projection(Operand::Calculation(calc))
-            if calc_has_nest_operands(&calc) =>
-        {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(calc),
+        }) if calc_has_nest_operands(&calc) => {
             resolve_projection_arithmetic(lens, *calc)
         }
-        QueryNode::Projection(op) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: op,
+        }) => {
             let resolved_op = resolve_operand(lens, &op)?;
             Ok(ResolvedNode::Nest {
                 keys: vec![resolved_op],
@@ -1370,6 +1632,91 @@ pub(crate) fn resolve_query_node(
             Ok(ResolvedNode::Aggregation(res))
         }
         QueryNode::Nest(nest) => resolve_nest(lens, nest),
+        QueryNode::DateTimeRange { first, op, range } => {
+            resolve_date_time_range(lens, first, op, range)
+        }
+        QueryNode::Eval(_) => {
+            anyhow::bail!(
+                "QueryNode::Eval must be pre-expanded before lens resolution"
+            )
+        }
+    }
+}
+
+fn resolve_date_time_range(
+    lens: &Lens,
+    first: Operand,
+    op: crate::query::ast::BasicOp,
+    range: crate::types::DateTimeRange,
+) -> Result<ResolvedNode> {
+    match first {
+        Operand::TypeRef(tag) => {
+            let storage = match lens.look_up(&tag) {
+                Some(desc) => desc.storage.clone(),
+                None => StorageMapping::Basic {
+                    column: Col::LabelStr,
+                    tag_type: tag.as_str().to_string(),
+                },
+            };
+            Ok(ResolvedNode::DateTimeMatch {
+                tag_type: tag,
+                storage,
+                op,
+                range,
+            })
+        }
+        Operand::Aggregation(agg) => {
+            let res_agg = resolve_aggregation(lens, *agg)?;
+            Ok(ResolvedNode::AggregationMatch {
+                agg: res_agg,
+                op: ComparisonOp::Label(op),
+                rhs: NvalueRhs::DateTime(range),
+            })
+        }
+        Operand::Calculation(calc) => {
+            let res_calc = resolve_calculation(lens, *calc)?;
+            Ok(ResolvedNode::CalculationMatch {
+                calc: res_calc,
+                op: ComparisonOp::Label(op),
+                rhs: NvalueRhs::DateTime(range),
+            })
+        }
+        Operand::Query(node) => {
+            let resolved = resolve_query_node(lens, *node)?;
+            match resolved {
+                ResolvedNode::Nest {
+                    mut keys,
+                    nvalue,
+                    context,
+                } => {
+                    let nv = nvalue.unwrap_or_else(|| {
+                        keys.pop().expect("Nest must have at least one key")
+                    });
+                    Ok(ResolvedNode::NestMatch {
+                        keys,
+                        nvalue: nv,
+                        op: ComparisonOp::Label(op),
+                        rhs: NvalueRhs::DateTime(range),
+                        context,
+                    })
+                }
+                ResolvedNode::And(ref nodes)
+                    if nodes.iter().any(|n| n.get_projection().is_some()) =>
+                {
+                    Ok(resolved)
+                }
+                _ => bail!(
+                    "DateTimeRange comparison must resolve to Nest, got: {:?}",
+                    resolved
+                ),
+            }
+        }
+        Operand::Literal(_) => {
+            bail!("DateTimeRange comparison first operand cannot be a literal")
+        }
+        Operand::LabelGrouping { .. } => {
+            bail!("DateTimeRange comparison first operand cannot be a LabelGrouping")
+        }
     }
 }
 
@@ -1415,8 +1762,8 @@ fn resolve_nest(
     if std::env::var("TTFM_DEBUG").is_ok() {
         println!("DEBUG resolve_nest: entering");
     }
-    let left = resolve_query_node(lens, *nest.left)?;
-    let right_node = *nest.right;
+    let left = resolve_query_node(lens, *nest.left.unwrap())?;
+    let right_node = nest.right.into_node();
 
     let (keys, context) = extract_projection_operand_with_context(left)?;
 
@@ -1431,15 +1778,19 @@ fn resolve_nest(
             })
         }
         // 深さ1: 右辺が Projection(Literal) → nvalue にスカラー値を付与
-        QueryNode::Projection(Operand::Literal(label)) => {
-            Ok(ResolvedNode::Nest {
-                keys,
-                nvalue: Some(ResolvedOperand::Literal(label)),
-                context,
-            })
-        }
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Literal(label),
+        }) => Ok(ResolvedNode::Nest {
+            keys,
+            nvalue: Some(ResolvedOperand::Literal(label)),
+            context,
+        }),
         // 深さ1: 右辺が Projection(Calculation)
-        QueryNode::Projection(Operand::Calculation(calc)) => {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: Operand::Calculation(calc),
+        }) => {
             let resolved_calc = resolve_calculation(lens, *calc)?;
             let operand = ResolvedOperand::Calculation(Box::new(resolved_calc));
 
@@ -1755,11 +2106,11 @@ fn resolve_projection_arithmetic(
             // 左辺 Nest の keys に演算結果を追加して1段深い Nest を返す
             let left_nest = match calc.left {
                 Operand::Query(node) => resolve_query_node(lens, *node)?,
-                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+                op => resolve_query_node(lens, QueryNode::base_nest(op))?,
             };
             let right_nest = match calc.right {
                 Operand::Query(node) => resolve_query_node(lens, *node)?,
-                op => resolve_query_node(lens, QueryNode::Projection(op))?,
+                op => resolve_query_node(lens, QueryNode::base_nest(op))?,
             };
             resolve_mixed_key_arithmetic(left_nest, right_nest, arith_op)
         }
@@ -1823,6 +2174,29 @@ fn resolve_nest_operand_extract_key(
     }
 }
 
+fn find_and_extract_nest(
+    nodes: &mut Vec<ResolvedNode>,
+) -> Option<(Vec<ResolvedOperand>, Option<Box<ResolvedNode>>)> {
+    for i in 0..nodes.len() {
+        if matches!(nodes[i], ResolvedNode::Nest { .. }) {
+            let nest = nodes.remove(i);
+            let ResolvedNode::Nest { keys, context, .. } = nest else {
+                unreachable!()
+            };
+            return Some((keys, context));
+        }
+        if let ResolvedNode::And(ref mut inner) = nodes[i] {
+            if let Some(res) = find_and_extract_nest(inner) {
+                if inner.is_empty() {
+                    nodes.remove(i);
+                }
+                return Some(res);
+            }
+        }
+    }
+    None
+}
+
 /// Nest の左辺から ResolvedOperand と、付随するコンテキスト (And などのフィルタ) を抽出するヘルパー。
 fn extract_projection_operand_with_context(
     left: ResolvedNode,
@@ -1830,15 +2204,7 @@ fn extract_projection_operand_with_context(
     match left {
         ResolvedNode::Nest { keys, context, .. } => Ok((keys, context)),
         ResolvedNode::And(mut nodes) => {
-            let nest_idx = nodes
-                .iter()
-                .position(|n| matches!(n, ResolvedNode::Nest { .. }));
-            if let Some(idx) = nest_idx {
-                let nest = nodes.remove(idx);
-                let ResolvedNode::Nest { keys, context, .. } = nest else {
-                    unreachable!()
-                };
-
+            if let Some((keys, context)) = find_and_extract_nest(&mut nodes) {
                 // 残りのノード（is_dir:false などのフィルタ）をコンテキストとして統合
                 let filter_ctx = if nodes.is_empty() {
                     None
@@ -2027,11 +2393,20 @@ fn resolve_operand_for_calc(
     match operand {
         Operand::Literal(lab) => Ok(ResolvedOperand::Literal(lab)),
         Operand::TypeRef(tt) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedOperand::TagRef {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
+            })
+        }
+        Operand::LabelGrouping { tag_type, pattern } => {
+            let (storage, bitical_type) = get_storage_and_type(lens, &tag_type);
+            Ok(ResolvedOperand::LabelGrouping {
+                tag_type,
+                pattern,
+                storage,
+                bitical_type,
             })
         }
         Operand::Calculation(calc) => {
@@ -2071,7 +2446,81 @@ fn resolve_comparison(
     }
 
     let (op, right) = cmp.rest.pop().unwrap();
-    resolve_single_match(lens, cmp.first, op, right)
+    let resolved = resolve_single_match(lens, cmp.first, op, right)?;
+    validate_order_op_not_partial_glob(&resolved)?;
+    Ok(resolved)
+}
+
+/// 文字列型の順序演算子（Gt/Ge/Lt/Le）× 部分 glob をエラーにする。
+/// 全一致 glob（`*`）は全域規則（Gt/Lt→FALSE、Ge/Le→TRUE）で扱うため対象外。
+/// Eq/Ne は GLOB / NOT GLOB へ翻訳できるため対象外。
+fn validate_order_op_not_partial_glob(node: &ResolvedNode) -> Result<()> {
+    use crate::query::ast::BasicOp;
+
+    let (op, rhs, is_string) = match node {
+        ResolvedNode::Match {
+            tag_type,
+            bitical_type,
+            op,
+            label,
+            ..
+        } => {
+            let is_string = !matches!(tag_type, TagType::Custom(_))
+                && matches!(bitical_type, BiticalType::String);
+            (*op, Some(label), is_string)
+        }
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (*op, label, agg.is_string_type())
+        }
+        ResolvedNode::CalculationMatch { calc, op, rhs } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (
+                *op,
+                label,
+                calc.left.is_string_type() && calc.right.is_string_type(),
+            )
+        }
+        ResolvedNode::NestMatch {
+            nvalue, op, rhs, ..
+        } => {
+            let label = match rhs {
+                NvalueRhs::Label(l) => Some(l),
+                NvalueRhs::DateTime(_) => None,
+            };
+            (*op, label, nvalue.is_string_type())
+        }
+        _ => return Ok(()),
+    };
+
+    if !is_string {
+        return Ok(());
+    }
+    let Some(label) = rhs else {
+        return Ok(());
+    };
+    let basic_op = match op {
+        ComparisonOp::Label(b) | ComparisonOp::Scalar(b) => b,
+    };
+    if matches!(basic_op, BasicOp::Eq | BasicOp::Ne) {
+        return Ok(());
+    }
+
+    let s = label.as_str();
+    if crate::util::is_glob_pattern(&s) && !crate::util::is_full_match_glob(&s)
+    {
+        return Err(crate::query::error::order_op_partial_glob(
+            &format!("{:?}", basic_op),
+            &s,
+        ));
+    }
+    Ok(())
 }
 
 /// メイン解決ロジック（15パターンの比較処理）
@@ -2083,21 +2532,21 @@ fn resolve_single_match(
 ) -> Result<ResolvedNode> {
     match (left, right) {
         (Operand::TypeRef(tt), Operand::Literal(lab)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedNode::Match {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 label: lab,
             })
         }
         (Operand::Literal(lab), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             Ok(ResolvedNode::Match {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op: flip_op(op),
                 label: lab,
             })
@@ -2107,7 +2556,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::AggregationMatch {
                 agg: res_agg,
                 op,
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         (Operand::Literal(lab), Operand::Aggregation(agg)) => {
@@ -2115,7 +2564,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::AggregationMatch {
                 agg: res_agg,
                 op: flip_op(op),
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // (nest_calc) :> 100 → Nest 算術演算子の NestMatch に変換
@@ -2144,7 +2593,7 @@ fn resolve_single_match(
                         },
                     )),
                     op,
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context: left_context,
                 }),
                 // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
@@ -2156,7 +2605,7 @@ fn resolve_single_match(
                     keys,
                     nvalue: nv,
                     op,
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context,
                 }),
                 // 多段キー (keys > 1): 比較演算子は未サポート
@@ -2182,17 +2631,17 @@ fn resolve_single_match(
             Ok(ResolvedNode::CalculationMatch {
                 calc: res_calc,
                 op,
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // size: > (1000 + 500)
         (Operand::TypeRef(tt), Operand::Calculation(calc)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::TagCalculationMatch {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op,
                 calc: res_calc,
             })
@@ -2201,12 +2650,12 @@ fn resolve_single_match(
         // 意味: size: が (1+2) より大きい → size: > (1+2)
         // 解決後の TagCalculationMatch は (tag op calc) の順なので、演算子を反転させる必要がある
         (Operand::Calculation(calc), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_calc = resolve_calculation(lens, *calc)?;
             Ok(ResolvedNode::TagCalculationMatch {
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
                 op: flip_op(op),
                 calc: res_calc,
             })
@@ -2243,26 +2692,26 @@ fn resolve_single_match(
         }
         // max(size:) == size:
         (Operand::Aggregation(agg), Operand::TypeRef(tt)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_agg = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedNode::AggregationTagMatch {
                 agg: res_agg,
                 op,
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
             })
         }
         // size: == max(size:)
         (Operand::TypeRef(tt), Operand::Aggregation(agg)) => {
-            let (storage, sql_type) = get_storage_and_type(lens, &tt);
+            let (storage, bitical_type) = get_storage_and_type(lens, &tt);
             let res_agg = resolve_aggregation(lens, *agg)?;
             Ok(ResolvedNode::AggregationTagMatch {
                 agg: res_agg,
                 op: flip_op(op),
                 tag_type: tt,
                 storage,
-                sql_type,
+                bitical_type,
             })
         }
         // 100 :< (nest_calc) → Nest 算術演算子の NestMatch に変換（flip）
@@ -2291,7 +2740,7 @@ fn resolve_single_match(
                         },
                     )),
                     op: flip_op(op),
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context: left_context,
                 }),
                 // 同一キーの算術演算: Nest { keys: [k], nvalue: calc } として返る
@@ -2303,7 +2752,7 @@ fn resolve_single_match(
                     keys,
                     nvalue: nv,
                     op: flip_op(op),
-                    label: lab,
+                    rhs: NvalueRhs::Label(lab),
                     context,
                 }),
                 _ => Ok(resolved),
@@ -2316,7 +2765,7 @@ fn resolve_single_match(
             Ok(ResolvedNode::CalculationMatch {
                 calc: res_calc,
                 op: flip_op(op),
-                label: lab,
+                rhs: NvalueRhs::Label(lab),
             })
         }
         // width: > height:
@@ -2354,7 +2803,7 @@ fn resolve_single_match(
                         keys,
                         nvalue: nv,
                         op,
-                        label: lit,
+                        rhs: NvalueRhs::Label(lit),
                         context,
                     })
                 }
@@ -2384,7 +2833,7 @@ fn resolve_single_match(
                         keys,
                         nvalue: nv,
                         op: flip_op(op),
-                        label: lit,
+                        rhs: NvalueRhs::Label(lit),
                         context,
                     })
                 }
@@ -2472,15 +2921,15 @@ fn resolve_single_match(
 fn get_storage_and_type(
     lens: &Lens,
     tt: &TagType,
-) -> (StorageMapping, SqlType) {
+) -> (StorageMapping, BiticalType) {
     match lens.look_up(tt) {
-        Some(desc) => (desc.storage.clone(), desc.sql_type()),
+        Some(desc) => (desc.storage.clone(), desc.logical_type.to_bitical()),
         None => (
             StorageMapping::Basic {
                 column: Col::LabelStr,
                 tag_type: tt.as_str().to_string(),
             },
-            SqlType::VARCHAR,
+            BiticalType::String,
         ),
     }
 }
@@ -2505,23 +2954,22 @@ pub fn flip_basic_op(
     }
 }
 
-/// ComparisonOp を sea_query の BinOper に変換します。
-///
-/// **重要**: sql.rs で使用中
-pub fn to_bin_op(op: ComparisonOp) -> BinOper {
-    use crate::query::ast::BasicOp;
-    let basic = match op {
-        ComparisonOp::Scalar(b) => b,
-        ComparisonOp::Label(b) => b,
-    };
-    match basic {
-        BasicOp::Eq => BinOper::Equal,
-        BasicOp::Ne => BinOper::NotEqual,
-        BasicOp::Gt => BinOper::GreaterThan,
-        BasicOp::Ge => BinOper::GreaterThanOrEqual,
-        BasicOp::Lt => BinOper::SmallerThan,
-        BasicOp::Le => BinOper::SmallerThanOrEqual,
-    }
+// ========== ResolvedOrder ==========
+
+/// 並び順キー（Order.key）の物理解決結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedOrderKey {
+    /// 全行に共通の直接カラム（rank / item_id）
+    Column(Col),
+    /// EAV タグ値（type = tag_type の行の col の値）
+    Tag { tag_type: String, col: Col },
+}
+
+/// 検索結果の並び順（types::Order）の物理解決結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOrder {
+    pub key: ResolvedOrderKey,
+    pub desc: bool,
 }
 
 // ========== Resolver 構造体 ==========
@@ -2531,30 +2979,23 @@ pub struct Resolver {
     lens: Lens,
     pub expanded_query: QueryNode,
     pub resolved_query: ResolvedNode,
+    /// 解決済みの並び順（with_order で設定。空 = SQL 側の既定の並び）
+    resolved_order: Vec<ResolvedOrder>,
 }
 
 impl Resolver {
-    /// クエリ文字列と TagRegistry から Resolver を生成
-    ///
-    /// 処理フロー:
-    /// 1. パース: Query文字列 → QueryNode (AST)
-    /// 2. 論理展開: logical_resolver::expand_query_node()
-    /// 3. 物理解決: resolve_query_node() → ResolvedNode
-    ///
-    /// 動的登録プラグインの normalize_label / expand_comparison を反映するには
-    /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
-    /// `&TagRegistry::with_standard()` を渡す。
-    pub fn new(query: &str, registry: &crate::tag::TagRegistry) -> Result<Self> {
+    /// 展開済み QueryNode (AST) と TagRegistry から Resolver を直接生成
+    pub fn from_node(
+        node: QueryNode,
+        registry: &crate::tag::TagRegistry,
+        sink: &mut dyn crate::query::error::WarningSink,
+    ) -> Result<Self> {
         let lens = Lens::from_registry(registry);
-        let node = if query.trim().is_empty() {
-            QueryNode::And(vec![])
-        } else {
-            crate::query::parse(query)?
-        };
 
         // 論理展開 + 型チェック（logical_resolver.rsに委譲）
-        let expanded =
-            crate::query::logical_resolver::expand_query_node(&lens, node)?;
+        let expanded = crate::query::logical_resolver::expand_query_node(
+            &lens, node, sink,
+        )?;
 
         // 物理解決（このファイル内のresolve_query_node）
         let resolved = resolve_query_node(&lens, expanded.clone())?;
@@ -2566,7 +3007,43 @@ impl Resolver {
             lens,
             expanded_query: expanded,
             resolved_query: optimized,
+            resolved_order: Vec::new(),
         })
+    }
+
+    /// クエリ文字列と TagRegistry から Resolver を生成
+    ///
+    /// 処理フロー:
+    /// 1. パース: Query文字列 → QueryNode (AST)
+    /// 2. 論理展開: logical_resolver::expand_query_node()
+    /// 3. 物理解決: resolve_query_node() → ResolvedNode
+    ///
+    /// 動的登録プラグインの interpret / expand_comparison を反映するには
+    /// 実際の TagRegistry を渡すこと。テストなど標準タグのみでよい場合は
+    /// `&TagRegistry::with_standard()` を渡す。
+    ///
+    /// パース時・論理展開時に検出された警告は `sink` へ即時発出される。
+    pub fn new(
+        query: &str,
+        registry: &crate::tag::TagRegistry,
+        sink: &mut dyn crate::query::error::WarningSink,
+    ) -> Result<Self> {
+        let node = if query.trim().is_empty() {
+            QueryNode::And(vec![])
+        } else {
+            crate::query::parser::parse(query, sink)?
+        };
+        Self::from_node(node, registry, sink)
+    }
+
+    /// 警告を捨てて Resolver を生成する薄いラッパー。
+    /// 警告の宛先を持たないテスト・内部呼び出し用。
+    pub fn new_nowarn(
+        query: &str,
+        registry: &crate::tag::TagRegistry,
+    ) -> Result<Self> {
+        let mut discard: Vec<crate::query::error::Warning> = Vec::new();
+        Self::new(query, registry, &mut discard)
     }
 
     /// Lens への参照を返す（Fetcherで使用）
@@ -2574,9 +3051,68 @@ impl Resolver {
         &self.lens
     }
 
+    /// 並び順を物理解決して保持する。優先順位は
+    /// 「明示指定（order） > resolve 済みクエリからの判定 > 既定（空）」。
+    /// rank / item_id は全行に共通の直接カラム、それ以外の型は EAV タグ値
+    /// （値カラムは Lens の論理型から決定。未登録型は label_str）。
+    /// 解決結果が空の場合は SQL 側の既定の並びに委ねる。
+    pub fn with_order(mut self, order: &[crate::types::Order]) -> Self {
+        use crate::query::logical_schema::LogicalSchema;
+        let effective: Vec<crate::types::Order> = if order.is_empty() {
+            self.preferred_order_from_query()
+        } else {
+            order.to_vec()
+        };
+        self.resolved_order = effective
+            .iter()
+            .map(|o| {
+                let key = match o.key.as_str() {
+                    "rank" => ResolvedOrderKey::Column(Col::Rank),
+                    "item_id" => ResolvedOrderKey::Column(Col::ItemId),
+                    k => ResolvedOrderKey::Tag {
+                        tag_type: k.to_string(),
+                        col: self
+                            .lens
+                            .get_logical_type(&o.key)
+                            .to_bitical()
+                            .to_column(),
+                    },
+                };
+                ResolvedOrder { key, desc: o.desc }
+            })
+            .collect();
+        self
+    }
+
+    /// resolve 済みクエリが単独の DefinitionRef なら、その定義種別の
+    /// TagFunction が Display で宣言する優先 Order を返す。
+    /// 複合クエリ（And/Or 等）や宣言が無い場合は空（= 既定の並び）。
+    fn preferred_order_from_query(&self) -> Vec<crate::types::Order> {
+        let ResolvedNode::DefinitionRef { def, .. } = &self.resolved_query
+        else {
+            return Vec::new();
+        };
+        self.lens
+            .look_up(&TagType::from(def.kind.as_str()))
+            .and_then(|d| d.logical_function.as_ref())
+            .and_then(|f| f.display())
+            .map(|d| d.preferred_order())
+            .unwrap_or_default()
+    }
+
+    /// 解決済みの並び順を返す（SQL 生成で使用。空 = 既定の並び）。
+    pub fn resolved_order(&self) -> &[ResolvedOrder] {
+        &self.resolved_order
+    }
+
     /// 投影対象の型を返す
     pub fn get_projection(&self) -> Option<TagType> {
         self.resolved_query.get_projection()
+    }
+
+    /// 結果が representative を持ち nest decode 経路でデコードすべきか。
+    pub fn has_representative(&self) -> bool {
+        self.resolved_query.has_representative()
     }
 
     /// ラベル集合演算クエリかどうかを返す（And でラップされた内部の LabelSetOp も検出する）
@@ -2587,17 +3123,6 @@ impl Resolver {
     /// ラベル集合演算ノードを返す（And[LabelSetOp, filter] の場合も内部を返す）
     pub fn get_label_set_op_node(&self) -> Option<&ResolvedNode> {
         self.resolved_query.get_label_set_op()
-    }
-
-    /// ラベル集合演算が Intersect（`&` 結合）かどうかを返す
-    pub fn is_label_set_intersect(&self) -> bool {
-        matches!(
-            self.resolved_query.get_label_set_op(),
-            Some(ResolvedNode::LabelSetOp {
-                op: LabelSetOpKind::Intersect,
-                ..
-            })
-        )
     }
 
     /// トップレベル集約を返す
@@ -2618,7 +3143,7 @@ impl Resolver {
     }
 
     /// nvalue に対するフィルタ条件を返す（resolved_query から再帰的に探索）
-    pub fn get_nvalue_condition(&self) -> Option<(&ComparisonOp, &Label)> {
+    pub fn get_nvalue_condition(&self) -> Option<(ComparisonOp, NvalueRhs)> {
         self.resolved_query.get_nvalue_condition()
     }
 
@@ -2632,11 +3157,11 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tag::TagRegistry;
-    use crate::db::SqlType;
+    use crate::db::BiticalType;
     use crate::query::ast::ArithmeticOp;
+    use crate::query::lens_schema::build_str_condition;
     use crate::query::lens_schema::StorageMapping;
-    use crate::query::lens_schema::{build_int_condition, build_str_condition};
+    use crate::tag::TagRegistry;
     use crate::types::{Label, SType};
 
     #[test]
@@ -2649,7 +3174,7 @@ mod tests {
         let tag = ResolvedOperand::TagRef {
             tag_type: TagType::Base(SType::Size),
             storage: StorageMapping::Fixed(crate::db::Col::LabelInt),
-            sql_type: SqlType::BIGINT,
+            bitical_type: BiticalType::Integer,
         };
         assert!(!tag.is_pure_scalar());
 
@@ -2692,21 +3217,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_int_condition() {
-        let cond = build_int_condition(Col::LabelInt, BinOper::Equal, 10, true);
-        let debug_str = format!("{:?}", cond);
-        assert!(!debug_str.is_empty());
-    }
-
-    #[test]
     fn test_build_str_condition() {
-        let cond = build_str_condition(
-            Col::LabelStr,
-            BinOper::Equal,
-            "test_val",
-            SqlType::VARCHAR,
-            true,
-        );
+        let cond =
+            build_str_condition(Col::LabelStr, BinOper::Equal, "test_val");
         let debug_str = format!("{:?}", cond);
         assert!(!debug_str.is_empty());
     }
@@ -2723,7 +3236,7 @@ mod tests {
             keys: vec![ResolvedOperand::TagRef {
                 tag_type: TagType::Base(SType::Size),
                 storage: StorageMapping::Fixed(Col::Size),
-                sql_type: SqlType::BIGINT,
+                bitical_type: BiticalType::Integer,
             }],
             nvalue: None,
             context: None,
@@ -2868,7 +3381,7 @@ mod tests {
         // sum(size:) のAggregationNode
         let agg_node = AggregationNode::Arithmetic {
             op: ArithmeticAggOp::Sum,
-            inner: Box::new(QueryNode::Projection(Operand::TypeRef(
+            inner: Box::new(QueryNode::base_nest(Operand::TypeRef(
                 TagType::Base(SType::Size),
             ))),
         };
@@ -3025,13 +3538,11 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3048,9 +3559,8 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
         let right = ResolvedOperand::Literal(Label::from(1i64));
 
@@ -3068,13 +3578,11 @@ mod tests {
         use crate::query::ast::ArithmeticOp;
         use crate::types::Label;
 
-        let left = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("a".into()),
+        let left = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("a".into()),
         ));
-        let right = ResolvedOperand::Literal(Label::Other(
-            crate::types::TagType::Custom(String::new()),
-            crate::types::LabelValue::Literal("b".into()),
+        let right = ResolvedOperand::Literal(Label::other(
+            crate::types::Bitical::String("b".into()),
         ));
 
         let result =
@@ -3100,8 +3608,11 @@ mod tests {
     #[test]
     fn test_resolve_nest_nvalue() {
         // parentdir: &: count(extension:jpg) → Nest { nvalue: Some(Count) }
-        let resolver = Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard())
-            .expect("nest with agg should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: count(extension:jpg)",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest with agg should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, keys, .. } => {
                 assert!(nvalue.is_some(), "nvalue should be present");
@@ -3129,8 +3640,11 @@ mod tests {
     #[test]
     fn test_resolve_nest_sum_nvalue() {
         // project: &: sum(size:) → Nest { nvalue: Some(Sum) }
-        let resolver = Resolver::new("project: &: sum(size:)", &TagRegistry::with_standard())
-            .expect("nest with sum should resolve");
+        let resolver = Resolver::new_nowarn(
+            "project: &: sum(size:)",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest with sum should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, keys, .. } => {
                 assert!(nvalue.is_some());
@@ -3158,7 +3672,8 @@ mod tests {
     fn test_projection_no_regression() {
         // size: → Nest { nvalue: None }
         let resolver =
-            Resolver::new("size:", &TagRegistry::with_standard()).expect("simple projection should resolve");
+            Resolver::new_nowarn("size:", &TagRegistry::with_standard())
+                .expect("simple projection should resolve");
         match &resolver.resolved_query {
             ResolvedNode::Nest { nvalue, .. } => {
                 assert!(
@@ -3175,7 +3690,11 @@ mod tests {
     #[test]
     fn test_get_nvalue_through_and() {
         // extension: は And([is_dir:false, Nest(extension)]) に展開される
-        let resolver = Resolver::new("extension: &: count(name:test)", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "extension: &: count(name:test)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
 
         // get_projection は And 内の Projection を見つける
         assert!(
@@ -3194,8 +3713,11 @@ mod tests {
     #[test]
     fn test_get_nvalue_direct_projection() {
         // parentdir は展開後も Nest のまま (And でラップされない)
-        let resolver =
-            Resolver::new("parentdir: &: count(extension:jpg)", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: count(extension:jpg)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
 
         assert!(resolver.get_projection().is_some());
         assert!(
@@ -3209,9 +3731,11 @@ mod tests {
     /// nvalue 付き Nest として解決される（nvalue でフィルタ済み）。
     #[test]
     fn test_resolve_nest_comparison_distributed() {
-        let resolver =
-            Resolver::new("parentdir: &: (count(extension:jpg) > 1)", &TagRegistry::with_standard())
-                .expect("nest comparison should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: (count(extension:jpg) > 1)",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest comparison should resolve");
 
         // Nest として解決される（nvalue 付き比較は Projection を返す）
         assert!(resolver.get_projection().is_some(), "Should return Nest");
@@ -3239,9 +3763,11 @@ mod tests {
     /// `(parentdir: &: count(ext:jpg)) :> 1` に正規化される
     #[test]
     fn test_resolve_nest_comparison_flipped_distributed() {
-        let resolver =
-            Resolver::new("parentdir: &: (1 < count(extension:jpg))", &TagRegistry::with_standard())
-                .expect("flipped nest comparison should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: (1 < count(extension:jpg))",
+            &TagRegistry::with_standard(),
+        )
+        .expect("flipped nest comparison should resolve");
 
         assert!(resolver.get_projection().is_some());
         assert!(resolver.get_nvalue().is_some());
@@ -3258,7 +3784,10 @@ mod tests {
     #[test]
     fn test_resolve_nest_comparison_agg_agg_distributed() {
         // 両辺が Query(Nest) の比較をサポート済み
-        let resolver = Resolver::new("parentdir: &: (avg(size:) == sum(size:))", &TagRegistry::with_standard())
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: (avg(size:) == sum(size:))",
+            &TagRegistry::with_standard(),
+        )
         .expect("Query-vs-Query comparison (nested) should now resolve");
 
         // 解析結果が NestNestMatch または MergedNestMatch であることを確認
@@ -3276,8 +3805,11 @@ mod tests {
     /// 右辺スカラー → nvalue: Some(Literal(100))
     #[test]
     fn test_resolve_nest_scalar_right() {
-        let resolver = Resolver::new("parentdir: &: 100", &TagRegistry::with_standard())
-            .expect("nest with scalar right should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: 100",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest with scalar right should resolve");
 
         assert!(resolver.get_projection().is_some());
         let nvalue = resolver.get_nvalue();
@@ -3295,8 +3827,11 @@ mod tests {
         // TypeRef を含む Calculation は純粋スカラーではないため、
         // nvalue ではなく複合キーの一つとして Nest を深化させる。
         // QUERY.md Level n 例: `project: &: (extension: + 1)`
-        let resolver = Resolver::new("parentdir: &: (size: * 2)", &TagRegistry::with_standard())
-            .expect("nest with calculation right should resolve");
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: (size: * 2)",
+            &TagRegistry::with_standard(),
+        )
+        .expect("nest with calculation right should resolve");
 
         assert!(resolver.get_projection().is_some());
         // size: * 2 は TypeRef を含むため key として扱われる → nvalue は None
@@ -3321,7 +3856,8 @@ mod tests {
         // クエリ: extension:html & parentdir: &: count(extension:jpg)
         // extension:html が parentdir: の context に注入されるべき
         let query = "extension:html & parentdir: &: count(extension:jpg)";
-        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
+        let result = Resolver::new_nowarn(query, &TagRegistry::with_standard())
+            .expect("Should resolve query");
         let node = &result.resolved_query;
 
         if let ResolvedNode::And(nodes) = node {
@@ -3350,7 +3886,7 @@ mod tests {
         // クエリ: (parentdir: &: count(ext:jpg)) == (parentdir: &: count(ext:png))
         let query = "(parentdir: &: count(extension:jpg)) == (parentdir: &: count(extension:png))";
         // 現在は解決ロジックを実装済みなので、Ok(NestNestMatch) が返るはず
-        let result = Resolver::new(query, &TagRegistry::with_standard())
+        let result = Resolver::new_nowarn(query, &TagRegistry::with_standard())
             .expect("Should resolve Query vs Query comparison");
         assert!(
             matches!(
@@ -3366,7 +3902,8 @@ mod tests {
     #[test]
     fn test_resolve_nest_depth1_produces_nest_variant() {
         let query = "parentdir: &: count()";
-        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
+        let result = Resolver::new_nowarn(query, &TagRegistry::with_standard())
+            .expect("Should resolve query");
         match result.resolved_query {
             ResolvedNode::Nest { keys, nvalue, .. } => {
                 assert_eq!(keys.len(), 1);
@@ -3381,7 +3918,8 @@ mod tests {
     #[test]
     fn test_resolve_projection_produces_nest_variant() {
         let query = "extension:";
-        let result = Resolver::new(query, &TagRegistry::with_standard()).expect("Should resolve query");
+        let result = Resolver::new_nowarn(query, &TagRegistry::with_standard())
+            .expect("Should resolve query");
         match result.resolved_query {
             ResolvedNode::And(ref nodes) => {
                 let has_nest = nodes.iter().any(|n| {
@@ -3398,6 +3936,36 @@ mod tests {
             ),
         }
     }
+
+    // --- 文字列型の順序演算子 × 部分 glob のエラー化 ---
+
+    #[test]
+    fn test_order_op_partial_glob_context_b_direct_tag_is_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("name: :> *.rs", &reg);
+        assert!(result.is_err(), "expected error");
+    }
+
+    #[test]
+    fn test_order_op_full_match_glob_context_b_is_not_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("name: :> *", &reg);
+        assert!(result.is_ok(), "expected ok, got {}", result.err().unwrap());
+    }
+
+    #[test]
+    fn test_order_op_partial_glob_eq_ne_context_b_is_not_error() {
+        let reg = TagRegistry::with_standard();
+        assert!(Resolver::new_nowarn("name:*.rs", &reg).is_ok());
+        assert!(Resolver::new_nowarn("name: :^ *.rs", &reg).is_ok());
+    }
+
+    #[test]
+    fn test_order_op_partial_glob_context_c_aggregation_is_error() {
+        let reg = TagRegistry::with_standard();
+        let result = Resolver::new_nowarn("max(name:) > *.rs", &reg);
+        assert!(result.is_err(), "expected error");
+    }
 }
 
 #[cfg(test)]
@@ -3410,7 +3978,8 @@ mod tests_integration {
         // 同一キーのマージが最適化によって行われるクエリ
         let query =
             "parentdir: &: count(ext:rs) > 0 & parentdir: &: sum(size:) > 1000";
-        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
+        let resolver =
+            Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
 
         // 最適化が適用されていれば、ルートは MergedNestMatch になっているはず
         assert!(
@@ -3423,15 +3992,25 @@ mod tests_integration {
         );
     }
 
+    fn find_nest(node: &ResolvedNode) -> Option<&ResolvedNode> {
+        match node {
+            ResolvedNode::And(nodes) => nodes
+                .iter()
+                .find(|n| matches!(n, ResolvedNode::Nest { .. })),
+            n @ ResolvedNode::Nest { .. } => Some(n),
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_resolve_nest_depth2_produces_nest_with_two_keys() {
         let query = "parentdir: &: filename:";
-        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
+        let resolver =
+            Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
-                resolver.resolved_query,
-                crate::query::ResolvedNode::Nest { ref keys, .. }
-                    if keys.len() == 2
+                find_nest(&resolver.resolved_query),
+                Some(ResolvedNode::Nest { keys, .. }) if keys.len() == 2
             ),
             "Depth 2 nest should resolve to Nest with 2 keys, got: {:?}",
             resolver.resolved_query
@@ -3441,12 +4020,12 @@ mod tests_integration {
     #[test]
     fn test_resolve_nest_left_is_nest() {
         let query = "(parentdir: &: filename:) &: extension:";
-        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
+        let resolver =
+            Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
         assert!(
             matches!(
-                resolver.resolved_query,
-                crate::query::ResolvedNode::Nest { ref keys, .. }
-                    if keys.len() >= 2
+                find_nest(&resolver.resolved_query),
+                Some(ResolvedNode::Nest { keys, .. }) if keys.len() >= 2
             ),
             "Left-is-Nest should produce Nest with 2+ keys, got: {:?}",
             resolver.resolved_query
@@ -3456,7 +4035,8 @@ mod tests_integration {
     #[test]
     fn test_mixed_key_arithmetic_returns_deeper_nest() {
         let query = "(parentdir: &: count()) + (extension: &: count())";
-        let resolver = Resolver::new(query, &TagRegistry::with_standard()).unwrap();
+        let resolver =
+            Resolver::new_nowarn(query, &TagRegistry::with_standard()).unwrap();
         // extension: expands to And([is_dir:false, Nest(extension)]), so the result
         // may be And([filter, Nest { keys: [parentdir, extension], ... }]).
         // Find the Nest node inside And if necessary.
@@ -3490,7 +4070,7 @@ mod tests_integration {
                 column: crate::db::Col::LabelStr,
                 tag_type: t.to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
         };
         let keys = (0..key_count)
             .map(|i| {
@@ -3593,6 +4173,56 @@ mod tests_integration {
         );
     }
 
+    fn make_definition_ref(value_type: &str, value_str: &str) -> ResolvedNode {
+        use crate::query::lens_schema::StorageMapping;
+        use crate::types::TypedTag;
+        let value = TypedTag::new(
+            crate::types::TagType::from(value_type),
+            crate::types::Bitical::String(value_str.to_string()),
+        );
+        let tag_type = value.tag_type();
+        ResolvedNode::DefinitionRef {
+            def: ResolvedDefinition::for_tag(
+                ItemKind::Tag,
+                value,
+                Vec::new(),
+                Vec::new(),
+                0,
+            ),
+            operand: ResolvedOperand::TagRef {
+                tag_type,
+                storage: StorageMapping::Basic {
+                    column: crate::db::Col::LabelStr,
+                    tag_type: value_type.to_string(),
+                },
+                bitical_type: crate::db::BiticalType::String,
+            },
+        }
+    }
+
+    #[test]
+    fn test_definition_ref_is_not_a_projection() {
+        // 単独 DefinitionRef は projection ではない。get_projection は投影型を問う関数なので None。
+        let node = make_definition_ref("project", "A");
+        assert_eq!(node.get_projection(), None);
+    }
+
+    #[test]
+    fn test_definition_ref_yields_to_real_projection_in_and() {
+        // `tag:"project:A" & rank:` 相当: And([DefinitionRef, Nest{rank}])。
+        // DefinitionRef は projection ではないので、複合の投影型は rank 側になるべき
+        // （現状は DefinitionRef が Some を返し find_map に拾われて壊れる）。
+        let node = ResolvedNode::And(vec![
+            make_definition_ref("project", "A"),
+            make_nest("rank"),
+        ]);
+        assert_eq!(
+            node.get_projection(),
+            Some(crate::types::TagType::from("rank")),
+            "DefinitionRef must yield the projection type to the real `rank:` projection"
+        );
+    }
+
     #[test]
     fn test_label_set_op_inject_context_propagates_to_all_operands() {
         use crate::query::lens_schema::StorageMapping;
@@ -3603,14 +4233,13 @@ mod tests_integration {
                 column: crate::db::Col::LabelStr,
                 tag_type: "path".to_string(),
             },
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: crate::query::ast::ComparisonOp::Label(
                 crate::query::ast::BasicOp::Eq,
             ),
-            label: crate::types::Label::resolve(
-                crate::types::TagType::from("path"),
-                crate::types::LabelValue::String("/foo/*".to_string()),
-            ),
+            label: crate::types::Label::other(crate::types::Bitical::String(
+                "/foo/*".to_string(),
+            )),
         };
 
         let mut node = ResolvedNode::LabelSetOp {
@@ -3648,7 +4277,11 @@ mod tests_integration {
     #[test]
     fn test_and_two_projections_produces_label_set_op_intersect() {
         // And([Proj(cat), Proj(flavor)]) → LabelSetOp { Intersect, [Nest{cat}, Nest{flavor}] }
-        let resolver = Resolver::new("cat: & flavor:", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "cat: & flavor:",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3674,7 +4307,11 @@ mod tests_integration {
     #[test]
     fn test_and_proj_nest_produces_label_set_op_intersect() {
         // And([Proj(tagA), Nest{tagA,tagB}]) → LabelSetOp { Intersect, 2 operands }
-        let resolver = Resolver::new("tagA: & (tagA: &: tagB:)", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "tagA: & (tagA: &: tagB:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3694,8 +4331,11 @@ mod tests_integration {
     #[test]
     fn test_and_nest_nest_produces_label_set_op_intersect() {
         // And([Nest{tagA,tagB}, Nest{tagA,tagC}]) → LabelSetOp { Intersect, 2 operands }
-        let resolver =
-            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC:)", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "(tagA: &: tagB:) & (tagA: &: tagC:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3717,7 +4357,11 @@ mod tests_integration {
     #[test]
     fn test_and_proj_proj_with_filter_context_injected() {
         // (cat: & flavor:) & path:foo/* — フィルタが各オペランドのコンテキストに注入される
-        let resolver = Resolver::new("cat: & flavor: & path:foo/*", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "cat: & flavor: & path:foo/*",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3747,7 +4391,11 @@ mod tests_integration {
         // extension: は And([is_dir:false, Nest{ext}]) に展開される。
         // extension: & size: → And([And([is_dir:false, Nest{ext}]), Nest{size}])
         // as_label_set_op_operand() で And ラッパーを透過して LabelSetOp になるべき。
-        let resolver = Resolver::new("extension: & size:", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "extension: & size:",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert!(
             matches!(
                 &resolver.resolved_query,
@@ -3766,9 +4414,11 @@ mod tests_integration {
     fn test_and_nest2_nest3_produces_label_set_op_intersect() {
         // Nest{2keys} & Nest{3keys} → LabelSetOp { Intersect, 2 operands }
         // (tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)
-        let resolver =
-            Resolver::new("(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)", &TagRegistry::with_standard())
-                .unwrap();
+        let resolver = Resolver::new_nowarn(
+            "(tagA: &: tagB:) & (tagA: &: tagC: &: tagD:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         let ResolvedNode::LabelSetOp { op, operands } =
             &resolver.resolved_query
         else {
@@ -3794,7 +4444,11 @@ mod tests_integration {
     fn test_and_proj_typedtag_does_not_produce_label_set_op() {
         // Proj & TypedTag → LabelSetOp にはならず Nest にコンテキスト注入される
         // 単一 Projection の場合は And ラッパーが剥がれ Nest{ctx:TypedTag} として返る
-        let resolver = Resolver::new("cat: & animal:dog", &TagRegistry::with_standard()).unwrap();
+        let resolver = Resolver::new_nowarn(
+            "cat: & animal:dog",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert!(
             !resolver.is_label_set_op(),
             "cat: & animal:dog should NOT be LabelSetOp, got: {:?}",
@@ -3827,17 +4481,14 @@ mod tests_integration {
 #[cfg(test)]
 mod tests_walk_fold {
     use super::*;
-    use crate::tag::TagRegistry;
     use crate::query::ast::ArithmeticOp;
-    use crate::types::{Label, LabelValue, SType, TagType};
+    use crate::tag::TagRegistry;
+    use crate::types::{Bitical, Label, SType};
 
     fn leaf(name: &str) -> ResolvedNode {
         ResolvedNode::ColumnMatch {
             tag: SType::Name,
-            label: Label::resolve(
-                TagType::from(name),
-                LabelValue::String(name.to_string()),
-            ),
+            label: Label::other(Bitical::String(name.to_string())),
         }
     }
 
@@ -3998,19 +4649,25 @@ mod tests_walk_fold {
     #[test]
     fn test_get_scalar_result_label_type_size() {
         use crate::types::{SType, TagType};
-        let r = Resolver::new("sum(size:)", &TagRegistry::with_standard()).unwrap();
+        let r =
+            Resolver::new_nowarn("sum(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "sum(size:) should yield Some(Size)"
         );
-        let r = Resolver::new("avg(size:)", &TagRegistry::with_standard()).unwrap();
+        let r =
+            Resolver::new_nowarn("avg(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "avg(size:) should yield Some(Size)"
         );
-        let r = Resolver::new("min(size:)", &TagRegistry::with_standard()).unwrap();
+        let r =
+            Resolver::new_nowarn("min(size:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
@@ -4021,7 +4678,9 @@ mod tests_walk_fold {
     #[test]
     fn test_get_scalar_result_label_type_mtime() {
         use crate::types::{SType, TagType};
-        let r = Resolver::new("max(mtime:)", &TagRegistry::with_standard()).unwrap();
+        let r =
+            Resolver::new_nowarn("max(mtime:)", &TagRegistry::with_standard())
+                .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Mtime)),
@@ -4031,13 +4690,18 @@ mod tests_walk_fold {
 
     #[test]
     fn test_get_scalar_result_label_type_count_is_none() {
-        let r = Resolver::new("count(extension:rs)", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn(
+            "count(extension:rs)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
             "count() should yield None (no type propagation)"
         );
-        let r = Resolver::new("count()", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn("count()", &TagRegistry::with_standard())
+            .unwrap();
         assert_eq!(r.get_scalar_result_label_type(), None);
     }
 
@@ -4045,7 +4709,11 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_mixed_is_none() {
         // sum(size: + mtime:) — two different tag types → None
         // Note: arithmetic inside sum() does not require extra parens
-        let r = Resolver::new("sum(size: + mtime:)", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size: + mtime:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,
@@ -4057,7 +4725,11 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_calc_with_literal() {
         use crate::types::{SType, TagType};
         // sum(size: - 1000) — Calculation(TagRef{size}, Literal) → size only
-        let r = Resolver::new("sum(size: - 1000)", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size: - 1000)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
@@ -4069,14 +4741,22 @@ mod tests_walk_fold {
     fn test_get_scalar_result_label_type_outer_calc() {
         use crate::types::{SType, TagType};
         // sum(size:) + count() — Calculation of Agg{size} + Agg{Count} → size only
-        let r = Resolver::new("sum(size:) + count()", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size:) + count()",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             Some(TagType::Base(SType::Size)),
             "sum(size:) + count() should yield Some(Size)"
         );
         // sum(size:) + sum(mtime:) → None (2 types)
-        let r = Resolver::new("sum(size:) + sum(mtime:)", &TagRegistry::with_standard()).unwrap();
+        let r = Resolver::new_nowarn(
+            "sum(size:) + sum(mtime:)",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
         assert_eq!(
             r.get_scalar_result_label_type(),
             None,

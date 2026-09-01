@@ -6,3 +6,4 @@ enabled = true
 [plugins.status]
 mimetype = true
 sample = false
+git_status = false

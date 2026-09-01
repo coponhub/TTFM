@@ -6,7 +6,7 @@ license = "GPL-3.0-only"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-duckdb = { version = "1.0", features = ["bundled", "uuid"] }
+duckdb = { version = "1.10504.0", features = ["bundled", "parquet", "uuid"] }
 walkdir = "2.4"
 anyhow = "1.0"
 chrono = "0.4"
@@ -31,14 +31,23 @@ uuid = { version = "1.19.0", features = ["v4", "v5"] }
 pest = "2.7"
 pest_derive = "2.7"
 indexmap = "2"
+glob = "0.3.3"
+fs4 = "1.1"
+filetime = "0.2.27"
 
 [dev-dependencies]
 filetime = "0.2.27"
 tempfile = "3.24.0"
 rstest = "0.25"
+libc = "0.2"
 
 # Optimize dependency build times and binary size
 [profile.dev.package."*"]
 debug = 0
 strip = "debuginfo"
+
+# DuckDB (C++ bundled build) は -O0 だとクエリ実行が公式バイナリ比で約10倍遅く、
+# テスト全体を支配するため、ここだけ最適化してビルドする（初回のみ再コンパイルが走る）
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
 

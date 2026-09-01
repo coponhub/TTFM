@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,7 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use crate::types::{Label, SType, TagType, TypedTag};
+use crate::types::{
+    DateTimeRange, ItemId, Label, Origin, Rank, SType, TagType, TypedTag,
+};
 use std::collections::HashSet;
 
 // ========== Type Aliases ==========
@@ -78,6 +82,10 @@ pub enum AggregationNode {
 pub enum Operand {
     Literal(Label),
     TypeRef(TagType),
+    LabelGrouping {
+        tag_type: TagType,
+        pattern: String,
+    },
     Calculation(Box<CalculationNode>),
     /// 集約演算結果 (sum(size:), count(*) など)
     Aggregation(Box<AggregationNode>),
@@ -111,10 +119,18 @@ pub struct ComparisonNode {
 /// ネスト演算ノード (`Projection &: Projection` 等)
 #[derive(Debug, PartialEq, Clone)]
 pub struct NestNode {
-    /// 左辺: Projection または Nest
-    pub left: Box<QueryNode>,
+    /// 左辺: ベースキーの場合は None、それ以外は Projection または Nest
+    pub left: Option<Box<QueryNode>>,
     /// 右辺: Projection, Scalar, Comparison, Aggregation, Nest
-    pub right: Box<QueryNode>,
+    pub right: Operand,
+}
+
+/// 定義アイテムの候補（レジストリ登録済み型/タグ名 1件分）。
+#[derive(Debug, PartialEq, Clone)]
+pub struct Candidate {
+    pub name: String,
+    pub rank: Rank,
+    pub id: ItemId,
 }
 
 /// 検索クエリの構造を表す抽象構文木（AST）ノード。
@@ -133,15 +149,52 @@ pub enum QueryNode {
     TypedTag(TypedTag),
     /// 物理カラムに対する検索 (rank, size, mtime, name, id 等)
     ColumnMatch { tag: SType, label: Label },
-    /// ラベル取得 (Projection)
-    Projection(Operand),
     /// 集約演算 (count(query), sum(size:) など)
     Aggregation(AggregationNode),
     /// ネスト演算 (`Projection &: Projection` 等)
     Nest(NestNode),
+    /// ある id 区画に属する型定義アイテムの参照 (`origin:system`)。
+    OriginRef(Origin),
+    /// 日付の絞り込み（区間 or 周期的なスロット制約）。
+    /// `first` は比較対象（TypeRef=直接タグ / Aggregation=集約 / Calculation=算術ラップ /
+    /// Query(Nest)=Nest 内集約比較）。
+    DateTimeRange {
+        first: Operand,
+        op: BasicOp,
+        range: DateTimeRange,
+    },
+    /// 動的クエリ展開（Eval: `q([query])`）
+    Eval(Box<QueryNode>),
 }
 
 impl QueryNode {
+    /// ベースキー（左辺のない Nest）を構築します。
+    pub fn base_nest(op: Operand) -> QueryNode {
+        QueryNode::Nest(NestNode {
+            left: None,
+            right: op,
+        })
+    }
+
+    /// 自身がベースキーであれば、その Operand を返します。
+    pub fn as_base_projection(&self) -> Option<&Operand> {
+        match self {
+            QueryNode::Nest(n) if n.left.is_none() => Some(&n.right),
+            _ => None,
+        }
+    }
+
+    /// Nest の右辺として格納するため、自身を Operand に変換します。
+    /// ベースキーはその Operand をそのまま返し、Aggregation は `Operand::Aggregation`
+    /// に、それ以外は `Operand::Query` に包みます。
+    pub fn into_operand(self) -> Operand {
+        match self {
+            QueryNode::Nest(n) if n.left.is_none() => n.right,
+            QueryNode::Aggregation(agg) => Operand::Aggregation(Box::new(agg)),
+            other => Operand::Query(Box::new(other)),
+        }
+    }
+
     /// このノードおよび子ノードに含まれるすべてのタグの型（`key`）を収集します。
     pub fn get_all_types(&self) -> Vec<String> {
         let mut types = HashSet::new();
@@ -183,17 +236,25 @@ impl QueryNode {
                 }
             }
             QueryNode::TypedTag(tt) => {
-                types.insert(tt.label.tag_type().as_str().to_string());
-            }
-            QueryNode::Projection(op) => {
-                op.collect_types(types);
+                types.insert(tt.tag_type().as_str().to_string());
             }
             QueryNode::Aggregation(agg) => {
                 agg.collect_types(types);
             }
             QueryNode::Nest(nest) => {
-                nest.left.collect_types(types);
+                if let Some(left) = &nest.left {
+                    left.collect_types(types);
+                }
                 nest.right.collect_types(types);
+            }
+            QueryNode::OriginRef(_) => {
+                types.insert(SType::Type.as_str().to_string());
+            }
+            QueryNode::DateTimeRange { first, .. } => {
+                first.collect_types(types);
+            }
+            QueryNode::Eval(inner) => {
+                inner.collect_types(types);
             }
         }
     }
@@ -208,15 +269,17 @@ impl QueryNode {
             QueryNode::Difference(l, _) => {
                 l.collect_projections(projections);
             }
-            QueryNode::Projection(op) => {
-                op.collect_projections(projections);
-            }
             QueryNode::Aggregation(agg) => {
                 agg.collect_projections(projections);
             }
             QueryNode::Nest(nest) => {
-                nest.left.collect_projections(projections);
+                if let Some(left) = &nest.left {
+                    left.collect_projections(projections);
+                }
                 nest.right.collect_projections(projections);
+            }
+            QueryNode::Eval(inner) => {
+                inner.collect_projections(projections);
             }
             _ => {}
         }
@@ -263,6 +326,9 @@ impl Operand {
             Operand::TypeRef(tt) => {
                 types.insert(tt.as_str().to_string());
             }
+            Operand::LabelGrouping { tag_type, .. } => {
+                types.insert(tag_type.as_str().to_string());
+            }
             Operand::Calculation(calc) => {
                 calc.left.collect_types(types);
                 calc.right.collect_types(types);
@@ -282,6 +348,9 @@ impl Operand {
             Operand::TypeRef(tt) => {
                 projections.insert(tt.as_str().to_string());
             }
+            Operand::LabelGrouping { tag_type, .. } => {
+                projections.insert(tag_type.as_str().to_string());
+            }
             Operand::Calculation(calc) => {
                 calc.left.collect_projections(projections);
                 calc.right.collect_projections(projections);
@@ -292,6 +361,16 @@ impl Operand {
             Operand::Query(node) => {
                 node.collect_projections(projections);
             }
+        }
+    }
+
+    /// Nest の右辺から取り出すため、自身を QueryNode に変換します。
+    /// `QueryNode::into_operand` の逆変換です。
+    pub fn into_node(self) -> QueryNode {
+        match self {
+            Operand::Query(node) => *node,
+            Operand::Aggregation(agg) => QueryNode::Aggregation(*agg),
+            other => QueryNode::base_nest(other),
         }
     }
 }
@@ -323,7 +402,7 @@ mod tests {
 
         // Projection
         let node =
-            QueryNode::Projection(Operand::TypeRef(TagType::from("rank")));
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("rank")));
         let types = node.get_all_types();
         assert_eq!(types.len(), 1);
         assert!(types.contains(&"rank".to_string()));
@@ -376,7 +455,7 @@ mod tests {
     fn test_get_projections() {
         // Projection only
         let node =
-            QueryNode::Projection(Operand::TypeRef(TagType::from("path")));
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("path")));
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
         assert!(projs.contains(&"path".to_string()));
@@ -385,7 +464,7 @@ mod tests {
         // name:foo AND project:size
         let node = QueryNode::And(vec![
             QueryNode::TypedTag(TypedTag::new("name", "foo")),
-            QueryNode::Projection(Operand::TypeRef(TagType::from("size"))),
+            QueryNode::base_nest(Operand::TypeRef(TagType::from("size"))),
         ]);
         let projs = node.get_projections();
         assert_eq!(projs.len(), 1);
@@ -400,7 +479,7 @@ mod tests {
             op: ArithmeticOp::Mul,
             right: Operand::TypeRef(TagType::from("height")),
         };
-        let node = QueryNode::Projection(Operand::Calculation(Box::new(calc)));
+        let node = QueryNode::base_nest(Operand::Calculation(Box::new(calc)));
 
         let types = node.get_all_types();
         assert!(types.contains(&"width".to_string()));
@@ -434,5 +513,19 @@ mod tests {
         let types = node.get_all_types();
         assert!(types.contains(&"width".to_string()));
         assert!(types.contains(&"height".to_string()));
+    }
+
+    #[test]
+    fn test_date_time_range_node_collects_tag_type() {
+        use crate::types::DateTimeRange;
+        let node = QueryNode::DateTimeRange {
+            first: Operand::TypeRef(TagType::from("mtime")),
+            op: BasicOp::Eq,
+            range: DateTimeRange::interval(0, 100),
+        };
+        let types = node.get_all_types();
+        assert_eq!(types, vec!["mtime".to_string()]);
+        // Projection ではないので get_projections には含まれない
+        assert!(node.get_projections().is_empty());
     }
 }

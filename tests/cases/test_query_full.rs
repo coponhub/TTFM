@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -13,10 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use ttfm::tag::TagRegistry;
 use super::has_item_tags;
 use std::fs::File;
 use ttfm::query::lens_resolver::Resolver;
+use ttfm::tag::TagRegistry;
 
 // ──────────────────────────────────────────────
 // define_cases! 移行済み (FileManager e2e テスト)
@@ -112,7 +114,7 @@ define_cases! {
 #[test]
 fn test_full_resolution() {
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 1"#;
-    match Resolver::new(q, &TagRegistry::with_standard()) {
+    match Resolver::new_nowarn(q, &TagRegistry::with_standard()) {
         Ok(resolver) => {
             eprintln!("SUCCESS: {:?}", resolver.get_projection())
         }
@@ -169,7 +171,8 @@ fn test_calculation_nvalue_label_groups() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"(((parentdir: &: count(extension:rs)) / (parentdir: &: count())) * 10) :> 5"#;
-    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
+    let resolver =
+        Resolver::new_nowarn(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results
@@ -240,7 +243,8 @@ fn test_calculation_nvalue_gt_zero() {
     std::env::set_var("TTFM_DEBUG", "1");
 
     let q = r#"((parentdir: &: count(extension:rs)) / (parentdir: &: count())) :> 0"#;
-    let resolver = Resolver::new(q, &TagRegistry::with_standard()).unwrap();
+    let resolver =
+        Resolver::new_nowarn(q, &TagRegistry::with_standard()).unwrap();
     let fetcher = ttfm::query::fetcher::Fetcher::new(&resolver, &conn);
     let results = fetcher.fetch(100, 0).expect("fetch should not fail");
     let mut ids: Vec<i64> = results

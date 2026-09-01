@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,13 +18,15 @@
 mod agg_pieces;
 mod boolean;
 mod calc_pieces;
+pub mod definition;
 mod low_dispatcher;
 mod nest;
+mod order;
 mod pick;
 mod precompute;
 mod scalar;
 pub(crate) mod schema_pieces;
-mod util;
+pub(crate) mod util;
 use agg_pieces::{
     agg_expr, build_agg, build_agg_calc_eav_expr, build_agg_calc_expr,
     build_agg_calc_subquery, build_agg_calc_subquery_nest, build_agg_nest,
@@ -57,11 +61,17 @@ pub use precompute::{
     needs_nest_context,
 };
 use scalar::{
-    build_column_match_sql, build_resolved_match_sql,
-    build_resolved_scalar_sql, build_resolved_tag_tag_match_sql,
-    build_scalar_match_sql,
+    build_column_match_in_sql, build_column_match_sql,
+    build_resolved_date_time_match_sql, build_resolved_match_in_sql,
+    build_resolved_match_sql, build_resolved_scalar_sql,
+    build_resolved_tag_tag_match_sql, build_scalar_match_sql,
+    date_time_condition_expr,
 };
 use util::*;
+pub(crate) use util::{
+    build_label_grouping_expr, build_label_grouping_expr_for_row,
+    build_label_grouping_match_cond, build_label_grouping_match_cond_for_row,
+};
 pub use util::{to_tag_condition, AggregationContext, NestContext};
 
 use crate::db::{Col, CustomFunc, Pronoun::*, Src};
@@ -76,6 +86,23 @@ fn build_fetch_items_sql(
     pick: &PickNode<'_>,
     limit: Option<usize>,
     offset: Option<usize>,
+    orders: &[crate::query::lens_resolver::ResolvedOrder],
+) -> SelectStatement {
+    build_fetch_items_sql_impl(src, pick, limit, offset, false, orders)
+}
+
+/// `with_definition_schema` が true の場合、定義枝と束ねられるよう
+/// fetch 行スキーマを定義アイテムの SQL の列順に揃える（align_schema_with_definitions）。
+/// `orders` は明示的な並び順。ページング用の id サブクエリと外側の両方に
+/// 同じ ORDER BY を適用し（先頭に置き、既定の並びはタイブレーカーに残す）、
+/// ページ境界と表示順を一致させる。
+fn build_fetch_items_sql_impl(
+    src: &Src,
+    pick: &PickNode<'_>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    with_definition_schema: bool,
+    orders: &[crate::query::lens_resolver::ResolvedOrder],
 ) -> SelectStatement {
     let node = pick.node();
     // 集約クエリ (e.g. count(path:) や sum(size:) > 100) の場合は、
@@ -85,7 +112,11 @@ fn build_fetch_items_sql(
     match node {
         ResolvedNode::Aggregation(_)
         | ResolvedNode::AggregationMatch { .. } => {
-            return pick.build_pick();
+            let mut sql = pick.build_pick();
+            if with_definition_schema {
+                align_schema_with_definitions(&mut sql, None);
+            }
+            return sql;
         }
         _ => {}
     }
@@ -94,9 +125,14 @@ fn build_fetch_items_sql(
 
     // 1. ID 絞り込みサブクエリ
     let mut id_query = Query::select();
+    id_query.column(Col::ItemId).from_subquery(pick_sql, Pk);
+    order::apply_resolved_order(
+        &mut id_query,
+        orders,
+        src,
+        Expr::col((Pk, Col::ItemId)).into(),
+    );
     id_query
-        .column(Col::ItemId)
-        .from_subquery(pick_sql, Pk)
         .order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
@@ -108,13 +144,7 @@ fn build_fetch_items_sql(
     }
 
     // 2. EAV列を UNION 型に変換して struct_pack で集約
-    use crate::db::SqlType;
-    let union_val = CustomFunc::eav_union_value(&[
-        (Col::LabelInt, SqlType::BIGINT),
-        (Col::LabelStr, SqlType::VARCHAR),
-        (Col::LabelBool, SqlType::BOOLEAN),
-        (Col::LabelDouble, SqlType::DOUBLE),
-    ]);
+    let union_val = CustomFunc::eav_union_value();
     let struct_expr = CustomFunc::struct_pack_tag(
         Expr::col(Col::Type).into(),
         union_val,
@@ -132,11 +162,37 @@ fn build_fetch_items_sql(
         .expr_as(tags_expr, crate::db::QueryResultCol::Tags)
         .from(src)
         .and_where(Expr::col(Col::ItemId).in_subquery(id_query))
-        .group_by_col(Col::ItemId)
-        .order_by(Col::Rank, sea_query::Order::Desc)
+        .group_by_col(Col::ItemId);
+    order::apply_resolved_order(&mut q, orders, src, order::src_item_id(src));
+    q.order_by(Col::Rank, sea_query::Order::Desc)
         .order_by(Col::ItemId, sea_query::Order::Desc);
 
+    if with_definition_schema {
+        let name_expr = CustomFunc::any_value(
+            Expr::case(
+                Expr::col(Col::Type).eq("name"),
+                Expr::col(Col::LabelStr),
+            )
+            .finally(Expr::val(None::<String>)),
+        );
+        align_schema_with_definitions(&mut q, Some(name_expr));
+    }
+
     q
+}
+
+/// fetch 行スキーマを定義アイテムの SQL（build_definition_fetch_sql）の列順に
+/// 揃える: 末尾に NULL の representative 列と並び替え専用の name 列
+/// （name タグの値。デコードには使わない）を追加する。
+fn align_schema_with_definitions(
+    q: &mut SelectStatement,
+    name_expr: Option<sea_query::SimpleExpr>,
+) {
+    q.expr_as(Expr::val(None::<String>), Representative)
+        .expr_as(
+            name_expr.unwrap_or_else(|| Expr::val(None::<String>).into()),
+            Col::Name,
+        );
 }
 
 pub fn build_flat_table_sql(
@@ -202,6 +258,24 @@ pub fn build_fetch_sql(
     n: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
+    // 並び順（resolver が保持する解決済みの Order）。アイテム行を返す経路
+    // （items / 定義枝）にのみ適用し、ラベルグループ（Nest/Projection）と
+    // スカラー・ブーリアンには適用しない。
+    let orders = resolver.resolved_order();
+    // 定義参照（単体または Or だけで到達可能な枝）を含む場合:
+    // 定義枝と src 由来枝を fetch レベルで束ねる（add_definitions）。
+    // representative は projection と同じ decode_nest 経路で型付けする。
+    if let Some((defs, rest)) =
+        resolver.resolved_query.split_definition_branches()
+    {
+        let rest_fetch = rest.as_ref().map(|rest_node| {
+            let pick = PickNode::new(src, rest_node);
+            build_fetch_items_sql_impl(src, &pick, None, None, true, &[])
+        });
+        return crate::query::lens_builder::add_definitions(
+            src, &defs, rest_fetch, n, offset, orders,
+        );
+    }
     if resolver.get_projection().is_some() {
         if resolver.get_label_set_op_node().is_some()
             || resolver.get_nvalue_condition().is_none()
@@ -211,7 +285,13 @@ pub fn build_fetch_sql(
         // nvalue比較あり → Lv.1 フラットリスト（items path）
         let pick = PickNode::new(src, &resolver.resolved_query);
         let limit = if n > 0 { Some(n + 1) } else { None };
-        return Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)));
+        return Ok(build_fetch_items_sql(
+            src,
+            &pick,
+            limit,
+            Some(offset),
+            orders,
+        ));
     }
     let limit = if n > 0 { Some(n + 1) } else { None };
     match &resolver.resolved_query {
@@ -255,14 +335,21 @@ pub fn build_fetch_sql(
         // スカラー比較の And/Or/Difference：全ての直接子がスカラー比較バリアントである場合に限り boolean
         // ラベル比較と演算子が異なるためバリアントで構造的に区別できる
         ResolvedNode::And(nodes) | ResolvedNode::Or(nodes)
-            if !nodes.is_empty() && nodes.iter().all(|n| is_boolean_only_node(n)) =>
+            if !nodes.is_empty()
+                && nodes.iter().all(|n| is_boolean_only_node(n)) =>
         {
             return Ok(build_boolean_sql(src, &resolver.resolved_query));
         }
         _ => {}
     }
     let pick = PickNode::new(src, &resolver.resolved_query);
-    Ok(build_fetch_items_sql(src, &pick, limit, Some(offset)))
+    Ok(build_fetch_items_sql(
+        src,
+        &pick,
+        limit,
+        Some(offset),
+        orders,
+    ))
 }
 
 #[cfg(test)]
@@ -316,7 +403,7 @@ mod tests {
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
             storage: StorageMapping::Fixed(Col::Name),
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
@@ -369,12 +456,13 @@ mod tests {
         let node = ResolvedNode::Match {
             tag_type: TagType::Base(SType::Name),
             storage: StorageMapping::Fixed(Col::Name),
-            sql_type: crate::db::SqlType::VARCHAR,
+            bitical_type: crate::db::BiticalType::String,
             op: ComparisonOp::Scalar(BasicOp::Eq),
             label: Label::from("test"),
         };
         let pick = PickNode::new(&Src::OneView, &node);
-        let sql = build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0));
+        let sql =
+            build_fetch_items_sql(&Src::OneView, &pick, Some(10), Some(0), &[]);
         let sql_str = sql.to_string(PostgresQueryBuilder);
 
         // 新スキーマ: "tag_type" フィールドが含まれる
@@ -383,25 +471,25 @@ mod tests {
             "SQL should use new tag_type field: {}",
             sql_str
         );
-        // UNION型変換: union_value(i := ...) 等が含まれる
+        // UNION型変換: union_value(\"integer\" := ...) 等が含まれる
         assert!(
-            sql_str.contains("union_value(i :="),
-            "SQL should have union_value(i :=: {}",
+            sql_str.contains("union_value(\"integer\" :="),
+            "SQL should have union_value(\"integer\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(s :="),
-            "SQL should have union_value(s :=: {}",
+            sql_str.contains("union_value(\"string\" :="),
+            "SQL should have union_value(\"string\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(b :="),
-            "SQL should have union_value(b :=: {}",
+            sql_str.contains("union_value(\"boolean\" :="),
+            "SQL should have union_value(\"boolean\" :=: {}",
             sql_str
         );
         assert!(
-            sql_str.contains("union_value(d :="),
-            "SQL should have union_value(d :=: {}",
+            sql_str.contains("union_value(\"double\" :="),
+            "SQL should have union_value(\"double\" :=: {}",
             sql_str
         );
         // struct_pack と list() でラップ
@@ -428,7 +516,7 @@ mod tests {
                         column: Col::LabelStr,
                         tag_type: "extension".to_string(),
                     },
-                    sql_type: crate::db::SqlType::VARCHAR,
+                    bitical_type: crate::db::BiticalType::String,
                     op: ComparisonOp::Scalar(BasicOp::Eq),
                     label: Label::from("txt"),
                 },
@@ -460,7 +548,7 @@ mod tests {
                         column: Col::LabelInt,
                         tag_type: "size".to_string(),
                     },
-                    sql_type: crate::db::SqlType::BIGINT,
+                    bitical_type: crate::db::BiticalType::Integer,
                 }],
                 nvalue: None,
                 context: None,
@@ -494,7 +582,7 @@ mod tests {
                     keys: vec![ResolvedOperand::TagRef {
                         tag_type: TagType::Base(SType::Size),
                         storage: StorageMapping::Fixed(Col::Size),
-                        sql_type: crate::db::SqlType::BIGINT,
+                        bitical_type: crate::db::BiticalType::Integer,
                     }],
                     nvalue: None,
                     context: None,
@@ -505,7 +593,7 @@ mod tests {
                         column: Col::LabelStr,
                         tag_type: "project".to_string(),
                     },
-                    sql_type: crate::db::SqlType::VARCHAR,
+                    bitical_type: crate::db::BiticalType::String,
                     op: crate::query::ast::ComparisonOp::Scalar(
                         crate::query::ast::BasicOp::Eq,
                     ),
@@ -566,15 +654,46 @@ mod tests {
     }
 
     #[test]
+    fn test_build_resolved_literal_expr_reads_formatted_byte_size_point() {
+        use crate::query::format::{ByteSizeRange, Formatted};
+        use crate::types::{Bitical, LabelNode};
+
+        // 生の値は書き換えず "1MB" のまま、解釈は Formatted 側に持たせる
+        // （build_label が本番でやるのと同じ形）。
+        let mut label = Label::other(Bitical::String("1MB".to_string()));
+        label.set_node(LabelNode::Formatted(Formatted::ByteSizeRange(
+            ByteSizeRange::Range {
+                lo: 1_048_576,
+                hi: 1_048_576,
+            },
+        )));
+
+        let expr = build_resolved_literal_expr(&label);
+        let sql_str = sea_query::Query::select()
+            .expr(expr)
+            .to_string(PostgresQueryBuilder);
+
+        assert!(
+            sql_str.contains("1048576"),
+            "Should read Formatted byte size point, got: {}",
+            sql_str
+        );
+        assert!(
+            !sql_str.contains("1MB"),
+            "Should not fall back to raw string '1MB': {}",
+            sql_str
+        );
+    }
+
+    #[test]
     fn test_build_resolved_operand_expr_for_arithmetic_boolean_cast() {
-        use crate::db::SqlType;
+        use crate::db::BiticalType;
         use crate::query::lens_resolver::ResolvedOperand;
         use crate::types::TagType;
 
         // 1. Boolean Literal -> CAST(... AS BIGINT)
-        let lit_bool = ResolvedOperand::Literal(crate::types::Label::resolve(
-            TagType::from("is_dir"),
-            crate::types::LabelValue::Boolean(true),
+        let lit_bool = ResolvedOperand::Literal(crate::types::Label::other(
+            crate::types::Bitical::Boolean(true),
         ));
         let expr_lit = build_resolved_operand_expr_for_arithmetic(
             &lit_bool,
@@ -600,7 +719,7 @@ mod tests {
             storage: crate::query::lens_schema::StorageMapping::Fixed(
                 crate::db::Col::LabelBool,
             ),
-            sql_type: SqlType::BOOLEAN,
+            bitical_type: BiticalType::Boolean,
         };
         let expr_tag = build_resolved_operand_expr_for_arithmetic(
             &tag_bool,

@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,12 +24,16 @@ use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
-use crate::db::{SqlType, TargetTable};
-use crate::query::ast::{Operand, QueryNode};
-use crate::tag::{
-    Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query, ScanRole, TagFunction,
+use crate::db::{BiticalType, TargetTable};
+use crate::query::ast::{
+    BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
-use crate::types::{Label, LabelValue, Rank, TagType};
+use crate::tag::{
+    Display as TagDisplay, DisplayFormat, DisplayFormats, Index, Query,
+    ScanRole, TagFunction,
+};
+use crate::types::{Bitical, Label, Rank, TagType};
+use crate::util::DotOk;
 
 // --- インターフェース用の手動型定義 ---
 
@@ -45,6 +51,18 @@ enum WasmValueType {
     Boolean,
     #[component(name = "double")]
     Double,
+}
+
+// indexing::target-table enum
+#[allow(dead_code)]
+#[derive(ComponentType, Lift, Lower, Debug, Clone, Copy, PartialEq)]
+#[component(enum)]
+#[repr(u8)]
+enum WasmTargetTable {
+    #[component(name = "base-tags")]
+    BaseTags,
+    #[component(name = "tags-by-location")]
+    TagsByLocation,
 }
 
 // indexing::tag-value variant
@@ -107,14 +125,22 @@ impl WasmPlugin {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let (engine, linker) = Self::create_engine_and_linker()?;
         let component = Component::from_file(&engine, path)?;
-        Ok(Self { engine, component, linker })
+        Ok(Self {
+            engine,
+            component,
+            linker,
+        })
     }
 
     /// バイト列からプラグインをロードします（ビルトインプラグイン用）。
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let (engine, linker) = Self::create_engine_and_linker()?;
         let component = Component::from_binary(&engine, bytes)?;
-        Ok(Self { engine, component, linker })
+        Ok(Self {
+            engine,
+            component,
+            linker,
+        })
     }
 
     fn create_engine_and_linker() -> Result<(Engine, Linker<WasmStore>)> {
@@ -130,14 +156,18 @@ impl WasmPlugin {
     pub fn into_adapter(self) -> Result<WasmPluginAdapter> {
         // 静的にエクスポートを検出（インスタンス化不要）
         let ct = self.component.component_type();
-        let has_indexing = ct.get_export(&self.engine, "ttfm:plugin/indexing").is_some();
-        let has_query    = ct.get_export(&self.engine, "ttfm:plugin/query").is_some();
-        let has_display  = ct.get_export(&self.engine, "ttfm:plugin/display").is_some();
+        let has_indexing = ct
+            .get_export(&self.engine, "ttfm:plugin/indexing")
+            .is_some();
+        let has_display =
+            ct.get_export(&self.engine, "ttfm:plugin/display").is_some();
 
         // core から name / version 取得（インスタンス化1回）
-        let mut store = self.create_store()
+        let mut store = self
+            .create_store()
             .context("Failed to create store for introspection")?;
-        let instance = self.linker
+        let instance = self
+            .linker
             .instantiate(&mut store, &self.component)
             .context("Failed to instantiate plugin")?;
         let core_export = instance
@@ -146,38 +176,68 @@ impl WasmPlugin {
         let name_fn_idx = instance
             .get_export(&mut store, Some(&core_export), "name")
             .context("name not found in ttfm:plugin/core")?;
-        let name_func = instance.get_func(&mut store, name_fn_idx)
+        let name_func = instance
+            .get_func(&mut store, name_fn_idx)
             .context("Failed to get name Func")?;
         let (name,) = wasm_call::<(), (String,)>(&name_func, &mut store, ())
             .context("Failed to call name")?;
 
         // indexing がある場合は get-value-type を呼び出して SQL 型を決定
-        let sql_type = if has_indexing {
+        let (bitical_type, target_table) = if has_indexing {
             let idx_export = instance
                 .get_export(&mut store, None, "ttfm:plugin/indexing")
-                .context("indexing interface not found despite capability flag")?;
+                .context(
+                    "indexing interface not found despite capability flag",
+                )?;
             let fn_idx = instance
                 .get_export(&mut store, Some(&idx_export), "get-value-type")
                 .context("get-value-type function not found")?;
-            let func = instance.get_func(&mut store, fn_idx)
+            let func = instance
+                .get_func(&mut store, fn_idx)
                 .context("Failed to get get-value-type Func")?;
-            let (vt,) = wasm_call::<(), (WasmValueType,)>(&func, &mut store, ())?;
-            match vt {
-                WasmValueType::Text    => SqlType::VARCHAR,
-                WasmValueType::BigInt  => SqlType::BIGINT,
-                WasmValueType::Boolean => SqlType::BOOLEAN,
-                WasmValueType::Double  => SqlType::DOUBLE,
-            }
+            let (vt,) =
+                wasm_call::<(), (WasmValueType,)>(&func, &mut store, ())?;
+            let btype = match vt {
+                WasmValueType::Text => BiticalType::String,
+                WasmValueType::BigInt => BiticalType::Integer,
+                WasmValueType::Boolean => BiticalType::Boolean,
+                WasmValueType::Double => BiticalType::Double,
+            };
+
+            let ttable = if let Some(tt_idx) = instance.get_export(
+                &mut store,
+                Some(&idx_export),
+                "target-table",
+            ) {
+                let tt_func = instance
+                    .get_func(&mut store, tt_idx)
+                    .context("Failed to get target-table Func")?;
+                let (tt,) = wasm_call::<(), (WasmTargetTable,)>(
+                    &tt_func,
+                    &mut store,
+                    (),
+                )?;
+                match tt {
+                    WasmTargetTable::BaseTags => TargetTable::BaseTags,
+                    WasmTargetTable::TagsByLocation => {
+                        TargetTable::TagsByLocation
+                    }
+                }
+            } else {
+                TargetTable::BaseTags
+            };
+
+            (btype, ttable)
         } else {
-            SqlType::VARCHAR
+            (BiticalType::String, TargetTable::BaseTags)
         };
 
         Ok(WasmPluginAdapter {
             plugin: Arc::new(self),
             name,
-            sql_type,
+            bitical_type,
+            target_table,
             has_indexing,
-            has_query,
             has_display,
         })
     }
@@ -194,7 +254,13 @@ impl WasmPlugin {
             )?
             .build();
         let resource_table = ResourceTable::new();
-        Ok(Store::new(&self.engine, WasmStore { wasi_ctx, resource_table }))
+        Ok(Store::new(
+            &self.engine,
+            WasmStore {
+                wasi_ctx,
+                resource_table,
+            },
+        ))
     }
 }
 
@@ -202,9 +268,9 @@ impl WasmPlugin {
 pub struct WasmPluginAdapter {
     plugin: Arc<WasmPlugin>,
     pub name: String,
-    sql_type: SqlType,
+    bitical_type: BiticalType,
+    target_table: TargetTable,
     has_indexing: bool,
-    has_query: bool,
     has_display: bool,
 }
 
@@ -214,15 +280,23 @@ impl TagFunction for WasmPluginAdapter {
     }
 
     fn index(&self) -> Option<&dyn Index> {
-        if self.has_indexing { Some(self) } else { None }
+        if self.has_indexing {
+            Some(self)
+        } else {
+            None
+        }
     }
 
-    fn query(&self) -> Option<&dyn Query> {
-        if self.has_query { Some(self) } else { None }
+    fn query(&self) -> &dyn Query {
+        self
     }
 
     fn display(&self) -> Option<&dyn TagDisplay> {
-        if self.has_display { Some(self) } else { None }
+        if self.has_display {
+            Some(self)
+        } else {
+            None
+        }
     }
 
     fn default_rank(&self) -> Rank {
@@ -234,7 +308,11 @@ impl TagFunction for WasmPluginAdapter {
 
 // TypedFunc::call() は必ず post_return() とペアで呼ぶ必要がある。
 // この関数がそれを強制する。
-fn wasm_call<P, R>(func: &Func, store: &mut Store<WasmStore>, params: P) -> Result<R>
+fn wasm_call<P, R>(
+    func: &Func,
+    store: &mut Store<WasmStore>,
+    params: P,
+) -> Result<R>
 where
     P: ComponentNamedList + Lower,
     R: ComponentNamedList + Lift,
@@ -246,14 +324,18 @@ where
 }
 
 fn ensure_cached<'a>(
-    cache: &'a mut HashMap<(*const WasmPlugin, String), (Store<WasmStore>, Instance)>,
+    cache: &'a mut HashMap<
+        (*const WasmPlugin, String),
+        (Store<WasmStore>, Instance),
+    >,
     plugin: &Arc<WasmPlugin>,
     name: &str,
 ) -> Result<&'a mut (Store<WasmStore>, Instance)> {
     let cache_key = (Arc::as_ptr(plugin), name.to_string());
     if !cache.contains_key(&cache_key) {
         let mut store = plugin.create_store()?;
-        let instance = plugin.linker.instantiate(&mut store, &plugin.component)?;
+        let instance =
+            plugin.linker.instantiate(&mut store, &plugin.component)?;
         cache.insert(cache_key.clone(), (store, instance));
     }
     Ok(cache.get_mut(&cache_key).unwrap())
@@ -266,15 +348,15 @@ impl Index for WasmPluginAdapter {
         ScanRole::Other
     }
 
-    fn sql_type(&self) -> SqlType {
-        self.sql_type
+    fn sql_type(&self) -> BiticalType {
+        self.bitical_type
     }
 
     fn target_table(&self) -> TargetTable {
-        TargetTable::BaseTags
+        self.target_table
     }
 
-    fn extract(&self, path: &Path) -> Result<Option<LabelValue>> {
+    fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
         let path_str = std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .to_string_lossy()
@@ -282,7 +364,8 @@ impl Index for WasmPluginAdapter {
 
         INSTANCE_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
-            let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+            let (store, instance) =
+                ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
             let idx_export = instance
                 .get_export(&mut *store, None, "ttfm:plugin/indexing")
@@ -298,9 +381,11 @@ impl Index for WasmPluginAdapter {
                 store,
                 (path_str.clone(),),
             )
-            .with_context(|| format!("Wasm execution error for file: {path_str}"))?;
+            .with_context(|| {
+                format!("Wasm execution error for file: {path_str}")
+            })?;
 
-            Ok(results.into_iter().find_map(convert_wasm_val))
+            Ok(results.into_iter().find_map(Bitical::from_wasm_value))
         })
     }
 }
@@ -308,11 +393,21 @@ impl Index for WasmPluginAdapter {
 // --- Query 実装 ---
 
 impl Query for WasmPluginAdapter {
-    fn normalize_label(&self, label: &Label) -> Label {
+    fn logical_type(&self) -> crate::query::logical_schema::LogicalType {
+        crate::query::lens_schema::sql_to_logical(self.bitical_type)
+    }
+
+    fn interpret(
+        &self,
+        first: &Operand,
+        op: ComparisonOp,
+        label: &Label,
+    ) -> Result<QueryNode> {
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
             let mut cache = cache.borrow_mut();
-            let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+            let (store, instance) =
+                ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
             let q_export = instance
                 .get_export(&mut *store, None, "ttfm:plugin/query")
@@ -320,15 +415,25 @@ impl Query for WasmPluginAdapter {
             let fn_idx = instance
                 .get_export(&mut *store, Some(&q_export), "normalize-label")
                 .context("normalize-label not found")?;
-            let func = instance.get_func(&mut *store, fn_idx)
+            let func = instance
+                .get_func(&mut *store, fn_idx)
                 .context("Failed to get normalize-label Func")?;
-            let (r,) = wasm_call::<(String,), (Option<String>,)>(&func, store, (label_str,))?;
+            let (r,) = wasm_call::<(String,), (Option<String>,)>(
+                &func,
+                store,
+                (label_str,),
+            )?;
             Ok(r)
         });
-        match result {
+        let normalized = match result {
             Ok(Some(s)) => Label::from(s),
             _ => label.clone(),
-        }
+        };
+        QueryNode::Comparison(ComparisonNode {
+            first: first.clone(),
+            rest: vec![(op, Operand::Literal(normalized))],
+        })
+        .to_ok()
     }
 
     fn expand(
@@ -336,12 +441,14 @@ impl Query for WasmPluginAdapter {
         tagtype: &TagType,
         label: &Label,
         tag: &crate::types::TypedTag,
-    ) -> QueryNode {
+        _schema: &dyn crate::query::logical_schema::LogicalSchema,
+    ) -> Result<QueryNode> {
         let tag_type_str = tagtype.as_str().to_string();
         let label_str = label.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
             let mut cache = cache.borrow_mut();
-            let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+            let (store, instance) =
+                ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
             let q_export = instance
                 .get_export(&mut *store, None, "ttfm:plugin/query")
@@ -349,7 +456,8 @@ impl Query for WasmPluginAdapter {
             let fn_idx = instance
                 .get_export(&mut *store, Some(&q_export), "expand")
                 .context("expand not found")?;
-            let func = instance.get_func(&mut *store, fn_idx)
+            let func = instance
+                .get_func(&mut *store, fn_idx)
                 .context("Failed to get expand Func")?;
             let (r,) = wasm_call::<(String, String), (Option<String>,)>(
                 &func,
@@ -360,15 +468,26 @@ impl Query for WasmPluginAdapter {
         });
         match result {
             Ok(Some(ttql)) => crate::tag::ttql_parse(&ttql),
-            _ => QueryNode::TypedTag(tag.clone()),
+            _ => {
+                let predicate = self.interpret(
+                    &Operand::TypeRef(tagtype.clone()),
+                    ComparisonOp::Label(BasicOp::Eq),
+                    label,
+                )?;
+                QueryNode::TypedTag(tag.clone().with_node(
+                    crate::query::Node::Expanded(Box::new(predicate)),
+                ))
+            }
         }
+        .to_ok()
     }
 
     fn expand_projection(&self, tagtype: &TagType) -> QueryNode {
         let tag_type_str = tagtype.as_str().to_string();
         let result = INSTANCE_CACHE.with(|cache| -> Result<Option<String>> {
             let mut cache = cache.borrow_mut();
-            let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+            let (store, instance) =
+                ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
             let q_export = instance
                 .get_export(&mut *store, None, "ttfm:plugin/query")
@@ -376,14 +495,19 @@ impl Query for WasmPluginAdapter {
             let fn_idx = instance
                 .get_export(&mut *store, Some(&q_export), "expand-projection")
                 .context("expand-projection not found")?;
-            let func = instance.get_func(&mut *store, fn_idx)
+            let func = instance
+                .get_func(&mut *store, fn_idx)
                 .context("Failed to get expand-projection Func")?;
-            let (r,) = wasm_call::<(String,), (Option<String>,)>(&func, store, (tag_type_str,))?;
+            let (r,) = wasm_call::<(String,), (Option<String>,)>(
+                &func,
+                store,
+                (tag_type_str,),
+            )?;
             Ok(r)
         });
         match result {
             Ok(Some(ttql)) => crate::tag::ttql_parse(&ttql),
-            _ => QueryNode::Projection(Operand::from(tagtype.clone())),
+            _ => QueryNode::base_nest(Operand::from(tagtype.clone())),
         }
     }
 }
@@ -392,34 +516,52 @@ impl Query for WasmPluginAdapter {
 
 impl TagDisplay for WasmPluginAdapter {
     fn formats(&self) -> DisplayFormats {
-        let result = INSTANCE_CACHE.with(
-            |cache| -> Result<(Option<WasmDisplayFormat>, Vec<WasmDisplayFormat>)> {
-                let mut cache = cache.borrow_mut();
-                let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+        let result =
+            INSTANCE_CACHE.with(
+                |cache| -> Result<(
+                    Option<WasmDisplayFormat>,
+                    Vec<WasmDisplayFormat>,
+                )> {
+                    let mut cache = cache.borrow_mut();
+                    let (store, instance) =
+                        ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
-                let d_export = instance
-                    .get_export(&mut *store, None, "ttfm:plugin/display")
-                    .context("display interface not found")?;
+                    let d_export = instance
+                        .get_export(&mut *store, None, "ttfm:plugin/display")
+                        .context("display interface not found")?;
 
-                let def_idx = instance
-                    .get_export(&mut *store, Some(&d_export), "default-format")
-                    .context("default-format not found")?;
-                let def_func = instance.get_func(&mut *store, def_idx)
-                    .context("Failed to get default-format Func")?;
-                let (default,) =
-                    wasm_call::<(), (Option<WasmDisplayFormat>,)>(&def_func, store, ())?;
+                    let def_idx = instance
+                        .get_export(
+                            &mut *store,
+                            Some(&d_export),
+                            "default-format",
+                        )
+                        .context("default-format not found")?;
+                    let def_func = instance
+                        .get_func(&mut *store, def_idx)
+                        .context("Failed to get default-format Func")?;
+                    let (default,) = wasm_call::<
+                        (),
+                        (Option<WasmDisplayFormat>,),
+                    >(
+                        &def_func, store, ()
+                    )?;
 
-                let fmts_idx = instance
-                    .get_export(&mut *store, Some(&d_export), "formats")
-                    .context("formats not found")?;
-                let fmts_func = instance.get_func(&mut *store, fmts_idx)
-                    .context("Failed to get formats Func")?;
-                let (options,) =
-                    wasm_call::<(), (Vec<WasmDisplayFormat>,)>(&fmts_func, store, ())?;
+                    let fmts_idx = instance
+                        .get_export(&mut *store, Some(&d_export), "formats")
+                        .context("formats not found")?;
+                    let fmts_func = instance
+                        .get_func(&mut *store, fmts_idx)
+                        .context("Failed to get formats Func")?;
+                    let (options,) = wasm_call::<(), (Vec<WasmDisplayFormat>,)>(
+                        &fmts_func,
+                        store,
+                        (),
+                    )?;
 
-                Ok((default, options))
-            },
-        );
+                    Ok((default, options))
+                },
+            );
         match result {
             Ok((default, options)) => DisplayFormats {
                 default: default
@@ -434,12 +576,13 @@ impl TagDisplay for WasmPluginAdapter {
         }
     }
 
-    fn show(&self, value: &LabelValue, format: DisplayFormat) -> String {
+    fn show(&self, value: &Bitical, format: DisplayFormat) -> String {
         let value_str = value.as_display_name();
         let format_id = format.id.clone();
         let result = INSTANCE_CACHE.with(|cache| -> Result<String> {
             let mut cache = cache.borrow_mut();
-            let (store, instance) = ensure_cached(&mut cache, &self.plugin, &self.name)?;
+            let (store, instance) =
+                ensure_cached(&mut cache, &self.plugin, &self.name)?;
 
             let d_export = instance
                 .get_export(&mut *store, None, "ttfm:plugin/display")
@@ -447,7 +590,8 @@ impl TagDisplay for WasmPluginAdapter {
             let fn_idx = instance
                 .get_export(&mut *store, Some(&d_export), "show")
                 .context("show not found")?;
-            let func = instance.get_func(&mut *store, fn_idx)
+            let func = instance
+                .get_func(&mut *store, fn_idx)
                 .context("Failed to get show Func")?;
             let (r,) = wasm_call::<(String, String), (String,)>(
                 &func,
@@ -460,12 +604,52 @@ impl TagDisplay for WasmPluginAdapter {
     }
 }
 
-fn convert_wasm_val(v: WasmTagValue) -> Option<LabelValue> {
-    match v {
-        WasmTagValue::Text(s)    => Some(LabelValue::String(s)),
-        WasmTagValue::BigInt(i)  => Some(LabelValue::Integer(i)),
-        WasmTagValue::Boolean(b) => Some(LabelValue::Boolean(b)),
-        WasmTagValue::Double(f)  => Some(LabelValue::Double(f.to_bits())),
-        WasmTagValue::Empty      => None,
+impl Bitical {
+    fn from_wasm_value(v: WasmTagValue) -> Option<Bitical> {
+        match v {
+            WasmTagValue::Text(s) => Some(Bitical::String(s)),
+            WasmTagValue::BigInt(i) => Some(Bitical::Integer(i)),
+            WasmTagValue::Boolean(b) => Some(Bitical::Boolean(b)),
+            WasmTagValue::Double(f) => Some(Bitical::Double(f)),
+            WasmTagValue::Empty => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::logical_schema::LogicalType;
+
+    /// mimetype fixture から得た WasmPluginAdapter の bitical_type だけを差し替える。
+    /// wasm 呼び出しを伴わない logical_type() の導出ロジックのみを検証するため。
+    fn adapter_with_sql_type(bitical_type: BiticalType) -> WasmPluginAdapter {
+        let plugin = crate::plugins::WasmPlugin::new(Path::new(
+            "plugins/mimetype_plugin.component.wasm",
+        ))
+        .expect("Failed to load fixture plugin");
+        let base = plugin.into_adapter().expect("Failed to create adapter");
+        WasmPluginAdapter {
+            bitical_type,
+            ..base
+        }
+    }
+
+    #[test]
+    fn test_logical_type_derives_integer_from_bigint_sql_type() {
+        let adapter = adapter_with_sql_type(BiticalType::Integer);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Integer);
+    }
+
+    #[test]
+    fn test_logical_type_derives_float_from_double_sql_type() {
+        let adapter = adapter_with_sql_type(BiticalType::Double);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Float);
+    }
+
+    #[test]
+    fn test_logical_type_derives_boolean_from_boolean_sql_type() {
+        let adapter = adapter_with_sql_type(BiticalType::Boolean);
+        assert_eq!(adapter.query().logical_type(), LogicalType::Boolean);
     }
 }

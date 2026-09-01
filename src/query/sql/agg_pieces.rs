@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,18 +17,22 @@
 
 use super::{
     apply_arithmetic_agg, apply_arithmetic_op, build_calculation_eav_expr,
+    build_label_grouping_expr, build_label_grouping_expr_for_row,
+    build_label_grouping_match_cond, build_label_grouping_match_cond_for_row,
     build_resolved_literal_expr, build_storage_column_expr,
-    build_tag_value_agg_expr, fold_simple_operand, label_to_simple_expr,
-    subquery, wrap_to_item_ids, AggregationContext, NestContext,
+    build_tag_value_agg_expr, coalesce_label_columns_as_string,
+    fold_simple_operand, label_to_simple_expr, nvalue_rhs_condition, subquery,
+    wrap_to_item_ids, AggregationContext, NestContext,
 };
-use crate::db::{Col, CustomFunc, Pronoun::*, Src, Tbl};
+use crate::db::{Col, CustomFunc, Pronoun, Pronoun::*, Src, Tbl};
 use crate::query::ast::ArithmeticAggOp;
 use crate::query::lens_resolver::{
     ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
-use crate::query::lens_schema::{to_bin_op, StorageMapping};
+use crate::query::lens_schema::StorageMapping;
 use sea_query::{
-    Alias, Condition, Expr, ExprTrait, Func, Iden, Query, SelectStatement, SimpleExpr,
+    Alias, BinOper, Condition, Expr, ExprTrait, Func, Query, SelectStatement,
+    SimpleExpr,
 };
 
 // ── 低レベルユーティリティ ──────────────────────────────────────────────────
@@ -47,29 +53,169 @@ pub(super) fn resolve_count_target(
         .unwrap_or((Col::ItemId, None))
 }
 
+/// 集約対象ノードから、対象カラムと cond（フィルタ）適用済みの base 式を解決する。
+/// `fallback_col` は storage が無い場合の対象カラム
+/// （Count は item_id、算術集約は label_int）。
+/// `filter_key` で `agg_ctx.agg_filters` を引く（呼び出し側が事前計算したキー）。
+fn resolve_agg_base_expr(
+    node: &ResolvedNode,
+    fallback_col: Col,
+    filter_key: usize,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    let (storage, cond, _) = node.extract_agg_parts();
+    let col = if let Some(s) = storage {
+        match s {
+            StorageMapping::Fixed(c) => Col::from(*c),
+            StorageMapping::Basic { column, .. } => *column,
+            _ => Col::LabelInt,
+        }
+    } else {
+        fallback_col
+    };
+    if cond.is_some() {
+        let pick_q = agg_ctx
+            .agg_filters
+            .get(&filter_key)
+            .expect("filter SQL must be pre-computed")
+            .clone();
+        let mut pick_ids = Query::select();
+        pick_ids.column(Col::ItemId).from_subquery(pick_q, Filter);
+        Expr::case(Expr::col(Col::ItemId).in_subquery(pick_ids), Expr::col(col))
+            .into()
+    } else {
+        Expr::col(col).into()
+    }
+}
+
+/// 事前計算済みの定義枝 distinct 件数 SQL をスカラーサブクエリ式で返す。
+fn lookup_definition_count_expr(
+    key: usize,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    subquery(
+        agg_ctx
+            .definition_counts
+            .get(&key)
+            .expect("definition count SQL must be pre-computed")
+            .clone(),
+    )
+}
+
+/// 定義枝 distinct 件数と rest（定義以外の枝）の count_distinct を合算した式。
+/// rest が None なら定義枝件数のみ。
+fn definition_count_expr(
+    rest: Option<&ResolvedNode>,
+    key: usize,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    let definition_expr = lookup_definition_count_expr(key, agg_ctx);
+    let Some(rest_node) = rest else {
+        return definition_expr;
+    };
+    let rest_expr = resolve_agg_base_expr(rest_node, Col::ItemId, key, agg_ctx);
+    Expr::expr(definition_expr)
+        .binary(BinOper::Add, Expr::expr(rest_expr).count_distinct())
+}
+
+/// Count(inner) の SimpleExpr を構築する。定義枝（DefinitionRef、Or 経由も含む）を
+/// 含む場合は定義枝 distinct 件数を加算する。
+fn build_count_expr(
+    inner: &ResolvedNode,
+    agg_ctx: &AggregationContext,
+) -> SimpleExpr {
+    let key = inner as *const ResolvedNode as usize;
+    if let Some((_, rest)) = inner.split_definition_branches() {
+        return definition_count_expr(rest.as_ref(), key, agg_ctx);
+    }
+    let base_expr = resolve_agg_base_expr(inner, Col::ItemId, key, agg_ctx);
+    Expr::expr(base_expr).count_distinct().into()
+}
+
+/// プロジェクションオペランドから (カラム, タグ型フィルタ, グループ化式) を抽出する共通ヘルパー
+pub(super) fn resolve_proj_operand_parts(
+    proj_operand: &ResolvedOperand,
+    row_type: Option<Pronoun>,
+) -> Option<(Col, Option<String>, SimpleExpr)> {
+    match proj_operand {
+        ResolvedOperand::TagRef { storage, .. } => match storage {
+            StorageMapping::Basic {
+                column, tag_type, ..
+            } => {
+                let col_expr = if let Some(p) = row_type {
+                    Expr::col((p, *column)).into()
+                } else {
+                    Expr::col(*column).into()
+                };
+                Some((*column, Some(tag_type.as_str().to_string()), col_expr))
+            }
+            StorageMapping::Fixed(col) => {
+                let col_expr = if let Some(p) = row_type {
+                    Expr::col((p, *col)).into()
+                } else {
+                    Expr::col(*col).into()
+                };
+                Some((*col, None, col_expr))
+            }
+            _ => None,
+        },
+        ResolvedOperand::LabelGrouping {
+            tag_type, storage, ..
+        } => {
+            let expr =
+                build_label_grouping_expr_for_row(proj_operand, row_type);
+            let tt = match storage {
+                StorageMapping::Basic { .. } => {
+                    Some(tag_type.as_str().to_string())
+                }
+                _ => None,
+            };
+            let col = match storage {
+                StorageMapping::Basic { column, .. } => *column,
+                StorageMapping::Fixed(c) => *c,
+                StorageMapping::Composite => Col::LabelStr,
+            };
+            Some((col, tt, expr))
+        }
+        _ => None,
+    }
+}
+
 /// nvalue サブクエリ結果に item_id をアタッチしてラップします。
 pub(super) fn wrap_with_item_id(
     src: &Src,
     agg_sub: SelectStatement,
-    proj_col: Col,
-    proj_tag_type: Option<&str>,
+    proj_operand: &ResolvedOperand,
 ) -> SelectStatement {
-
+    let Some((_proj_col, proj_tag_type, proj_group_expr)) =
+        resolve_proj_operand_parts(proj_operand, Some(View))
+    else {
+        return SelectStatement::default();
+    };
     let mut wrapped = Query::select();
     wrapped
         .column((View, Col::ItemId))
-        .expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group)
+        .expr_as(
+            CustomFunc::as_representative(proj_group_expr.clone()),
+            Group,
+        )
         .column((Agg, Nvalue))
         .from_as(src, View)
         .join_subquery(
             sea_query::JoinType::InnerJoin,
             agg_sub,
             Agg,
-            CustomFunc::as_representative(Expr::col((View, proj_col)))
+            CustomFunc::as_representative(proj_group_expr)
                 .eq(Expr::col((Agg, Group))),
         );
-    if let Some(tag_type) = proj_tag_type {
-        wrapped.and_where(Expr::col((View, Col::Type)).eq(tag_type));
+    if let Some(tag_type) = &proj_tag_type {
+        wrapped.and_where(Expr::col((View, Col::Type)).eq(tag_type.as_str()));
+    }
+    if let ResolvedOperand::LabelGrouping {
+        storage, pattern, ..
+    } = proj_operand
+    {
+        wrapped.cond_where(build_label_grouping_match_cond(storage, pattern));
     }
     wrapped
 }
@@ -81,63 +227,12 @@ pub(super) fn agg_expr(
 ) -> SimpleExpr {
     match agg {
         ResolvedAggregationNode::Count(inner) => {
-            let (storage, cond, _) = inner.extract_agg_parts();
-            let col = if let Some(s) = storage {
-                match s {
-                    StorageMapping::Fixed(c) => Col::from(*c),
-                    StorageMapping::Basic { column, .. } => *column,
-                    _ => Col::LabelInt,
-                }
-            } else {
-                Col::ItemId
-            };
-            let base_expr: SimpleExpr = if cond.is_some() {
-                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
-                let pick_q = agg_ctx
-                    .agg_filters
-                    .get(&inner_ptr)
-                    .expect("filter SQL must be pre-computed")
-                    .clone();
-                let mut pick_ids = Query::select();
-                pick_ids.column(Col::ItemId).from_subquery(pick_q, Filter);
-                Expr::case(
-                    Expr::col(Col::ItemId).in_subquery(pick_ids),
-                    Expr::col(col),
-                )
-                .into()
-            } else {
-                Expr::col(col).into()
-            };
-            Expr::expr(base_expr).count_distinct().into()
+            build_count_expr(inner, agg_ctx)
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
-            let (storage, cond, _) = inner.extract_agg_parts();
-            let col = if let Some(s) = storage {
-                match s {
-                    StorageMapping::Fixed(c) => Col::from(*c),
-                    StorageMapping::Basic { column, .. } => *column,
-                    _ => Col::LabelInt,
-                }
-            } else {
-                Col::LabelInt
-            };
-            let base_expr: SimpleExpr = if cond.is_some() {
-                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
-                let pick_q = agg_ctx
-                    .agg_filters
-                    .get(&inner_ptr)
-                    .expect("filter SQL must be pre-computed")
-                    .clone();
-                let mut pick_ids = Query::select();
-                pick_ids.column(Col::ItemId).from_subquery(pick_q, Filter);
-                Expr::case(
-                    Expr::col(Col::ItemId).in_subquery(pick_ids),
-                    Expr::col(col),
-                )
-                .into()
-            } else {
-                Expr::col(col).into()
-            };
+            let key = inner.as_ref() as *const ResolvedNode as usize;
+            let base_expr =
+                resolve_agg_base_expr(inner, Col::LabelInt, key, agg_ctx);
             match op {
                 ArithmeticAggOp::Sum => Func::sum(base_expr).into(),
                 ArithmeticAggOp::Avg => Func::avg(base_expr).into(),
@@ -156,8 +251,11 @@ pub(super) fn build_agg_operand_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_storage_column_expr(storage, *sql_type),
+            storage,
+            bitical_type,
+            ..
+        } => build_storage_column_expr(storage, *bitical_type),
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -188,8 +286,11 @@ pub(super) fn build_agg_operand_eav_expr(
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
         ResolvedOperand::TagRef {
-            storage, sql_type, ..
-        } => build_tag_value_agg_expr(storage, *sql_type),
+            storage,
+            bitical_type,
+            ..
+        } => build_tag_value_agg_expr(storage, *bitical_type),
+        ResolvedOperand::LabelGrouping { .. } => build_label_grouping_expr(op),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -294,8 +395,10 @@ pub(super) fn build_agg_calc_subquery_nest(
     agg_ctx: &AggregationContext,
     nest_ctx: &NestContext,
 ) -> SimpleExpr {
-    let left = build_agg_operand_subquery_nest(src, &calc.left, agg_ctx, nest_ctx);
-    let right = build_agg_operand_subquery_nest(src, &calc.right, agg_ctx, nest_ctx);
+    let left =
+        build_agg_operand_subquery_nest(src, &calc.left, agg_ctx, nest_ctx);
+    let right =
+        build_agg_operand_subquery_nest(src, &calc.right, agg_ctx, nest_ctx);
     let is_string = calc.left.is_string_type() && calc.right.is_string_type();
     apply_arithmetic_op(&calc.op, left, right, is_string)
 }
@@ -313,32 +416,41 @@ pub(super) fn build_resolved_operand_expr_for_arithmetic(
         match op {
             ResolvedOperand::Literal(lab) => {
                 let expr = build_resolved_literal_expr(lab);
-                if matches!(lab.value(), crate::types::LabelValue::Boolean(_)) {
-                    expr.cast_as(crate::db::SqlType::BIGINT).into()
+                if matches!(lab.value(), crate::types::Bitical::Boolean(_)) {
+                    expr.cast_as(crate::db::BiticalType::Integer).into()
                 } else {
                     expr
                 }
             }
             ResolvedOperand::TagRef {
-                storage, sql_type, ..
+                storage,
+                bitical_type,
+                ..
             } => {
-                if *sql_type == crate::db::SqlType::BOOLEAN {
-                    return build_storage_column_expr(storage, *sql_type)
-                        .cast_as(crate::db::SqlType::BIGINT)
+                if *bitical_type == crate::db::BiticalType::Boolean {
+                    return build_storage_column_expr(storage, *bitical_type)
+                        .cast_as(crate::db::BiticalType::Integer)
                         .into();
                 }
                 match storage {
                     StorageMapping::Basic { column, .. }
                         if *column == Col::LabelStr =>
                     {
-                        CustomFunc::try_cast_double(Expr::col(*column))
+                        CustomFunc::try_cast_double(
+                            coalesce_label_columns_as_string(),
+                        )
                     }
                     StorageMapping::Basic { column, .. } => {
                         Expr::col(*column).into()
                     }
                     StorageMapping::Fixed(col) => Expr::col(*col).into(),
-                    StorageMapping::Composite => Expr::col(Col::LabelStr).into(),
+                    StorageMapping::Composite => {
+                        Expr::col(Col::LabelStr).into()
+                    }
                 }
+            }
+            ResolvedOperand::LabelGrouping { .. } => {
+                build_label_grouping_expr(op)
             }
             ResolvedOperand::Calculation(calc) => {
                 let [left, right]: [SimpleExpr; 2] =
@@ -404,11 +516,71 @@ pub(super) fn collect_tag_types_from_operand(
 
 // ── nvalue SQL ─────────────────────────────────────────────────────────────
 
+/// Nest 文脈での Count(inner) が定義枝を含む場合の nvalue SQL。定義枝 distinct
+/// 件数は group に依存しない定数として各 group に加算され、rest（それ以外の枝）が
+/// あればその実アイテム数を group ごとに数えて加算する。
+fn build_definition_count_nvalue_sql(
+    src: &Src,
+    proj_operand: &ResolvedOperand,
+    key: usize,
+    rest: Option<&ResolvedNode>,
+    context: Option<&ResolvedNode>,
+    item_scope: Option<SelectStatement>,
+    include_item_id: bool,
+    agg_ctx: &AggregationContext,
+    nest_ctx: Option<&NestContext>,
+) -> SelectStatement {
+    let Some((_proj_col, proj_tag_type, group_expr)) =
+        resolve_proj_operand_parts(proj_operand, None)
+    else {
+        return SelectStatement::default();
+    };
+    let mut stmt = Query::select();
+    stmt.expr_as(CustomFunc::as_representative(group_expr), Group);
+    stmt.expr_as(definition_count_expr(rest, key, agg_ctx), Nvalue);
+    stmt.from(src);
+    if let Some(tt) = &proj_tag_type {
+        stmt.and_where(Expr::col(Col::Type).eq(tt.as_str()));
+    }
+    if let ResolvedOperand::LabelGrouping {
+        storage, pattern, ..
+    } = proj_operand
+    {
+        stmt.cond_where(build_label_grouping_match_cond(storage, pattern));
+    }
+    if let Some(scope) = item_scope {
+        stmt.and_where(Expr::col(Col::ItemId).in_subquery(scope));
+    }
+    if let Some(ctx) = context {
+        let ctx_ptr = ctx as *const ResolvedNode as usize;
+        let context_pick = nest_ctx
+            .expect("NestContext required for context lookup")
+            .contexts
+            .get(&ctx_ptr)
+            .expect("context SQL must be pre-computed")
+            .clone();
+        stmt.and_where(
+            Expr::col(Col::ItemId).in_subquery(
+                Query::select()
+                    .column(Col::ItemId)
+                    .from_subquery(context_pick, Ctx)
+                    .to_owned(),
+            ),
+        );
+    }
+    stmt.group_by_col(Group);
+
+    if include_item_id {
+        wrap_with_item_id(src, stmt, proj_operand)
+    } else {
+        stmt
+    }
+}
+
 /// Count 集約の nvalue SQL を生成する共通ヘルパー。
 pub(super) fn build_count_nvalue_sql(
     src: &Src,
-    proj_col: Col,
-    proj_tag_type: Option<&str>,
+    proj_operand: &ResolvedOperand,
     inner: &ResolvedNode,
     context: Option<&ResolvedNode>,
     item_scope: Option<SelectStatement>,
@@ -416,12 +588,30 @@ pub(super) fn build_count_nvalue_sql(
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
+    if let Some((_, rest)) = inner.split_definition_branches() {
+        let key = inner as *const ResolvedNode as usize;
+        return build_definition_count_nvalue_sql(
+            src,
+            proj_operand,
+            key,
+            rest.as_ref(),
+            context,
+            item_scope,
+            include_item_id,
+            agg_ctx,
+            nest_ctx,
+        );
+    }
     let (count_col, inner_tag_type) = resolve_count_target(inner);
     let mut stmt = Query::select();
 
-
     if let Some(tag_type) = inner_tag_type {
-                    stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+        let Some((_proj_col, proj_tag_type, group_expr)) =
+            resolve_proj_operand_parts(proj_operand, Some(Proj))
+        else {
+            return SelectStatement::default();
+        };
+        stmt.expr_as(CustomFunc::as_representative(group_expr), Group);
         stmt.expr_as(Expr::col((Tags, count_col)).count_distinct(), Nvalue);
         stmt.from_as(src, Proj);
         stmt.join_as(
@@ -430,8 +620,18 @@ pub(super) fn build_count_nvalue_sql(
             Tags,
             Expr::col((Proj, Col::ItemId)).equals((Tags, Col::ItemId)),
         );
-        if let Some(tt) = proj_tag_type {
-            stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
+        if let Some(tt) = &proj_tag_type {
+            stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt.as_str()));
+        }
+        if let ResolvedOperand::LabelGrouping {
+            storage, pattern, ..
+        } = proj_operand
+        {
+            stmt.cond_where(build_label_grouping_match_cond_for_row(
+                storage,
+                pattern,
+                Some(Proj),
+            ));
         }
         stmt.and_where(Expr::col((Tags, Col::Type)).eq(tag_type));
         if let Some(scope) = item_scope {
@@ -471,13 +671,24 @@ pub(super) fn build_count_nvalue_sql(
                 ),
             );
         }
-        stmt.group_by_col(Alias::new("Group"));
+        stmt.group_by_col(Group);
     } else {
-        stmt.expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group);
+        let Some((_proj_col, proj_tag_type, group_expr)) =
+            resolve_proj_operand_parts(proj_operand, None)
+        else {
+            return SelectStatement::default();
+        };
+        stmt.expr_as(CustomFunc::as_representative(group_expr), Group);
         stmt.expr_as(Expr::col(Col::ItemId).count_distinct(), Nvalue);
         stmt.from(src);
-        if let Some(tt) = proj_tag_type {
-            stmt.and_where(Expr::col(Col::Type).eq(tt));
+        if let Some(tt) = &proj_tag_type {
+            stmt.and_where(Expr::col(Col::Type).eq(tt.as_str()));
+        }
+        if let ResolvedOperand::LabelGrouping {
+            storage, pattern, ..
+        } = proj_operand
+        {
+            stmt.cond_where(build_label_grouping_match_cond(storage, pattern));
         }
         if let Some(scope) = item_scope {
             stmt.and_where(Expr::col(Col::ItemId).in_subquery(scope));
@@ -513,11 +724,11 @@ pub(super) fn build_count_nvalue_sql(
                 ),
             );
         }
-        stmt.group_by_col(Alias::new("Group"));
+        stmt.group_by_col(Group);
     }
 
     if include_item_id {
-        wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
+        wrap_with_item_id(src, stmt, proj_operand)
     } else {
         stmt
     }
@@ -587,23 +798,17 @@ pub(super) fn build_nvalue_standalone_subquery(
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
-    let (proj_col, proj_tag_type) = match proj_operand {
-        ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::Basic {
-                column, tag_type, ..
-            } => (*column, Some(tag_type.as_str())),
-            StorageMapping::Fixed(col) => (*col, None),
-            _ => return SelectStatement::default(),
-        },
-        _ => return SelectStatement::default(),
+    let Some((_proj_col, proj_tag_type, group_expr)) =
+        resolve_proj_operand_parts(proj_operand, Some(Proj))
+    else {
+        return SelectStatement::default();
     };
 
     nvalue.fold(&|op, child_results: Vec<SelectStatement>| match op {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             build_count_nvalue_sql(
                 src,
-                proj_col,
-                proj_tag_type,
+                proj_operand,
                 inner,
                 context,
                 None,
@@ -616,10 +821,14 @@ pub(super) fn build_nvalue_standalone_subquery(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
-        
+            let deduped =
+                build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
+
             let mut stmt = Query::select();
-                        stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(group_expr.clone()),
+                Group,
+            );
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -635,12 +844,20 @@ pub(super) fn build_nvalue_standalone_subquery(
                 Deduped,
                 Expr::col((Proj, Col::ItemId)).equals((Deduped, Col::ItemId)),
             );
-            if let Some(tt) = proj_tag_type {
-                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
+            if let Some(tt) = &proj_tag_type {
+                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt.as_str()));
             }
-            stmt.group_by_col(Alias::new("Group"));
+            if let ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } = proj_operand
+            {
+                stmt.cond_where(build_label_grouping_match_cond(
+                    storage, pattern,
+                ));
+            }
+            stmt.group_by_col(Group);
             if include_item_id {
-                wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
+                wrap_with_item_id(src, stmt, proj_operand)
             } else {
                 stmt
             }
@@ -648,18 +865,29 @@ pub(super) fn build_nvalue_standalone_subquery(
         ResolvedOperand::Literal(label) => {
             let val = label_to_simple_expr(label);
             let mut stmt = Query::select();
-            stmt.expr_as(CustomFunc::as_representative(Expr::col(proj_col)), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(group_expr.clone()),
+                Group,
+            );
             stmt.expr_as(val, Nvalue);
-            stmt.from(src);
-            if let Some(tt) = proj_tag_type {
-                stmt.and_where(Expr::col(Col::Type).eq(tt));
+            stmt.from_as(src, Proj);
+            if let Some(tt) = &proj_tag_type {
+                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt.as_str()));
+            }
+            if let ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } = proj_operand
+            {
+                stmt.cond_where(build_label_grouping_match_cond(
+                    storage, pattern,
+                ));
             }
             if include_item_id {
-                stmt.column(Col::ItemId);
-                stmt.group_by_col(Alias::new("Group"));
-                stmt.group_by_col(Col::ItemId);
+                stmt.column((Proj, Col::ItemId));
+                stmt.group_by_col(Group);
+                stmt.group_by_col((Proj, Col::ItemId));
             } else {
-                stmt.group_by_col(Alias::new("Group"));
+                stmt.group_by_col(Group);
             }
             stmt
         }
@@ -726,8 +954,10 @@ pub(super) fn build_nvalue_standalone_subquery(
             stmt.from_as(src, Proj);
             match nval_storage {
                 StorageMapping::Fixed(nv_col) => {
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+                    stmt.expr_as(
+                        CustomFunc::as_representative(group_expr.clone()),
+                        Group,
+                    );
                     stmt.expr_as(
                         CustomFunc::any_value(Expr::col((Proj, *nv_col))),
                         Nvalue,
@@ -752,10 +982,14 @@ pub(super) fn build_nvalue_standalone_subquery(
                         sea_query::JoinType::LeftJoin,
                         nv_sub,
                         Sub,
-                        Expr::col((Proj, Col::ItemId)).equals((Sub, Col::ItemId)),
+                        Expr::col((Proj, Col::ItemId))
+                            .equals((Sub, Col::ItemId)),
                     );
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+
+                    stmt.expr_as(
+                        CustomFunc::as_representative(group_expr.clone()),
+                        Group,
+                    );
                     stmt.expr_as(
                         CustomFunc::any_value(Func::coalesce([
                             Expr::col((Sub, Val)).into(),
@@ -765,17 +999,45 @@ pub(super) fn build_nvalue_standalone_subquery(
                     );
                 }
                 StorageMapping::Composite => {
-                
-                                stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+                    stmt.expr_as(
+                        CustomFunc::as_representative(group_expr.clone()),
+                        Group,
+                    );
                     stmt.expr_as(Expr::val(0.0f64), Nvalue);
                 }
             }
-            if let Some(tt) = proj_tag_type {
-                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
+            if let Some(tt) = &proj_tag_type {
+                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt.as_str()));
             }
-            stmt.group_by_col(Alias::new("Group"));
+            if let ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } = proj_operand
+            {
+                stmt.cond_where(build_label_grouping_match_cond(
+                    storage, pattern,
+                ));
+            }
+            stmt.group_by_col(Group);
             if include_item_id {
-                wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
+                wrap_with_item_id(src, stmt, proj_operand)
+            } else {
+                stmt
+            }
+        }
+        ResolvedOperand::LabelGrouping { .. } => {
+            let mut stmt = Query::select();
+            stmt.expr_as(
+                CustomFunc::as_representative(group_expr.clone()),
+                Group,
+            );
+            stmt.expr_as(Expr::val(""), Nvalue);
+            stmt.from_as(src, Proj);
+            if let Some(tt) = &proj_tag_type {
+                stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt.as_str()));
+            }
+            stmt.group_by_col(Group);
+            if include_item_id {
+                wrap_with_item_id(src, stmt, proj_operand)
             } else {
                 stmt
             }
@@ -802,40 +1064,116 @@ pub(super) fn build_agg_nest(
     build_agg_inner(src, agg, agg_ctx, Some(nest_ctx))
 }
 
+/// cond（フィルタノード）から Count 対象の item_id 一覧 SQL を返す。
+/// cond が None なら src 全体、Some なら `filter_key` で引く事前計算済み filter SQL。
+fn resolve_count_ids_sql(
+    src: &Src,
+    cond: &Option<ResolvedNode>,
+    filter_key: usize,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    match cond {
+        Some(_) => {
+            let pick_sql = agg_ctx
+                .agg_filters
+                .get(&filter_key)
+                .expect("filter SQL must be pre-computed")
+                .clone();
+            Query::select()
+                .column(Col::ItemId)
+                .from_subquery(pick_sql, Sub)
+                .to_owned()
+        }
+        None => Query::select().column(Col::ItemId).from(src).to_owned(),
+    }
+}
+
+/// Count 対象ノードのスカラー SQL（FROM/WHERE 込み）。`definition_expr` があれば
+/// カウントに加算する。
+fn build_count_stmt_inner(
+    src: &Src,
+    node: &ResolvedNode,
+    filter_key: usize,
+    definition_expr: Option<SimpleExpr>,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    let (_, cond, _) = node.extract_agg_parts();
+    let (count_col, tag_type) = resolve_count_target(node);
+    let ids_sql = resolve_count_ids_sql(src, &cond, filter_key, agg_ctx);
+
+    if let Some(counted) =
+        crate::query::lens_builder::count_types(src, count_col, &ids_sql)
+    {
+        return match definition_expr {
+            None => counted,
+            Some(def) => Query::select()
+                .expr_as(
+                    Expr::expr(def).binary(BinOper::Add, subquery(counted)),
+                    Scalar,
+                )
+                .to_owned(),
+        };
+    }
+
+    let mut stmt = Query::select();
+    stmt.from(src);
+    let mut final_cond = Condition::all();
+    if let Some(tt) = tag_type {
+        final_cond = final_cond.add(Expr::col(Col::Type).eq(tt));
+    }
+    if cond.is_some() {
+        final_cond =
+            final_cond.add(Expr::col(Col::ItemId).in_subquery(ids_sql));
+    }
+    let count_expr: SimpleExpr = Expr::col(count_col).count_distinct().into();
+    let scalar = match definition_expr {
+        None => count_expr,
+        Some(def) => Expr::expr(def).binary(BinOper::Add, count_expr),
+    };
+    stmt.expr_as(scalar, Scalar);
+    stmt.cond_where(final_cond);
+    stmt
+}
+
+/// Count(inner) のスカラー SQL（FROM/WHERE 込み）を構築する。定義枝を含む場合は
+/// 定義枝 distinct 件数を rest の既存カウントに加算する。
+fn build_count_stmt(
+    src: &Src,
+    inner: &ResolvedNode,
+    agg_ctx: &AggregationContext,
+) -> SelectStatement {
+    let key = inner as *const ResolvedNode as usize;
+    let Some((_, rest)) = inner.split_definition_branches() else {
+        return build_count_stmt_inner(src, inner, key, None, agg_ctx);
+    };
+    let definition_expr = lookup_definition_count_expr(key, agg_ctx);
+    match rest {
+        None => Query::select().expr_as(definition_expr, Scalar).to_owned(),
+        Some(rest_node) => build_count_stmt_inner(
+            src,
+            &rest_node,
+            key,
+            Some(definition_expr),
+            agg_ctx,
+        ),
+    }
+}
+
 fn build_agg_inner(
     src: &Src,
     agg: &ResolvedAggregationNode,
     agg_ctx: &AggregationContext,
     nest_ctx: Option<&NestContext>,
 ) -> SelectStatement {
-    if let Some(nvalue_agg_sql) = build_agg_over_nvalue(src, agg, agg_ctx, nest_ctx)
+    if let Some(nvalue_agg_sql) =
+        build_agg_over_nvalue(src, agg, agg_ctx, nest_ctx)
     {
         return nvalue_agg_sql;
     }
     let mut stmt = Query::select();
     match agg {
         ResolvedAggregationNode::Count(inner) => {
-            stmt.from(src);
-            let (_, cond, _) = inner.extract_agg_parts();
-            let mut final_cond = Condition::all();
-            let (count_col, inner_tag_type) = resolve_count_target(inner);
-            if let Some(key) = inner_tag_type {
-                final_cond = final_cond.add(Expr::col(Col::Type).eq(key));
-            }
-            if let Some(_filter_node) = cond {
-                let inner_ptr = inner.as_ref() as *const ResolvedNode as usize;
-                let pick_sql = agg_ctx
-                    .agg_filters
-                    .get(&inner_ptr)
-                    .expect("filter SQL must be pre-computed")
-                    .clone();
-                let mut sub = Query::select();
-                sub.column(Col::ItemId).from_subquery(pick_sql, Sub);
-                final_cond =
-                    final_cond.add(Expr::col(Col::ItemId).in_subquery(sub));
-            }
-            stmt.expr_as(Expr::col(count_col).count_distinct(), Scalar);
-            stmt.cond_where(final_cond);
+            stmt = build_count_stmt(src, inner, agg_ctx);
         }
         ResolvedAggregationNode::Arithmetic { op, inner } => {
             let is_string = agg.is_string_type();
@@ -876,13 +1214,17 @@ fn build_agg_over_nvalue(
             agg_ctx,
             nest_ctx,
         );
-        if let Some((op, value)) = nvalue_condition {
-            let bin_op = to_bin_op(*op);
-            let val = label_to_simple_expr(value);
+        if let Some((op, value)) = &nvalue_condition {
+            let cond = nvalue_rhs_condition(
+                Expr::col(Nvalue).into(),
+                *op,
+                value,
+                nvalue.is_string_type(),
+            );
             Query::select()
                 .column(Nvalue)
                 .from_subquery(pivot_agg, Sub)
-                .and_where(Expr::col(Nvalue).binary(bin_op, val))
+                .cond_where(cond)
                 .to_owned()
         } else {
             pivot_agg
@@ -897,10 +1239,14 @@ fn build_agg_over_nvalue(
             agg_ctx,
             nest_ctx,
         );
-        if let Some((op, value)) = nvalue_condition {
-            let bin_op = to_bin_op(*op);
-            let val = label_to_simple_expr(value);
-            nvalue_sub.and_where(Expr::col(Nvalue).binary(bin_op, val));
+        if let Some((op, value)) = &nvalue_condition {
+            let cond = nvalue_rhs_condition(
+                Expr::col(Nvalue).into(),
+                *op,
+                value,
+                nvalue.is_string_type(),
+            );
+            nvalue_sub.cond_where(cond);
         }
         Query::select()
             .column(Group)
@@ -977,27 +1323,17 @@ fn build_nvalue_cte_inner(
         );
     }
     let proj_operand = &proj_operands[0];
-    let (proj_col, proj_storage) = match proj_operand {
-        ResolvedOperand::TagRef { storage, .. } => match storage {
-            StorageMapping::Basic { column, .. } => (*column, storage),
-            StorageMapping::Fixed(col) => (*col, storage),
-            _ => return SelectStatement::default(),
-        },
-        _ => return SelectStatement::default(),
+    let Some((_proj_col, proj_tag_type, group_expr)) =
+        resolve_proj_operand_parts(proj_operand, Some(Proj))
+    else {
+        return SelectStatement::default();
     };
-    let proj_tag_type =
-        if let StorageMapping::Basic { tag_type, .. } = &proj_storage {
-            Some(tag_type.as_str())
-        } else {
-            None
-        };
 
     let inner_q = match nvalue {
         ResolvedOperand::Aggregation(ResolvedAggregationNode::Count(inner)) => {
             build_count_nvalue_sql(
                 src,
-                proj_col,
-                proj_tag_type,
+                proj_operand,
                 inner,
                 context,
                 Some(
@@ -1015,9 +1351,13 @@ fn build_nvalue_cte_inner(
             agg @ ResolvedAggregationNode::Arithmetic { op, inner },
         ) => {
             let is_string = agg.is_string_type();
-            let deduped = build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
+            let deduped =
+                build_unique_agg(src, inner, context, agg_ctx, nest_ctx);
             let mut stmt = Query::select();
-            stmt.expr_as(CustomFunc::as_representative(Expr::col((Proj, proj_col))), Group);
+            stmt.expr_as(
+                CustomFunc::as_representative(group_expr.clone()),
+                Group,
+            );
             stmt.expr_as(
                 apply_arithmetic_agg(
                     op,
@@ -1044,8 +1384,16 @@ fn build_nvalue_cte_inner(
             if let Some(tt) = proj_tag_type {
                 stmt.and_where(Expr::col((Proj, Col::Type)).eq(tt));
             }
-            stmt.group_by_col((Proj, proj_col));
-            wrap_with_item_id(src, stmt, proj_col, proj_tag_type)
+            if let ResolvedOperand::LabelGrouping {
+                storage, pattern, ..
+            } = proj_operand
+            {
+                stmt.cond_where(build_label_grouping_match_cond(
+                    storage, pattern,
+                ));
+            }
+            stmt.group_by_col(Group);
+            wrap_with_item_id(src, stmt, proj_operand)
         }
         _ => build_nvalue_standalone_subquery(
             src,
@@ -1091,7 +1439,7 @@ fn build_pivot_keys_into_stmt(
 
     let mut type_filters = std::collections::HashSet::new();
 
-    let union_type = "UNION(v VARCHAR, i BIGINT, d DOUBLE, b BOOLEAN, u UUID)";
+    let union_type = CustomFunc::representative_union_type();
     for (i, key) in keys.iter().enumerate() {
         match key {
             ResolvedOperand::TagRef { storage, .. } => match storage {
@@ -1119,11 +1467,20 @@ fn build_pivot_keys_into_stmt(
                 StorageMapping::Composite => {
                     // Representative は既にリストなのでそのまま（または UNION[] キャスト）
                     stmt.expr_as(
-                        Expr::cust(format!("CAST(\"{}\" AS {}[])", sea_query::Iden::to_string(&crate::db::Pronoun::Representative), union_type)),
-                        Alias::new(&format!("key{}", i))
+                        Expr::cust(format!(
+                            "CAST(\"{}\" AS {}[])",
+                            sea_query::Iden::to_string(
+                                &crate::db::Pronoun::Representative
+                            ),
+                            union_type
+                        )),
+                        Alias::new(&format!("key{}", i)),
                     );
                     // NULLチェック
-                    stmt.and_having(Expr::col(crate::db::Pronoun::Representative).is_not_null());
+                    stmt.and_having(
+                        Expr::col(crate::db::Pronoun::Representative)
+                            .is_not_null(),
+                    );
                 }
             },
             ResolvedOperand::Calculation(calc) => {
@@ -1135,6 +1492,27 @@ fn build_pivot_keys_into_stmt(
                     Alias::new(&format!("key{}", i)),
                 );
                 stmt.and_having(calc_expr.is_not_null());
+            }
+            ResolvedOperand::LabelGrouping {
+                tag_type, storage, ..
+            } => {
+                let group_expr = build_label_grouping_expr(key);
+                let max_expr: SimpleExpr = match storage {
+                    StorageMapping::Basic { .. } => {
+                        type_filters.insert(tag_type.as_str().to_string());
+                        let case_expr = Expr::case(
+                            Expr::col(Col::Type).eq(tag_type.as_str()),
+                            group_expr,
+                        );
+                        Func::max(case_expr).into()
+                    }
+                    _ => Func::max(group_expr).into(),
+                };
+                stmt.expr_as(
+                    CustomFunc::as_representative(max_expr.clone()),
+                    Alias::new(&format!("key{}", i)),
+                );
+                stmt.and_having(max_expr.is_not_null());
             }
             _ => {}
         }
@@ -1150,9 +1528,10 @@ pub(super) fn build_nest_pivot_cte(
     nvalue: Option<&ResolvedOperand>,
     agg_ctx: &AggregationContext,
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
-        build_agg_calc_eav_expr(calc, agg_ctx)
-    });
+    let (mut stmt, type_filters) =
+        build_pivot_keys_into_stmt(src, keys, |calc| {
+            build_agg_calc_eav_expr(calc, agg_ctx)
+        });
 
     if let Some(nv) = nvalue {
         let nv_expr = build_agg_operand_eav_expr(nv, agg_ctx);
@@ -1171,9 +1550,10 @@ pub(super) fn build_nest_pivot_cte_no_agg(
     src: &Src,
     keys: &[ResolvedOperand],
 ) -> SelectStatement {
-    let (mut stmt, type_filters) = build_pivot_keys_into_stmt(src, keys, |calc| {
-        build_calculation_eav_expr(calc)
-    });
+    let (mut stmt, type_filters) =
+        build_pivot_keys_into_stmt(src, keys, |calc| {
+            build_calculation_eav_expr(calc)
+        });
 
     if !type_filters.is_empty() {
         stmt.and_where(Expr::col(Col::Type).is_in(type_filters));
@@ -1342,4 +1722,82 @@ fn build_mixed_key_calc_nvalue_sql(
         stmt.and_where(Expr::col((Pivot, Col::ItemId)).in_subquery(ctx_sub));
     }
     stmt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::BiticalType;
+    use crate::query::lens_schema::StorageMapping;
+    use crate::types::TagType;
+    use sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn test_resolve_proj_operand_parts_tag_ref() {
+        let op = ResolvedOperand::TagRef {
+            tag_type: TagType::from("extension"),
+            storage: StorageMapping::Basic {
+                column: Col::LabelStr,
+                tag_type: "extension".to_string(),
+            },
+            bitical_type: BiticalType::String,
+        };
+        let (col, tt, _expr) =
+            resolve_proj_operand_parts(&op, Some(Proj)).unwrap();
+        assert_eq!(col, Col::LabelStr);
+        assert_eq!(tt.as_deref(), Some("extension"));
+
+        let (col_none, tt_none, _expr_none) =
+            resolve_proj_operand_parts(&op, None).unwrap();
+        assert_eq!(col_none, Col::LabelStr);
+        assert_eq!(tt_none.as_deref(), Some("extension"));
+    }
+
+    #[test]
+    fn test_resolve_proj_operand_parts_label_grouping() {
+        let op = ResolvedOperand::LabelGrouping {
+            tag_type: TagType::from("path"),
+            pattern: "/projects/*/".to_string(),
+            storage: StorageMapping::Basic {
+                column: Col::LabelStr,
+                tag_type: "path".to_string(),
+            },
+            bitical_type: BiticalType::String,
+        };
+        let (col, tt, expr) =
+            resolve_proj_operand_parts(&op, Some(Proj)).unwrap();
+        assert_eq!(col, Col::LabelStr);
+        assert_eq!(tt.as_deref(), Some("path"));
+        let mut select = Query::select();
+        select.expr(expr);
+        let sql = select.to_string(PostgresQueryBuilder);
+        assert!(sql.contains("regexp_extract"));
+        assert!(sql.contains("proj"));
+    }
+
+    #[test]
+    fn test_build_nvalue_standalone_subquery_literal() {
+        let op = ResolvedOperand::TagRef {
+            tag_type: TagType::from("parentdir"),
+            storage: StorageMapping::Basic {
+                column: Col::LabelStr,
+                tag_type: "parentdir".to_string(),
+            },
+            bitical_type: BiticalType::String,
+        };
+        let lit = ResolvedOperand::Literal(crate::types::Label::from(10i64));
+        let agg_ctx = AggregationContext::new();
+        let sql = build_nvalue_standalone_subquery(
+            &Src::OneView,
+            &op,
+            &lit,
+            None,
+            false,
+            &agg_ctx,
+            None,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(sql.contains("\"oneview\" AS \"proj\""));
+        assert!(sql.contains("\"proj\".\"label_str\""));
+    }
 }

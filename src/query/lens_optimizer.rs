@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,7 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::query::lens_resolver::{
-    NestMatchCondition, NestMatchOp, ResolvedAggregationNode,
+    NestMatchCondition, NestMatchOp, NestMatchRhs, NvalueRhs,
+    ResolvedAggregationNode,
 };
 use crate::query::{ResolvedNode, ResolvedOperand};
 
@@ -37,6 +40,7 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             // DuckDB has a bug evaluating `HAVING A OR B` when A or B contains an `IN` subquery with `INTERSECT`.
             // By NOT merging ORs, it falls back to UNION which works perfectly.
             // merge_nest_matches(&mut optimized_children, true);
+            collapse_same_column_matches(&mut optimized_children);
             if optimized_children.len() == 1 {
                 optimized_children.pop().unwrap()
             } else {
@@ -63,22 +67,27 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             && matches!(right_nvalue, ResolvedOperand::Literal(_)) =>
         {
             // Convert self-comparing NestNestMatch into a MergedNestMatch
+            let ResolvedOperand::Literal(right_label) = right_nvalue else {
+                unreachable!("right_nvalue はガード節で Literal に限定済み")
+            };
             ResolvedNode::MergedNestMatch {
                 keys: left_keys,
                 matches: vec![NestMatchCondition {
                     nvalue: left_nvalue,
                     op,
-                    right: right_nvalue,
+                    right: NestMatchRhs::Operand(ResolvedOperand::Literal(
+                        right_label,
+                    )),
                     context: left_context,
                 }],
                 is_or: false,
             }
         }
-        ResolvedNode::AggregationMatch { agg, op, label } => {
+        ResolvedNode::AggregationMatch { agg, op, rhs } => {
             ResolvedNode::AggregationMatch {
                 agg: flatten_aggregation(agg),
                 op,
-                label,
+                rhs,
             }
         }
         ResolvedNode::AggregationCalculationMatch { agg, op, calc } => {
@@ -100,26 +109,31 @@ pub fn optimize(node: ResolvedNode) -> ResolvedNode {
             op,
             tag_type,
             storage,
-            sql_type,
+            bitical_type,
         } => ResolvedNode::AggregationTagMatch {
             agg: flatten_aggregation(agg),
             op,
             tag_type,
             storage,
-            sql_type,
+            bitical_type,
         },
         ResolvedNode::NestMatch {
             keys,
             nvalue,
             op,
-            label,
+            rhs,
             context,
         } if nvalue.contains_aggregation() => ResolvedNode::MergedNestMatch {
             keys: keys.clone(),
             matches: vec![NestMatchCondition {
                 nvalue,
                 op: NestMatchOp::Comparison(op),
-                right: ResolvedOperand::Literal(label),
+                right: match rhs {
+                    NvalueRhs::Label(label) => {
+                        NestMatchRhs::Operand(ResolvedOperand::Literal(label))
+                    }
+                    NvalueRhs::DateTime(range) => NestMatchRhs::DateTime(range),
+                },
                 context,
             }],
             is_or: false,
@@ -209,7 +223,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                     let cond = NestMatchCondition {
                         nvalue: left_nvalue,
                         op,
-                        right: right_nvalue,
+                        right: NestMatchRhs::Operand(right_nvalue),
                         context: left_context.clone(),
                     };
 
@@ -243,13 +257,19 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 keys,
                 nvalue,
                 op,
-                label,
+                rhs,
                 context,
             } => {
+                let right = match rhs {
+                    NvalueRhs::Label(label) => NestMatchRhs::Operand(
+                        crate::query::ResolvedOperand::Literal(label),
+                    ),
+                    NvalueRhs::DateTime(range) => NestMatchRhs::DateTime(range),
+                };
                 let cond = NestMatchCondition {
                     nvalue,
                     op: NestMatchOp::Comparison(op),
-                    right: crate::query::ResolvedOperand::Literal(label),
+                    right,
                     context: context.clone(),
                 };
 
@@ -286,7 +306,7 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 }
 
                 if !found {
-                    groups.push((keys, None, matches));
+                    groups.push((keys, matches_context, matches));
                 }
             }
             _ => remaining.push(child),
@@ -309,25 +329,39 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
                 .next()
                 .expect("matches should have at least one element");
             let NestMatchOp::Comparison(op) = cond.op;
-            if let crate::query::ResolvedOperand::Literal(label) = cond.right {
-                remaining.push(ResolvedNode::NestMatch {
-                    keys: operand.clone(),
-                    nvalue: cond.nvalue,
-                    op,
-                    label,
-                    context: cond.context,
-                });
-            } else {
-                // right is Calculation or other non-Literal: keep as NestNestMatch
-                remaining.push(ResolvedNode::NestNestMatch {
-                    left_keys: operand.clone(),
-                    left_nvalue: cond.nvalue,
-                    left_context: cond.context.clone(),
-                    op: NestMatchOp::Comparison(op),
-                    right_keys: operand,
-                    right_nvalue: cond.right,
-                    right_context: cond.context,
-                });
+            match cond.right {
+                NestMatchRhs::DateTime(range) => {
+                    remaining.push(ResolvedNode::NestMatch {
+                        keys: operand.clone(),
+                        nvalue: cond.nvalue,
+                        op,
+                        rhs: NvalueRhs::DateTime(range),
+                        context: cond.context,
+                    });
+                }
+                NestMatchRhs::Operand(
+                    crate::query::ResolvedOperand::Literal(label),
+                ) => {
+                    remaining.push(ResolvedNode::NestMatch {
+                        keys: operand.clone(),
+                        nvalue: cond.nvalue,
+                        op,
+                        rhs: NvalueRhs::Label(label),
+                        context: cond.context,
+                    });
+                }
+                NestMatchRhs::Operand(right_nvalue) => {
+                    // right is Calculation or other non-Literal: keep as NestNestMatch
+                    remaining.push(ResolvedNode::NestNestMatch {
+                        left_keys: operand.clone(),
+                        left_nvalue: cond.nvalue,
+                        left_context: cond.context.clone(),
+                        op: NestMatchOp::Comparison(op),
+                        right_keys: operand,
+                        right_nvalue,
+                        right_context: cond.context,
+                    });
+                }
             }
         }
     }
@@ -335,18 +369,208 @@ fn merge_nest_matches(children: &mut Vec<ResolvedNode>, is_or: bool) {
     *children = remaining;
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum CollapseKey {
+    Col(crate::db::Col),
+    Match(Option<crate::types::TagType>, crate::db::Col),
+}
+
+impl CollapseKey {
+    fn extract(node: &ResolvedNode) -> Option<(Self, crate::types::Label)> {
+        match node {
+            ResolvedNode::ColumnMatch { tag, label } if is_plain(label) => {
+                let target_col = if *tag == crate::types::SType::Label {
+                    crate::db::Col::from(label.value().name().to_column())
+                } else {
+                    crate::db::Col::from(*tag)
+                };
+                Some((Self::Col(target_col), label.clone()))
+            }
+            ResolvedNode::Match {
+                tag_type,
+                storage,
+                op,
+                label,
+                ..
+            } if is_plain(label)
+                && matches!(
+                    op,
+                    crate::query::ast::ComparisonOp::Scalar(
+                        crate::query::ast::BasicOp::Eq
+                    ) | crate::query::ast::ComparisonOp::Label(
+                        crate::query::ast::BasicOp::Eq
+                    )
+                ) =>
+            {
+                match storage {
+                    crate::query::lens_schema::StorageMapping::Fixed(col) => {
+                        Some((Self::Match(None, *col), label.clone()))
+                    }
+                    crate::query::lens_schema::StorageMapping::Basic {
+                        ..
+                    } => {
+                        let target_col = crate::db::Col::from(
+                            label.value().name().to_column(),
+                        );
+                        Some((
+                            Self::Match(Some(tag_type.clone()), target_col),
+                            label.clone(),
+                        ))
+                    }
+                    crate::query::lens_schema::StorageMapping::Composite => {
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn into_node(self, labels: Vec<crate::types::Label>) -> ResolvedNode {
+        let mut unique_labels: Vec<crate::types::Label> = Vec::new();
+        for l in labels {
+            if !unique_labels.iter().any(|u| u.value() == l.value()) {
+                unique_labels.push(l);
+            }
+        }
+        match self {
+            Self::Col(target_col) => ResolvedNode::ColumnMatchIn {
+                target_col,
+                labels: unique_labels,
+            },
+            Self::Match(tag_type, target_col) => ResolvedNode::MatchIn {
+                tag_type,
+                target_col,
+                labels: unique_labels,
+            },
+        }
+    }
+}
+
+fn is_plain(label: &crate::types::Label) -> bool {
+    let s = label.to_string();
+    !s.contains(['*', '?', '[', '\\'])
+}
+
+fn collapse_same_column_matches(children: &mut Vec<ResolvedNode>) {
+    use std::collections::{HashMap, HashSet};
+
+    let mut groups: HashMap<CollapseKey, Vec<crate::types::Label>> =
+        HashMap::new();
+    for (key, label) in children.iter().filter_map(CollapseKey::extract) {
+        groups.entry(key).or_default().push(label);
+    }
+    groups.retain(|_, v| v.len() >= 2);
+    if groups.is_empty() {
+        return;
+    }
+
+    let target_keys: HashSet<CollapseKey> = groups.keys().cloned().collect();
+    let mut new_children = Vec::new();
+
+    for child in children.drain(..) {
+        let Some((key, _)) = CollapseKey::extract(&child) else {
+            new_children.push(child);
+            continue;
+        };
+
+        if let Some(labels) = groups.remove(&key) {
+            new_children.push(key.into_node(labels));
+        } else if !target_keys.contains(&key) {
+            new_children.push(child);
+        }
+    }
+
+    *children = new_children;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tag::TagRegistry;
     use crate::query::ResolvedOperand;
+    use crate::tag::TagRegistry;
+    use crate::types::{Label, SType};
 
     use crate::query::lens_resolver::Resolver;
 
     #[test]
+    fn test_collapse_same_column_matches_into_in_list() {
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("1"),
+            },
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("2"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert_eq!(
+            optimized,
+            ResolvedNode::ColumnMatchIn {
+                target_col: crate::db::Col::ItemId,
+                labels: vec![Label::from("1"), Label::from("2")],
+            }
+        );
+    }
+
+    #[test]
+    fn test_collapse_does_not_group_mixed_bitical_types_for_basic_tags() {
+        use crate::query::ast::{BasicOp, ComparisonOp};
+        use crate::query::lens_schema::StorageMapping;
+        use crate::types::{BiticalType, TagType};
+
+        let storage = StorageMapping::Basic {
+            column: crate::db::Col::LabelStr,
+            tag_type: "x".to_string(),
+        };
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::Match {
+                tag_type: TagType::from("x"),
+                storage: storage.clone(),
+                bitical_type: BiticalType::String,
+                op: ComparisonOp::Scalar(BasicOp::Eq),
+                label: Label::from(1i64),
+            },
+            ResolvedNode::Match {
+                tag_type: TagType::from("x"),
+                storage,
+                bitical_type: BiticalType::String,
+                op: ComparisonOp::Scalar(BasicOp::Eq),
+                label: Label::from("abc"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert!(
+            matches!(optimized, ResolvedNode::Or(_)),
+            "Mixed integer and string on basic tags must not be grouped into single IN"
+        );
+    }
+
+    #[test]
+    fn test_collapse_ignores_glob_and_non_eq_matches() {
+        let node = ResolvedNode::Or(vec![
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("*1"),
+            },
+            ResolvedNode::ColumnMatch {
+                tag: SType::ItemId,
+                label: Label::from("2"),
+            },
+        ]);
+        let optimized = optimize(node);
+        assert!(matches!(optimized, ResolvedNode::Or(_)));
+    }
+
+    #[test]
     fn test_optimize_same_key_merge_logical() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) & parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
 
         // At this point `resolved` is an `And` node containing two NestMatches.
         let optimized = optimize(resolved);
@@ -380,7 +604,10 @@ mod tests {
     #[test]
     fn test_optimize_same_key_merge_or() {
         let query_str = "parentdir: &: (count(ext:rs) > 0) | parentdir: &: (sum(size:) > 1000)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
 
         let optimized = optimize(resolved);
 
@@ -420,8 +647,13 @@ mod tests {
 
     #[test]
     fn test_optimize_filter_pushdown() {
-        let query_str = "parentdir: &: (count(*:*) > 0) & type:file";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        // フィルタ（非 Projection ノード）が nest context に押し込まれることを確認する。
+        // 旧 `type:file` は定義参照になったため、`X:*` ルールに従い `file:*` を使用する。
+        let query_str = "parentdir: &: (count(*:*) > 0) & file:*";
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         let ResolvedNode::And(nodes) = optimized else {
@@ -437,25 +669,23 @@ mod tests {
             context: Some(ctx), ..
         } = proj_match
         else {
-            panic!("Context should be populated with type:file");
+            panic!("Context should be populated with file:*");
         };
 
-        fn is_type_file(n: &ResolvedNode) -> bool {
+        fn is_file_star(n: &ResolvedNode) -> bool {
             match n {
-                ResolvedNode::ColumnMatch { tag, label } => {
-                    tag.as_str() == "type" && label.as_str() == "file"
+                ResolvedNode::ColumnMatch { tag, .. } => tag.as_str() == "file",
+                ResolvedNode::Match { tag_type, .. } => {
+                    tag_type.as_str() == "file"
                 }
-                ResolvedNode::Match {
-                    tag_type, label, ..
-                } => tag_type.as_str() == "type" && label.as_str() == "file",
-                ResolvedNode::And(nodes) => nodes.iter().any(is_type_file),
+                ResolvedNode::And(nodes) => nodes.iter().any(is_file_star),
                 _ => false,
             }
         }
 
         assert!(
-            is_type_file(&ctx),
-            "Context should contain type:file: {:?}",
+            is_file_star(&ctx),
+            "Context should contain file:*: {:?}",
             ctx
         );
     }
@@ -465,13 +695,18 @@ mod tests {
         // Query: sum(parentdir: &: sum(size:)) > 0
         // Outer sum should be flattened to essentially sum(size:) > 0.
         let query_str = "sum(parentdir: &: sum(size:)) > 0";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         // Compare with explicitly flat sum(size:) > 0
         let flat_query_str = "sum(size:) > 0";
         let flat_resolved =
-            Resolver::new(flat_query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+            Resolver::new_nowarn(flat_query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
 
         match (optimized, flat_resolved) {
             (
@@ -494,7 +729,10 @@ mod tests {
         // (フラットリストを返すべき比較演算のため、MergedNestMatch には変換しない)
         let query_str =
             "((parentdir: &: count(size:))) := ((parentdir: &: sum(size:)))";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
@@ -538,7 +776,10 @@ mod tests {
         // 同一キーの算術演算 nvalue → Calculation を持つ MergedNestMatch に変換されること
         let query_str =
             "((parentdir: &: count(ext:rs)) / (parentdir: &: count())) :> 100";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         match optimized {
@@ -572,11 +813,46 @@ mod tests {
     }
 
     #[test]
+    fn test_optimize_same_key_merge_with_shared_context() {
+        // 同じ context (path:) を持つ2条件は、他の And 兄弟があってもマージされること
+        let query_str = "(parentdir: &: (count(cat:rs) > 0) & parentdir: &: (count(dog:rs) > 0)) & path:/tmp/foo/*";
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
+        let optimized = optimize(resolved);
+
+        let ResolvedNode::And(children) = &optimized else {
+            panic!("Expected And as root, got: {:?}", optimized)
+        };
+        let merged = children
+            .iter()
+            .find(|c| matches!(c, ResolvedNode::MergedNestMatch { .. }))
+            .unwrap_or_else(|| {
+                panic!("Expected a MergedNestMatch child, got: {:?}", optimized)
+            });
+        match merged {
+            ResolvedNode::MergedNestMatch { matches, .. } => {
+                assert_eq!(
+                    matches.len(),
+                    2,
+                    "Same key + same context should merge into 2 conditions, got: {:?}",
+                    optimized
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_optimize_different_key_no_merge() {
         // parentdir と extension は異なるキーなのでマージされないこと
         let query_str =
             "parentdir: &: (count(ext:rs) > 0) & extension: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         // MergedNestMatch にはなってはいけない
@@ -597,7 +873,10 @@ mod tests {
         // extension: の And ラッパーなしのシンプルな異なるキー同士はマージされないこと
         let query_str =
             "parentdir: &: (sum(size:) > 0) & stem: &: (count(*:*) > 0)";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         assert!(
@@ -615,12 +894,19 @@ mod tests {
     fn test_optimize_no_flatten_avg_avg() {
         // avg(parentdir: &: avg(size:)) は sum と違いフラット化されないこと
         let query_str = "avg(parentdir: &: avg(size:)) > 0";
-        let resolved = Resolver::new(query_str, &TagRegistry::with_standard()).unwrap().resolved_query;
+        let resolved =
+            Resolver::new_nowarn(query_str, &TagRegistry::with_standard())
+                .unwrap()
+                .resolved_query;
         let optimized = optimize(resolved);
 
         // 比較対象: avg(size:) > 0 (フラット版)
-        let flat_resolved =
-            Resolver::new("avg(size:) > 0", &TagRegistry::with_standard()).unwrap().resolved_query;
+        let flat_resolved = Resolver::new_nowarn(
+            "avg(size:) > 0",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap()
+        .resolved_query;
 
         match (optimized, flat_resolved) {
             (

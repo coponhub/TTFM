@@ -1,4 +1,6 @@
-// Copyright (C) 2026 coponhub
+// Copyright (C) 2026 The TTFM Project Contributors
+// See the CONTRIBUTORS file at the top-level directory of this distribution
+// for a list of copyright holders.
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -15,7 +17,7 @@
 
 use super::{
     apply_arithmetic_op, build_agg, build_resolved_literal_expr,
-    build_tag_value_agg_expr, label_to_unit_aware_expr, resolve_count_target,
+    build_tag_value_agg_expr, nvalue_rhs_condition, resolve_count_target,
     subquery, try_dispatch_common, AggregationContext, NestContext,
 };
 use crate::db::{Col, Src};
@@ -49,7 +51,10 @@ pub fn needs_aggregation_context(node: &ResolvedNode) -> bool {
     })
 }
 
-pub fn build_aggregation_context(src: &Src, node: &ResolvedNode) -> AggregationContext {
+pub fn build_aggregation_context(
+    src: &Src,
+    node: &ResolvedNode,
+) -> AggregationContext {
     let mut ctx = AggregationContext::new();
     build_agg_context_into(node, &mut ctx);
     materialize_agg_context(src, &mut ctx);
@@ -154,6 +159,27 @@ fn precompute_agg_into(
     let inner = agg.inner_node();
     let key = inner as *const ResolvedNode as usize;
 
+    // rest は split のたびに新しく合成されるノードでポインタが安定しないため、
+    // rest 自身ではなく inner のポインタ（key）に登録する。
+    if matches!(agg, ResolvedAggregationNode::Count(_)) {
+        if let Some((defs, rest)) = inner.split_definition_branches() {
+            if !ctx.definition_counts.contains_key(&key)
+                && !ctx.definition_count_nodes.contains_key(&key)
+            {
+                ctx.definition_count_nodes
+                    .insert(key, defs.into_iter().cloned().collect());
+            }
+            if let Some(rest_node) = rest {
+                if !ctx.agg_filters.contains_key(&key)
+                    && !ctx.filter_nodes.contains_key(&key)
+                {
+                    ctx.filter_nodes.insert(key, rest_node);
+                }
+            }
+            return;
+        }
+    }
+
     if !ctx.agg_filters.contains_key(&key)
         && !ctx.filter_nodes.contains_key(&key)
     {
@@ -196,7 +222,10 @@ pub fn build_nest_context(src: &Src, node: &ResolvedNode) -> NestContext {
     ctx
 }
 
-pub fn build_nest_context_for_operand(src: &Src, op: &ResolvedOperand) -> NestContext {
+pub fn build_nest_context_for_operand(
+    src: &Src,
+    op: &ResolvedOperand,
+) -> NestContext {
     let mut ctx = NestContext::new();
     for o in op.walk() {
         if let ResolvedOperand::Aggregation(agg) = o {
@@ -270,6 +299,12 @@ fn materialize_agg_context(src: &Src, ctx: &mut AggregationContext) {
     for (key, node) in inner_nodes {
         ctx.agg_inner_sqls.insert(key, build_filter_sql(src, &node));
     }
+    let definition_count_nodes: Vec<(usize, Vec<ResolvedNode>)> =
+        ctx.definition_count_nodes.drain().collect();
+    for (key, defs) in definition_count_nodes {
+        let sql = crate::query::lens_builder::count_definitions(src, &defs);
+        ctx.definition_counts.insert(key, sql);
+    }
 }
 
 fn build_filter_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
@@ -286,21 +321,22 @@ fn build_filter_node_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
     // build_filter_operand_expr はタグを EAV で、集約をスカラーサブクエリで展開する。
     let agg_ctx = build_aggregation_context(src, node);
     match node {
-        ResolvedNode::CalculationMatch { calc, op, label } => {
+        ResolvedNode::CalculationMatch { calc, op, rhs } => {
             let mut stmt = Query::select();
             stmt.column(Col::ItemId)
                 .from(src)
                 .group_by_col(Col::ItemId);
             let calc_expr = build_filter_calc_expr(src, calc, &agg_ctx);
-            let label_expr = label_to_unit_aware_expr(label);
-            stmt.and_having(
-                Expr::expr(calc_expr).binary(to_bin_op(*op), label_expr),
-            );
+            let is_string =
+                calc.left.is_string_type() && calc.right.is_string_type();
+            stmt.cond_having(nvalue_rhs_condition(
+                calc_expr, *op, rhs, is_string,
+            ));
             stmt
         }
         ResolvedNode::TagCalculationMatch {
             storage,
-            sql_type,
+            bitical_type,
             op,
             calc,
             ..
@@ -309,7 +345,7 @@ fn build_filter_node_sql(src: &Src, node: &ResolvedNode) -> SelectStatement {
             stmt.column(Col::ItemId)
                 .from(src)
                 .group_by_col(Col::ItemId);
-            let tag_expr = build_tag_value_agg_expr(storage, *sql_type);
+            let tag_expr = build_tag_value_agg_expr(storage, *bitical_type);
             let calc_expr = build_filter_calc_expr(src, calc, &agg_ctx);
             stmt.and_having(
                 Expr::expr(tag_expr).binary(to_bin_op(*op), calc_expr),
@@ -359,9 +395,16 @@ fn build_filter_operand_expr(
 ) -> SimpleExpr {
     operand.fold(&|op, child_results: Vec<SimpleExpr>| match op {
         ResolvedOperand::Literal(lab) => build_resolved_literal_expr(lab),
-        ResolvedOperand::TagRef { storage, sql_type, .. } => {
-            build_tag_value_agg_expr(storage, *sql_type)
+        ResolvedOperand::TagRef {
+            storage,
+            bitical_type,
+            ..
         }
+        | ResolvedOperand::LabelGrouping {
+            storage,
+            bitical_type,
+            ..
+        } => build_tag_value_agg_expr(storage, *bitical_type),
         ResolvedOperand::Calculation(calc) => {
             let [left, right]: [SimpleExpr; 2] =
                 child_results.try_into().unwrap();
@@ -369,6 +412,8 @@ fn build_filter_operand_expr(
                 calc.left.is_string_type() && calc.right.is_string_type();
             apply_arithmetic_op(&calc.op, left, right, is_string)
         }
-        ResolvedOperand::Aggregation(agg) => subquery(build_agg(src, agg, agg_ctx)),
+        ResolvedOperand::Aggregation(agg) => {
+            subquery(build_agg(src, agg, agg_ctx))
+        }
     })
 }
