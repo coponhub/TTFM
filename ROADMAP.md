@@ -82,12 +82,14 @@ Modularizing the core for tag-centricity and extensibility.
 
 ---
 
-## Milestone 4: Tag Edit (Status: [ ])
+## Milestone 4: Tag Edit (Status: [x])
 Tag-based operations including file movement and functional integration.
 
-- [ ] **Query-Based Tagging**: Support `ttfm tag <QUERY> <TAG>` to batch-tag items.
-- [ ] **Functional Integration**: Merge `rank` assignment into the generalized tag editing system.
-- [ ] **Virtual Operations (mv)**: Realize file moving/renaming by updating `path` tags.
+- [x] **Query-Based Tagging**: Support `ttfm tag <QUERY> <TAG>` and `ttfm untag` to batch-tag items.
+- [x] **Functional Integration**: Merge `rank` assignment into the generalized tag editing system.
+- [x] **Virtual Operations (mv)**: Realize file moving/renaming by updating `path`, `filename`, `stem`, `parentdir` tags.
+- [x] **Type Metadata & Tag Cast**: Configure `strategy`, `display_unit`, `bitical_type`, and perform atomic type casting (`cast`).
+- [x] **Interactive Confirmation & Policy Controls**: Pre-flight confirmation prompt, interactive resolution (conflict, hardlinks, replace), and automation policy flags (`-y`, `--on-conflict`, `--on-hardlink`).
 
 ---
 
@@ -135,7 +137,8 @@ Remaining features, optimizations, and long-term vision.
 - [ ] **Open Operations**: Support `ttfm open <QUERY>` with system-default apps.
 - [ ] **Item Operations**: `split` (separate multi-location items) and `merge` (combine entities).
 - [ ] **Remote Support**: Integrate `RemoteID` (ETag/VersionID) for online files.
-- [ ] **Unique Tag Types**: Allow a user-defined type to be marked unique (e.g. a `unique:true` meta tag on the Type item) so its tag is single-valued, rejecting or replacing duplicates on edit.
+- [x] **Unique Tag Types**: Implemented via `strategy:replace` on Type definitions (ADR 0029) to enforce single-valued tags.
+- [ ] **Multi-Origin Tag Coexistence**: Support the coexistence of same-named tags across different origins (User, Plugin, and Builtin/System) without destructive overwrites, enabling origin-scoped disambiguation and query resolution.
 
 ### Search & UI Enhancements
 - [ ] **Sorting**: Sort results by Size, Date Modified, or Name.
