@@ -33,3 +33,7 @@ ttfm search --short "extension:rs & path:" | head -n 5
 索引データを削除し、再構築可能な状態に戻すためのコマンド。
 - `ttfm clear`: File Reference 関連のテーブル（`file_references` / `locations` / `base_tags` / `tags_by_location`）(STORE.md §1参照)を丸ごと削除する。
 - `ttfm clear --all`: データベース全体を削除する。Origin を問わず全ての登録済みの Item が失われる。
+
+## 4. タグ編集 (`ttfm tag`)
+- `ttfm tag <SearchQuery> <EditQuery>`: 誤実行防止のため第2引数は必須。
+- `ttfm tag <SearchQuery> ""` : 空文字指定で検索結果をそのままDBへ登録する（EDIT.md §5.7 参照）。

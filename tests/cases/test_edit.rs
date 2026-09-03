@@ -830,3 +830,41 @@ fn edit_tag_applies_to_all_over_100_files() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn test_cli_tag_requires_edit_query_or_empty_string() -> anyhow::Result<()> {
+    let ttfm_bin = env!("CARGO_BIN_EXE_ttfm");
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    let ttfm_home = root.join(".ttfm");
+    let store_dir = ttfm_home.join("db");
+    std::fs::create_dir_all(&store_dir)?;
+    let store = Store::open(&store_dir)?;
+    let registry = TagRegistry::with_standard();
+    Indexer::new(&store, &registry).initialize_tables()?;
+
+    let out_err = std::process::Command::new(ttfm_bin)
+        .env("TTFM_HOME", &ttfm_home)
+        .args(["tag", "tag:\"project:foo\""])
+        .output()?;
+    assert!(
+        !out_err.status.success(),
+        "tag with single argument must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out_err.stderr);
+    assert!(
+        stderr.contains("<EDIT_QUERY>"),
+        "stderr should mention missing <EDIT_QUERY>, got:\n{stderr}"
+    );
+
+    let out_ok = std::process::Command::new(ttfm_bin)
+        .env("TTFM_HOME", &ttfm_home)
+        .args(["-y", "tag", "tag:\"project:foo\"", ""])
+        .output()?;
+    assert!(
+        out_ok.status.success(),
+        "tag with empty string edit_query must succeed, stderr:\n{}",
+        String::from_utf8_lossy(&out_ok.stderr)
+    );
+    Ok(())
+}

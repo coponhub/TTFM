@@ -126,8 +126,8 @@ enum Commands {
     Tag {
         /// 対象を絞るクエリ（例: "filename:foo.txt"）
         search_query: String,
-        /// 付与するタグ（例: "project:A status:done"）
-        edit_query: Option<String>,
+        /// 付与するタグ（例: "project:A status:done"。DB登録は ""）
+        edit_query: String,
     },
     /// マッチしたアイテムからタグを削除します。
     Untag {
@@ -319,12 +319,17 @@ fn main() -> Result<()> {
             search_query,
             edit_query,
         } => {
+            let edit_query_opt = if edit_query.is_empty() {
+                None
+            } else {
+                Some(edit_query.as_str())
+            };
             let mut stdout = std::io::stdout();
             let resp = edit(
                 &store,
                 &registry,
                 search_query,
-                edit_query.as_deref(),
+                edit_query_opt,
                 QueryType::Tag,
                 None,
                 build_write_options(&cli, &config),
@@ -1025,6 +1030,37 @@ mod tests {
             "Completed cache with has_more=true must not display generating warning, got:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn test_cli_parse_tag_requires_edit_query() {
+        assert!(Cli::try_parse_from(["ttfm", "tag", "extension:rs"]).is_err());
+        let parsed_empty =
+            Cli::try_parse_from(["ttfm", "tag", "extension:rs", ""]).unwrap();
+        match parsed_empty.command {
+            Commands::Tag {
+                search_query,
+                edit_query,
+            } => {
+                assert_eq!(search_query, "extension:rs");
+                assert_eq!(edit_query, "");
+            }
+            _ => panic!("expected Tag command"),
+        }
+
+        let parsed_with_tag =
+            Cli::try_parse_from(["ttfm", "tag", "extension:rs", "project:A"])
+                .unwrap();
+        match parsed_with_tag.command {
+            Commands::Tag {
+                search_query,
+                edit_query,
+            } => {
+                assert_eq!(search_query, "extension:rs");
+                assert_eq!(edit_query, "project:A");
+            }
+            _ => panic!("expected Tag command"),
+        }
     }
 }
 
