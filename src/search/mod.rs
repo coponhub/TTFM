@@ -200,11 +200,10 @@ pub(crate) fn search_core(
     order: &[crate::types::Order],
     sink: &mut dyn crate::query::error::WarningSink,
 ) -> Result<(Vec<crate::response::Item>, bool)> {
-    let parsed = if query.trim().is_empty() {
-        crate::query::ast::QueryNode::And(vec![])
-    } else {
-        crate::query::parser::parse(query, sink)?
-    };
+    if query.trim().is_empty() {
+        return Err(anyhow::anyhow!("Empty search query is not allowed"));
+    }
+    let parsed = crate::query::parser::parse(query, sink)?;
     let expanded = eval::expand_eval(parsed, store, registry, sink)?;
     let resolver = crate::query::lens_resolver::Resolver::from_node(
         expanded, registry, sink,

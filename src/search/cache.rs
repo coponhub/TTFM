@@ -210,11 +210,10 @@ pub fn run_cache_worker(db_dir: PathBuf, cid: &str, query: &str) -> Result<()> {
         reader,
         &db_dir,
     )?;
-    let parsed = if query.trim().is_empty() {
-        crate::query::ast::QueryNode::And(vec![])
-    } else {
-        crate::query::parser::parse_nowarn(query)?
-    };
+    if query.trim().is_empty() {
+        return Err(anyhow::anyhow!("Empty search query is not allowed"));
+    }
+    let parsed = crate::query::parser::parse_nowarn(query)?;
     let expanded =
         super::eval::expand_eval(parsed, &store, &registry, &mut Vec::new())?;
     let resolver = crate::query::lens_resolver::Resolver::from_node(
@@ -392,11 +391,10 @@ pub(crate) fn try_resolve_cache(
     }
     let n = options.n.unwrap_or(0);
     let offset = options.offset.unwrap_or(0);
-    let parsed = if query.trim().is_empty() {
-        crate::query::ast::QueryNode::And(vec![])
-    } else {
-        crate::query::parser::parse(query, sink)?
-    };
+    if query.trim().is_empty() {
+        return Err(anyhow::anyhow!("Empty search query is not allowed"));
+    }
+    let parsed = crate::query::parser::parse(query, sink)?;
     let expanded = super::eval::expand_eval(parsed, store, registry, sink)?;
     let resolver = crate::query::lens_resolver::Resolver::from_node(
         expanded, registry, sink,

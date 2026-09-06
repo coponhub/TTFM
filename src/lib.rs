@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 use file_id::get_file_id;
 use std::path::Path;
 
+pub mod cli;
 pub mod config;
 pub mod db;
 pub mod indexing;

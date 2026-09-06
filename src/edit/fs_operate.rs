@@ -101,10 +101,16 @@ pub struct Moved {
     pub crossed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttrSet {
+    pub item: ItemId,
+    pub path: PathBuf,
+}
+
 #[derive(Default)]
 pub struct FsOutcome {
     pub moved: Vec<Moved>,
-    pub attrs_set: Vec<PathBuf>,
+    pub attrs_set: Vec<AttrSet>,
 }
 
 impl FsOutcome {
@@ -516,7 +522,7 @@ impl FsOutcome {
             .iter()
             .map(|m| m.to.clone())
             .chain(plan.moves.iter().map(|m| m.from.clone()))
-            .chain(self.attrs_set.iter().cloned())
+            .chain(self.attrs_set.iter().map(|a| a.path.clone()))
             .filter_map(|p| p.parent().map(Path::to_path_buf))
             .fold(Vec::new(), |mut dirs, d| {
                 if !dirs.contains(&d) {
@@ -594,7 +600,10 @@ pub fn apply(
     for a in &plan.attrs {
         let path = outcome.target_of(&a.item).unwrap_or(&a.from).clone();
         match set_attr(&path, &a.attr) {
-            Ok(()) => outcome.attrs_set.push(path),
+            Ok(()) => outcome.attrs_set.push(AttrSet {
+                item: a.item.clone(),
+                path,
+            }),
             Err(e) => return abort(store, registry, &plan, outcome, &path, e),
         }
     }
@@ -796,7 +805,13 @@ mod tests {
         let store = open_test_store(dir.path(), &reg);
         let outcome = apply(&store, &reg, plan).unwrap();
         assert_eq!(outcome.count(), 1);
-        assert_eq!(outcome.attrs_set, vec![p.clone()]);
+        assert_eq!(
+            outcome.attrs_set,
+            vec![AttrSet {
+                item: ItemId::Stored(1),
+                path: p.clone(),
+            }]
+        );
 
         let meta = std::fs::metadata(&p).unwrap();
         let ft = filetime::FileTime::from_last_modification_time(&meta);

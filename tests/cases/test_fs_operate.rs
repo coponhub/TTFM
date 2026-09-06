@@ -124,7 +124,7 @@ fn parentdir_change_across_devices_keeps_the_item() {
 #[test]
 fn mtime_edit_sets_the_file_attribute_and_reindexes() {
     let (store, registry, _d, root) = setup(&["a.txt"]);
-    run(
+    let resp = run(
         &store,
         &registry,
         "filename:a.txt",
@@ -132,6 +132,11 @@ fn mtime_edit_sets_the_file_attribute_and_reindexes() {
         QueryType::Tag,
     )
     .unwrap();
+    assert_eq!(resp.fs_ops, 1);
+    assert!(
+        !resp.has_skipped,
+        "has_skipped should be false for successful attr edit"
+    );
     let on_disk = std::fs::metadata(root.join("a.txt")).unwrap().mtime();
     assert_eq!(on_disk, expected_epoch("2020-01-01T00:00:00"));
     assert_eq!(find(&store, &registry, "mtime:2020").len(), 1);

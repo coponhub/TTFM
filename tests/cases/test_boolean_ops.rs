@@ -47,7 +47,7 @@ fn test_boolean_arithmetic_ops() -> anyhow::Result<()> {
 
     // デバッグ: 全アイテム数を確認 (実ファイル/ディレクトリのみ。インデックスルートの data は除く)
     let all_items =
-        search::search_nowarn(&store, &registry, "", Default::default())?;
+        search::search_nowarn(&store, &registry, "*:*", Default::default())?;
     let files_only: Vec<_> = all_items
         .results
         .iter()

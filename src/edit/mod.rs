@@ -233,6 +233,9 @@ pub fn edit_with_prompt(
     for m in &outcome.moved {
         processed_items.insert(m.item.clone());
     }
+    for a in &outcome.attrs_set {
+        processed_items.insert(a.item.clone());
+    }
     let resp = write::write_and_refresh(
         store,
         registry,

@@ -82,7 +82,7 @@ pub struct Warning(pub String);
 
 impl std::fmt::Display for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Warning: {}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -92,7 +92,7 @@ pub struct ImmediateWarningSink<'a> {
 
 impl WarningSink for ImmediateWarningSink<'_> {
     fn warn(&mut self, warning: Warning) {
-        writeln!(self.writer, "{}", warning).unwrap_or(());
+        writeln!(self.writer, "Warning: {}", warning).unwrap_or(());
     }
 }
 

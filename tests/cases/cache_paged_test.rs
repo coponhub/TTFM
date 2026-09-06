@@ -201,8 +201,8 @@ fn test_run_cache_worker_empty_query() -> anyhow::Result<()> {
         None::<&fn(usize)>,
         false,
     )?;
-    let cid = "test-empty-cid";
-    ttfm::search::run_cache_worker(store.db_dir.clone(), cid, "")?;
+    let cid = "test-all-cid";
+    ttfm::search::run_cache_worker(store.db_dir.clone(), cid, "*:*")?;
     let cache = ttfm::search::CacheManager::new(store.db_dir.join("cache"), 0);
     assert!(cache.path_for(cid).exists());
     Ok(())

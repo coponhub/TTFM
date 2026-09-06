@@ -460,6 +460,7 @@ pub mod test_errors;
 pub mod test_eval;
 pub mod test_fs_operate;
 pub mod test_glob_values;
+pub mod test_interactive;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
 pub mod test_literal_ops;
