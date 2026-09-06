@@ -24,6 +24,7 @@ file-id = "0.2.3"
 ignore = "0.4.25"
 sea-query = "0.32.7"
 terminal_size = "0.4.3"
+console = "0.16"
 path-slash = "0.2"
 strum = { version = "0.26", features = ["derive"] }
 rustc-hash = "2.1.1"

@@ -3630,6 +3630,7 @@ dependencies = [
  "chrono",
  "chrono-english",
  "clap",
+ "console",
  "dateparser",
  "dirs 5.0.1",
  "duckdb",

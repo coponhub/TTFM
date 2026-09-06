@@ -477,6 +477,7 @@ pub mod test_search_order;
 pub mod test_search_progress;
 pub mod test_size_units;
 pub mod test_strict_grammar;
+pub mod test_terminal_width_formatting;
 pub mod test_type_definitions;
 pub mod test_typedtag_label_node;
 pub mod test_validation;

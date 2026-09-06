@@ -36,16 +36,13 @@ impl<W: Write> WarningSink for ColorWarningSink<W> {
 }
 
 pub fn truncate_text(text: &str, max_width: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_width {
-        text.to_string()
-    } else {
-        if max_width <= 3 {
-            return "...".chars().take(max_width).collect();
-        }
-        let truncated: String = text.chars().take(max_width - 3).collect();
-        format!("{}...", truncated)
+    if console::measure_text_width(text) <= max_width {
+        return text.to_string();
     }
+    if max_width <= 3 {
+        return "...".chars().take(max_width).collect();
+    }
+    console::truncate_str(text, max_width, "...").to_string()
 }
 
 pub fn get_terminal_width() -> usize {
@@ -122,7 +119,7 @@ pub fn print_results(
     }
 
     let type_ranks = crate::rank::get_type_ranks(store).unwrap_or_default();
-    let term_width = get_terminal_width();
+    let effective_width = get_terminal_width().saturating_sub(4);
 
     if let Some(res) = response.results.first().filter(|r| {
         r.id.is_volatile()
@@ -160,14 +157,20 @@ pub fn print_results(
         let mut col_widths = vec![0; sorted_keys.len()];
 
         for res in &group.results {
-            item_id_width = item_id_width.max(res.id.to_string().len());
+            item_id_width = item_id_width
+                .max(console::measure_text_width(&res.id.to_string()));
             for (i, key) in sorted_keys.iter().enumerate() {
-                let val = res.get_tag_value(key.as_str()).unwrap_or_default();
-                col_widths[i] = col_widths[i].max(val.chars().count());
+                let val_str = res
+                    .get_tag_value(key.as_str())
+                    .map(|raw| registry.format_display(key.as_str(), &raw))
+                    .unwrap_or_default();
+                col_widths[i] =
+                    col_widths[i].max(console::measure_text_width(&val_str));
             }
         }
         for (i, key) in sorted_keys.iter().enumerate() {
-            col_widths[i] = col_widths[i].max(key.as_str().len());
+            col_widths[i] =
+                col_widths[i].max(console::measure_text_width(key.as_str()));
         }
 
         {
@@ -180,13 +183,19 @@ pub fn print_results(
                 let id_str = res_opt
                     .map(|r| r.id.to_string())
                     .unwrap_or_else(|| "item_id".to_string());
-                let available = term_width.saturating_sub(current_width);
+                let available = effective_width.saturating_sub(current_width);
                 if available == 0 {
                     return;
                 }
 
                 let id_disp = if item_id_width <= available {
-                    format!("{:<width$}", id_str, width = item_id_width)
+                    console::pad_str(
+                        &id_str,
+                        item_id_width,
+                        console::Alignment::Left,
+                        None,
+                    )
+                    .to_string()
                 } else {
                     truncate_text(&id_str, available)
                 };
@@ -196,11 +205,15 @@ pub fn print_results(
                 } else {
                     write!(writer, "{}", id_disp).unwrap_or(());
                 }
-                current_width += id_disp.chars().count();
+                current_width += console::measure_text_width(&id_disp);
 
                 for (i, key) in sorted_keys.iter().enumerate() {
-                    if current_width + sep_len >= term_width {
-                        write!(writer, "...").unwrap_or(());
+                    let target_width = col_widths[i];
+                    if current_width + sep_len + target_width > effective_width
+                    {
+                        if current_width + sep_len + 3 <= effective_width {
+                            write!(writer, "{}{}", sep, "...").unwrap_or(());
+                        }
                         break;
                     }
                     write!(writer, "{}", sep).unwrap_or(());
@@ -219,24 +232,19 @@ pub fn print_results(
                             .unwrap_or_default()
                     };
 
-                    let avail = term_width.saturating_sub(current_width);
-                    if avail == 0 {
-                        break;
-                    }
-
-                    let target_width = col_widths[i];
-                    let out = if target_width <= avail {
-                        format!("{:<width$}", val_str, width = target_width)
-                    } else {
-                        truncate_text(&val_str, avail)
-                    };
+                    let out = console::pad_str(
+                        &val_str,
+                        target_width,
+                        console::Alignment::Left,
+                        None,
+                    );
 
                     if is_header {
                         write!(writer, "\x1b[1m{}\x1b[0m", out).unwrap_or(());
                     } else {
                         write!(writer, "{}", out).unwrap_or(());
                     }
-                    current_width += out.chars().count();
+                    current_width += console::measure_text_width(&out);
                 }
                 writeln!(writer).unwrap_or(());
             };
@@ -282,7 +290,7 @@ pub fn print_compact_projections(
     writer: &mut dyn Write,
     is_interactive: bool,
 ) {
-    let term_width = get_terminal_width();
+    let effective_width = get_terminal_width().saturating_sub(4);
 
     for label_item in &response.results {
         let total_count = label_item
@@ -308,7 +316,9 @@ pub fn print_compact_projections(
                 all_items_str.push_str(", ");
             }
             all_items_str.push_str(&tag_entry.typed_tag.as_str());
-            if all_items_str.chars().count() > term_width + 10 {
+            if console::measure_text_width(&all_items_str)
+                > effective_width + 10
+            {
                 break;
             }
         }
@@ -316,7 +326,7 @@ pub fn print_compact_projections(
         writeln!(
             writer,
             "  {}",
-            truncate_text(&all_items_str, term_width.saturating_sub(2))
+            truncate_text(&all_items_str, effective_width.saturating_sub(2))
         )
         .unwrap_or(());
     }
@@ -681,5 +691,47 @@ mod tests {
             "Completed cache with has_more=true must not display generating warning, got:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn test_truncate_text_boundary_safety() {
+        assert_eq!(truncate_text("abcdef", 10), "abcdef");
+        assert_eq!(truncate_text("a", 2), "a");
+        assert_eq!(truncate_text("abcdef", 2), "..");
+        assert_eq!(truncate_text("abcdef", 0), "");
+    }
+
+    #[test]
+    fn test_print_results_drops_whole_columns_cleanly() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "40");
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = make_store_and_registry(&dir.path().join("db"));
+        let response = crate::search::search_nowarn(
+            &store,
+            &registry,
+            "type:*",
+            Default::default(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        print_results(
+            &store, &registry, &response, "type:*", 100, &mut out, false,
+        );
+        std::env::remove_var("COLUMNS");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("item_id"));
+        for line in text.lines().filter(|l| {
+            !l.is_empty()
+                && !l.contains("displayed")
+                && !l.contains("available")
+        }) {
+            assert!(
+                console::measure_text_width(line) <= 40 - 4,
+                "Line width {} exceeds 36 for line: {:?}",
+                console::measure_text_width(line),
+                line
+            );
+        }
     }
 }
