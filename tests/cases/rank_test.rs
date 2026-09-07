@@ -39,7 +39,7 @@ fn test_rank_sorting_files() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     // 2. クエリでランクを設定
@@ -111,7 +111,7 @@ fn test_rank_batch_update() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     // 1. *.txt のランクを一括で 10 に設定
@@ -163,7 +163,7 @@ fn test_rank_set_by_id_low_level() {
 
     fs::create_dir_all(&db_dir).unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(dir.path(), None::<&fn(usize)>, false)
+        .run_single(dir.path(), None, false)
         .unwrap();
 
     let id = tagging::add_item(&store, &registry, "note", "test note").unwrap();
@@ -195,7 +195,7 @@ fn user_rank_survives_reindex() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     edit(
@@ -212,7 +212,7 @@ fn user_rank_survives_reindex() {
 
     fs::write(root.join("a.txt"), "changed content").unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     let results = search::search_nowarn(
@@ -241,7 +241,7 @@ fn test_definition_ref_rank_falls_back_to_registry_default() {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     // `filename` の type 定義行は index 時に registry のデフォルト rank を

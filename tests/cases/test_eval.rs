@@ -203,11 +203,8 @@ fn test_q_large_expansion_in_list_no_ulimit_crash() -> anyhow::Result<()> {
     for i in 0..2000 {
         std::fs::File::create(root.join(format!("file_{:04}.txt", i)))?;
     }
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
     let res = ttfm::search::search_nowarn(
         &store,
         &registry,
@@ -230,11 +227,8 @@ fn test_q_lightweight_eval_expansion() -> anyhow::Result<()> {
 
     std::fs::write(root.join("a.rs"), "fn main() {}")?;
     std::fs::write(root.join("b.txt"), "hello")?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,

@@ -545,7 +545,7 @@ fn reindex(
     rebind(store, outcome)?;
     crate::indexing::indexer::Indexer::new(store, registry).run(
         &outcome.touched_dirs(plan),
-        None::<&fn(usize)>,
+        None,
         false,
     )?;
     Ok(())

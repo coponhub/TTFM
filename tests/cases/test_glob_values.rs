@@ -241,11 +241,8 @@ fn test_aggregation_comparison_slot_glob_true() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,
@@ -278,11 +275,8 @@ fn test_aggregation_comparison_slot_glob_false() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,
@@ -311,11 +305,8 @@ fn test_aggregation_comparison_string_rhs_not_collapsed_to_zero(
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,
@@ -343,11 +334,8 @@ fn test_size_partial_digit_glob_returns_error() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,
@@ -375,11 +363,8 @@ fn test_mtime_partial_digit_glob_returns_error() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,
@@ -407,11 +392,8 @@ fn test_item_id_unknown_origin_glob_returns_error() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = ttfm::search::search_nowarn(
         &store,

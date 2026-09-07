@@ -24,7 +24,7 @@ fn setup(files: &[&str]) -> (Store, TagRegistry, TempDir, PathBuf) {
     let store = Store::open(base.join("db")).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
     (store, registry, dir, root)
 }

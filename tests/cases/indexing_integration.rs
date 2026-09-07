@@ -47,7 +47,7 @@ fn setup(files: &[&str]) -> (Store, TagRegistry, TempDir, PathBuf) {
 
 fn index(store: &Store, registry: &TagRegistry, roots: &[&Path]) {
     Indexer::new(store, registry)
-        .run(roots, None::<&fn(usize)>, false)
+        .run(roots, None, false)
         .unwrap();
 }
 
@@ -671,7 +671,7 @@ fn indexing_no_roots_scans_nothing() {
 
     let empty: &[&Path] = &[];
     let count = Indexer::new(&store, &registry)
-        .run(empty, None::<&fn(usize)>, false)
+        .run(empty, None, false)
         .unwrap();
 
     assert_eq!(count, 0, "an empty root list must scan no entries");

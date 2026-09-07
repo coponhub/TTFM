@@ -16,7 +16,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +25,7 @@ use crate::cli::format::{
     ColorWarningSink, FormatOptions,
 };
 use crate::cli::interactive::state::State;
+use crate::cli::progress::MultiStageProgressView;
 use crate::config::Config;
 use crate::db::Store;
 use crate::edit::{edit_with_io, QueryType, WriteOptions};
@@ -620,8 +621,16 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
                 .collect();
             let path_refs: Vec<&std::path::Path> =
                 expanded_paths.iter().map(|p| p.as_path()).collect();
+            let is_interactive = std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal();
+            let view = MultiStageProgressView::for_stdout(is_interactive);
             let indexer = Indexer::new(store, registry);
-            let n = indexer.run(&path_refs, None::<&fn(usize)>, false)?;
+            let n = indexer.run(
+                &path_refs,
+                Some(&|p| view.handle_progress(p)),
+                false,
+            )?;
+            view.finish();
             writeln!(output, "Indexed {n} files.")?;
             if let Some(first) = paths.first() {
                 if let Ok(mut p) = last_indexed_path.lock() {
@@ -1006,7 +1015,7 @@ mod tests {
         let file_path = dir.path().join("test_sample.txt");
         std::fs::write(&file_path, "sample content").unwrap();
         Indexer::new(&store, &registry)
-            .run_single(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None, false)
             .unwrap();
 
         let config = Config::default();

@@ -123,7 +123,7 @@ macro_rules! define_cases {
                     .initialize_tables()
                     .expect("initialize_tables");
                 ttfm::indexing::Indexer::new(&store, &registry)
-                    .run_single(root.path(), None::<&fn(usize)>, false)
+                    .run_single(root.path(), None, false)
                     .expect("index_directory");
                 // 宣言的タグ指定（tags フィールド）を全ケース分集めて 1 回の write で適用
                 let tag_specs: Vec<(std::path::PathBuf, &str)> = CASES
@@ -464,6 +464,7 @@ pub mod test_interactive;
 pub mod test_item_refactoring;
 pub mod test_label_calc;
 pub mod test_literal_ops;
+pub mod test_multi_stage_indexing_progress;
 pub mod test_nest;
 pub mod test_null_propagation;
 pub mod test_optimize_sql;

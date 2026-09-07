@@ -538,11 +538,7 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let cid = "test-worker-cid";
         run_cache_worker(store.db_dir.clone(), cid, "extension:txt")?;
@@ -566,11 +562,7 @@ mod tests {
         std::fs::create_dir_all(db_dir.join("cache"))?;
         File::create(dir.path().join("test.txt"))?;
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            dir.path(),
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(dir.path(), None, false)?;
         let cid = "test-handshake-cid";
         let token = "test-secret-token";
         let job_file = job_path_for(&cache.cache_dir, cid);
@@ -634,11 +626,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let query = "extension:txt";
 
@@ -714,11 +702,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let res = search_nowarn(
             &store,
@@ -754,11 +738,7 @@ mod tests {
         File::create(root.join("test.txt"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let query = "extension:";
 
@@ -858,11 +838,7 @@ mod tests {
         File::create(root.join("test.rs"))?;
 
         let (store, registry, cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let query = "extension:md | extension:rs";
         let cid = "test-complex-cid";

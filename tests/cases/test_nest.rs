@@ -2629,11 +2629,8 @@ fn test_nest_proj_proj_no_scope() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2658,11 +2655,8 @@ fn test_nest_proj_calc_no_scope() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2691,11 +2685,8 @@ fn test_label_set_op_column_storage() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // type: の値（タグタイプ名）と parentdir: の値（パス）は交わらないため空
     let res = search::search_nowarn(
@@ -2739,11 +2730,8 @@ fn test_nest_label_grouping_sum_size() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2778,11 +2766,8 @@ fn test_nest_label_grouping_commutative_and_composition() -> anyhow::Result<()>
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res1 = search::search_nowarn(
         &store,
@@ -2822,11 +2807,8 @@ fn test_nest_label_grouping_anchored_and_quoted_pattern() -> anyhow::Result<()>
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res1 = search::search_nowarn(
         &store,
@@ -2866,11 +2848,8 @@ fn test_nest_label_grouping_unmatched_rows_excluded() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2898,11 +2877,8 @@ fn test_nest_label_grouping_multi_key() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2930,11 +2906,8 @@ fn test_nest_label_grouping_count_typed() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -2966,11 +2939,8 @@ fn test_nest_label_grouping_multi_key_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -3002,11 +2972,8 @@ fn test_nest_label_grouping_scalar_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -3033,11 +3000,8 @@ fn test_label_grouping_on_user_defined_tag() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     ttfm::edit::edit(
         &store,
@@ -3084,11 +3048,8 @@ fn test_label_grouping_boundary_wildcards() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&root.join(".ttfm/db"))?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     ttfm::edit::edit(
         &store,

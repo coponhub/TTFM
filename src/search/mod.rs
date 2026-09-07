@@ -246,11 +246,7 @@ mod tests {
         let db_dir = dir.path().join("db");
         std::fs::create_dir(&db_dir)?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            dir.path(),
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(dir.path(), None, false)?;
 
         let mut warnings: Vec<crate::query::error::Warning> = Vec::new();
         search(
@@ -285,11 +281,7 @@ mod tests {
         }
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let res = search_nowarn(
             &store,
@@ -317,11 +309,7 @@ mod tests {
 
         File::create(root.join("a.txt"))?;
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let res = search_nowarn(
             &store,
@@ -353,11 +341,7 @@ mod tests {
         std::fs::write(&path, vec![0u8; 123])?;
 
         let (store, registry, _cache) = setup(&db_dir)?;
-        Indexer::new(&store, &registry).run_single(
-            root,
-            None::<&fn(usize)>,
-            false,
-        )?;
+        Indexer::new(&store, &registry).run_single(root, None, false)?;
 
         let res = search_nowarn(
             &store,

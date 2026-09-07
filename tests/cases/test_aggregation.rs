@@ -277,11 +277,8 @@ fn test_aggregation_comparison_ne() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res1 = search::search_nowarn(
         &store,
@@ -320,11 +317,8 @@ fn test_system_columns_aggregation() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -406,11 +400,8 @@ fn test_max_mtime_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res2 = search::search_nowarn(
         &store,
@@ -438,11 +429,8 @@ fn test_max_mtime_with_filter_date_comparison() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -468,11 +456,8 @@ fn test_aggregation_comparison_date_equal() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(
         &store,
@@ -527,7 +512,7 @@ impl TestContext {
             .initialize_tables()
             .unwrap();
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run_single(&self.root, None::<&fn(usize)>, false)
+            .run_single(&self.root, None, false)
             .unwrap();
         search::search_nowarn(
             &store,
@@ -566,11 +551,8 @@ fn test_string_agg_arithmetic_addition() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res = search::search_nowarn(&store, &registry,
         "sum(extension:rs & extension:) + ' - ' + sum(extension:txt & extension:)",
@@ -616,11 +598,8 @@ fn test_count_empty_args() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        &root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(&root, None, false)?;
 
     let res_any_top = search::search_nowarn(
         &store,

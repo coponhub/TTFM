@@ -367,11 +367,8 @@ fn test_aggregation_bare_calc_explicit_paren_baseline() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     let res_explicit = search::search_nowarn(
         &store,

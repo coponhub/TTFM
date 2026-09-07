@@ -662,7 +662,7 @@ mod tests {
         let test_file = dir.path().join("sized.bin");
         std::fs::write(&test_file, vec![0u8; 1024]).unwrap();
         crate::indexing::Indexer::new(&store, &registry)
-            .run_single(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None, false)
             .unwrap();
 
         let response = crate::search::search_nowarn(
@@ -712,7 +712,7 @@ mod tests {
         let test_file = dir.path().join("dated.txt");
         std::fs::write(&test_file, b"hi").unwrap();
         crate::indexing::Indexer::new(&store, &registry)
-            .run_single(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None, false)
             .unwrap();
 
         let response = crate::search::search_nowarn(
@@ -758,7 +758,7 @@ mod tests {
 
         std::fs::write(dir.path().join("sized.bin"), vec![0u8; 1024]).unwrap();
         crate::indexing::Indexer::new(&store, &registry)
-            .run_single(dir.path(), None::<&fn(usize)>, false)
+            .run_single(dir.path(), None, false)
             .unwrap();
 
         let response = crate::search::search_nowarn(

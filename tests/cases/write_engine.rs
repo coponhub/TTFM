@@ -285,7 +285,7 @@ fn setup_with_indexed_file() -> (Store, TagRegistry, i64, tempfile::TempDir) {
         .initialize_tables()
         .unwrap();
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None, false)
         .unwrap();
 
     let file_id = read_file_ids(&store)[0];

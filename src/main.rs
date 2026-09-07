@@ -16,14 +16,13 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::io::IsTerminal;
-use std::time::Duration;
 use ttfm::cli::args::{build_write_options, Cli, Commands};
 use ttfm::cli::format::{
     format_tag_result, format_untag_result, print_results_with_options,
     print_simple_results, ColorWarningSink, FormatOptions,
 };
+use ttfm::cli::progress::MultiStageProgressView;
 use ttfm::config::Config;
 use ttfm::db::Store;
 use ttfm::edit::{edit, QueryType};
@@ -117,31 +116,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     dry_run
                 );
 
-                let pb = ProgressBar::new_spinner();
-                pb.set_style(
-                    ProgressStyle::default_spinner()
-                        .tick_chars(r"/|\-")
-                        .template("{spinner:.green} {msg}")?,
-                );
-                pb.set_message("Scanning...");
-                pb.enable_steady_tick(Duration::from_millis(100));
-
+                let enabled = !cli.quiet && std::io::stderr().is_terminal();
+                let view = MultiStageProgressView::for_stderr(enabled);
                 let count = ttfm::indexing::Indexer::new(&store, &registry)
-                    .run(
-                        paths,
-                        Some(&|count| {
-                            pb.set_message(format!(
-                                "Indexed {} files...",
-                                count
-                            ));
-                        }),
-                        *dry_run,
-                    )?;
+                    .run(paths, Some(&|p| view.handle_progress(p)), *dry_run)?;
 
-                pb.finish_with_message(format!(
-                    "Done! Successfully indexed {} files.",
-                    count
-                ));
+                if *dry_run {
+                    view.finish_dry_run();
+                } else {
+                    view.finish();
+                }
+
+                safe_println!("Done! Successfully indexed {} files.", count);
             }
             Commands::Search {
                 query,

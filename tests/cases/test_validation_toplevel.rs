@@ -31,11 +31,8 @@ fn test_toplevel_arithmetic_without_parens(
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        &root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(&root, None, false)?;
 
     // 1. Aggregation - Aggregation
     // count() - count() = 0
@@ -57,11 +54,8 @@ fn test_toplevel_arithmetic_without_parens(
     // Let's create a file with known size.
     let file_path = root.join("test.txt");
     std::fs::write(&file_path, "content")?; // 7 bytes
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        &root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(&root, None, false)?;
 
     // size: - 7 = 0
     // "size:" will return 7 for the file.

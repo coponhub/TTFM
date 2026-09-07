@@ -41,11 +41,8 @@ fn test_search_cache_flow() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // 1. Initial Search (n=10)
     let options = SearchOptions {
@@ -132,11 +129,8 @@ fn test_run_cache_worker_direct() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
     let cid = "test-direct-cid";
     ttfm::search::run_cache_worker(store.db_dir.clone(), cid, "extension:txt")?;
     let cache = ttfm::search::CacheManager::new(store.db_dir.join("cache"), 0);
@@ -167,11 +161,8 @@ fn test_cacher_fallback_when_generating() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
     let res = search::search_nowarn(
         &store,
         &registry,
@@ -196,11 +187,8 @@ fn test_run_cache_worker_empty_query() -> anyhow::Result<()> {
     let registry = ttfm::tag::TagRegistry::with_standard();
     let store = ttfm::db::Store::open(&db_dir)?;
     ttfm::indexing::Indexer::new(&store, &registry).initialize_tables()?;
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
     let cid = "test-all-cid";
     ttfm::search::run_cache_worker(store.db_dir.clone(), cid, "*:*")?;
     let cache = ttfm::search::CacheManager::new(store.db_dir.join("cache"), 0);

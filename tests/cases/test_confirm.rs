@@ -48,7 +48,7 @@ fn setup(files: &[&str]) -> (Store, TagRegistry, TempDir, PathBuf) {
     let store = Store::open(base.join("db")).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
     (store, registry, dir, root)
 }
@@ -243,7 +243,7 @@ fn prompt_interactive_hardlink_path_selection() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::hard_link(root.join("a.txt"), sub.join("a.txt")).unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
 
     let opts = WriteOptions::interactive().on_confirm(ConfirmMode::Always);
@@ -279,7 +279,7 @@ fn test_hardlink_interactive_candidate_move_index_alignment() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::hard_link(root.join("a.txt"), sub.join("a.txt")).unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
 
     let dest = root.join("dest");
@@ -425,7 +425,7 @@ fn hardlink_abort_aborts_and_lists_paths() {
     let (store, registry, _d, root) = setup(&["a.txt"]);
     std::fs::hard_link(root.join("a.txt"), root.join("a_link.txt")).unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
 
     let opts = WriteOptions::noconfirm().on_hardlink(HardlinkPolicy::Abort);
@@ -452,7 +452,7 @@ fn hardlink_all_moves_all_links() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::hard_link(root.join("a.txt"), sub.join("a.txt")).unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
 
     let opts = WriteOptions::noconfirm().on_hardlink(HardlinkPolicy::All);
@@ -501,7 +501,7 @@ fn hardlink_all_moves_all_links_to_new_directory() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::hard_link(root.join("a.txt"), sub.join("a_sub.txt")).unwrap();
     Indexer::new(&store, &registry)
-        .run(&[&root], None::<&fn(usize)>, false)
+        .run(&[&root], None, false)
         .unwrap();
 
     let new_dir = root.join("new_parent/nested");

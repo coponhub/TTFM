@@ -40,7 +40,7 @@ mod tests {
         }
 
         ttfm::indexing::Indexer::new(&store, &registry)
-            .run_single(index_dir.path(), None::<&fn(usize)>, false)
+            .run_single(index_dir.path(), None, false)
             .unwrap();
 
         let res_comp = search::search_nowarn(&store, &registry, "count()", SearchOptions::default()).unwrap();

@@ -39,7 +39,7 @@ fn setup_fixture() -> (Store, TagRegistry, TempDir) {
     let store = Store::open(&db_dir).unwrap();
     Indexer::new(&store, &registry).initialize_tables().unwrap();
     Indexer::new(&store, &registry)
-        .run_single(&root, None::<&fn(usize)>, false)
+        .run_single(&root, None, false)
         .unwrap();
     (store, registry, dir)
 }

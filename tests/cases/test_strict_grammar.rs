@@ -34,11 +34,8 @@ fn test_strict_grammar_scalar_comparison_error() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // This implies "Projection(size:) > Scalar(100)" which is invalid logic but valid loose grammar.
     // In strict grammar, this is a Parse Error.
@@ -160,11 +157,8 @@ fn test_scalar_comparison_rejects_projection_calculation() -> Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // Scalar comparison with projection in calculation should fail
     let res = search::search_nowarn(

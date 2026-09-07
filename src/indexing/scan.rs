@@ -16,7 +16,8 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use super::indexer::{
-    calc_basename_scan_hash, calc_scanhash, ScanHash, TempScanEntry,
+    calc_basename_scan_hash, calc_scanhash, IndexProgress, ScanHash,
+    TempScanEntry,
 };
 use crate::db::{Col, Tbl};
 use crate::indexing::ScanEntry;
@@ -40,26 +41,23 @@ pub(crate) enum ScanMessage {
     Live(ItemId, ScanHash),
 }
 
-pub(crate) fn run_scan<F>(
-    conn: &Connection,
+pub(crate) fn run_scan<'a, 'r>(
+    conn: &'a Connection,
     db_dir: &Path,
     temp_scan_path: &Path,
     temp_live_path: &Path,
     roots: &[PathBuf],
-    cache: &FxHashMap<ScanHash, ItemId>,
-    on_progress: Option<&F>,
+    cache: &'a FxHashMap<ScanHash, ItemId>,
+    on_progress: Option<&'r (dyn Fn(IndexProgress) + Sync + Send)>,
     dry_run: bool,
-) -> Result<usize>
-where
-    F: Fn(usize) + Sync + Send,
-{
+) -> Result<usize> {
     let (mut scanner, rx) = FileScanner::new(
         conn,
         roots,
         db_dir.to_path_buf(),
         cache,
         dry_run,
-        on_progress.map(|f| f as _),
+        on_progress,
     );
 
     scanner.prepare_tray()?;
@@ -78,24 +76,24 @@ where
 // File Scanner Implementation
 // ========================================================
 
-pub(crate) struct FileScanner<'a> {
+pub(crate) struct FileScanner<'a, 'r> {
     pub(crate) conn: &'a Connection,
     pub(crate) db_dir: PathBuf,
     pub(crate) cache: &'a FxHashMap<ScanHash, ItemId>,
     pub(crate) dry_run: bool,
-    pub(crate) on_progress: Option<&'a (dyn Fn(usize) + Sync + Send)>,
+    pub(crate) on_progress: Option<&'r (dyn Fn(IndexProgress) + Sync + Send)>,
     pub(crate) walker: Option<ignore::WalkParallel>,
     pub(crate) tx: Option<std::sync::mpsc::Sender<ScanMessage>>,
 }
 
-impl<'a> FileScanner<'a> {
+impl<'a, 'r> FileScanner<'a, 'r> {
     pub(crate) fn new(
         conn: &'a Connection,
         roots: &[PathBuf],
         db_dir: PathBuf,
         cache: &'a FxHashMap<ScanHash, ItemId>,
         dry_run: bool,
-        on_progress: Option<&'a (dyn Fn(usize) + Sync + Send)>,
+        on_progress: Option<&'r (dyn Fn(IndexProgress) + Sync + Send)>,
     ) -> (Self, std::sync::mpsc::Receiver<ScanMessage>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut builder = ignore::WalkBuilder::new(&roots[0]);
@@ -203,15 +201,19 @@ impl<'a> FileScanner<'a> {
             }
 
             current_count += 1;
-            if let Some(cb) = self.on_progress {
+            if let Some(on_p) = self.on_progress {
                 if current_count % 1000 == 0 {
-                    cb(current_count);
+                    on_p(IndexProgress::Scanning {
+                        count: current_count,
+                    });
                 }
             }
         }
 
-        if let Some(cb) = self.on_progress {
-            cb(current_count);
+        if let Some(on_p) = self.on_progress {
+            on_p(IndexProgress::Scanning {
+                count: current_count,
+            });
         }
 
         Ok(current_count)
@@ -341,5 +343,43 @@ mod tests {
 
         assert!(is_db_dir(&db_file, &db_dir_abs));
         assert!(!is_db_dir(&normal_file, &db_dir_abs));
+    }
+
+    #[test]
+    fn test_file_scanner_reports_scanning_progress() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let called =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called_clone = std::sync::Arc::clone(&called);
+        let cb = move |p: IndexProgress| {
+            if let IndexProgress::Scanning { count } = p {
+                called_clone.store(count, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let cache = FxHashMap::default();
+        let (mut scanner, rx) = FileScanner::new(
+            &conn,
+            &roots,
+            dir.path().join("db"),
+            &cache,
+            true,
+            Some(&cb),
+        );
+        scanner.prepare_tray().unwrap();
+
+        let count = std::thread::scope(|s| {
+            scanner.scan(s);
+            scanner.write(rx)
+        })
+        .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

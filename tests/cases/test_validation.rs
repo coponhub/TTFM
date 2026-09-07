@@ -33,11 +33,8 @@ fn test_calculation_invalid_type_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: (path: + 10) :> 100
     // path: は文字列型なので、+ 10（数値演算）は論理展開フェーズで失敗すべき
@@ -73,11 +70,8 @@ fn test_calculation_literal_string_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: ('str' + 10) :> 100
     // 文字列リテラルとの演算も失敗すべき
@@ -115,11 +109,8 @@ fn test_set_operation_with_aggregation_left_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: count(path:) & type:file
     // 左オペランドが集約関数（スカラー値）
@@ -160,11 +151,8 @@ fn test_set_operation_with_aggregation_right_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: type:file & sum(size:)
     // 右オペランドが集約関数（スカラー値）
@@ -205,11 +193,8 @@ fn test_set_operation_with_scalar_comparison_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: (1 > 0) & type:file
     // 左オペランドがスカラー比較（真偽値）
@@ -251,11 +236,8 @@ fn test_set_operation_difference_with_scalar_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: type:file - sum(size:)
     // 右オペランドが集約関数（スカラー値）
@@ -295,11 +277,8 @@ fn test_valid_set_operations_still_work() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // 正常な集合演算: type:file & path:
     let result = search::search_nowarn(
@@ -352,11 +331,8 @@ fn test_set_operation_with_both_scalars_fail() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // クエリ: sum(size:) & count(path:)
     // 両方のオペランドがスカラー値
@@ -397,11 +373,8 @@ fn test_aggregator_empty_args_errors() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // sum(), avg(), max(), min() は引数が必要
     let queries = vec!["sum()", "avg()", "max()", "min()"];
@@ -469,7 +442,7 @@ fn test_sum_with_label_comparison_inner_is_error() {
         .unwrap();
     let (store, registry) = (db_dir_store, db_dir_registry);
     ttfm::indexing::Indexer::new(&store, &registry)
-        .run_single(root, None::<&fn(usize)>, false)
+        .run_single(root, None, false)
         .unwrap();
 
     // バグ1: sum() の内側に label comparison → パニックではなくエラー
@@ -496,11 +469,8 @@ fn test_set_operation_error_message_says_invalid() -> anyhow::Result<()> {
     ttfm::indexing::Indexer::new(&db_dir_store, &db_dir_registry)
         .initialize_tables()?;
     let (store, registry) = (db_dir_store, db_dir_registry);
-    ttfm::indexing::Indexer::new(&store, &registry).run_single(
-        root,
-        None::<&fn(usize)>,
-        false,
-    )?;
+    ttfm::indexing::Indexer::new(&store, &registry)
+        .run_single(root, None, false)?;
 
     // バグ4: エラーメッセージが "not implemented" ではなく "invalid"
     let queries = [
