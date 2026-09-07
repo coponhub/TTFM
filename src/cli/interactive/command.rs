@@ -32,6 +32,8 @@ use crate::indexing::Indexer;
 use crate::search::{search, SearchOptions};
 use crate::tag::TagRegistry;
 
+pub const INTERACTIVE_PAGE_SIZE: usize = 20;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Search(String),
@@ -48,8 +50,10 @@ pub enum Command {
         all: bool,
     },
     Next,
+    Prev,
     NextCols,
     PrevCols,
+    Help,
     Menu,
     Quit,
 }
@@ -268,6 +272,14 @@ pub fn parse_command(
                 Ok(Command::Next)
             }
         }
+        "p" | "prev" => {
+            if !is_searched {
+                Err(CommandParseError::DisabledInInit('p'))
+            } else {
+                Ok(Command::Prev)
+            }
+        }
+        "h" | "help" => Ok(Command::Help),
         ">" => {
             if !is_searched {
                 Err(CommandParseError::DisabledInInit('>'))
@@ -305,17 +317,22 @@ fn render_response<W: Write>(
     output: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cur_col_offset = state.current_col_offset();
+    let cur_offset = match state {
+        State::Searched { offset, .. } => Some(*offset),
+        _ => None,
+    };
     let paging = print_results_with_options(
         store,
         registry,
         resp,
         query,
-        20,
+        INTERACTIVE_PAGE_SIZE,
         output,
         FormatOptions {
             is_interactive: true,
             wide: false,
             col_offset: cur_col_offset,
+            current_offset: cur_offset,
         },
     );
     state.set_next_col_offset(if paging.has_next {
@@ -344,7 +361,7 @@ fn render_current_page<W: Write, E: Write>(
         _ => return Ok(()),
     };
     let opts = SearchOptions {
-        n: Some(20),
+        n: Some(INTERACTIVE_PAGE_SIZE),
         offset: Some(page_start),
         cid,
         cache: true,
@@ -366,7 +383,7 @@ fn execute_search_and_render<W: Write, E: Write>(
     err_out: &mut E,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let opts = SearchOptions {
-        n: Some(20),
+        n: Some(INTERACTIVE_PAGE_SIZE),
         offset: Some(page_start),
         cid: cid.clone(),
         cache: true,
@@ -376,6 +393,7 @@ fn execute_search_and_render<W: Write, E: Write>(
     let resp = search(store, registry, query, opts, &mut sink)?;
     if page_start > 0 && resp.results.is_empty() {
         writeln!(output, "No more items.")?;
+        print_menu(output, state)?;
         return Ok(());
     }
     state.to_searched_at_page(
@@ -523,6 +541,34 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
                 &query, offset, cid, state, store, registry, output, err_out,
             )?;
         }
+        Command::Prev => {
+            let (query, cid, page_start) = match state {
+                State::Searched {
+                    query,
+                    cid,
+                    page_start,
+                    ..
+                } => (query.clone(), cid.clone(), *page_start),
+                _ => return Ok(true),
+            };
+            if page_start == 0 {
+                writeln!(output, "Already at first page.")?;
+                print_menu(output, state)?;
+            } else {
+                let prev_offset =
+                    page_start.saturating_sub(INTERACTIVE_PAGE_SIZE);
+                execute_search_and_render(
+                    &query,
+                    prev_offset,
+                    cid,
+                    state,
+                    store,
+                    registry,
+                    output,
+                    err_out,
+                )?;
+            }
+        }
         Command::NextCols => {
             let next_opt = match state {
                 State::Searched {
@@ -606,6 +652,10 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
             }
             print_menu(output, state)?;
         }
+        Command::Help => {
+            print_help(output)?;
+            print_menu(output, state)?;
+        }
         Command::Menu => {
             print_menu(output, state)?;
         }
@@ -621,6 +671,74 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
     Ok(true)
 }
 
+const HELP_TEXT: &str = r#"TTFM Interactive Mode Help
+
+Commands:
+  s <query>                     : Search with TTQL query
+  t "<search_query>" <edit>     : Add or update tags (empty edit "" to store)
+  u "<search_query>" <tag>      : Remove tags from matched items
+  n                             : Next page of search results
+  p                             : Previous page of search results
+  >                             : Show right columns (horizontal scroll)
+  <                             : Show left columns (horizontal scroll)
+  i <paths>...                  : Index directories (Init state only)
+  clear [all]                   : Clear file index or database
+  h                             : Show this help
+  m                             : Show menu
+  q                             : Clear search context / Quit
+
+Syntax & Examples:
+  Basic Tags (type:label):
+    s extension:rs                              : Search items by tag
+    t "extension:rs" project:alpha              : Add tag to matched items
+    u "extension:rs" status:draft               : Remove tag from matched items
+
+  Set Operations (&, |, -):
+    s extension:rs & project:ttfm               : Search with AND, OR, DIFF
+    t "extension:rs & size:>1MB" project:large  : Apply tags to filtered set
+
+  Glob Patterns & Captures (*, {n}):
+    s filename:*.rs                             : Search with wildcard pattern
+    t "filename:*_draft.txt" filename:{1}.txt   : Rename physical files
+    t "name:*.old" name:{1}                     : Rename item display name
+    t "path:*.md" path:/new/dir/{1}             : Move files to new directory
+
+  Comparisons & Ranges:
+    s size:>100MB                               : Stuck label comparison
+    s 10MB :< size: :< 1GB                      : Chained range comparison
+    s mtime:today                               : Search by relative date
+    t "size:>1GB" tag:huge                      : Tag items matching comparison
+
+  Projection (Type:) & Storing:
+    s extension:                                : List distinct labels of type
+    s tag:                                      : List all tags across items
+    u "extension:rs" project:                   : Remove all tags of type
+    t "extension:rs" ""                         : Store volatile search results
+
+  Aggregations (count, sum, avg, ...):
+    s count()                                   : Total count of matched items
+    s sum(size:)                                : Sum of numeric projection
+    s count(extension:)                         : Count distinct labels of type
+
+  Nesting (&:):
+    s project: &: extension:                    : Multi-key compound grouping
+    s path:^/mnt/*/: &: extension:              : Pattern-based label grouping
+
+  Nesting with Aggregation (Combined):
+    s parentdir: &: count()                     : Group by label and aggregate
+    s path:^/mnt/*/: &: sum(size:)               : Pattern grouping with sum
+    s parentdir: &: count() :> 10               : Filter groups by condition
+    t "parentdir: &: count() :> 10" status:busy : Tag filtered group items
+
+  Eval (q()):
+    s q(milestone:m1) & extension:rs            : Expand definition tags
+    t "q(milestone:m1)" status:ready            : Tag items from definition
+"#;
+
+pub fn print_help<W: Write>(out: &mut W) -> std::io::Result<()> {
+    write!(out, "{HELP_TEXT}")
+}
+
 pub fn print_menu<W: Write>(out: &mut W, state: &State) -> std::io::Result<()> {
     match state {
         State::Init => {
@@ -628,23 +746,38 @@ pub fn print_menu<W: Write>(out: &mut W, state: &State) -> std::io::Result<()> {
             writeln!(out, "Commands:")?;
             writeln!(out, "  s : Search")?;
             writeln!(out, "  i : Index directories")?;
+            writeln!(out, "  h : Help")?;
             writeln!(out, "  m : Show menu")?;
             writeln!(out, "  q : Quit")?;
             writeln!(out, "  clear : Clear indexed files (or `clear all`)")?;
-            writeln!(out)?;
-            writeln!(out, "Examples:")?;
-            writeln!(out, "  `s extension:rs`")?;
-            writeln!(out, "  `i ~/Documents`")?;
-            writeln!(out, "  `clear`")?;
         }
-        State::Searched { .. } => {
-            writeln!(
-                out,
-                "s(earch) | t(ag) | u(ntag) | n(ext) | > (next cols) | < (prev cols) | q(uit to main menu)"
-            )?;
-            writeln!(out, "Examples:")?;
-            writeln!(out, "  `t \"extension:rs\" project:alpha`")?;
-            writeln!(out, "  `u \"extension:rs\" status:draft`")?;
+        State::Searched {
+            page_start,
+            has_more,
+            next_col_offset,
+            col_offsets,
+            ..
+        } => {
+            let mut items = vec![
+                "s \x1b[2msearch\x1b[0m".to_string(),
+                "t \x1b[2mtag\x1b[0m".to_string(),
+                "u \x1b[2muntag\x1b[0m".to_string(),
+            ];
+            if *has_more {
+                items.push("n \x1b[2mnext\x1b[0m".to_string());
+            }
+            if *page_start > 0 {
+                items.push("p \x1b[2mprev\x1b[0m".to_string());
+            }
+            if next_col_offset.is_some() {
+                items.push("> \x1b[2mshow right\x1b[0m".to_string());
+            }
+            if col_offsets.len() > 1 {
+                items.push("< \x1b[2mshow left\x1b[0m".to_string());
+            }
+            items.push("h \x1b[2mhelp\x1b[0m".to_string());
+            items.push("q \x1b[2mquit to main menu\x1b[0m".to_string());
+            writeln!(out, "{}", items.join(" | "))?;
         }
     }
     Ok(())
@@ -1028,30 +1161,78 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prev_and_help() {
+        assert!(matches!(
+            parse_command("p", false),
+            Err(CommandParseError::DisabledInInit('p'))
+        ));
+        assert_eq!(parse_command("p", true).unwrap(), Command::Prev);
+        assert_eq!(parse_command("prev", true).unwrap(), Command::Prev);
+        assert_eq!(parse_command("h", false).unwrap(), Command::Help);
+        assert_eq!(parse_command("help", true).unwrap(), Command::Help);
+    }
+
+    #[test]
     fn test_print_menu_init_and_searched() {
         let mut out = Vec::new();
         let state = State::new();
         print_menu(&mut out, &state).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("Welcome to ttfm interactive mode"));
+        assert!(!s.contains("Examples:"));
+        assert!(s.contains("h : Help"));
         let q_pos = s.find("q : Quit").unwrap();
         let clear_pos = s.find("clear : Clear indexed files").unwrap();
         assert!(q_pos < clear_pos);
 
         let mut out_searched = Vec::new();
         let mut searched_state = State::new();
-        searched_state.to_searched(
-            "foo".to_string(),
-            Some("cid".to_string()),
-            0,
-            Some(10),
-            false,
-        );
+        searched_state.to_searched("foo".to_string(), None, 0, Some(10), false);
         print_menu(&mut out_searched, &searched_state).unwrap();
         let s_searched = String::from_utf8(out_searched).unwrap();
+        assert!(!s_searched.contains("Examples:"));
         assert!(s_searched.contains(
-            "s(earch) | t(ag) | u(ntag) | n(ext) | > (next cols) | < (prev cols) | q(uit to main menu)"
+            "s \x1b[2msearch\x1b[0m | t \x1b[2mtag\x1b[0m | u \x1b[2muntag\x1b[0m"
         ));
+    }
+
+    #[test]
+    fn test_print_menu_searched_dynamic_hints() {
+        let mut out_first = Vec::new();
+        let mut st_first = State::new();
+        st_first.to_searched_at_page(
+            "foo".to_string(),
+            None,
+            0,
+            20,
+            None,
+            true,
+        );
+        st_first.set_next_col_offset(Some(3));
+        print_menu(&mut out_first, &st_first).unwrap();
+        let s_first = String::from_utf8(out_first).unwrap();
+        assert!(s_first.contains("n \x1b[2mnext\x1b[0m"));
+        assert!(!s_first.contains("p \x1b[2mprev\x1b[0m"));
+        assert!(s_first.contains("> \x1b[2mshow right\x1b[0m"));
+        assert!(!s_first.contains("< \x1b[2mshow left\x1b[0m"));
+
+        let mut out_second = Vec::new();
+        let mut st_second = State::new();
+        st_second.to_searched_at_page(
+            "foo".to_string(),
+            None,
+            20,
+            10,
+            None,
+            false,
+        );
+        st_second.push_col_offset(3);
+        print_menu(&mut out_second, &st_second).unwrap();
+        let s_second = String::from_utf8(out_second).unwrap();
+        assert!(!s_second.contains("n \x1b[2mnext\x1b[0m"));
+        assert!(s_second.contains("p \x1b[2mprev\x1b[0m"));
+        assert!(!s_second.contains("> \x1b[2mshow right\x1b[0m"));
+        assert!(s_second.contains("< \x1b[2mshow left\x1b[0m"));
     }
 
     #[test]
@@ -1212,5 +1393,36 @@ mod tests {
         .unwrap();
         let s_prev = String::from_utf8(out_prev).unwrap();
         assert!(s_prev.contains("Already at first columns."));
+    }
+
+    #[test]
+    fn test_execute_search_and_render_no_more_items_prints_menu() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        let registry = TagRegistry::with_standard();
+        crate::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
+        let mut state = State::new();
+        state.to_searched_at_page(
+            "ext:rs".to_string(),
+            None,
+            0,
+            5,
+            Some(5),
+            false,
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        execute_search_and_render(
+            "ext:rs", 20, None, &mut state, &store, &registry, &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("No more items."));
+        assert!(s.contains("s \x1b[2msearch\x1b[0m"));
     }
 }

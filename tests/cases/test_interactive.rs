@@ -66,7 +66,7 @@ fn test_interactive_init_menu_and_quit() {
     let out_str = String::from_utf8(output).unwrap();
     assert!(out_str.contains("s : Search"));
     assert!(out_str.contains("i : Index directories"));
-    assert!(out_str.contains("`s extension:rs`"));
+    assert!(!out_str.contains("Examples:"));
 }
 
 #[test]
@@ -96,7 +96,8 @@ fn test_interactive_search_and_next_paging() {
 
     let out_str = String::from_utf8(output).unwrap();
     assert!(
-        out_str.contains("results displayed") || out_str.contains("s(earch)")
+        out_str.contains("items matched")
+            || out_str.contains("s \x1b[2msearch\x1b[0m")
     );
     assert!(out_str.contains("file_"));
 }
@@ -355,7 +356,7 @@ fn test_interactive_quit_hierarchical_navigation() {
 
     let out_str = String::from_utf8(output).unwrap();
     assert!(out_str.contains("Welcome to ttfm interactive mode"));
-    assert!(out_str.contains("q(uit to main menu)"));
+    assert!(out_str.contains("q \x1b[2mquit to main menu\x1b[0m"));
     assert!(out_str.contains("clear : Clear indexed files (or `clear all`)"));
 }
 
@@ -480,4 +481,111 @@ fn test_interactive_tab_no_matches_transient_hint() {
         !hint_after_left.contains("(no matches)"),
         "hint should be cleared after arrow key, got: {hint_after_left:?}"
     );
+}
+
+#[test]
+fn test_interactive_help_command() {
+    let (store, registry, _dir, _root) = setup_env(&["a.txt"]);
+    let input = Cursor::new(b"h\nq\n");
+    let mut output = Vec::new();
+    let mut err_out = Vec::new();
+    let config = Config::default();
+    let write_opts = WriteOptions::default();
+
+    run_interactive_stream(
+        &store,
+        &registry,
+        &config,
+        write_opts,
+        None,
+        input,
+        &mut output,
+        &mut err_out,
+        true,
+    )
+    .unwrap();
+
+    let out_str = String::from_utf8(output).unwrap();
+    assert!(out_str.contains("TTFM Interactive Mode Help"));
+    assert!(out_str.contains("Syntax & Examples:"));
+    assert!(out_str.contains("Basic Tags (type:label):"));
+    assert!(out_str.contains("Set Operations (&, |, -):"));
+    assert!(out_str.contains("Glob Patterns & Captures (*, {n}):"));
+    assert!(out_str.contains("Comparisons & Ranges:"));
+    assert!(out_str.contains("Projection (Type:) & Storing:"));
+    assert!(out_str.contains("Aggregations (count, sum, avg, ...):"));
+    assert!(out_str.contains("Nesting (&:):"));
+    assert!(out_str.contains("Nesting with Aggregation (Combined):"));
+    assert!(out_str.contains("path:^/mnt/*/: &: sum(size:)"));
+    assert!(out_str.contains("Eval (q()):"));
+    assert!(
+        out_str.contains(">                             : Show right columns")
+    );
+    assert!(
+        out_str.contains("<                             : Show left columns")
+    );
+}
+
+#[test]
+fn test_interactive_prev_paging_and_column_scroll() {
+    let files: Vec<String> =
+        (0..45).map(|i| format!("file_{i:02}.rs")).collect();
+    let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let (store, registry, _dir, _root) = setup_env(&file_refs);
+    let input = Cursor::new(b"s extension:rs\np\nn\np\n>\nq\n");
+    let mut output = Vec::new();
+    let mut err_out = Vec::new();
+    let config = Config::default();
+    let write_opts = WriteOptions::default();
+
+    run_interactive_stream(
+        &store,
+        &registry,
+        &config,
+        write_opts,
+        None,
+        input,
+        &mut output,
+        &mut err_out,
+        true,
+    )
+    .unwrap();
+
+    let out_str = String::from_utf8(output).unwrap();
+    assert!(out_str.contains("Already at first page."));
+    assert!(out_str.contains("items matched."));
+    assert!(out_str.contains("file_"));
+}
+
+#[test]
+fn test_interactive_searched_dynamic_hints_and_no_examples() {
+    let files: Vec<String> =
+        (0..45).map(|i| format!("file_{i:02}.rs")).collect();
+    let file_refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let (store, registry, _dir, _root) = setup_env(&file_refs);
+    let input = Cursor::new(b"s extension:rs\nn\nq\n");
+    let mut output = Vec::new();
+    let mut err_out = Vec::new();
+    let config = Config::default();
+    let write_opts = WriteOptions::default();
+
+    run_interactive_stream(
+        &store,
+        &registry,
+        &config,
+        write_opts,
+        None,
+        input,
+        &mut output,
+        &mut err_out,
+        true,
+    )
+    .unwrap();
+
+    let out_str = String::from_utf8(output).unwrap();
+    assert!(!out_str.contains("Examples:"));
+    assert!(out_str.contains("s \x1b[2msearch\x1b[0m"));
+    assert!(out_str.contains("n \x1b[2mnext\x1b[0m"));
+    assert!(out_str.contains("p \x1b[2mprev\x1b[0m"));
+    assert!(out_str.contains("h \x1b[2mhelp\x1b[0m"));
 }

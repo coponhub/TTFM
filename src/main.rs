@@ -184,6 +184,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             is_interactive: false,
                             wide: *wide,
                             col_offset: 0,
+                            ..Default::default()
                         },
                     );
                 }

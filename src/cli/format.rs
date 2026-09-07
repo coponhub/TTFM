@@ -87,6 +87,7 @@ pub struct FormatOptions {
     pub is_interactive: bool,
     pub wide: bool,
     pub col_offset: usize,
+    pub current_offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,6 +117,7 @@ pub fn print_results(
             is_interactive,
             wide: false,
             col_offset: 0,
+            ..Default::default()
         },
     );
 }
@@ -327,12 +329,27 @@ pub fn print_results_with_options(
         }
     }
 
-    writeln!(
-        writer,
-        "Total: {} results displayed.",
-        response.results.len()
-    )
-    .unwrap_or(());
+    if options.is_interactive {
+        let count_str = if let Some(total) = response.total_count {
+            format!("{total}")
+        } else {
+            let base_count =
+                options.current_offset.unwrap_or(response.results.len());
+            if response.has_more {
+                format!("{base_count}+")
+            } else {
+                format!("{base_count}")
+            }
+        };
+        writeln!(writer, "{count_str} items matched.").unwrap_or(());
+    } else {
+        writeln!(
+            writer,
+            "Total: {} results displayed.",
+            response.results.len()
+        )
+        .unwrap_or(());
+    }
 
     if response.has_more {
         if options.is_interactive {
@@ -832,6 +849,7 @@ mod tests {
                 is_interactive: false,
                 wide: true,
                 col_offset: 0,
+                ..Default::default()
             },
         );
         std::env::remove_var("COLUMNS");
@@ -865,6 +883,7 @@ mod tests {
                 is_interactive: true,
                 wide: false,
                 col_offset: 1,
+                ..Default::default()
             },
         );
         std::env::remove_var("COLUMNS");
@@ -872,5 +891,54 @@ mod tests {
         assert!(paging.has_prev);
         let clean = console::strip_ansi_codes(&text).to_string();
         assert!(clean.contains("item_id  ..."));
+    }
+
+    #[test]
+    fn test_print_results_interactive_matched_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = make_store_and_registry(&dir.path().join("db"));
+        let mut response = SearchResponse::default();
+        response.results =
+            vec![Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile)];
+        response.has_more = true;
+
+        let mut out = Vec::new();
+        let _ = print_results_with_options(
+            &store,
+            &registry,
+            &response,
+            "ext:rs",
+            20,
+            &mut out,
+            FormatOptions {
+                is_interactive: true,
+                wide: false,
+                col_offset: 0,
+                current_offset: Some(20),
+            },
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("20+ items matched."));
+        assert!(!out_str.contains("results displayed."));
+
+        let mut out_final = Vec::new();
+        response.has_more = false;
+        let _ = print_results_with_options(
+            &store,
+            &registry,
+            &response,
+            "ext:rs",
+            20,
+            &mut out_final,
+            FormatOptions {
+                is_interactive: true,
+                wide: false,
+                col_offset: 0,
+                current_offset: Some(45),
+            },
+        );
+        let out_final_str = String::from_utf8(out_final).unwrap();
+        assert!(out_final_str.contains("45 items matched."));
+        assert!(!out_final_str.contains("results displayed."));
     }
 }

@@ -87,22 +87,9 @@ impl State {
 
     pub fn prompt_string(&self) -> String {
         match self {
-            State::Init => "Command (m for help): ".to_string(),
-            State::Searched {
-                query,
-                offset,
-                total_count,
-                has_more,
-                ..
-            } => {
-                let count_str = if let Some(total) = total_count {
-                    format!("{total}")
-                } else if *has_more {
-                    format!("{offset}+")
-                } else {
-                    format!("{offset}")
-                };
-                format!("[{query} ({count_str} items)] Command (m for help): ")
+            State::Init => String::new(),
+            State::Searched { query, .. } => {
+                format!("[{query}] ")
             }
         }
     }
@@ -161,7 +148,7 @@ mod tests {
     #[test]
     fn test_state_transitions_and_prompt() {
         let mut s = State::new();
-        assert_eq!(s.prompt_string(), "Command (m for help): ");
+        assert_eq!(s.prompt_string(), "");
         assert_eq!(s.last_query(), None);
 
         s.to_searched(
@@ -171,17 +158,11 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(
-            s.prompt_string(),
-            "[extension:rs (20+ items)] Command (m for help): "
-        );
+        assert_eq!(s.prompt_string(), "[extension:rs] ");
         assert_eq!(s.last_query(), Some("extension:rs"));
 
         s.to_searched("extension:rs".to_string(), None, 5, Some(5), false);
-        assert_eq!(
-            s.prompt_string(),
-            "[extension:rs (5 items)] Command (m for help): "
-        );
+        assert_eq!(s.prompt_string(), "[extension:rs] ");
 
         s.clear();
         assert_eq!(s, State::Init);

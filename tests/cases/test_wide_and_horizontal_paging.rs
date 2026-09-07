@@ -98,6 +98,7 @@ fn test_search_wide_option_prints_all_columns_without_truncation() {
             is_interactive: false,
             wide: false,
             col_offset: 0,
+            ..Default::default()
         },
     );
 
@@ -113,6 +114,7 @@ fn test_search_wide_option_prints_all_columns_without_truncation() {
             is_interactive: false,
             wide: true,
             col_offset: 0,
+            ..Default::default()
         },
     );
 
