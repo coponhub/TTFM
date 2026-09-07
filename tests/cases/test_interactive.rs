@@ -512,18 +512,14 @@ fn test_interactive_help_command() {
     assert!(out_str.contains("Set Operations (&, |, -):"));
     assert!(out_str.contains("Glob Patterns & Captures (*, {n}):"));
     assert!(out_str.contains("Comparisons & Ranges:"));
-    assert!(out_str.contains("Projection (Type:) & Storing:"));
+    assert!(out_str.contains("Show types/labels/tags definitions & Storing:"));
     assert!(out_str.contains("Aggregations (count, sum, avg, ...):"));
     assert!(out_str.contains("Nesting (&:):"));
     assert!(out_str.contains("Nesting with Aggregation (Combined):"));
     assert!(out_str.contains("path:^/mnt/*/: &: sum(size:)"));
     assert!(out_str.contains("Eval (q()):"));
-    assert!(
-        out_str.contains(">                             : Show right columns")
-    );
-    assert!(
-        out_str.contains("<                             : Show left columns")
-    );
+    assert!(out_str.contains("> # Show right columns"));
+    assert!(out_str.contains("< # Show left columns"));
 }
 
 #[test]

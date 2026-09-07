@@ -45,6 +45,37 @@ pub fn truncate_text(text: &str, max_width: usize) -> String {
     console::truncate_str(text, max_width, "...").to_string()
 }
 
+pub fn wrap_text_slices<'a>(
+    text: &'a str,
+    first_width: usize,
+    sub_width: usize,
+) -> impl Iterator<Item = &'a str> {
+    let mut remaining = text;
+    let mut width = first_width;
+
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let target_w = width.max(1);
+        let split_at = remaining
+            .char_indices()
+            .scan(0, |acc, (idx, ch)| {
+                *acc += console::measure_text_width(&ch.to_string());
+                Some((idx, *acc, ch.len_utf8()))
+            })
+            .take_while(|&(idx, w, _)| idx == 0 || w <= target_w)
+            .last()
+            .map(|(idx, _, len)| idx + len)
+            .unwrap_or(remaining.len());
+
+        let (chunk, rest) = remaining.split_at(split_at);
+        remaining = rest;
+        width = sub_width;
+        Some(chunk)
+    })
+}
+
 pub fn get_terminal_width() -> usize {
     // 環境変数 COLUMNS を最優先（テスト用）
     if let Ok(cols) = std::env::var("COLUMNS") {
@@ -157,6 +188,7 @@ pub fn print_results_with_options(
             query,
             writer,
             options.is_interactive,
+            options.wide,
         );
         return paging_info;
     }
@@ -268,6 +300,60 @@ pub fn print_results_with_options(
                     sorted_keys.iter().enumerate().skip(options.col_offset)
                 {
                     let target_width = col_widths[i];
+                    let available_content_w =
+                        effective_width.saturating_sub(current_width + sep_len);
+                    let is_single_oversized = !options.wide
+                        && i == options.col_offset
+                        && target_width > available_content_w;
+
+                    if is_single_oversized {
+                        write!(writer, "{}", sep).unwrap_or(());
+                        let val_str = if is_header {
+                            key.as_str().to_string()
+                        } else {
+                            res_opt
+                                .and_then(|r| r.get_tag_value(key.as_str()))
+                                .map(|raw| {
+                                    registry.format_display(key.as_str(), &raw)
+                                })
+                                .unwrap_or_default()
+                        };
+                        let pad_indent = " ".repeat(current_width + sep_len);
+                        let wrapped = wrap_text_slices(
+                            &val_str,
+                            available_content_w,
+                            available_content_w,
+                        )
+                        .enumerate()
+                        .map(|(w_idx, w_line)| {
+                            if w_idx == 0 {
+                                if is_header {
+                                    format!("\x1b[1m{}\x1b[0m", w_line)
+                                } else {
+                                    w_line.to_string()
+                                }
+                            } else {
+                                if is_header {
+                                    format!(
+                                        "{}\x1b[1m{}\x1b[0m",
+                                        pad_indent, w_line
+                                    )
+                                } else {
+                                    format!("{}{}", pad_indent, w_line)
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                        write!(writer, "{}", wrapped).unwrap_or(());
+                        if i + 1 < sorted_keys.len() {
+                            group_has_next = true;
+                            group_next_offset = i + 1;
+                        }
+                        break;
+                    }
+
                     if !options.wide
                         && current_width + sep_len + target_width
                             > effective_width
@@ -378,8 +464,13 @@ pub fn print_compact_projections(
     query: &str,
     writer: &mut dyn Write,
     is_interactive: bool,
+    wide: bool,
 ) {
-    let effective_width = get_terminal_width().saturating_sub(4);
+    let effective_width = if wide {
+        usize::MAX
+    } else {
+        get_terminal_width().saturating_sub(4)
+    };
 
     for label_item in &response.results {
         let total_count = label_item
@@ -389,35 +480,70 @@ pub fn print_compact_projections(
             .unwrap_or(label_item.tags.entries.len());
 
         let repr_display = label_item.representative.display(registry);
+        let count_str = format!(" ({} items)", total_count);
+        let full_header = format!(":{}", repr_display);
 
-        writeln!(
-            writer,
-            "\x1b[1;34m:{}\x1b[0m \x1b[2m({} items)\x1b[0m",
-            repr_display, total_count
-        )
-        .unwrap_or(());
+        if !wide
+            && console::measure_text_width(&full_header)
+                + console::measure_text_width(&count_str)
+                > effective_width
+        {
+            let wrapped = wrap_text_slices(
+                &full_header,
+                effective_width,
+                effective_width.saturating_sub(2),
+            )
+            .enumerate()
+            .map(|(idx, line)| {
+                if idx == 0 {
+                    format!("\x1b[1;34m{}\x1b[0m", line)
+                } else {
+                    format!("  \x1b[1;34m{}\x1b[0m", line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+            writeln!(writer, "{}\x1b[2m{}\x1b[0m", wrapped, count_str)
+                .unwrap_or(());
+        } else {
+            writeln!(
+                writer,
+                "\x1b[1;34m:{}\x1b[0m\x1b[2m{}\x1b[0m",
+                repr_display, count_str
+            )
+            .unwrap_or(());
+        }
 
         let mut all_items_str = String::new();
+        let max_items = if wide { usize::MAX } else { 200 };
         for (i, tag_entry) in
-            label_item.tags.entries.iter().take(200).enumerate()
+            label_item.tags.entries.iter().take(max_items).enumerate()
         {
             if i > 0 {
                 all_items_str.push_str(", ");
             }
             all_items_str.push_str(&tag_entry.typed_tag.as_str());
-            if console::measure_text_width(&all_items_str)
-                > effective_width + 10
+            if !wide
+                && console::measure_text_width(&all_items_str)
+                    > effective_width + 10
             {
                 break;
             }
         }
 
-        writeln!(
-            writer,
-            "  {}",
-            truncate_text(&all_items_str, effective_width.saturating_sub(2))
-        )
-        .unwrap_or(());
+        if wide {
+            writeln!(writer, "  {}", all_items_str).unwrap_or(());
+        } else {
+            writeln!(
+                writer,
+                "  {}",
+                truncate_text(
+                    &all_items_str,
+                    effective_width.saturating_sub(2)
+                )
+            )
+            .unwrap_or(());
+        }
     }
 
     writeln!(
@@ -940,5 +1066,41 @@ mod tests {
         let out_final_str = String::from_utf8(out_final).unwrap();
         assert!(out_final_str.contains("45 items matched."));
         assert!(!out_final_str.contains("results displayed."));
+    }
+
+    #[test]
+    fn test_wrap_text_slices_functional() {
+        let text = "a".repeat(100);
+        let slices: Vec<&str> = wrap_text_slices(&text, 40, 30).collect();
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0].len(), 40);
+        assert_eq!(slices[1].len(), 30);
+        assert_eq!(slices[2].len(), 30);
+    }
+
+    #[test]
+    fn test_print_compact_projections_wide_bypasses_truncation() {
+        let registry = TagRegistry::with_standard();
+        let mut resp = SearchResponse::default();
+        let mut item =
+            Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
+        for i in 0..50 {
+            item.tags.push(
+                crate::types::TypedTag::new("project", format!("p_{i}")),
+                crate::types::Origin::User,
+            );
+        }
+        resp.results.push(item);
+        let mut out = Vec::new();
+        print_compact_projections(
+            &registry,
+            &resp,
+            "extension:",
+            &mut out,
+            false,
+            true,
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert!(!s.contains("..."));
     }
 }

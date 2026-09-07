@@ -393,6 +393,15 @@ fn execute_search_and_render<W: Write, E: Write>(
     let resp = search(store, registry, query, opts, &mut sink)?;
     if page_start > 0 && resp.results.is_empty() {
         writeln!(output, "No more items.")?;
+        if let State::Searched {
+            has_more,
+            next_col_offset,
+            ..
+        } = state
+        {
+            *has_more = false;
+            *next_col_offset = None;
+        }
         print_menu(output, state)?;
         return Ok(());
     }
@@ -671,72 +680,52 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
     Ok(true)
 }
 
-const HELP_TEXT: &str = r#"TTFM Interactive Mode Help
+const HELP_TEXT: &str = "\
+TTFM Interactive Mode Help
 
 Commands:
-  s <query>                     : Search with TTQL query
-  t "<search_query>" <edit>     : Add or update tags (empty edit "" to store)
-  u "<search_query>" <tag>      : Remove tags from matched items
-  n                             : Next page of search results
-  p                             : Previous page of search results
-  >                             : Show right columns (horizontal scroll)
-  <                             : Show left columns (horizontal scroll)
-  i <paths>...                  : Index directories (Init state only)
-  clear [all]                   : Clear file index or database
-  h                             : Show this help
-  m                             : Show menu
-  q                             : Clear search context / Quit
+  s <query>                 \x1b[2m# Search with TTQL query\x1b[0m          p \x1b[2m# Previous page of search results\x1b[0m
+  t \"<search_query>\" <edit> \x1b[2m# Add or update tags (empty store)\x1b[0m n \x1b[2m# Next page of search results\x1b[0m
+  u \"<search_query>\" <tag>  \x1b[2m# Remove tags from matched items\x1b[0m  < \x1b[2m# Show left columns (horizontal scroll)\x1b[0m
+  i <paths>...              \x1b[2m# Index directories (Init only)\x1b[0m   > \x1b[2m# Show right columns (horizontal scroll)\x1b[0m
+  clear [all]               \x1b[2m# Clear file index or database\x1b[0m    h \x1b[2m# Show this help\x1b[0m / m \x1b[2m# Show menu\x1b[0m
+  q                         \x1b[2m# Clear search context / Quit\x1b[0m
 
 Syntax & Examples:
-  Basic Tags (type:label):
-    s extension:rs                              : Search items by tag
-    t "extension:rs" project:alpha              : Add tag to matched items
-    u "extension:rs" status:draft               : Remove tag from matched items
-
-  Set Operations (&, |, -):
-    s extension:rs & project:ttfm               : Search with AND, OR, DIFF
-    t "extension:rs & size:>1MB" project:large  : Apply tags to filtered set
-
-  Glob Patterns & Captures (*, {n}):
-    s filename:*.rs                             : Search with wildcard pattern
-    t "filename:*_draft.txt" filename:{1}.txt   : Rename physical files
-    t "name:*.old" name:{1}                     : Rename item display name
-    t "path:*.md" path:/new/dir/{1}             : Move files to new directory
-
-  Comparisons & Ranges:
-    s size:>100MB                               : Stuck label comparison
-    s 10MB :< size: :< 1GB                      : Chained range comparison
-    s mtime:today                               : Search by relative date
-    t "size:>1GB" tag:huge                      : Tag items matching comparison
-
-  Projection (Type:) & Storing:
-    s extension:                                : List distinct labels of type
-    s tag:                                      : List all tags across items
-    u "extension:rs" project:                   : Remove all tags of type
-    t "extension:rs" ""                         : Store volatile search results
-
-  Aggregations (count, sum, avg, ...):
-    s count()                                   : Total count of matched items
-    s sum(size:)                                : Sum of numeric projection
-    s count(extension:)                         : Count distinct labels of type
-
-  Nesting (&:):
-    s project: &: extension:                    : Multi-key compound grouping
-    s path:^/mnt/*/: &: extension:              : Pattern-based label grouping
-
-  Nesting with Aggregation (Combined):
-    s parentdir: &: count()                     : Group by label and aggregate
-    s path:^/mnt/*/: &: sum(size:)               : Pattern grouping with sum
-    s parentdir: &: count() :> 10               : Filter groups by condition
-    t "parentdir: &: count() :> 10" status:busy : Tag filtered group items
-
-  Eval (q()):
-    s q(milestone:m1) & extension:rs            : Expand definition tags
-    t "q(milestone:m1)" status:ready            : Tag items from definition
-"#;
+Basic Tags (type:label):                                              Show types/labels/tags definitions & Storing:
+  s extension:rs \x1b[2m# Search items by tag\x1b[0m                                  s extension: \x1b[2m# List distinct labels of type\x1b[0m
+  t \"extension:rs\" project:alpha \x1b[2m# Add tag to matched items\x1b[0m             s label: \x1b[2m# List all labels across indexed items\x1b[0m
+  u \"extension:rs\" status:draft \x1b[2m# Remove tag from matched items\x1b[0m         s type:* \x1b[2m# List all type definitions\x1b[0m
+                                                                        s type: \x1b[2m# List distinct types across indexed items\x1b[0m
+Set Operations (&, |, -):                                               s tag: \x1b[2m# List all tags across indexed items\x1b[0m
+  s extension:rs & project:ttfm \x1b[2m# Intersection (AND)\x1b[0m                    u \"extension:rs\" project: \x1b[2m# Remove all tags of type\x1b[0m
+  s extension:rs | extension:ts \x1b[2m# Union (OR)\x1b[0m                            t \"extension:rs\" \"\" \x1b[2m# Store volatile search results\x1b[0m
+  s extension:rs - status:draft \x1b[2m# Difference (DIFF / EXCLUDE)\x1b[0m
+  t \"extension:rs & size:>1MB\" project:large \x1b[2m# Tag filtered set\x1b[0m       Aggregations (count, sum, avg, ...):
+                                                                        s count() \x1b[2m# Total count of matched items\x1b[0m
+Glob Patterns & Captures (*, {n}):                                      s sum(size:) \x1b[2m# Sum of numeric projection\x1b[0m
+  s filename:*.rs \x1b[2m# Wildcard pattern search\x1b[0m                             s count(extension:) \x1b[2m# Count distinct labels of type\x1b[0m
+  t \"filename:*_draft.txt\" filename:{1}.txt \x1b[2m# Rename files\x1b[0m
+  t \"name:*.old\" name:{1} \x1b[2m# Rename item display name\x1b[0m                  Nesting (&:):
+  t \"path:*.md\" path:/new/dir/{1} \x1b[2m# Move files to new directory\x1b[0m         s project: &: extension: \x1b[2m# Multi-key compound grouping\x1b[0m
+                                                                        s path:^/mnt/*/: &: extension: \x1b[2m# Pattern grouping\x1b[0m
+Comparisons & Ranges:
+  s size:>100MB \x1b[2m# Stuck label comparison\x1b[0m                              Nesting with Aggregation (Combined):
+  s 10MB :< size: :< 1GB \x1b[2m# Chained range comparison\x1b[0m                     s parentdir: &: count() \x1b[2m# Group and aggregate\x1b[0m
+  s mtime:today \x1b[2m# Relative date search\x1b[0m                                  s path:^/mnt/*/: &: sum(size:) \x1b[2m# Pattern group with sum\x1b[0m
+  t \"size:>1GB\" tag:huge \x1b[2m# Tag comparison match\x1b[0m                         s parentdir: &: count() :> 10 \x1b[2m# Filter groups\x1b[0m
+                                                                        t \"parentdir: &: count() :> 10\" status:busy \x1b[2m# Tag groups\x1b[0m
+Eval (q()):
+  s q(milestone:m1) & extension:rs \x1b[2m# Expand definition tags\x1b[0m
+  t \"q(milestone:m1)\" status:ready \x1b[2m# Tag from definition\x1b[0m
+";
 
 pub fn print_help<W: Write>(out: &mut W) -> std::io::Result<()> {
-    write!(out, "{HELP_TEXT}")
+    if console::colors_enabled() {
+        write!(out, "{HELP_TEXT}")
+    } else {
+        write!(out, "{}", console::strip_ansi_codes(HELP_TEXT))
+    }
 }
 
 pub fn print_menu<W: Write>(out: &mut W, state: &State) -> std::io::Result<()> {
@@ -763,17 +752,17 @@ pub fn print_menu<W: Write>(out: &mut W, state: &State) -> std::io::Result<()> {
                 "t \x1b[2mtag\x1b[0m".to_string(),
                 "u \x1b[2muntag\x1b[0m".to_string(),
             ];
-            if *has_more {
-                items.push("n \x1b[2mnext\x1b[0m".to_string());
-            }
             if *page_start > 0 {
                 items.push("p \x1b[2mprev\x1b[0m".to_string());
             }
-            if next_col_offset.is_some() {
-                items.push("> \x1b[2mshow right\x1b[0m".to_string());
+            if *has_more {
+                items.push("n \x1b[2mnext\x1b[0m".to_string());
             }
             if col_offsets.len() > 1 {
                 items.push("< \x1b[2mshow left\x1b[0m".to_string());
+            }
+            if next_col_offset.is_some() {
+                items.push("> \x1b[2mshow right\x1b[0m".to_string());
             }
             items.push("h \x1b[2mhelp\x1b[0m".to_string());
             items.push("q \x1b[2mquit to main menu\x1b[0m".to_string());
@@ -1424,5 +1413,39 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("No more items."));
         assert!(s.contains("s \x1b[2msearch\x1b[0m"));
+    }
+
+    #[test]
+    fn test_print_help_output_and_ansi_handling() {
+        let mut out = Vec::new();
+        print_help(&mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+
+        assert!(s.contains("TTFM Interactive Mode Help"));
+        assert!(s.contains("Commands:"));
+        assert!(s.contains("Syntax & Examples:"));
+        assert!(s.contains("Basic Tags (type:label):"));
+        assert!(s.contains("Set Operations (&, |, -):"));
+        assert!(s.contains("Show types/labels/tags definitions & Storing:"));
+        assert!(s.contains("# Search with TTQL query"));
+
+        // Verify that raw HELP_TEXT contains dimmed escape codes
+        assert!(HELP_TEXT.contains("\x1b[2m"));
+        assert!(HELP_TEXT.contains("\x1b[0m"));
+
+        // Verify that each line's visual width is within 140 columns
+        for line in HELP_TEXT.lines() {
+            let visible_width = console::measure_text_width(line);
+            assert!(
+                visible_width <= 140,
+                "Line exceeds 140 chars width ({}): {:?}",
+                visible_width,
+                line
+            );
+        }
+
+        // Verify that strip_ansi_codes completely strips ANSI escapes
+        let stripped = console::strip_ansi_codes(HELP_TEXT);
+        assert!(!stripped.contains("\x1b["));
     }
 }

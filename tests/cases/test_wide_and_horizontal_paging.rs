@@ -201,3 +201,123 @@ fn test_interactive_horizontal_paging_next_and_prev_columns() {
     assert!(clean3.contains("item_id"));
     assert!(!clean3.contains("item_id  ..."));
 }
+
+#[test]
+fn test_search_wide_projection_bypasses_truncation() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("COLUMNS", "40");
+    let _env_guard = EnvVarGuard("COLUMNS");
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..20 {
+        std::fs::write(
+            root.join(format!("file_long_name_{i:02}.txt")),
+            "hello",
+        )
+        .unwrap();
+    }
+    let db_dir = base.join("db");
+    let registry = TagRegistry::with_standard();
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run_single(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let response = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "extension:",
+        SearchOptions::default(),
+    )
+    .unwrap();
+
+    let mut out_normal = Vec::new();
+    print_results_with_options(
+        &store,
+        &registry,
+        &response,
+        "extension:",
+        100,
+        &mut out_normal,
+        FormatOptions {
+            is_interactive: false,
+            wide: false,
+            col_offset: 0,
+            ..Default::default()
+        },
+    );
+
+    let mut out_wide = Vec::new();
+    print_results_with_options(
+        &store,
+        &registry,
+        &response,
+        "extension:",
+        100,
+        &mut out_wide,
+        FormatOptions {
+            is_interactive: false,
+            wide: true,
+            col_offset: 0,
+            ..Default::default()
+        },
+    );
+
+    let text_normal = String::from_utf8(out_normal).unwrap();
+    let text_wide = String::from_utf8(out_wide).unwrap();
+    assert!(text_normal.contains("..."));
+    assert!(!text_wide.contains("..."));
+}
+
+#[test]
+fn test_table_wrapping_for_oversized_column() {
+    let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("COLUMNS", "60");
+    let _env_guard = EnvVarGuard("COLUMNS");
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    let long_name = "this_is_an_extremely_long_filename_that_exceeds_sixty_columns_terminal_width_test.txt";
+    std::fs::write(root.join(long_name), "hello").unwrap();
+
+    let db_dir = base.join("db");
+    let registry = TagRegistry::with_standard();
+    let store = Store::open(&db_dir).unwrap();
+    Indexer::new(&store, &registry).initialize_tables().unwrap();
+    Indexer::new(&store, &registry)
+        .run_single(&root, None::<&fn(usize)>, false)
+        .unwrap();
+
+    let response = ttfm::search::search_nowarn(
+        &store,
+        &registry,
+        "filename:*extremely_long*",
+        SearchOptions::default(),
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    print_results_with_options(
+        &store,
+        &registry,
+        &response,
+        "filename:*extremely_long*",
+        100,
+        &mut out,
+        FormatOptions {
+            is_interactive: true,
+            wide: false,
+            col_offset: 0,
+            ..Default::default()
+        },
+    );
+
+    let text =
+        console::strip_ansi_codes(&String::from_utf8(out).unwrap()).to_string();
+    assert!(text.contains("extremely_long_filename"));
+    assert!(text.lines().count() >= 3);
+}
