@@ -21,9 +21,12 @@ pub enum State {
     Searched {
         query: String,
         cid: Option<String>,
+        page_start: usize,
         offset: usize,
         total_count: Option<usize>,
         has_more: bool,
+        col_offsets: Vec<usize>,
+        next_col_offset: Option<usize>,
     },
 }
 
@@ -40,12 +43,34 @@ impl State {
         total_count: Option<usize>,
         has_more: bool,
     ) {
+        self.to_searched_at_page(
+            query,
+            cid,
+            0,
+            fetched_len,
+            total_count,
+            has_more,
+        );
+    }
+
+    pub fn to_searched_at_page(
+        &mut self,
+        query: String,
+        cid: Option<String>,
+        page_start: usize,
+        fetched_len: usize,
+        total_count: Option<usize>,
+        has_more: bool,
+    ) {
         *self = State::Searched {
             query,
             cid,
-            offset: fetched_len,
+            page_start,
+            offset: page_start + fetched_len,
             total_count,
             has_more,
+            col_offsets: vec![0],
+            next_col_offset: None,
         };
     }
 
@@ -79,6 +104,46 @@ impl State {
                 };
                 format!("[{query} ({count_str} items)] Command (m for help): ")
             }
+        }
+    }
+
+    pub fn current_col_offset(&self) -> usize {
+        match self {
+            State::Searched { col_offsets, .. } => {
+                *col_offsets.last().unwrap_or(&0)
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn push_col_offset(&mut self, next: usize) {
+        if let State::Searched { col_offsets, .. } = self {
+            col_offsets.push(next);
+        }
+    }
+
+    pub fn pop_col_offset(&mut self) -> Option<usize> {
+        if let State::Searched { col_offsets, .. } = self {
+            if col_offsets.len() > 1 {
+                return col_offsets.pop();
+            }
+        }
+        None
+    }
+
+    pub fn can_prev_cols(&self) -> bool {
+        match self {
+            State::Searched { col_offsets, .. } => col_offsets.len() > 1,
+            _ => false,
+        }
+    }
+
+    pub fn set_next_col_offset(&mut self, next: Option<usize>) {
+        if let State::Searched {
+            next_col_offset, ..
+        } = self
+        {
+            *next_col_offset = next;
         }
     }
 }
@@ -120,5 +185,40 @@ mod tests {
 
         s.clear();
         assert_eq!(s, State::Init);
+    }
+
+    #[test]
+    fn test_state_col_offset_navigation_and_reset() {
+        let mut s = State::new();
+        assert_eq!(s.current_col_offset(), 0);
+        assert!(!s.can_prev_cols());
+
+        s.to_searched_at_page("ext:rs".to_string(), None, 0, 20, None, true);
+        assert_eq!(s.current_col_offset(), 0);
+        assert!(!s.can_prev_cols());
+
+        s.set_next_col_offset(Some(3));
+        s.push_col_offset(3);
+        assert_eq!(s.current_col_offset(), 3);
+        assert!(s.can_prev_cols());
+
+        s.set_next_col_offset(Some(5));
+        s.push_col_offset(5);
+        assert_eq!(s.current_col_offset(), 5);
+
+        assert_eq!(s.pop_col_offset(), Some(5));
+        assert_eq!(s.current_col_offset(), 3);
+        assert!(s.can_prev_cols());
+
+        assert_eq!(s.pop_col_offset(), Some(3));
+        assert_eq!(s.current_col_offset(), 0);
+        assert!(!s.can_prev_cols());
+        assert_eq!(s.pop_col_offset(), None);
+
+        // Reset on to_searched_at_page
+        s.push_col_offset(4);
+        s.to_searched_at_page("ext:rs".to_string(), None, 20, 20, None, true);
+        assert_eq!(s.current_col_offset(), 0);
+        assert!(!s.can_prev_cols());
     }
 }

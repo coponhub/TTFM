@@ -82,15 +82,56 @@ pub fn format_short_result(registry: &TagRegistry, res: &Item) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FormatOptions {
+    pub is_interactive: bool,
+    pub wide: bool,
+    pub col_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColumnPagingInfo {
+    pub has_next: bool,
+    pub next_col_offset: usize,
+    pub has_prev: bool,
+}
+
 pub fn print_results(
+    store: &Store,
+    registry: &TagRegistry,
+    response: &SearchResponse,
+    query: &str,
+    current_n: usize,
+    writer: &mut dyn Write,
+    is_interactive: bool,
+) {
+    let _ = print_results_with_options(
+        store,
+        registry,
+        response,
+        query,
+        current_n,
+        writer,
+        FormatOptions {
+            is_interactive,
+            wide: false,
+            col_offset: 0,
+        },
+    );
+}
+
+pub fn print_results_with_options(
     store: &Store,
     registry: &TagRegistry,
     response: &SearchResponse,
     query: &str,
     _current_n: usize,
     writer: &mut dyn Write,
-    is_interactive: bool,
-) {
+    options: FormatOptions,
+) -> ColumnPagingInfo {
+    let mut paging_info = ColumnPagingInfo::default();
+    paging_info.has_prev = options.col_offset > 0;
+
     if response.has_more && !response.progress.is_finished() {
         writeln!(
             writer,
@@ -104,7 +145,7 @@ pub fn print_results(
         if response.progress.is_finished() {
             writeln!(writer, "No items found.").unwrap_or(());
         }
-        return;
+        return paging_info;
     }
 
     if response.has_projection_results() {
@@ -113,13 +154,17 @@ pub fn print_results(
             response,
             query,
             writer,
-            is_interactive,
+            options.is_interactive,
         );
-        return;
+        return paging_info;
     }
 
     let type_ranks = crate::rank::get_type_ranks(store).unwrap_or_default();
-    let effective_width = get_terminal_width().saturating_sub(4);
+    let effective_width = if options.wide {
+        usize::MAX
+    } else {
+        get_terminal_width().saturating_sub(4)
+    };
 
     if let Some(res) = response.results.first().filter(|r| {
         r.id.is_volatile()
@@ -173,6 +218,9 @@ pub fn print_results(
                 col_widths[i].max(console::measure_text_width(key.as_str()));
         }
 
+        let mut group_has_next = false;
+        let mut group_next_offset = 0;
+
         {
             let mut print_line = |res_opt: Option<&Item>| {
                 let mut current_width = 0;
@@ -207,13 +255,30 @@ pub fn print_results(
                 }
                 current_width += console::measure_text_width(&id_disp);
 
-                for (i, key) in sorted_keys.iter().enumerate() {
+                if paging_info.has_prev
+                    && current_width + sep_len + 3 <= effective_width
+                {
+                    write!(writer, "{}{}", sep, "...").unwrap_or(());
+                    current_width += sep_len + 3;
+                }
+
+                for (i, key) in
+                    sorted_keys.iter().enumerate().skip(options.col_offset)
+                {
                     let target_width = col_widths[i];
-                    if current_width + sep_len + target_width > effective_width
+                    if !options.wide
+                        && current_width + sep_len + target_width
+                            > effective_width
                     {
                         if current_width + sep_len + 3 <= effective_width {
                             write!(writer, "{}{}", sep, "...").unwrap_or(());
                         }
+                        group_has_next = true;
+                        group_next_offset = if i == options.col_offset {
+                            (i + 1).min(sorted_keys.len())
+                        } else {
+                            i
+                        };
                         break;
                     }
                     write!(writer, "{}", sep).unwrap_or(());
@@ -250,11 +315,16 @@ pub fn print_results(
             };
 
             print_line(None);
-            for res in group.results {
+            for res in &group.results {
                 print_line(Some(res));
             }
         }
         writeln!(writer).unwrap_or(());
+
+        paging_info.has_next |= group_has_next;
+        if group_has_next && paging_info.next_col_offset == 0 {
+            paging_info.next_col_offset = group_next_offset;
+        }
     }
 
     writeln!(
@@ -265,7 +335,7 @@ pub fn print_results(
     .unwrap_or(());
 
     if response.has_more {
-        if is_interactive {
+        if options.is_interactive {
             writeln!(
                 writer,
                 "\x1b[1;32mMore results available.\x1b[0m Type 'n' for next page."
@@ -281,6 +351,8 @@ pub fn print_results(
                 .unwrap_or(());
         }
     }
+
+    paging_info
 }
 
 pub fn print_compact_projections(
@@ -733,5 +805,72 @@ mod tests {
                 line
             );
         }
+    }
+
+    #[test]
+    fn test_print_results_wide_bypasses_effective_width() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "40");
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = make_store_and_registry(&dir.path().join("db"));
+        let response = crate::search::search_nowarn(
+            &store,
+            &registry,
+            "type:*",
+            Default::default(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let paging = print_results_with_options(
+            &store,
+            &registry,
+            &response,
+            "type:*",
+            100,
+            &mut out,
+            FormatOptions {
+                is_interactive: false,
+                wide: true,
+                col_offset: 0,
+            },
+        );
+        std::env::remove_var("COLUMNS");
+        let text = String::from_utf8(out).unwrap();
+        assert!(!paging.has_next);
+        assert!(!text.contains("..."));
+    }
+
+    #[test]
+    fn test_print_results_col_offset_inserts_leading_and_trailing_ellipsis() {
+        let _guard = COLUMNS_MUTEX.lock().unwrap();
+        std::env::set_var("COLUMNS", "40");
+        let dir = tempfile::tempdir().unwrap();
+        let (store, registry) = make_store_and_registry(&dir.path().join("db"));
+        let response = crate::search::search_nowarn(
+            &store,
+            &registry,
+            "type:*",
+            Default::default(),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let paging = print_results_with_options(
+            &store,
+            &registry,
+            &response,
+            "type:*",
+            100,
+            &mut out,
+            FormatOptions {
+                is_interactive: true,
+                wide: false,
+                col_offset: 1,
+            },
+        );
+        std::env::remove_var("COLUMNS");
+        let text = String::from_utf8(out).unwrap();
+        assert!(paging.has_prev);
+        let clean = console::strip_ansi_codes(&text).to_string();
+        assert!(clean.contains("item_id  ..."));
     }
 }

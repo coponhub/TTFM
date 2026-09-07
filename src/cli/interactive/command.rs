@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::cli::format::{
-    format_tag_result, format_untag_result, print_results, ColorWarningSink,
+    format_tag_result, format_untag_result, print_results_with_options,
+    ColorWarningSink, FormatOptions,
 };
 use crate::cli::interactive::state::State;
 use crate::config::Config;
@@ -47,6 +48,8 @@ pub enum Command {
         all: bool,
     },
     Next,
+    NextCols,
+    PrevCols,
     Menu,
     Quit,
 }
@@ -265,6 +268,20 @@ pub fn parse_command(
                 Ok(Command::Next)
             }
         }
+        ">" => {
+            if !is_searched {
+                Err(CommandParseError::DisabledInInit('>'))
+            } else {
+                Ok(Command::NextCols)
+            }
+        }
+        "<" => {
+            if !is_searched {
+                Err(CommandParseError::DisabledInInit('<'))
+            } else {
+                Ok(Command::PrevCols)
+            }
+        }
         "clear" => {
             if is_searched {
                 Err(CommandParseError::DisabledInSearched("clear".to_string()))
@@ -277,6 +294,99 @@ pub fn parse_command(
         "q" => Ok(Command::Quit),
         other => Err(CommandParseError::UnknownCommand(other.to_string())),
     }
+}
+
+fn render_response<W: Write>(
+    resp: &crate::response::SearchResponse,
+    query: &str,
+    state: &mut State,
+    store: &Store,
+    registry: &TagRegistry,
+    output: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cur_col_offset = state.current_col_offset();
+    let paging = print_results_with_options(
+        store,
+        registry,
+        resp,
+        query,
+        20,
+        output,
+        FormatOptions {
+            is_interactive: true,
+            wide: false,
+            col_offset: cur_col_offset,
+        },
+    );
+    state.set_next_col_offset(if paging.has_next {
+        Some(paging.next_col_offset)
+    } else {
+        None
+    });
+    print_menu(output, state)?;
+    Ok(())
+}
+
+fn render_current_page<W: Write, E: Write>(
+    state: &mut State,
+    store: &Store,
+    registry: &TagRegistry,
+    output: &mut W,
+    err_out: &mut E,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (query, cid, page_start) = match state {
+        State::Searched {
+            query,
+            cid,
+            page_start,
+            ..
+        } => (query.clone(), cid.clone(), *page_start),
+        _ => return Ok(()),
+    };
+    let opts = SearchOptions {
+        n: Some(20),
+        offset: Some(page_start),
+        cid,
+        cache: true,
+        order: Vec::new(),
+    };
+    let mut sink = ColorWarningSink { writer: err_out };
+    let resp = search(store, registry, &query, opts, &mut sink)?;
+    render_response(&resp, &query, state, store, registry, output)
+}
+
+fn execute_search_and_render<W: Write, E: Write>(
+    query: &str,
+    page_start: usize,
+    cid: Option<String>,
+    state: &mut State,
+    store: &Store,
+    registry: &TagRegistry,
+    output: &mut W,
+    err_out: &mut E,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = SearchOptions {
+        n: Some(20),
+        offset: Some(page_start),
+        cid: cid.clone(),
+        cache: true,
+        order: Vec::new(),
+    };
+    let mut sink = ColorWarningSink { writer: err_out };
+    let resp = search(store, registry, query, opts, &mut sink)?;
+    if page_start > 0 && resp.results.is_empty() {
+        writeln!(output, "No more items.")?;
+        return Ok(());
+    }
+    state.to_searched_at_page(
+        query.to_string(),
+        resp.cid.clone(),
+        page_start,
+        resp.results.len(),
+        resp.total_count,
+        resp.has_more,
+    );
+    render_response(&resp, query, state, store, registry, output)
 }
 
 pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
@@ -296,23 +406,9 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
     };
     match cmd {
         Command::Search(q) => {
-            let opts = SearchOptions {
-                n: Some(20),
-                offset: Some(0),
-                cid: None,
-                cache: true,
-                order: Vec::new(),
-            };
-            let resp = search(store, registry, &q, opts, &mut sink)?;
-            state.to_searched(
-                q.clone(),
-                resp.cid.clone(),
-                resp.results.len(),
-                resp.total_count,
-                resp.has_more,
-            );
-            print_results(store, registry, &resp, &q, 20, output, true);
-            print_menu(output, state)?;
+            execute_search_and_render(
+                &q, 0, None, state, store, registry, output, err_out,
+            )?;
         }
         Command::Tag {
             search_query,
@@ -349,36 +445,19 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
                 if let State::Searched { cid, .. } = state {
                     *cid = None;
                 }
-                if let Some(last_q) = state.last_query().map(|s| s.to_string())
-                {
-                    let opts = SearchOptions {
-                        n: Some(20),
-                        offset: Some(0),
-                        cid: None,
-                        cache: true,
-                        order: Vec::new(),
-                    };
-                    match search(store, registry, &last_q, opts, &mut sink) {
-                        Ok(re_resp) => {
-                            state.to_searched(
-                                last_q.clone(),
-                                re_resp.cid.clone(),
-                                re_resp.results.len(),
-                                re_resp.total_count,
-                                re_resp.has_more,
-                            );
-                            print_results(
-                                store, registry, &re_resp, &last_q, 20, output,
-                                true,
-                            );
-                            print_menu(output, state)?;
-                        }
-                        Err(e) => {
-                            writeln!(err_out, "Error refreshing search: {e}")?;
-                            state.clear();
-                            print_menu(output, state)?;
-                        }
-                    }
+                if let Err(e) = execute_search_and_render(
+                    &search_query,
+                    0,
+                    None,
+                    state,
+                    store,
+                    registry,
+                    output,
+                    err_out,
+                ) {
+                    writeln!(err_out, "Error refreshing search: {e}")?;
+                    state.clear();
+                    print_menu(output, state)?;
                 }
             }
         }
@@ -417,36 +496,19 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
                 if let State::Searched { cid, .. } = state {
                     *cid = None;
                 }
-                if let Some(last_q) = state.last_query().map(|s| s.to_string())
-                {
-                    let opts = SearchOptions {
-                        n: Some(20),
-                        offset: Some(0),
-                        cid: None,
-                        cache: true,
-                        order: Vec::new(),
-                    };
-                    match search(store, registry, &last_q, opts, &mut sink) {
-                        Ok(re_resp) => {
-                            state.to_searched(
-                                last_q.clone(),
-                                re_resp.cid.clone(),
-                                re_resp.results.len(),
-                                re_resp.total_count,
-                                re_resp.has_more,
-                            );
-                            print_results(
-                                store, registry, &re_resp, &last_q, 20, output,
-                                true,
-                            );
-                            print_menu(output, state)?;
-                        }
-                        Err(e) => {
-                            writeln!(err_out, "Error refreshing search: {e}")?;
-                            state.clear();
-                            print_menu(output, state)?;
-                        }
-                    }
+                if let Err(e) = execute_search_and_render(
+                    &search_query,
+                    0,
+                    None,
+                    state,
+                    store,
+                    registry,
+                    output,
+                    err_out,
+                ) {
+                    writeln!(err_out, "Error refreshing search: {e}")?;
+                    state.clear();
+                    print_menu(output, state)?;
                 }
             }
         }
@@ -457,26 +519,31 @@ pub fn dispatch_command<R: BufRead, W: Write, E: Write>(
                 } => (query.clone(), cid.clone(), *offset),
                 _ => return Ok(true),
             };
-            let opts = SearchOptions {
-                n: Some(20),
-                offset: Some(offset),
-                cid: cid.clone(),
-                cache: true,
-                order: Vec::new(),
+            execute_search_and_render(
+                &query, offset, cid, state, store, registry, output, err_out,
+            )?;
+        }
+        Command::NextCols => {
+            let next_opt = match state {
+                State::Searched {
+                    next_col_offset, ..
+                } => *next_col_offset,
+                _ => None,
             };
-            let resp = search(store, registry, &query, opts, &mut sink)?;
-            if resp.results.is_empty() {
-                writeln!(output, "No more items.")?;
+            if let Some(next) = next_opt {
+                state.push_col_offset(next);
+                render_current_page(state, store, registry, output, err_out)?;
             } else {
-                let new_offset = offset + resp.results.len();
-                print_results(store, registry, &resp, &query, 20, output, true);
-                state.to_searched(
-                    query,
-                    resp.cid.clone(),
-                    new_offset,
-                    resp.total_count,
-                    resp.has_more,
-                );
+                writeln!(output, "No more columns.")?;
+                print_menu(output, state)?;
+            }
+        }
+        Command::PrevCols => {
+            if state.can_prev_cols() {
+                state.pop_col_offset();
+                render_current_page(state, store, registry, output, err_out)?;
+            } else {
+                writeln!(output, "Already at first columns.")?;
                 print_menu(output, state)?;
             }
         }
@@ -573,7 +640,7 @@ pub fn print_menu<W: Write>(out: &mut W, state: &State) -> std::io::Result<()> {
         State::Searched { .. } => {
             writeln!(
                 out,
-                "s(earch) | t(ag) | u(ntag) | n(ext) | q(uit to main menu)"
+                "s(earch) | t(ag) | u(ntag) | n(ext) | > (next cols) | < (prev cols) | q(uit to main menu)"
             )?;
             writeln!(out, "Examples:")?;
             writeln!(out, "  `t \"extension:rs\" project:alpha`")?;
@@ -808,6 +875,88 @@ mod tests {
     }
 
     #[test]
+    fn test_dispatch_tag_and_untag_refreshes_with_edit_search_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        let registry = TagRegistry::with_standard();
+        Indexer::new(&store, &registry).initialize_tables().unwrap();
+
+        let file_path = dir.path().join("test_sample.txt");
+        std::fs::write(&file_path, "sample content").unwrap();
+        Indexer::new(&store, &registry)
+            .run_single(dir.path(), None::<&fn(usize)>, false)
+            .unwrap();
+
+        let config = Config::default();
+        let mut write_opts = WriteOptions::default();
+        write_opts.confirm = crate::config::ConfirmMode::Never;
+        let path = Arc::new(Mutex::new(".".to_string()));
+        let mut state = State::new();
+
+        // 1. Initial search
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        dispatch_command(
+            Command::Search("extension:txt".to_string()),
+            &mut state,
+            &store,
+            &registry,
+            &config,
+            write_opts.clone(),
+            &path,
+            &mut std::io::Cursor::new(b""),
+            &mut out1,
+            &mut err1,
+        )
+        .unwrap();
+        assert_eq!(state.last_query(), Some("extension:txt"));
+
+        // 2. Tag with a different search_query
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        dispatch_command(
+            Command::Tag {
+                search_query: "extension:txt & size:>0".to_string(),
+                edit_query: "project:alpha".to_string(),
+            },
+            &mut state,
+            &store,
+            &registry,
+            &config,
+            write_opts.clone(),
+            &path,
+            &mut std::io::Cursor::new(b""),
+            &mut out2,
+            &mut err2,
+        )
+        .unwrap();
+        // After tag execution, state query must be the tag command's search_query
+        assert_eq!(state.last_query(), Some("extension:txt & size:>0"));
+
+        // 3. Untag with another search_query
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        dispatch_command(
+            Command::Untag {
+                search_query: "project:alpha".to_string(),
+                edit_query: "project:alpha".to_string(),
+            },
+            &mut state,
+            &store,
+            &registry,
+            &config,
+            write_opts,
+            &path,
+            &mut std::io::Cursor::new(b""),
+            &mut out3,
+            &mut err3,
+        )
+        .unwrap();
+        // After untag execution, state query must be the untag command's search_query
+        assert_eq!(state.last_query(), Some("project:alpha"));
+    }
+
+    #[test]
     fn test_parse_clear_command() {
         assert_eq!(
             parse_command("clear", false).unwrap(),
@@ -901,7 +1050,7 @@ mod tests {
         print_menu(&mut out_searched, &searched_state).unwrap();
         let s_searched = String::from_utf8(out_searched).unwrap();
         assert!(s_searched.contains(
-            "s(earch) | t(ag) | u(ntag) | n(ext) | q(uit to main menu)"
+            "s(earch) | t(ag) | u(ntag) | n(ext) | > (next cols) | < (prev cols) | q(uit to main menu)"
         ));
     }
 
@@ -1002,5 +1151,66 @@ mod tests {
         let out_str = String::from_utf8(output).unwrap();
         assert!(out_str.contains("File indexes cleared successfully."));
         assert!(!out_str.contains("[y/N]"));
+    }
+
+    #[test]
+    fn test_parse_and_dispatch_column_paging() {
+        assert!(matches!(
+            parse_command(">", false),
+            Err(CommandParseError::DisabledInInit('>'))
+        ));
+        assert!(matches!(
+            parse_command("<", false),
+            Err(CommandParseError::DisabledInInit('<'))
+        ));
+        assert_eq!(parse_command(">", true).unwrap(), Command::NextCols);
+        assert_eq!(parse_command("<", true).unwrap(), Command::PrevCols);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        let registry = TagRegistry::with_standard();
+        let config = Config::default();
+        let write_opts = WriteOptions::default();
+        let path = Arc::new(Mutex::new(".".to_string()));
+        let mut state = State::new();
+        state.to_searched("dummy".to_string(), None, 0, Some(0), false);
+
+        // next_col_offset is None initially
+        let mut out_next = Vec::new();
+        let mut err_next = Vec::new();
+        dispatch_command(
+            Command::NextCols,
+            &mut state,
+            &store,
+            &registry,
+            &config,
+            write_opts.clone(),
+            &path,
+            &mut std::io::Cursor::new(b""),
+            &mut out_next,
+            &mut err_next,
+        )
+        .unwrap();
+        let s_next = String::from_utf8(out_next).unwrap();
+        assert!(s_next.contains("No more columns."));
+
+        // cannot prev cols initially
+        let mut out_prev = Vec::new();
+        let mut err_prev = Vec::new();
+        dispatch_command(
+            Command::PrevCols,
+            &mut state,
+            &store,
+            &registry,
+            &config,
+            write_opts,
+            &path,
+            &mut std::io::Cursor::new(b""),
+            &mut out_prev,
+            &mut err_prev,
+        )
+        .unwrap();
+        let s_prev = String::from_utf8(out_prev).unwrap();
+        assert!(s_prev.contains("Already at first columns."));
     }
 }

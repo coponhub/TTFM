@@ -22,7 +22,7 @@ use ttfm::{
     SearchOptions,
 };
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
+pub(crate) static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 fn setup_fixture() -> (Store, TagRegistry, TempDir) {
     let dir = tempfile::tempdir().unwrap();

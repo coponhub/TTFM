@@ -21,8 +21,8 @@ use std::io::IsTerminal;
 use std::time::Duration;
 use ttfm::cli::args::{build_write_options, Cli, Commands};
 use ttfm::cli::format::{
-    format_tag_result, format_untag_result, print_results,
-    print_simple_results, ColorWarningSink,
+    format_tag_result, format_untag_result, print_results_with_options,
+    print_simple_results, ColorWarningSink, FormatOptions,
 };
 use ttfm::config::Config;
 use ttfm::db::Store;
@@ -146,6 +146,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Commands::Search {
                 query,
                 short,
+                wide,
                 n,
                 offset,
                 cid,
@@ -172,14 +173,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if *short {
                     print_simple_results(&registry, &response);
                 } else {
-                    print_results(
+                    print_results_with_options(
                         &store,
                         &registry,
                         &response,
                         query,
                         n.unwrap_or(100),
                         &mut std::io::stdout(),
-                        false,
+                        FormatOptions {
+                            is_interactive: false,
+                            wide: *wide,
+                            col_offset: 0,
+                        },
                     );
                 }
             }

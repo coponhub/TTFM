@@ -85,6 +85,9 @@ pub enum Commands {
         /// シンプルな出力モード。
         #[arg(short, long)]
         short: bool,
+        /// 端末幅によるカラム打ち切りを行わずに全カラムを出力します。
+        #[arg(short, long)]
+        wide: bool,
         /// 取得件数 (None または 0 は全件)
         #[arg(short, long)]
         n: Option<usize>,
