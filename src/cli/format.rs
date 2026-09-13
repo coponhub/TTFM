@@ -19,7 +19,6 @@ use crate::db::Store;
 use crate::edit::EditResponse;
 use crate::query::error::{Warning, WarningSink};
 use crate::response::SearchResponse;
-use crate::safe_println;
 use crate::tag::TagRegistry;
 use crate::Item;
 use std::io::Write;
@@ -95,24 +94,6 @@ pub fn get_terminal_width() -> usize {
     100 // default fallback
 }
 
-pub fn format_short_result(registry: &TagRegistry, res: &Item) -> String {
-    let nvalue_str = res
-        .tags
-        .entries
-        .iter()
-        .find(|e| {
-            e.typed_tag.tag_type() == crate::types::TagType::from("nvalue")
-        })
-        .map(|e| e.typed_tag.as_str().to_string());
-
-    let repr = res.representative.display_keys(registry);
-    if let Some(nv) = nvalue_str {
-        format!("{} {}", repr, nv)
-    } else {
-        repr
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FormatOptions {
     pub is_interactive: bool,
@@ -162,6 +143,13 @@ pub fn print_results_with_options(
     writer: &mut dyn Write,
     options: FormatOptions,
 ) -> ColumnPagingInfo {
+    debug_assert!(
+        !response
+            .results
+            .iter()
+            .any(|r| !r.representative.is_empty() && r.tags.entries.is_empty()),
+        "short search results must not be passed to table formatting"
+    );
     let mut paging_info = ColumnPagingInfo::default();
     paging_info.has_prev = options.col_offset > 0;
 
@@ -573,16 +561,32 @@ pub fn print_compact_projections(
 }
 
 pub fn print_simple_results(registry: &TagRegistry, response: &SearchResponse) {
-    if response.has_projection_results() {
-        for label_item in &response.results {
-            safe_println!("{}", format_short_result(registry, label_item));
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    if let Err(e) =
+        print_simple_results_to_writer(registry, response, &mut handle)
+    {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
         }
-    } else {
-        for res in &response.results {
+        panic!("failed printing to stdout: {e}");
+    }
+}
+
+pub fn print_simple_results_to_writer(
+    registry: &TagRegistry,
+    response: &SearchResponse,
+    writer: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    for res in &response.results {
+        if !res.representative.is_empty() {
+            writeln!(writer, "{}", res.representative.display_short(registry))?;
+        } else {
             let line = res.primary_value().unwrap_or_else(|| res.raw_repr());
-            safe_println!("{}", line);
+            writeln!(writer, "{}", line)?;
         }
     }
+    Ok(())
 }
 
 pub fn format_tag_result(resp: &EditResponse) -> String {
@@ -606,7 +610,8 @@ pub fn format_untag_result(resp: &EditResponse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Bitical, ItemId, ItemKind, Origin, SType, TypedTag};
+    use crate::response::Representative;
+    use crate::types::{ItemId, ItemKind, Origin, SType, TypedTag};
     use std::sync::Mutex;
 
     static COLUMNS_MUTEX: Mutex<()> = Mutex::new(());
@@ -623,31 +628,52 @@ mod tests {
     }
 
     #[test]
-    fn test_short_format_with_nvalue() {
-        let mut res_with_nvalue =
-            Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
-        res_with_nvalue.representative =
-            vec![TypedTag::new(SType::Name, "test_label")].into();
-        res_with_nvalue.apply_tag(
-            TypedTag::new("nvalue", Bitical::Integer(9986)),
-            Origin::Builtin,
-        );
-
-        let registry = TagRegistry::with_standard();
-        let output = format_short_result(&registry, &res_with_nvalue);
-        assert_eq!(output, "test_label 9986");
+    fn test_print_simple_results_to_writer_by_representative_presence() {
+        let registry = TagRegistry::default();
+        let mut resp = SearchResponse::default();
+        let mut item1 = Item::new_empty(ItemId::Stored(1), ItemKind::File);
+        item1.representative = Representative {
+            tags: vec![TypedTag::new(SType::Name, "rust")],
+            nvalue: None,
+        };
+        let mut item2 = Item::new_empty(ItemId::Stored(2), ItemKind::File);
+        item2
+            .tags
+            .push(TypedTag::new(SType::Path, "src/main.rs"), Origin::Builtin);
+        resp.results = vec![item1, item2];
+        let mut out = Vec::new();
+        print_simple_results_to_writer(&registry, &resp, &mut out).unwrap();
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("rust\n"));
+        assert!(out_str.contains("src/main.rs\n"));
     }
 
     #[test]
-    fn test_short_format_without_nvalue() {
-        let mut res_without_nvalue =
-            Item::new_empty(ItemId::new_volatile(), ItemKind::Volatile);
-        res_without_nvalue.representative =
-            vec![TypedTag::new(SType::Name, "test_label_no_nv")].into();
-
-        let registry = TagRegistry::with_standard();
-        let output = format_short_result(&registry, &res_without_nvalue);
-        assert_eq!(output, "test_label_no_nv");
+    #[should_panic(
+        expected = "short search results must not be passed to table formatting"
+    )]
+    fn test_print_results_with_options_panics_on_short_projection_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_dir = dir.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let (store, registry) = make_store_and_registry(&db_dir);
+        let mut resp = SearchResponse::default();
+        let mut item = Item::new_empty(ItemId::Stored(1), ItemKind::File);
+        item.representative = Representative {
+            tags: vec![TypedTag::new(SType::Name, "rust")],
+            nvalue: None,
+        };
+        resp.results = vec![item];
+        let mut out = Vec::new();
+        print_results_with_options(
+            &store,
+            &registry,
+            &resp,
+            "extension:",
+            10,
+            &mut out,
+            FormatOptions::default(),
+        );
     }
 
     #[test]

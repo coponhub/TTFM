@@ -287,6 +287,21 @@ pub fn parquet_query(path: &str) -> SelectStatement {
         .to_owned()
 }
 
+pub fn hive_parquet_query(dir: &Path) -> SelectStatement {
+    use crate::db::{DuckDbFunc, Pronoun::*};
+    use sea_query::Func;
+    let glob = dir.join("*/*.parquet");
+    Query::select()
+        .column(sea_query::Asterisk)
+        .from_function(
+            Func::cust(DuckDbFunc::ReadParquet)
+                .arg(Expr::val(glob.to_string_lossy().to_string()))
+                .arg(Expr::cust("hive_partitioning = true")),
+            Diff,
+        )
+        .to_owned()
+}
+
 /// サイズ単位（B, KB, MB, GB, TB, PB とその別名。1024累乗）の1バイトあたり倍率。
 /// 空文字列・`B` は等倍（生バイト）。未知の単位は None。
 pub fn size_unit_multiplier(unit: &str) -> Option<i64> {

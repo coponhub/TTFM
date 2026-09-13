@@ -966,4 +966,25 @@ mod tests {
         });
         assert!(!has_item_tag, "Flat list result should NOT have item: tags");
     }
+
+    #[test]
+    fn test_fetcher_fetch_short_flag_propagates() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        make_oneview(&conn);
+        insert_row(&conn, 1, 10, "extension", "rs");
+        insert_bool_row(&conn, 1, 10, "is_dir", "false", false);
+        insert_row(&conn, 2, 5, "extension", "txt");
+        insert_bool_row(&conn, 2, 5, "is_dir", "false", false);
+
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
+            "extension:",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap()
+        .with_short(true);
+        let fetcher = Fetcher::new(&resolver, &conn);
+        let results = fetcher.fetch(10, 0).unwrap();
+        assert!(!results.is_empty());
+        assert!(results[0].tags.entries.is_empty());
+    }
 }

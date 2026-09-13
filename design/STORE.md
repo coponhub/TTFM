@@ -24,17 +24,20 @@ TTFMのデータベースは以下の様式で定義される。
 - `scan_hash`: Path・Mtime・Size のhash
 - `basename_scan_hash`: filename・Mtime・Size・Inodeのhash
 
-### 1.3 `base_tags` テーブル (自動抽出タグ)
+### 1.3 `base_tags` テーブル (ファイル属性・自動抽出タグ)
 - **ファイルパス**: `.ttfm/db/base_tags.parquet`
+- 物理ファイル属性 (`size`, `mtime`, `stem`, `is_dir`, `file_id`) を事前縦持ち展開。
 - `item_id`: `file_references.item_id` への外部キー
-- `type`: タグの種類（例: `size_str`, `stem`）
+- `type`: タグの種類（例: `size`, `mtime`, `stem`, `is_dir`, `file_id` 等）
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値（型ごとに物理カラムを持ち、適切な型で格納される）
-- ※ 内容やファイル名に依存する自動抽出タグ。ファイル移動のみ（内容不変）の場合は再抽出をスキップする。
+- `rank`: 属性・タグの優先度
+- ※ 内容やファイル実体に依存する属性・タグ。ファイル移動のみ（内容不変）の場合は再抽出をスキップする。
 
-### 1.4 `tags_by_location` テーブル (パス依存タグ)
+### 1.4 `tags_by_location` テーブル (ロケーション属性タグ)
 - **ファイルパス**: `.ttfm/db/tags_by_location.parquet`
+- 場所依存の物理属性 (`path`, `filename`, `parentdir`, `extension`) を事前縦持ち展開。
 - `item_id`: `file_references.item_id` への外部キー
-- `type`: タグの種類
+- `type`: タグの種類（例: `path`, `filename`, `parentdir`, `extension`）
 - `label_str`, `label_int`, `label_double`, `label_bool`: タグの値
 - ※ パス（ディレクトリ）に依存する自動抽出タグ。`locations` と同じタイミングで常に更新・洗い替えされる。
 
@@ -46,6 +49,19 @@ TTFMのデータベースは以下の様式で定義される。
 - `scan_hash`, `basename_scan_hash`: 復帰判定に用いる識別子
 - `path`, `size`, `mtime`, `is_dir`: 削除時点のメタデータ
 - `removed_at`: 削除を検知した日時 (epoch)
+
+### 1.6 `tags` Table
+- **ファイルパス**: `.ttfm/db/tags/type=<type>/*.parquet`（内部保存形式として Hive パーティション分割ディレクトリを使用）
+- タグ候補の高速ルックアップ用辞書テーブル。
+- カラム構成:
+  - `type` (VARCHAR): タグ型名
+  - `label` (VARCHAR): 文字列化ラベル値
+  - `tag` (VARCHAR): `type:label` 完全文字列
+  - `item_id` (BIGINT, NULLABLE): 登録済み定義アイテムの Stored ID
+  - `rank` (BIGINT): タグ・型の優先度
+- 完了標識: `.ttfm/db/tags/metadata.parquet` (KV_METADATA: ttfm.status = complete)
+- 読み出し時: `read_parquet('tags/*/*.parquet', hive_partitioning = true) WHERE type = ?`
+- 各パーティション内ソート: `rank DESC, label ASC, item_id ASC`
 
 ## 2. Item Store (Definition Registry)
 タグの型(Type)や値(Label)の定義自体を管理するID台帳。
@@ -135,3 +151,4 @@ StorageMapping は3種:
 - `item_references` は保存時に `item_id ASC` でソートする
     - item idは区画毎の連続値になっているため、特定の区画にアクセスする際zone mapによる最適化が期待できる
     - 書き出し経路: `tagging::add_item` / edit の write エンジン / `rank::batch_update_rank`
+- `tags` パーティション内は `rank DESC, label ASC, item_id ASC` でソートする

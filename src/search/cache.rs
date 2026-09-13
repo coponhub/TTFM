@@ -406,7 +406,12 @@ pub(crate) fn try_resolve_cache(
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
-    super::apply_post_fetch_formatting(&mut results, &resolver, registry);
+    super::apply_post_fetch_formatting(
+        &mut results,
+        &resolver,
+        registry,
+        false,
+    );
     let has_more = n > 0 && results.len() > n;
     if has_more {
         results.truncate(n);

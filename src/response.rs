@@ -53,6 +53,14 @@ impl Representative {
             None => keys,
         }
     }
+
+    pub fn display_short(&self, registry: &TagRegistry) -> String {
+        let keys = self.display_keys(registry);
+        match self.display_nvalue() {
+            Some(nv) => format!("{}\t{}", keys, nv),
+            None => keys,
+        }
+    }
 }
 
 impl From<Vec<TypedTag>> for Representative {
@@ -903,5 +911,27 @@ mod tests {
             ItemKind::File,
         );
         assert_eq!(item_plugin.large_origin(), LargeOrigin::System);
+    }
+
+    #[test]
+    fn test_representative_display_short_format() {
+        use crate::types::{Label, SType, TypedTag};
+        let registry = TagRegistry::default();
+        let repr = Representative {
+            tags: vec![TypedTag::new(SType::Name, "docs")],
+            nvalue: Some(Label::from("1258291")),
+        };
+        assert_eq!(repr.display_short(&registry), "docs\t1258291");
+    }
+
+    #[test]
+    fn test_representative_display_short_without_nvalue() {
+        use crate::types::{SType, TypedTag};
+        let registry = TagRegistry::default();
+        let repr = Representative {
+            tags: vec![TypedTag::new(SType::Name, "docs")],
+            nvalue: None,
+        };
+        assert_eq!(repr.display_short(&registry), "docs");
     }
 }

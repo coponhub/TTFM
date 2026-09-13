@@ -879,3 +879,19 @@ fn test_dir_changed_skips_base_tags_and_updates_location() {
     let locs = find(&store, &registry, "parentdir:*dir_b");
     assert_eq!(locs.len(), 1);
 }
+
+#[test]
+fn test_indexing_uppercase_extension_stem_search() {
+    let (store, registry, _d, root) = setup(&["photo.JPG", "archive.tar.GZ"]);
+    index(&store, &registry, &[&root]);
+
+    let photo_id = find(&store, &registry, "filename:photo.JPG")[0].id;
+    let results = find(&store, &registry, "stem:photo");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, photo_id);
+
+    let gz_id = find(&store, &registry, "filename:archive.tar.GZ")[0].id;
+    let results_gz = find(&store, &registry, "stem:archive.tar");
+    assert_eq!(results_gz.len(), 1);
+    assert_eq!(results_gz[0].id, gz_id);
+}

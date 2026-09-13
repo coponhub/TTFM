@@ -153,7 +153,7 @@ fn exact_match_candidate(
 /// NULL。NULL の行は fetch 後、fetcher 側で `ItemId::new_volatile()` により
 /// 一意な揮発 id を採番し、Settling の場合は続けて origin タグから
 /// `settle()` される。
-fn build_definition_rows(
+fn build_definition_rows_from_src(
     src: &Src,
     resolved: &ResolvedDefinition,
 ) -> SelectStatement {
@@ -162,11 +162,9 @@ fn build_definition_rows(
         candidates,
         origins,
         reserved,
-        recorded,
         ..
     } = resolved;
     let kind = *kind;
-    let recorded = *recorded;
     let mut with_clause = WithClause::new();
 
     // Stored 定義行。
@@ -215,6 +213,23 @@ fn build_definition_rows(
                 .is_in(origins.iter().map(|o| o.as_str().to_string())),
         );
     }
+
+    assemble_definition_rows(resolved, with_clause, used_q)
+}
+
+fn assemble_definition_rows(
+    resolved: &ResolvedDefinition,
+    mut with_clause: WithClause,
+    used_q: SelectStatement,
+) -> SelectStatement {
+    let ResolvedDefinition {
+        kind,
+        candidates,
+        recorded,
+        ..
+    } = resolved;
+    let kind = *kind;
+    let recorded = *recorded;
 
     // candidates（定数リスト）∪ データ中で使用中の型/タグ。組み込み（Stored）は
     // candidates の 3要素目に固定 Sys id を持つ（プラグイン登録・データ中で
@@ -318,7 +333,7 @@ pub(crate) fn build_definition_pick_sql(
         .column(Col::ItemId)
         .column(Col::Rank)
         .column(Col::ItemKind)
-        .from_subquery(build_definition_rows(src, resolved), Sub)
+        .from_subquery(build_definition_rows(None, src, resolved), Sub)
         .and_where(name_condition(&resolved.pattern, resolved.exact))
         .to_owned()
 }
@@ -426,7 +441,7 @@ pub(crate) fn build_definition_fetch_sql(
             Representative,
         )
         .column((Sub, Col::Name))
-        .from_subquery(build_definition_rows(src, resolved), Sub)
+        .from_subquery(build_definition_rows(None, src, resolved), Sub)
         .join_subquery(
             JoinType::LeftJoin,
             tags_agg_sql,
@@ -445,7 +460,7 @@ pub(crate) fn build_definition_name_sql(
 ) -> SelectStatement {
     Query::select()
         .column(Col::Name)
-        .from_subquery(build_definition_rows(src, resolved), Sub)
+        .from_subquery(build_definition_rows(None, src, resolved), Sub)
         .and_where(name_condition(&resolved.pattern, resolved.exact))
         .to_owned()
 }
@@ -541,9 +556,96 @@ pub(crate) fn build_add_definitions_sql(
     q
 }
 
+pub(crate) fn build_definition_rows_optimized(
+    store: &crate::db::Store,
+    _src: &Src,
+    resolved: &ResolvedDefinition,
+) -> SelectStatement {
+    use crate::db::{TargetTable, Tbl};
+    use crate::util;
+
+    let kind = resolved.kind;
+    let ir_path = store
+        .path_for_target(TargetTable::ItemReferences)
+        .to_string_lossy()
+        .to_string();
+    let stored_q = Query::select()
+        .column(Col::ItemId)
+        .expr_as(Expr::col(Col::Content), Col::Name)
+        .column(Col::Rank)
+        .from_subquery(util::parquet_query(&ir_path), Tbl::ItemReferences)
+        .and_where(Expr::col(Col::ItemKind).eq(kind.as_str()))
+        .to_owned();
+
+    let mut used_q = Query::select();
+    if matches!(kind, ItemKind::Tag) {
+        let val_expr = crate::oneview::build_label_str_expr(Tbl::UserTags);
+        let typed_tag_expr = Func::cust(crate::db::DuckDbFunc::Concat).args([
+            Expr::col((Tbl::UserTags, Col::Type)).into(),
+            Expr::val(":").into(),
+            val_expr.into(),
+        ]);
+        let ut_path = store
+            .path_for_target(TargetTable::UserTags)
+            .to_string_lossy()
+            .to_string();
+        used_q
+            .distinct()
+            .expr_as(typed_tag_expr, Col::Name)
+            .expr_as(Expr::val(crate::rank::SystemRank::DEFAULT), Col::Rank)
+            .expr_as(Expr::val(None::<i64>), Col::ItemId)
+            .from_subquery(util::parquet_query(&ut_path), Tbl::UserTags);
+    } else {
+        used_q
+            .distinct()
+            .expr_as(Expr::col(Col::Type), Col::Name)
+            .column(Col::Rank)
+            .column((Tbl::Tags, Col::ItemId))
+            .from_subquery(
+                util::hive_parquet_query(&store.tags_dir()),
+                Tbl::Tags,
+            );
+    }
+
+    let mut excluded: Vec<String> =
+        resolved.candidates.iter().map(|c| c.name.clone()).collect();
+    excluded.extend(resolved.reserved.iter().cloned());
+    if !excluded.is_empty() {
+        used_q.and_where(Expr::col(Col::Name).is_not_in(excluded));
+    }
+
+    let mut with_clause = WithClause::new();
+    with_clause.cte(
+        CommonTableExpression::new()
+            .query(stored_q)
+            .table_name(Stored)
+            .to_owned(),
+    );
+    assemble_definition_rows(resolved, with_clause, used_q)
+}
+
+pub(crate) fn build_definition_rows(
+    store: Option<&crate::db::Store>,
+    src: &Src,
+    resolved: &ResolvedDefinition,
+) -> SelectStatement {
+    if let Some(store) = store {
+        if store.tags_metadata_path().exists()
+            && !matches!(src, Src::Parquet(_))
+            && resolved.origins.is_empty()
+        {
+            return build_definition_rows_optimized(store, src, resolved);
+        }
+    }
+    build_definition_rows_from_src(src, resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Store;
+    use sea_query::PostgresQueryBuilder;
+    use tempfile::tempdir;
 
     #[test]
     fn test_name_condition_caret_is_literal_not_prefix_glob() {
@@ -561,5 +663,41 @@ mod tests {
             "must not convert to prefix glob 'foo*': {}",
             sql
         );
+    }
+
+    #[test]
+    fn test_build_definition_rows_user_tags_only_and_type_tags_dict() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let tag_resolved = ResolvedDefinition::for_tag(
+            ItemKind::Tag,
+            TypedTag::new(crate::types::TagType::from("tag"), "*"),
+            Vec::new(),
+            Vec::new(),
+            crate::rank::SystemRank::DEFAULT,
+        );
+        let tag_sql = build_definition_rows_optimized(
+            &store,
+            &Src::OneView,
+            &tag_resolved,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(tag_sql.contains("user_tags"));
+        assert!(!tag_sql.contains("tags_by_location"));
+
+        let type_resolved = ResolvedDefinition::for_tag(
+            ItemKind::Type,
+            TypedTag::new(crate::types::TagType::from("type"), "*"),
+            Vec::new(),
+            Vec::new(),
+            crate::rank::SystemRank::DEFAULT,
+        );
+        let type_sql = build_definition_rows_optimized(
+            &store,
+            &Src::OneView,
+            &type_resolved,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(type_sql.contains("tags"));
     }
 }

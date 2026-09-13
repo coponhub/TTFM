@@ -295,6 +295,15 @@ impl CustomFunc {
         )
     }
 
+    /// short 最適化用の空タグリスト式 `list_value()::STRUCT(...)[]` を生成します。
+    pub fn empty_tag_list() -> sea_query::SimpleExpr {
+        let union_type = Self::union_type();
+        sea_query::Expr::cust(format!(
+            "list_value()::STRUCT(tag_type VARCHAR, value {}, origin VARCHAR)[]",
+            union_type
+        ))
+    }
+
     /// list_value(v1, v2, ...) を生成します。
     pub fn list_value(
         exprs: impl IntoIterator<Item = sea_query::SimpleExpr>,

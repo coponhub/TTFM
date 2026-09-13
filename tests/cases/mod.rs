@@ -476,6 +476,7 @@ pub mod test_reverse_patterns;
 pub mod test_scalar_format;
 pub mod test_search_order;
 pub mod test_search_progress;
+pub mod test_search_short;
 pub mod test_size_units;
 pub mod test_strict_grammar;
 pub mod test_terminal_width_formatting;

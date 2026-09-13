@@ -137,9 +137,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 offset,
                 cid,
             } => {
-                if !*short {
-                    safe_println!("Searching for: '{}'", query);
-                }
                 let opts = ttfm::SearchOptions {
                     n: Some(n.unwrap_or(100)),
                     offset: *offset,
@@ -147,18 +144,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 };
                 let mut stdout = std::io::stdout();
-                let response = ttfm::search::search(
-                    &store,
-                    &registry,
-                    query,
-                    opts,
-                    &mut ColorWarningSink {
-                        writer: &mut stdout,
-                    },
-                )?;
+                let mut sink = ColorWarningSink {
+                    writer: &mut stdout,
+                };
                 if *short {
+                    let response = ttfm::search::search_short(
+                        &store, &registry, query, opts, &mut sink,
+                    )?;
                     print_simple_results(&registry, &response);
                 } else {
+                    safe_println!("Searching for: '{}'", query);
+                    let response = ttfm::search::search(
+                        &store, &registry, query, opts, &mut sink,
+                    )?;
                     print_results_with_options(
                         &store,
                         &registry,

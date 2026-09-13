@@ -168,4 +168,3 @@ Remaining features, optimizations, and long-term vision.
     - Explore batch insertion strategies to consolidate data before writing to the database to improve I/O throughput.
 - [ ] **Test Coverage**: Windows paths and complex boolean logic edge cases.
 - [ ] **Optimization Trade-offs**: Directory optimization to reduce metadata calls (scalability target: 100M+ files).
-

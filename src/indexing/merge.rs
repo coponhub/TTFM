@@ -24,7 +24,8 @@ use crate::util::{self, ExecuteSql, IdenExt};
 use anyhow::Result;
 use duckdb::{Connection, ToSql};
 use sea_query::{
-    Condition, Expr, Func, Iden, JoinType, Order, Query, SelectStatement,
+    CaseStatement, Condition, Expr, Func, Iden, JoinType, Order, Query,
+    SelectStatement, UnionType,
 };
 // use sea_query::{JoinType, SimpleExpr};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ pub(crate) fn run_merge(
     temp_live_path: &Path,
     roots: &[PathBuf],
     update_sys_fn: impl Fn(Option<SelectStatement>) -> Result<()>,
-) -> Result<()> {
+) -> Result<Vec<i64>> {
     // 各テーブルの取り込みと同期を実行
 
     // 実体・場所テーブルが上書きされる前に退避する必要がある。
@@ -103,7 +104,12 @@ pub(crate) fn run_merge(
     // クリーンアップ
     std::fs::remove_file(temp_scan_path).ok();
     std::fs::remove_file(temp_live_path).ok();
-    Ok(())
+
+    let mut modified_item_ids = Vec::new();
+    for r in results.iter().chain(dir_changed.iter()) {
+        modified_item_ids.push(r.location_row.id);
+    }
+    Ok(modified_item_ids)
 }
 
 // ========================================================
@@ -310,19 +316,25 @@ impl<'a> BaseTagMerger<'a> {
         }
         let table_name = Tbl::BaseTagsDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
+        let mut seen: rustc_hash::FxHashSet<(i64, &str)> =
+            rustc_hash::FxHashSet::default();
 
         for res in results {
             for t in &res.tags {
-                // EAV 分解は書込境界のここで行う。列順はテーブル定義と同じ
-                // BiticalType::to_columns に追従し、値は書込先カラムのみ、
-                // 他カラムは NULL。
-                let (stored_col, stored) = t.value.to_col_value();
-                let none = None::<Bitical>;
-                let mut row: Vec<&dyn ToSql> = vec![&t.item_id, &t.tag_type];
-                for col in BiticalType::to_columns() {
-                    row.push(if col == stored_col { &stored } else { &none });
+                if seen.insert((t.item_id, t.tag_type.as_str())) {
+                    let (stored_col, stored) = t.value.to_col_value();
+                    let none = None::<Bitical>;
+                    let mut row: Vec<&dyn ToSql> =
+                        vec![&t.item_id, &t.tag_type];
+                    for col in BiticalType::to_columns() {
+                        row.push(if col == stored_col {
+                            &stored
+                        } else {
+                            &none
+                        });
+                    }
+                    app.append_row(row.as_slice())?;
                 }
-                app.append_row(row.as_slice())?;
             }
         }
         Ok(self)
@@ -381,35 +393,37 @@ impl<'a> LocationTagMerger<'a> {
         }
         let table_name = Tbl::TagsByLocationDiff.to_string().replace('"', "");
         let mut app = self.conn.appender(&table_name)?;
+        let mut seen: rustc_hash::FxHashSet<(i64, &str, String)> =
+            rustc_hash::FxHashSet::default();
 
         for res in results.iter().chain(dir_changed.iter()) {
             for t in &res.location_tags {
                 let (stored_col, stored) = t.value.to_col_value();
-                let none = None::<Bitical>;
-                let mut row: Vec<&dyn ToSql> = vec![&t.item_id, &t.tag_type];
-                for col in BiticalType::to_columns() {
-                    row.push(if col == stored_col { &stored } else { &none });
+                let val_str = stored.as_display_name();
+                let key = (t.item_id, t.tag_type.as_str(), val_str);
+                if seen.insert(key) {
+                    let none = None::<Bitical>;
+                    let mut row: Vec<&dyn ToSql> =
+                        vec![&t.item_id, &t.tag_type];
+                    for col in BiticalType::to_columns() {
+                        row.push(if col == stored_col {
+                            &stored
+                        } else {
+                            &none
+                        });
+                    }
+                    app.append_row(row.as_slice())?;
                 }
-                app.append_row(row.as_slice())?;
             }
         }
         Ok(self)
     }
 
-    pub(crate) fn sync(self, deleted_ids: &[ItemId]) -> Result<Self> {
-        let ids_i64: Vec<i64> =
-            deleted_ids.iter().map(|id| id.as_i64()).collect();
-        merge_and_save(
-            self.conn,
-            &self.store.path_for_target(TargetTable::TagsByLocation),
-            Tbl::TagsByLocationDiff,
-            (!ids_i64.is_empty()).then(|| {
-                Condition::all()
-                    .add(Expr::col(Col::ItemId).is_not_in(ids_i64.clone()))
-            }),
-            Col::ItemId,
-            Some(vec![Col::Type, Col::LabelInt, Col::LabelStr, Col::ItemId]),
-        )?;
+    pub(crate) fn sync(self, _deleted_ids: &[ItemId]) -> Result<Self> {
+        let target_path =
+            self.store.path_for_target(TargetTable::TagsByLocation);
+        let loc_path = self.store.path_for_target(TargetTable::Locations);
+        sync_location_tags(self.conn, &target_path, &loc_path)?;
         Ok(self)
     }
 
@@ -417,6 +431,168 @@ impl<'a> LocationTagMerger<'a> {
         Tbl::TagsByLocationDiff.drop_table(self.conn).ok();
         Ok(())
     }
+}
+
+fn build_stem_expr() -> sea_query::SimpleExpr {
+    let ext_col = Expr::col((Tbl::Locations, Col::Extension));
+    let name_col = Expr::col((Tbl::Locations, Col::Filename));
+
+    let ext_not_empty =
+        ext_col.clone().is_not_null().and(ext_col.clone().ne(""));
+
+    let lower_name = Func::lower(name_col.clone());
+    let lower_ext = Func::lower(ext_col.clone());
+    let dot_ext = Func::cust(crate::db::DuckDbFunc::Concat)
+        .args([Expr::val(".").into(), lower_ext.into()]);
+    let name_ends_with_ext: sea_query::SimpleExpr =
+        Func::cust(crate::db::DuckDbFunc::EndsWith)
+            .args([lower_name.into(), dot_ext.into()])
+            .into();
+
+    let name_len = Func::char_length(name_col.clone());
+    let ext_len = Func::char_length(ext_col);
+
+    let stem_len = Expr::expr(name_len.clone())
+        .sub(Expr::expr(ext_len))
+        .sub(1i64);
+
+    let stem_substr = Func::cust(crate::db::DuckDbFunc::Substr).args([
+        name_col.clone().into(),
+        Expr::val(1i64).into(),
+        stem_len.into(),
+    ]);
+
+    // 末尾が '.' で終わるファイル名（例: "a."）の幹名は "a"（Rust の Path::file_stem() と同一）
+    let ends_with_dot: sea_query::SimpleExpr =
+        Func::cust(crate::db::DuckDbFunc::EndsWith)
+            .args([name_col.clone().into(), Expr::val(".").into()])
+            .into();
+    let name_len_gt_1 = Expr::expr(name_len.clone()).gt(1i64);
+    let dot_stem_substr = Func::cust(crate::db::DuckDbFunc::Substr).args([
+        name_col.clone().into(),
+        Expr::val(1i64).into(),
+        Expr::expr(name_len).sub(1i64).into(),
+    ]);
+
+    CaseStatement::new()
+        .case(ext_not_empty.and(name_ends_with_ext), stem_substr)
+        .case(name_len_gt_1.and(ends_with_dot), dot_stem_substr)
+        .finally(name_col)
+        .into()
+}
+
+fn build_location_exists_query(loc_path: &Path) -> SelectStatement {
+    let loc_subquery = util::parquet_query(&loc_path.to_string_lossy());
+    let stem_expr = build_stem_expr();
+
+    let tbl_tag = Tbl::TagsByLocation;
+    let tbl_loc = Tbl::Locations;
+
+    let mut q = Query::select();
+    q.expr(Expr::val(1i64))
+        .from_subquery(loc_subquery, tbl_loc)
+        .and_where(
+            Expr::col((tbl_loc, Col::ItemId)).equals((tbl_tag, Col::ItemId)),
+        )
+        .cond_where(
+            Condition::any()
+                .add(
+                    Expr::col((tbl_tag, Col::Type)).eq("path").and(
+                        Expr::col((tbl_tag, Col::LabelStr))
+                            .equals((tbl_loc, Col::Path)),
+                    ),
+                )
+                .add(
+                    Expr::col((tbl_tag, Col::Type)).eq("filename").and(
+                        Expr::col((tbl_tag, Col::LabelStr))
+                            .equals((tbl_loc, Col::Filename)),
+                    ),
+                )
+                .add(
+                    Expr::col((tbl_tag, Col::Type)).eq("parentdir").and(
+                        Expr::col((tbl_tag, Col::LabelStr))
+                            .equals((tbl_loc, Col::Parentdir)),
+                    ),
+                )
+                .add(
+                    Expr::col((tbl_tag, Col::Type)).eq("extension").and(
+                        Expr::col((tbl_tag, Col::LabelStr))
+                            .equals((tbl_loc, Col::Extension)),
+                    ),
+                )
+                .add(
+                    Expr::col((tbl_tag, Col::Type))
+                        .eq("stem")
+                        .and(Expr::col((tbl_tag, Col::LabelStr)).eq(stem_expr)),
+                )
+                .add(Expr::col((tbl_tag, Col::Type)).is_not_in([
+                    "path",
+                    "filename",
+                    "parentdir",
+                    "extension",
+                    "stem",
+                ])),
+        );
+    q
+}
+
+fn sync_location_tags(
+    conn: &Connection,
+    target_path: &Path,
+    loc_path: &Path,
+) -> Result<()> {
+    let cols = [
+        Col::ItemId,
+        Col::Type,
+        Col::LabelStr,
+        Col::LabelInt,
+        Col::LabelDouble,
+        Col::LabelBool,
+    ];
+
+    let diff_q = Query::select()
+        .columns(cols)
+        .from(Tbl::TagsByLocationDiff)
+        .to_owned();
+
+    let source_q = if target_path.exists() {
+        let mut existing_q = Query::select();
+        existing_q.columns(cols).from_subquery(
+            util::parquet_query(&target_path.to_string_lossy()),
+            Tbl::TagsByLocation,
+        );
+        existing_q.union(UnionType::All, diff_q);
+        existing_q
+    } else {
+        diff_q
+    };
+
+    let mut main_q = Query::select();
+    main_q
+        .distinct()
+        .columns([
+            (Tbl::TagsByLocation, Col::ItemId),
+            (Tbl::TagsByLocation, Col::Type),
+            (Tbl::TagsByLocation, Col::LabelStr),
+            (Tbl::TagsByLocation, Col::LabelInt),
+            (Tbl::TagsByLocation, Col::LabelDouble),
+            (Tbl::TagsByLocation, Col::LabelBool),
+        ])
+        .from_subquery(source_q, Tbl::TagsByLocation)
+        .order_by((Tbl::TagsByLocation, Col::Type), Order::Asc)
+        .order_by((Tbl::TagsByLocation, Col::LabelInt), Order::Asc)
+        .order_by((Tbl::TagsByLocation, Col::LabelStr), Order::Asc)
+        .order_by((Tbl::TagsByLocation, Col::ItemId), Order::Asc);
+
+    if loc_path.exists() {
+        let exists_q = build_location_exists_query(loc_path);
+        main_q.and_where(Expr::exists(exists_q));
+    } else {
+        main_q.and_where(Expr::val(1i64).eq(0i64));
+    }
+
+    util::save_parquet(conn, &main_q, target_path, None)?;
+    Ok(())
 }
 
 pub(crate) fn record_removed_files(
@@ -670,6 +846,259 @@ mod tests {
         };
         merger.prepare()?.sync(&[])?.cleanup()?;
         assert!(store.path_for_target(TargetTable::TagsByLocation).exists());
+        Ok(())
+    }
+
+    fn insert_dummy_locations(
+        store: &Store,
+        item_id: i64,
+        paths: &[&str],
+    ) -> Result<()> {
+        let p = store.path_for_target(TargetTable::Locations);
+        let mut rows = Vec::new();
+        for path_str in paths {
+            let path = Path::new(path_str);
+            let parent = path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let filename = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            rows.push(format!(
+                "({item_id}, '{path_str}', '{parent}', '{filename}', \
+                 '{ext}', 0, 0)"
+            ));
+        }
+        let sql = format!(
+            "COPY (SELECT * FROM (VALUES {}) AS t(item_id, path, \
+             parentdir, filename, extension, scan_hash, \
+             basename_scan_hash)) TO '{}' (FORMAT PARQUET)",
+            rows.join(", "),
+            p.to_string_lossy().replace('\'', "''")
+        );
+        store.conn.execute(&sql, [])?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_location_and_base_tag_merger_deduplicates_hardlinks() {
+        use crate::indexing::indexer::{DynamicRow, ScanHash, TagRow};
+        use sea_query::PostgresQueryBuilder;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let registry = TagRegistry::with_standard();
+
+        insert_dummy_locations(&store, 1, &["/path/a.txt", "/path/b.txt"])
+            .unwrap();
+
+        let make_res = |path: &str| TaggingResult {
+            entity_row: DynamicRow {
+                id: 1,
+                values: vec![Some(Bitical::Integer(0))],
+            },
+            location_row: DynamicRow {
+                id: 1,
+                values: vec![Some(Bitical::String(path.to_string()))],
+            },
+            tags: vec![TagRow {
+                item_id: 1,
+                tag_type: "size".to_string(),
+                value: Bitical::Integer(100),
+            }],
+            location_tags: vec![TagRow {
+                item_id: 1,
+                tag_type: "path".to_string(),
+                value: Bitical::String(path.to_string()),
+            }],
+            scan_hash: ScanHash(0),
+            basename_scan_hash: ScanHash(0),
+        };
+        let results = vec![make_res("/path/a.txt"), make_res("/path/b.txt")];
+
+        let base_merger = BaseTagMerger {
+            conn: &store.conn,
+            registry: &registry,
+            store: &store,
+        };
+        base_merger
+            .prepare()
+            .unwrap()
+            .ingest(&results)
+            .unwrap()
+            .sync(&[])
+            .unwrap();
+
+        let loc_merger = LocationTagMerger {
+            conn: &store.conn,
+            registry: &registry,
+            store: &store,
+        };
+        loc_merger
+            .prepare()
+            .unwrap()
+            .ingest(&results, &[])
+            .unwrap()
+            .sync(&[])
+            .unwrap();
+
+        let base_p = store.path_for_target(TargetTable::BaseTags);
+        let mut q = Query::select();
+        q.expr(Func::count(Expr::col(sea_query::Asterisk)))
+            .from_subquery(
+                util::parquet_query(&base_p.to_string_lossy()),
+                Tbl::BaseTags,
+            )
+            .and_where(Expr::col((Tbl::BaseTags, Col::ItemId)).eq(1))
+            .and_where(Expr::col((Tbl::BaseTags, Col::Type)).eq("size"));
+        let sql = q.to_string(PostgresQueryBuilder);
+        let count: i64 = store.conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+
+        let loc_p = store.path_for_target(TargetTable::TagsByLocation);
+        let mut loc_q = Query::select();
+        loc_q
+            .expr(Func::count(Expr::col(sea_query::Asterisk)))
+            .from_subquery(
+                util::parquet_query(&loc_p.to_string_lossy()),
+                Tbl::TagsByLocation,
+            )
+            .and_where(Expr::col((Tbl::TagsByLocation, Col::ItemId)).eq(1))
+            .and_where(Expr::col((Tbl::TagsByLocation, Col::Type)).eq("path"));
+        let loc_sql = loc_q.to_string(PostgresQueryBuilder);
+        let loc_count: i64 =
+            store.conn.query_row(&loc_sql, [], |r| r.get(0)).unwrap();
+        assert_eq!(loc_count, 2);
+    }
+
+    #[test]
+    fn test_location_tag_merger_incremental_hardlink_preserves_existing() {
+        use crate::indexing::indexer::{DynamicRow, ScanHash, TagRow};
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let registry = TagRegistry::with_standard();
+
+        insert_dummy_locations(&store, 1, &["/path/a.txt", "/path/b.txt"])
+            .unwrap();
+
+        let make_res = |path: &str| TaggingResult {
+            entity_row: DynamicRow {
+                id: 1,
+                values: vec![Some(Bitical::Integer(0))],
+            },
+            location_row: DynamicRow {
+                id: 1,
+                values: vec![Some(Bitical::String(path.to_string()))],
+            },
+            tags: vec![],
+            location_tags: vec![TagRow {
+                item_id: 1,
+                tag_type: "path".to_string(),
+                value: Bitical::String(path.to_string()),
+            }],
+            scan_hash: ScanHash(0),
+            basename_scan_hash: ScanHash(0),
+        };
+
+        // 1. 初回インデックス: a.txt のみ
+        let loc_merger1 = LocationTagMerger {
+            conn: &store.conn,
+            registry: &registry,
+            store: &store,
+        };
+        loc_merger1
+            .prepare()
+            .unwrap()
+            .ingest(&[make_res("/path/a.txt")], &[])
+            .unwrap()
+            .sync(&[])
+            .unwrap()
+            .cleanup()
+            .unwrap();
+
+        // 2. インクリメンタルインデックス: b.txt のみ
+        let loc_merger2 = LocationTagMerger {
+            conn: &store.conn,
+            registry: &registry,
+            store: &store,
+        };
+        loc_merger2
+            .prepare()
+            .unwrap()
+            .ingest(&[make_res("/path/b.txt")], &[])
+            .unwrap()
+            .sync(&[])
+            .unwrap()
+            .cleanup()
+            .unwrap();
+
+        // 3. a.txt と b.txt の両方が残っていることを検証
+        let target_p = store.path_for_target(TargetTable::TagsByLocation);
+        let count: i64 = store
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM read_parquet('{}') \
+                     WHERE item_id = 1 AND type = 'path'",
+                    target_p.display()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_build_stem_expr_case_insensitive_and_trailing_dot() -> Result<()> {
+        use sea_query::PostgresQueryBuilder;
+
+        let conn = Connection::open_in_memory()?;
+        conn.execute(
+            "CREATE TABLE locations (filename VARCHAR, extension VARCHAR)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO locations VALUES 
+             ('photo.JPG', 'jpg'),
+             ('archive.tar.GZ', 'gz'),
+             ('document.pdf', 'pdf'),
+             ('no_ext', ''),
+             ('trailing_dot.', '')",
+            [],
+        )?;
+
+        let stem_expr = build_stem_expr();
+        let mut q = Query::select();
+        q.column(Col::Filename)
+            .expr_as(stem_expr, Alias::new("stem"))
+            .from(Tbl::Locations)
+            .order_by(Col::Filename, Order::Asc);
+
+        let sql = q.to_string(PostgresQueryBuilder);
+        let rows: Vec<(String, String)> = conn
+            .prepare(&sql)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            rows,
+            vec![
+                ("archive.tar.GZ".to_string(), "archive.tar".to_string()),
+                ("document.pdf".to_string(), "document".to_string()),
+                ("no_ext".to_string(), "no_ext".to_string()),
+                ("photo.JPG".to_string(), "photo".to_string()),
+                ("trailing_dot.".to_string(), "trailing_dot".to_string()),
+            ]
+        );
+
         Ok(())
     }
 }

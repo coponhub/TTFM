@@ -263,67 +263,15 @@ impl<'a> ItemTriager<'a> {
         cols: &[ColumnDef],
     ) -> TaggingResult {
         let id_i64 = id.as_i64();
-        let mut res = values
-            .into_iter()
-            .zip(cols)
-            .map(|(v, c)| self.classify(id_i64, v, c))
-            .fold(TriageAccumulator::new(id_i64), |acc, p| acc.collect(p))
-            .finish();
+        let mut acc = TriageAccumulator::new(id_i64);
+        for (v, c) in values.into_iter().zip(cols) {
+            acc.feed(v, c);
+        }
+        let mut res = acc.finish();
 
         res.scan_hash = hashes.0;
         res.basename_scan_hash = hashes.1;
         res
-    }
-
-    fn classify(
-        &self,
-        id: i64,
-        val: Option<Bitical>,
-        col: &ColumnDef,
-    ) -> TriagePiece {
-        match col.target_table {
-            TargetTable::FileReferences => TriagePiece::Entity(val),
-            TargetTable::Locations => TriagePiece::Location(val),
-            TargetTable::BaseTags => self.triage_base_tag(id, val, &col.name),
-            TargetTable::TagsByLocation => {
-                self.triage_location_tag(id, val, &col.name)
-            }
-            _ => TriagePiece::None,
-        }
-    }
-
-    fn triage_base_tag(
-        &self,
-        id: i64,
-        val: Option<Bitical>,
-        name: &str,
-    ) -> TriagePiece {
-        // 値が無ければタグ行を作らない。EAV カラムへの分解は書込境界
-        // （BaseTagMerger::ingest）まで遅延する。
-        match val {
-            Some(value) => TriagePiece::Tag(TagRow {
-                item_id: id,
-                tag_type: name.to_string(),
-                value,
-            }),
-            None => TriagePiece::None,
-        }
-    }
-
-    fn triage_location_tag(
-        &self,
-        id: i64,
-        val: Option<Bitical>,
-        name: &str,
-    ) -> TriagePiece {
-        match val {
-            Some(value) => TriagePiece::LocationTag(TagRow {
-                item_id: id,
-                tag_type: name.to_string(),
-                value,
-            }),
-            None => TriagePiece::None,
-        }
     }
 }
 
@@ -332,14 +280,6 @@ impl<'a> ItemTriager<'a> {
 // ========================================================
 
 pub(crate) struct Hashes(pub(crate) ScanHash, pub(crate) ScanHash);
-
-pub(crate) enum TriagePiece {
-    Entity(Option<Bitical>),
-    Location(Option<Bitical>),
-    Tag(TagRow),
-    LocationTag(TagRow),
-    None,
-}
 
 pub(crate) struct TriageAccumulator {
     id: i64,
@@ -360,15 +300,48 @@ impl TriageAccumulator {
         }
     }
 
-    pub(crate) fn collect(mut self, piece: TriagePiece) -> Self {
-        match piece {
-            TriagePiece::Entity(v) => self.entities.push(v),
-            TriagePiece::Location(v) => self.locations.push(v),
-            TriagePiece::Tag(t) => self.tags.push(t),
-            TriagePiece::LocationTag(t) => self.location_tags.push(t),
-            TriagePiece::None => {}
+    pub(crate) fn feed(&mut self, val: Option<Bitical>, col: &ColumnDef) {
+        match col.target_table {
+            TargetTable::FileReferences => {
+                self.entities.push(val.clone());
+                if let Some(value) = val {
+                    self.tags.push(TagRow {
+                        item_id: self.id,
+                        tag_type: col.name.clone(),
+                        value,
+                    });
+                }
+            }
+            TargetTable::Locations => {
+                self.locations.push(val.clone());
+                if let Some(value) = val {
+                    self.location_tags.push(TagRow {
+                        item_id: self.id,
+                        tag_type: col.name.clone(),
+                        value,
+                    });
+                }
+            }
+            TargetTable::BaseTags => {
+                if let Some(value) = val {
+                    self.tags.push(TagRow {
+                        item_id: self.id,
+                        tag_type: col.name.clone(),
+                        value,
+                    });
+                }
+            }
+            TargetTable::TagsByLocation => {
+                if let Some(value) = val {
+                    self.location_tags.push(TagRow {
+                        item_id: self.id,
+                        tag_type: col.name.clone(),
+                        value,
+                    });
+                }
+            }
+            _ => {}
         }
-        self
     }
 
     pub(crate) fn finish(self) -> TaggingResult {
@@ -404,15 +377,32 @@ mod tests {
     #[test]
     fn test_triage_accumulator_logic() {
         let mut acc = TriageAccumulator::new(123);
-        acc = acc.collect(TriagePiece::Entity(Some(Bitical::Integer(100))));
-        acc = acc.collect(TriagePiece::Location(Some(Bitical::String(
-            "/path".into(),
-        ))));
-        acc = acc.collect(TriagePiece::Tag(TagRow {
-            item_id: 123,
-            tag_type: "ext".into(),
-            value: Bitical::String("rs".into()),
-        }));
+        let col_file_ref = ColumnDef {
+            name: "size".into(),
+            bitical_type: BiticalType::Integer,
+            target_table: TargetTable::FileReferences,
+        };
+        let col_loc = ColumnDef {
+            name: "path".into(),
+            bitical_type: BiticalType::String,
+            target_table: TargetTable::Locations,
+        };
+        let col_tag = ColumnDef {
+            name: "ext".into(),
+            bitical_type: BiticalType::String,
+            target_table: TargetTable::BaseTags,
+        };
+        let col_loc_tag = ColumnDef {
+            name: "loc_ext".into(),
+            bitical_type: BiticalType::String,
+            target_table: TargetTable::TagsByLocation,
+        };
+
+        acc.feed(Some(Bitical::Integer(100)), &col_file_ref);
+        acc.feed(Some(Bitical::String("/path".into())), &col_loc);
+        acc.feed(Some(Bitical::String("rs".into())), &col_tag);
+        acc.feed(Some(Bitical::String("rs_loc".into())), &col_loc_tag);
+
         let res = acc.finish();
         assert_eq!(res.entity_row.id, 123);
         assert_eq!(res.entity_row.values[1], Some(Bitical::Integer(100)));
@@ -420,24 +410,12 @@ mod tests {
             res.location_row.values[0],
             Some(Bitical::String("/path".into()))
         );
-        assert_eq!(res.tags[0].tag_type, "ext");
-    }
-
-    #[test]
-    fn test_triager_classify_logic() {
-        let registry = TagRegistry::new();
-        let triager = ItemTriager::new(&registry);
-
-        let col_ent = ColumnDef {
-            name: "size".to_string(),
-            bitical_type: BiticalType::Integer,
-            target_table: TargetTable::FileReferences,
-        };
-        let p_ent = triager.classify(1, Some(Bitical::Integer(1024)), &col_ent);
-        assert!(matches!(
-            p_ent,
-            TriagePiece::Entity(Some(Bitical::Integer(1024)))
-        ));
+        assert_eq!(res.tags.len(), 2);
+        assert_eq!(res.tags[0].tag_type, "size");
+        assert_eq!(res.tags[1].tag_type, "ext");
+        assert_eq!(res.location_tags.len(), 2);
+        assert_eq!(res.location_tags[0].tag_type, "path");
+        assert_eq!(res.location_tags[1].tag_type, "loc_ext");
     }
 
     #[test]
@@ -652,5 +630,34 @@ mod tests {
                 total: 1
             }
         );
+    }
+
+    #[test]
+    fn test_triage_pre_flattens_locations_and_file_refs() {
+        use std::fs::File;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_file.rs");
+        File::create(&file_path).unwrap();
+
+        let registry = TagRegistry::with_standard();
+        let triager = ItemTriager::new(&registry);
+        let cols = registry.get_all_columns();
+
+        let values = registry.process_file(&file_path).unwrap();
+        let hashes = Hashes(ScanHash(10), ScanHash(20));
+
+        let res = triager.triage_item(ItemId::from(1), values, hashes, &cols);
+
+        assert!(res.location_tags.iter().any(|t| t.tag_type == "extension"));
+        assert!(res.location_tags.iter().any(|t| t.tag_type == "parentdir"));
+        assert!(res.location_tags.iter().any(|t| t.tag_type == "filename"));
+        assert!(res.location_tags.iter().any(|t| t.tag_type == "path"));
+        assert!(res.location_tags.iter().any(|t| t.tag_type == "stem"));
+        assert!(res.tags.iter().any(|t| t.tag_type == "size"));
+        assert!(res.tags.iter().any(|t| t.tag_type == "mtime"));
+        assert!(res.tags.iter().any(|t| t.tag_type == "is_dir"));
+        assert!(res.tags.iter().any(|t| t.tag_type == "file_id"));
     }
 }

@@ -3,7 +3,7 @@ use crate::db::{Col, Store, TargetTable, Tbl};
 use crate::types::{BiticalType, ItemId, Origin, SType, TagType, TypedTag};
 use crate::util::{parquet_query, ParquetExt};
 use anyhow::Result;
-use sea_query::{Expr, Query};
+use sea_query::{Expr, PostgresQueryBuilder, Query, UnionType};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum WriteAction {
@@ -45,6 +45,23 @@ pub fn write(
     actions: Vec<WriteAction>,
     cast_migration: Option<(TagType, BiticalType)>,
 ) -> Result<WriteResponse> {
+    let mut modified_types = extract_action_tag_types(&actions);
+    if let Some((cast_type, _)) = &cast_migration {
+        modified_types.insert(cast_type.as_str().to_string());
+    }
+
+    let cascade_ids = extract_cascade_item_ids(&actions);
+    if !cascade_ids.is_empty() {
+        let cascade_types = collect_types_for_items(
+            &store.conn,
+            store,
+            registry,
+            &cascade_ids,
+        )?;
+        modified_types.extend(cascade_types);
+    }
+    modified_types.retain(|t| !registry.is_excluded_from_tags(t));
+
     // 1. Volatile/Settling → Stored 採番
     let (resolved, new_item_ids) = resolve_volatiles(store, actions)?;
     // 2. 未実体化の組み込み型定義（Sys 区画・行なし）に kind/content を補う
@@ -179,12 +196,18 @@ pub fn write(
         for target in [
             TargetTable::FileReferences,
             TargetTable::Locations,
+            TargetTable::TagsByLocation,
             TargetTable::BaseTags,
             TargetTable::RemovedFiles,
         ] {
             cascade_delete_from(store, target, &file_cascade)?;
         }
     }
+
+    if !modified_types.is_empty() {
+        sync_tags_partitions(store, registry, &modified_types)?;
+    }
+
     Ok(WriteResponse {
         updated,
         deleted,
@@ -398,6 +421,7 @@ fn cascade_delete_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::TagRegistry;
     use crate::types::{SType, TagType};
 
     #[test]
@@ -478,4 +502,275 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
     }
+
+    #[test]
+    fn test_collect_types_for_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = crate::tag::TagRegistry::with_standard();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        crate::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
+
+        write(
+            &store,
+            &registry,
+            vec![WriteAction::Add {
+                item: ItemId::Volatile(0),
+                tags: vec![TagOp::Append(TypedTag::new("category", "docs"))],
+            }],
+            None,
+        )
+        .unwrap();
+
+        let types = collect_types_for_items(
+            &store.conn,
+            &store,
+            &registry,
+            &[ItemId::from(0)],
+        )
+        .unwrap();
+        assert!(types.contains(&"category".to_string()));
+    }
+
+    #[test]
+    fn test_write_updates_tags_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = crate::tag::TagRegistry::with_standard();
+        let store = Store::open(dir.path().join("db")).unwrap();
+        crate::indexing::Indexer::new(&store, &registry)
+            .initialize_tables()
+            .unwrap();
+
+        write(
+            &store,
+            &registry,
+            vec![WriteAction::Add {
+                item: ItemId::Volatile(0),
+                tags: vec![TagOp::Append(TypedTag::new("category", "docs"))],
+            }],
+            None,
+        )
+        .unwrap();
+
+        let part_dir = store.tags_dir().join("type=category");
+        assert!(part_dir.exists());
+        assert!(part_dir.join("data.parquet").exists());
+    }
+
+    #[test]
+    fn test_extract_action_tag_types_and_cascade_ids() {
+        let actions = vec![
+            WriteAction::Add {
+                item: ItemId::from(1),
+                tags: vec![TagOp::Append(TypedTag::new("project", "alpha"))],
+            },
+            WriteAction::Delete {
+                item: ItemId::from(1),
+                tags: vec![
+                    DeleteTarget::Tag(TypedTag::new("status", "done")),
+                    DeleteTarget::Type(TagType::Custom("priority".to_string())),
+                    DeleteTarget::Type(TagType::Base(SType::ItemId)),
+                ],
+            },
+        ];
+        let types = extract_action_tag_types(&actions);
+        assert!(types.contains("project"));
+        assert!(types.contains("status"));
+        assert!(types.contains("priority"));
+        assert!(!types.contains("item_id"));
+
+        let cascade_ids = extract_cascade_item_ids(&actions);
+        assert_eq!(cascade_ids, vec![ItemId::from(1)]);
+    }
+
+    #[test]
+    fn test_write_filters_excluded_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        crate::indexing::Indexer::new(&store, &TagRegistry::with_standard())
+            .initialize_tables()
+            .unwrap();
+
+        let registry = TagRegistry::with_standard();
+        let actions = vec![WriteAction::Add {
+            item: ItemId::from(1),
+            tags: vec![TagOp::Append(TypedTag::new("mtime", "2026-01-01"))],
+        }];
+
+        write(&store, &registry, actions, None).unwrap();
+        assert!(!store.tags_dir().join("type=mtime").exists());
+    }
+
+    #[test]
+    fn test_sync_tags_partitions_cleanup_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // create a dummy corrupted partition dir
+        let part_dir = store.tags_dir().join("type=broken");
+        std::fs::create_dir_all(&part_dir).unwrap();
+        assert!(part_dir.exists());
+
+        let mut modified = rustc_hash::FxHashSet::default();
+        modified.insert("broken".to_string());
+        let reg = crate::tag::TagRegistry::with_standard();
+        let res = sync_tags_partitions(&store, &reg, &modified);
+        assert!(res.is_err());
+        assert!(!part_dir.exists());
+    }
+}
+
+pub(crate) fn collect_types_for_items(
+    conn: &duckdb::Connection,
+    store: &Store,
+    registry: &crate::tag::TagRegistry,
+    item_ids: &[ItemId],
+) -> Result<Vec<String>> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = item_ids.iter().map(|id| id.as_i64()).collect();
+
+    let mut queries = Vec::new();
+
+    let loc_path = store.path_for_target(TargetTable::TagsByLocation);
+    if loc_path.exists() {
+        let mut loc_q = Query::select();
+        loc_q
+            .column(Col::Type)
+            .from_subquery(
+                crate::util::parquet_query(&loc_path.to_string_lossy()),
+                Tbl::TagsByLocation,
+            )
+            .and_where(Expr::col(Col::ItemId).is_in(ids.clone()));
+        queries.push(loc_q);
+    }
+
+    let user_path = store.path_for_target(TargetTable::UserTags);
+    if user_path.exists() {
+        let mut user_q = Query::select();
+        user_q
+            .column(Col::Type)
+            .from_subquery(
+                crate::util::parquet_query(&user_path.to_string_lossy()),
+                Tbl::UserTags,
+            )
+            .and_where(Expr::col(Col::ItemId).is_in(ids.clone()));
+        queries.push(user_q);
+    }
+
+    let base_path = store.path_for_target(TargetTable::BaseTags);
+    if base_path.exists() {
+        let mut base_q = Query::select();
+        base_q
+            .column(Col::Type)
+            .from_subquery(
+                crate::util::parquet_query(&base_path.to_string_lossy()),
+                Tbl::BaseTags,
+            )
+            .and_where(Expr::col(Col::ItemId).is_in(ids));
+        let excluded = registry.get_excluded_from_tags();
+        if !excluded.is_empty() {
+            base_q.and_where(Expr::col(Col::Type).is_not_in(excluded));
+        }
+        queries.push(base_q);
+    }
+
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut combined_q = queries.remove(0);
+    for q in queries {
+        combined_q.union(UnionType::All, q);
+    }
+
+    let mut q = Query::select();
+    q.distinct()
+        .column(Col::Type)
+        .from_subquery(combined_q, Tbl::ItemTags);
+
+    let sql = q.to_string(PostgresQueryBuilder);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect::<duckdb::Result<Vec<_>>>().map_err(Into::into)
+}
+
+fn extract_action_tag_types(
+    actions: &[WriteAction],
+) -> rustc_hash::FxHashSet<String> {
+    let mut types = rustc_hash::FxHashSet::default();
+    for action in actions {
+        match action {
+            WriteAction::Add { tags, .. } => {
+                for tag_op in tags {
+                    let tag = match tag_op {
+                        TagOp::Append(t) | TagOp::Replace(t) => t,
+                    };
+                    types.insert(tag.tag_type().as_str().to_string());
+                }
+            }
+            WriteAction::Delete { tags, .. } => {
+                for target in tags {
+                    match target {
+                        DeleteTarget::Tag(t) => {
+                            types.insert(t.tag_type().as_str().to_string());
+                        }
+                        DeleteTarget::Type(tt) => {
+                            if tt.as_str() != "item_id" {
+                                types.insert(tt.as_str().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    types
+}
+
+fn extract_cascade_item_ids(actions: &[WriteAction]) -> Vec<ItemId> {
+    let mut ids = Vec::new();
+    for action in actions {
+        if let WriteAction::Delete { item, tags } = action {
+            for target in tags {
+                if matches!(
+                    target,
+                    DeleteTarget::Type(TagType::Base(SType::ItemId))
+                ) {
+                    ids.push(*item);
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn sync_tags_partitions(
+    store: &Store,
+    registry: &crate::tag::TagRegistry,
+    modified_types: &rustc_hash::FxHashSet<String>,
+) -> Result<()> {
+    let types_vec: Vec<&str> =
+        modified_types.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = crate::db::tags::update_tags_partitions(
+        store,
+        &store.conn,
+        registry,
+        &types_vec,
+    ) {
+        for tag_type in &types_vec {
+            let part_dir = store.tags_dir().join(format!("type={tag_type}"));
+            if part_dir.exists() {
+                if let Err(err) = std::fs::remove_dir_all(&part_dir) {
+                    eprintln!(
+                        "Failed to remove invalid partition directory {}: {err}",
+                        part_dir.display()
+                    );
+                }
+            }
+        }
+        return Err(e);
+    }
+    Ok(())
 }

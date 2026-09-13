@@ -30,8 +30,8 @@ use super::{
 use crate::db::{BiticalType, Col, CustomFunc, Pronoun, Pronoun::*, Src, Tbl};
 use crate::query::ast::{ArithmeticAggOp, ComparisonOp};
 use crate::query::lens_resolver::{
-    LabelSetOpKind, NestMatchCondition, NestMatchOp, NestMatchRhs, NvalueRhs,
-    ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
+    DataSource, LabelSetOpKind, NestMatchCondition, NestMatchOp, NestMatchRhs,
+    NvalueRhs, ResolvedAggregationNode, ResolvedNode, ResolvedOperand,
 };
 use crate::query::lens_schema::{to_bin_op, StorageMapping};
 use crate::types::{SType, TagType};
@@ -1129,7 +1129,7 @@ pub(super) fn build_fetch_nest_sql(
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     if let Some(node) = resolver.get_label_set_op_node() {
-        label_set_op_sql(src, node, limit, offset)
+        label_set_op_sql(src, node, resolver, limit, offset)
     } else {
         let pick = PickNode::new(src, &resolver.resolved_query);
         nest(src, &pick, resolver, limit, offset)
@@ -1158,6 +1158,56 @@ pub(super) fn nest(
 ) -> anyhow::Result<SelectStatement> {
     use crate::db::CustomFunc;
     use sea_query::{CommonTableExpression, Iden, WithClause};
+
+    let short = resolver.short();
+
+    if let Some(proj_type) = resolver.get_single_direct_projection() {
+        if resolver.data_source(&proj_type) == DataSource::TagsPartition {
+            let tags_dir = resolver.store_tags_dir.as_ref().unwrap();
+            let mut q = Query::select();
+            let desc = resolver
+                .lens()
+                .look_up_or_default(&TagType::from(proj_type.as_str()));
+            let bitical_type = desc.logical_type.to_bitical();
+            let rep_label =
+                Expr::col((Tbl::Tags, Col::Label)).cast_as(bitical_type);
+
+            let type_cond =
+                if let Some(fb) = resolver.fallback_tag_type(&proj_type) {
+                    Expr::col((Tbl::Tags, Col::Type))
+                        .is_in([proj_type.as_str(), fb.as_str()])
+                } else {
+                    Expr::col((Tbl::Tags, Col::Type)).eq(proj_type.as_str())
+                };
+
+            q.distinct()
+                .expr_as(Expr::val(None::<i64>), Col::ItemId)
+                .expr_as(Expr::col((Tbl::Tags, Col::Rank)), Col::Rank)
+                .expr_as(Expr::val("volatile"), Col::ItemKind)
+                .expr_as(
+                    crate::db::CustomFunc::empty_tag_list(),
+                    crate::db::QueryResultCol::Tags,
+                )
+                .expr_as(
+                    crate::db::CustomFunc::as_representative(rep_label),
+                    Pronoun::Representative,
+                )
+                .from_subquery(
+                    crate::util::hive_parquet_query(tags_dir),
+                    Tbl::Tags,
+                )
+                .and_where(type_cond);
+
+            if limit > 0 {
+                q.limit((limit + 1) as u64);
+            }
+            if offset > 0 {
+                q.offset(offset as u64);
+            }
+            q.order_by(Pronoun::Representative, sea_query::Order::Asc);
+            return Ok(q);
+        }
+    }
 
     let pick_sql = pick.build_pick();
 
@@ -1428,17 +1478,19 @@ pub(super) fn nest(
     } else {
         all_hits_q.column(label_col.clone());
     }
-    all_hits_q
-        .column(Col::Rank)
-        .expr_as(
-            CustomFunc::row_number_over_multi(
-                &partition_cols,
-                vec![(Col::Rank, Order::Desc), (Col::ItemId, Order::Desc)],
-            ),
-            Rn,
-        )
-        .expr_as(CustomFunc::count_over_multi(&partition_cols), GroupTotal)
-        .distinct();
+    all_hits_q.column(Col::Rank);
+    if !short {
+        all_hits_q
+            .expr_as(
+                CustomFunc::row_number_over_multi(
+                    &partition_cols,
+                    vec![(Col::Rank, Order::Desc), (Col::ItemId, Order::Desc)],
+                ),
+                Rn,
+            )
+            .expr_as(CustomFunc::count_over_multi(&partition_cols), GroupTotal);
+    }
+    all_hits_q.distinct();
     match &all_hits_source_cte {
         Some(cte_name) => all_hits_q.from(Alias::new(cte_name.as_str())),
         None => all_hits_q.from(src),
@@ -1496,12 +1548,13 @@ pub(super) fn nest(
     } else {
         top_items_q.column(label_col.clone());
     }
-    top_items_q
-        .column(Col::ItemId)
-        .column(Col::Rank)
-        .column(GroupTotal)
-        .from(AllHits)
-        .and_where(Expr::col(Rn).lte(100));
+    top_items_q.column(Col::ItemId).column(Col::Rank);
+    if !short {
+        top_items_q
+            .column(GroupTotal)
+            .and_where(Expr::col(Rn).lte(100));
+    }
+    top_items_q.from(AllHits);
 
     let top_items_cte = CommonTableExpression::new()
         .query(top_items_q)
@@ -1590,10 +1643,14 @@ pub(super) fn nest(
         )),
     );
 
-    let mut tags_expr: SimpleExpr = Expr::cust_with_exprs(
-        "$1 || list_value($2)",
-        [item_list_expr, proj_label_sp],
-    );
+    let mut tags_expr: SimpleExpr = if short {
+        CustomFunc::empty_tag_list()
+    } else {
+        Expr::cust_with_exprs(
+            "$1 || list_value($2)",
+            [item_list_expr, proj_label_sp],
+        )
+    };
 
     if has_nvalue {
         let nvalue_subq_expr = if proj_operands.len() > 1 {
@@ -1635,10 +1692,14 @@ pub(super) fn nest(
             BiticalType::Double,
             Expr::cust_with_exprs("CAST(($1) AS DOUBLE)", [nvalue_subq_expr]),
         );
-        tags_expr = Expr::cust_with_exprs(
-            "$1 || list_value($2)",
-            [tags_expr, nvalue_sp],
-        );
+        tags_expr = if short {
+            Expr::cust_with_exprs("list_value($1)", [nvalue_sp])
+        } else {
+            Expr::cust_with_exprs(
+                "$1 || list_value($2)",
+                [tags_expr, nvalue_sp],
+            )
+        };
     }
 
     let mut q = Query::select();
@@ -1686,11 +1747,13 @@ pub(super) fn nest(
 fn label_set_op_sql(
     src: &Src,
     label_set_op: &ResolvedNode,
+    resolver: &crate::query::lens_resolver::Resolver,
     limit: usize,
     offset: usize,
 ) -> anyhow::Result<SelectStatement> {
     use sea_query::{CommonTableExpression, Iden, WithClause};
 
+    let short = resolver.short();
     let (op, operands) = match label_set_op {
         ResolvedNode::LabelSetOp { op, operands } => (op, operands),
         _ => anyhow::bail!("label_set_op_sql: expected LabelSetOp node"),
@@ -1755,7 +1818,7 @@ fn label_set_op_sql(
         with_clause.cte(
             CommonTableExpression::new()
                 .query(labels_sql)
-                .table_name(Alias::new("labels"))
+                .table_name(Labels)
                 .to_owned(),
         );
     } else {
@@ -1818,24 +1881,27 @@ fn label_set_op_sql(
         with_clause.cte(
             CommonTableExpression::new()
                 .query(labels_sql)
-                .table_name(Alias::new("labels"))
+                .table_name(Labels)
                 .to_owned(),
         );
     }
 
-    let all_hits_sql = Query::select()
-        .column(Col::ItemId)
-        .column(Label)
-        .expr_as(
-            CustomFunc::row_number_over_multi(
-                &[Label.into_iden()],
-                vec![(Col::ItemId, Order::Desc)],
-            ),
-            Rn,
-        )
-        .expr_as(CustomFunc::count_over(Label), GroupTotal)
-        .from(Alias::new("labels"))
-        .to_owned();
+    let mut all_hits_q = Query::select();
+    all_hits_q.column(Col::ItemId).column(Label);
+    if !short {
+        all_hits_q
+            .expr_as(
+                CustomFunc::row_number_over_multi(
+                    &[Label.into_iden()],
+                    vec![(Col::ItemId, Order::Desc)],
+                ),
+                Rn,
+            )
+            .expr_as(CustomFunc::count_over(Label), GroupTotal);
+    }
+    all_hits_q.from(Labels);
+    all_hits_q.distinct();
+    let all_hits_sql = all_hits_q.to_owned();
     with_clause.cte(
         CommonTableExpression::new()
             .query(all_hits_sql)
@@ -1843,13 +1909,15 @@ fn label_set_op_sql(
             .to_owned(),
     );
 
-    let top_items_sql = Query::select()
-        .column(Col::ItemId)
-        .column(Label)
-        .column(GroupTotal)
-        .from(AllHits)
-        .and_where(Expr::col(Rn).lte(100))
-        .to_owned();
+    let mut top_items_q = Query::select();
+    top_items_q.column(Col::ItemId).column(Label);
+    if !short {
+        top_items_q
+            .column(GroupTotal)
+            .and_where(Expr::col(Rn).lte(100));
+    }
+    top_items_q.from(AllHits);
+    let top_items_sql = top_items_q.to_owned();
     with_clause.cte(
         CommonTableExpression::new()
             .query(top_items_sql)
@@ -1906,10 +1974,14 @@ fn label_set_op_sql(
         )),
     );
 
-    let tags_expr: SimpleExpr = Expr::cust_with_exprs(
-        "$1 || list_value($2)",
-        [item_list_expr, proj_label_sp],
-    );
+    let tags_expr: SimpleExpr = if short {
+        CustomFunc::empty_tag_list()
+    } else {
+        Expr::cust_with_exprs(
+            "$1 || list_value($2)",
+            [item_list_expr, proj_label_sp],
+        )
+    };
 
     let mut q = Query::select();
     q.with_cte(with_clause);
@@ -2378,7 +2450,12 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = label_set_op_sql(&Src::OneView, &node, 100, 0)
+        let registry = crate::tag::TagRegistry::with_standard();
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
+            "cat:", &registry,
+        )
+        .unwrap();
+        let sql = label_set_op_sql(&Src::OneView, &node, &resolver, 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
@@ -2426,7 +2503,12 @@ mod tests {
             operands: vec![make_nest_node("cat"), make_nest_node("flavor")],
         };
 
-        let sql = label_set_op_sql(&Src::OneView, &node, 100, 0)
+        let registry = crate::tag::TagRegistry::with_standard();
+        let resolver = crate::query::lens_resolver::Resolver::new_nowarn(
+            "cat:", &registry,
+        )
+        .unwrap();
+        let sql = label_set_op_sql(&Src::OneView, &node, &resolver, 100, 0)
             .unwrap()
             .to_string(PostgresQueryBuilder);
 
@@ -2466,5 +2548,37 @@ mod tests {
             "should partition by label_group, got: {}",
             sql
         );
+    }
+
+    #[test]
+    fn test_build_fetch_nest_sql_short_mode_skips_window_and_items() {
+        let resolver =
+            Resolver::new_nowarn("extension:", &TagRegistry::default())
+                .unwrap()
+                .with_short(true);
+        let sql =
+            build_fetch_nest_sql(&Src::OneView, &resolver, 10, 0).unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+        assert!(!sql_str.contains("row_number() OVER"));
+        assert!(!sql_str.contains("count(*) OVER"));
+        assert!(!sql_str.contains("coalesce"));
+        assert!(sql_str.contains("list_value()::STRUCT(tag_type VARCHAR"));
+    }
+
+    #[test]
+    fn test_build_fetch_nest_sql_short_mode_preserves_nvalue_when_present() {
+        let resolver = Resolver::new_nowarn(
+            "parentdir: &: count(extension:rs)",
+            &TagRegistry::default(),
+        )
+        .unwrap()
+        .with_short(true);
+        let sql =
+            build_fetch_nest_sql(&Src::OneView, &resolver, 10, 0).unwrap();
+        let sql_str = sql.to_string(PostgresQueryBuilder);
+        assert!(!sql_str.contains("row_number() OVER"));
+        assert!(!sql_str.contains("count(*) OVER"));
+        assert!(!sql_str.contains("|| list_value("));
+        assert!(sql_str.contains("nvalue_agg"));
     }
 }

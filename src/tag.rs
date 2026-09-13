@@ -19,6 +19,7 @@ use crate::db::{BiticalType, TargetTable};
 use crate::query::ast::{
     BasicOp, ComparisonNode, ComparisonOp, Operand, QueryNode,
 };
+use crate::query::lens_resolver::ResolvedNode;
 use crate::response::Item;
 use crate::types::{
     Bitical, BiticalAssociate, Biticals, ItemKind, Label, LargeOrigin, Origin,
@@ -242,6 +243,10 @@ pub trait Query: Send + Sync {
     /// `compose_projection_implication` を呼ぶこと（既定実装以外には自動適用されない）。
     fn implies(&self) -> Option<(TagType, Label)> {
         None
+    }
+
+    fn allows_direct_projection(&self, context: Option<&ResolvedNode>) -> bool {
+        context.is_none()
     }
 
     /// Projection（type:形式）を QueryNode へ展開する。
@@ -531,6 +536,10 @@ pub trait TagFunction: Send + Sync {
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::DEFAULT
     }
+
+    fn exclude_in_tags_table(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================
@@ -667,6 +676,37 @@ impl TagRegistry {
 
     pub fn iter_arcs(&self) -> impl Iterator<Item = Arc<dyn TagFunction>> + '_ {
         self.functions.values().cloned()
+    }
+
+    pub fn is_excluded_from_tags(&self, name: &str) -> bool {
+        self.get(name)
+            .map(|f| f.exclude_in_tags_table())
+            .unwrap_or(false)
+    }
+
+    pub fn get_excluded_from_tags(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter_map(|(name, func)| {
+                if func.exclude_in_tags_table() {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn location_tag_types(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter(|(_, f)| {
+                f.edit()
+                    .map(|e| e.strategy() == EditStrategy::Relocate)
+                    .unwrap_or(false)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub fn iter_all_for_rank(&self) -> impl Iterator<Item = (&str, Rank)> + '_ {
@@ -991,6 +1031,31 @@ impl Query for FilenameFn {
     }
 }
 
+fn is_only_is_dir_false_context(context: Option<&ResolvedNode>) -> bool {
+    match context {
+        None => true,
+        Some(ctx) => match ctx {
+            ResolvedNode::Match {
+                tag_type,
+                op,
+                label,
+                ..
+            } if tag_type.as_str() == "is_dir"
+                && matches!(
+                    op,
+                    ComparisonOp::Label(BasicOp::Eq)
+                        | ComparisonOp::Scalar(BasicOp::Eq)
+                )
+                && (*label == Label::from(false)
+                    || label.as_str().eq_ignore_ascii_case("false")) =>
+            {
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
 // --- ExtensionFn ---
 pub(crate) struct ExtensionFn;
 impl TagFunction for ExtensionFn {
@@ -1020,6 +1085,10 @@ impl Index for ExtensionFn {
         ScanRole::Location
     }
     fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
+        let m = get_safe_meta(path)?;
+        if m.is_dir() {
+            return Ok(None);
+        }
         Ok(path
             .extension()
             .map(|e| Bitical::String(e.to_string_lossy().to_lowercase())))
@@ -1031,6 +1100,9 @@ impl Query for ExtensionFn {
     }
     fn implies(&self) -> Option<(TagType, Label)> {
         Some((SType::IsDir.into(), Label::from(false)))
+    }
+    fn allows_direct_projection(&self, context: Option<&ResolvedNode>) -> bool {
+        is_only_is_dir_false_context(context)
     }
     fn interpret(
         &self,
@@ -1200,20 +1272,35 @@ impl Edit for StemFn {
     }
 }
 impl Index for StemFn {
+    fn role(&self) -> ScanRole {
+        ScanRole::Location
+    }
+
     fn extract(&self, path: &Path) -> Result<Option<Bitical>> {
+        let m = get_safe_meta(path)?;
+        if m.is_dir() {
+            return Ok(None);
+        }
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         Ok(Some(Bitical::String(stem)))
     }
+
     fn target_table(&self) -> TargetTable {
-        TargetTable::BaseTags
+        TargetTable::TagsByLocation
     }
 }
 impl Query for StemFn {
     fn logical_type(&self) -> LogicalType {
         LogicalType::String
+    }
+    fn implies(&self) -> Option<(TagType, Label)> {
+        Some((SType::IsDir.into(), Label::from(false)))
+    }
+    fn allows_direct_projection(&self, context: Option<&ResolvedNode>) -> bool {
+        is_only_is_dir_false_context(context)
     }
 }
 
@@ -1521,6 +1608,9 @@ impl TagFunction for SizeFn {
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::SIZE
     }
+    fn exclude_in_tags_table(&self) -> bool {
+        true
+    }
 }
 impl Scan for SizeFn {
     fn name() -> &'static str {
@@ -1667,6 +1757,9 @@ impl TagFunction for MtimeFn {
     }
     fn default_rank(&self) -> Rank {
         crate::rank::SystemRank::MTIME
+    }
+    fn exclude_in_tags_table(&self) -> bool {
+        true
     }
 }
 impl Edit for MtimeFn {
@@ -2413,6 +2506,157 @@ mod tests {
         reg.register(SimpleTag);
         assert!(reg.get("simple").is_some());
         assert!(reg.get("unknown").is_none());
+    }
+
+    #[test]
+    fn test_tag_function_exclude_in_tags_table() {
+        assert!(!PathFn.exclude_in_tags_table());
+        assert!(SizeFn.exclude_in_tags_table());
+        assert!(MtimeFn.exclude_in_tags_table());
+        assert!(!NameFn.exclude_in_tags_table());
+    }
+
+    #[test]
+    fn test_tag_registry_excluded_from_tags() {
+        let reg = TagRegistry::with_standard();
+        assert!(reg.is_excluded_from_tags("size"));
+        assert!(reg.is_excluded_from_tags("mtime"));
+        assert!(!reg.is_excluded_from_tags("path"));
+        assert!(!reg.is_excluded_from_tags("name"));
+
+        let excluded = reg.get_excluded_from_tags();
+        assert!(excluded.contains(&"size".to_string()));
+        assert!(excluded.contains(&"mtime".to_string()));
+        assert!(!excluded.contains(&"path".to_string()));
+    }
+
+    #[test]
+    fn test_tag_registry_location_tag_types() {
+        let reg = TagRegistry::with_standard();
+        let loc_types = reg.location_tag_types();
+        assert!(loc_types.contains(&"path".to_string()));
+        assert!(loc_types.contains(&"filename".to_string()));
+        assert!(loc_types.contains(&"parentdir".to_string()));
+        assert!(loc_types.contains(&"extension".to_string()));
+        assert!(loc_types.contains(&"stem".to_string()));
+        assert!(!loc_types.contains(&"name".to_string()));
+        assert!(!loc_types.contains(&"is_dir".to_string()));
+        assert!(!loc_types.contains(&"size".to_string()));
+        assert!(!loc_types.contains(&"mtime".to_string()));
+    }
+
+    #[test]
+    fn test_extension_fn_extract_skips_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_with_ext = dir.path().join("sub.dir");
+        std::fs::create_dir(&dir_with_ext).unwrap();
+        let file_with_ext = dir.path().join("file.rs");
+        std::fs::write(&file_with_ext, "content").unwrap();
+
+        let ext_fn = ExtensionFn;
+        assert_eq!(ext_fn.extract(&dir_with_ext).unwrap(), None);
+        assert_eq!(
+            ext_fn.extract(&file_with_ext).unwrap(),
+            Some(Bitical::String("rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_extension_fn_allows_direct_projection() {
+        let is_dir_false = ResolvedNode::Match {
+            tag_type: TagType::from("is_dir"),
+            storage: crate::query::lens_schema::StorageMapping::Basic {
+                column: SType::IsDir,
+                tag_type: "is_dir".to_string(),
+            },
+            bitical_type: BiticalType::Boolean,
+            op: ComparisonOp::Label(BasicOp::Eq),
+            label: Label::from(false),
+        };
+        let is_dir_true = ResolvedNode::Match {
+            tag_type: TagType::from("is_dir"),
+            storage: crate::query::lens_schema::StorageMapping::Basic {
+                column: SType::IsDir,
+                tag_type: "is_dir".to_string(),
+            },
+            bitical_type: BiticalType::Boolean,
+            op: ComparisonOp::Label(BasicOp::Eq),
+            label: Label::from(true),
+        };
+        let other_node = ResolvedNode::Match {
+            tag_type: TagType::from("name"),
+            storage: crate::query::lens_schema::StorageMapping::Basic {
+                column: SType::Name,
+                tag_type: "name".to_string(),
+            },
+            bitical_type: BiticalType::String,
+            op: ComparisonOp::Label(BasicOp::Eq),
+            label: Label::from("test"),
+        };
+
+        assert!(ExtensionFn.query().allows_direct_projection(None));
+        assert!(ExtensionFn
+            .query()
+            .allows_direct_projection(Some(&is_dir_false)));
+        assert!(!ExtensionFn
+            .query()
+            .allows_direct_projection(Some(&is_dir_true)));
+        assert!(!ExtensionFn
+            .query()
+            .allows_direct_projection(Some(&other_node)));
+
+        assert!(FilenameFn.query().allows_direct_projection(None));
+        assert!(!FilenameFn
+            .query()
+            .allows_direct_projection(Some(&is_dir_false)));
+    }
+
+    #[test]
+    fn test_stem_fn_extract_skips_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("sub.dir");
+        std::fs::create_dir(&sub_dir).unwrap();
+        let file = dir.path().join("file.tar.gz");
+        std::fs::write(&file, "content").unwrap();
+
+        let stem_fn = StemFn;
+        assert_eq!(stem_fn.extract(&sub_dir).unwrap(), None);
+        assert_eq!(
+            stem_fn.extract(&file).unwrap(),
+            Some(Bitical::String("file.tar".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_stem_fn_allows_direct_projection() {
+        let is_dir_false = ResolvedNode::Match {
+            tag_type: TagType::from("is_dir"),
+            storage: crate::query::lens_schema::StorageMapping::Basic {
+                column: SType::IsDir,
+                tag_type: "is_dir".to_string(),
+            },
+            bitical_type: BiticalType::Boolean,
+            op: ComparisonOp::Label(BasicOp::Eq),
+            label: Label::from(false),
+        };
+        let is_dir_true = ResolvedNode::Match {
+            tag_type: TagType::from("is_dir"),
+            storage: crate::query::lens_schema::StorageMapping::Basic {
+                column: SType::IsDir,
+                tag_type: "is_dir".to_string(),
+            },
+            bitical_type: BiticalType::Boolean,
+            op: ComparisonOp::Label(BasicOp::Eq),
+            label: Label::from(true),
+        };
+
+        assert!(StemFn.query().allows_direct_projection(None));
+        assert!(StemFn.query().allows_direct_projection(Some(&is_dir_false)));
+        assert!(!StemFn.query().allows_direct_projection(Some(&is_dir_true)));
+        assert_eq!(
+            StemFn.query().implies(),
+            Some((SType::IsDir.into(), Label::from(false)))
+        );
     }
 
     #[test]

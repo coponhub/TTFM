@@ -153,7 +153,38 @@ impl<'a> Indexer<'a> {
         if let Some(on_p) = on_progress {
             on_p(IndexProgress::Merging);
         }
-        merge::run_merge(
+        // 変更された型を事前に収集
+        let has_changes = !results.is_empty()
+            || !dir_changed_results.is_empty()
+            || !diff.deleted_ids.is_empty();
+        let mut modified_types: rustc_hash::FxHashSet<String> =
+            rustc_hash::FxHashSet::default();
+        if !dir_changed_results.is_empty() {
+            for s in ["path", "filename", "parentdir", "extension"] {
+                modified_types.insert(s.to_string());
+            }
+        }
+        for r in results.iter().chain(dir_changed_results.iter()) {
+            for t in &r.tags {
+                if !matches!(t.tag_type.as_str(), "size" | "mtime") {
+                    modified_types.insert(t.tag_type.clone());
+                }
+            }
+            for t in &r.location_tags {
+                modified_types.insert(t.tag_type.clone());
+            }
+        }
+        if !diff.deleted_ids.is_empty() {
+            let del_types = crate::edit::write::collect_types_for_items(
+                &self.store.conn,
+                &self.store,
+                self.registry,
+                &diff.deleted_ids,
+            )?;
+            modified_types.extend(del_types);
+        }
+
+        let location_changed_ids = merge::run_merge(
             &self.store.conn,
             self.registry,
             &self.store,
@@ -165,6 +196,30 @@ impl<'a> Indexer<'a> {
             &roots,
             |_data| Ok(()),
         )?;
+
+        if !self.store.tags_metadata_path().exists() {
+            crate::db::tags::generate_tags_hive_partitioned(
+                &self.store,
+                &self.store.conn,
+                self.registry,
+            )?;
+        } else if has_changes {
+            if !location_changed_ids.is_empty() {
+                for s in self.registry.location_tag_types() {
+                    modified_types.insert(s);
+                }
+            }
+            if !modified_types.is_empty() {
+                let types_vec: Vec<&str> =
+                    modified_types.iter().map(|s| s.as_str()).collect();
+                crate::db::tags::update_tags_partitions(
+                    &self.store,
+                    &self.store.conn,
+                    self.registry,
+                    &types_vec,
+                )?;
+            }
+        }
 
         Ok(count)
     }

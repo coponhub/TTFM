@@ -48,6 +48,7 @@ use crate::types::{Bitical, ItemKind, Label, Origin, Rank, SType, TagType};
 use anyhow::{bail, Result};
 use duckdb::types::Value;
 use sea_query::{BinOper, Condition, Expr, SimpleExpr};
+use std::path::PathBuf;
 
 /// 物理マッピングが解決された後のクエリノード。
 #[derive(Debug, Clone, PartialEq)]
@@ -2972,6 +2973,12 @@ pub struct ResolvedOrder {
     pub desc: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSource {
+    TagsPartition,
+    OneView,
+}
+
 // ========== Resolver 構造体 ==========
 
 /// クエリの論理展開と物理解決を統合する構造体
@@ -2981,6 +2988,8 @@ pub struct Resolver {
     pub resolved_query: ResolvedNode,
     /// 解決済みの並び順（with_order で設定。空 = SQL 側の既定の並び）
     resolved_order: Vec<ResolvedOrder>,
+    short: bool,
+    pub store_tags_dir: Option<PathBuf>,
 }
 
 impl Resolver {
@@ -3008,6 +3017,8 @@ impl Resolver {
             expanded_query: expanded,
             resolved_query: optimized,
             resolved_order: Vec::new(),
+            short: false,
+            store_tags_dir: None,
         })
     }
 
@@ -3049,6 +3060,78 @@ impl Resolver {
     /// Lens への参照を返す（Fetcherで使用）
     pub fn lens(&self) -> &Lens {
         &self.lens
+    }
+
+    pub fn with_short(mut self, short: bool) -> Self {
+        self.short = short;
+        self
+    }
+
+    pub fn short(&self) -> bool {
+        self.short
+    }
+
+    pub fn with_store_tags_dir(mut self, tags_dir: Option<PathBuf>) -> Self {
+        self.store_tags_dir = tags_dir;
+        self
+    }
+
+    pub fn get_single_direct_projection(&self) -> Option<String> {
+        let (tag_type, ctx) = match &self.resolved_query {
+            ResolvedNode::Nest {
+                keys,
+                nvalue: None,
+                context,
+            } if keys.len() == 1 => {
+                (extract_tag_type_from_operand(&keys[0])?, context.as_deref())
+            }
+            ResolvedNode::And(nodes) => nodes.iter().find_map(|n| match n {
+                ResolvedNode::Nest {
+                    keys,
+                    nvalue: None,
+                    context,
+                } if keys.len() == 1 => Some((
+                    extract_tag_type_from_operand(&keys[0])?,
+                    context.as_deref(),
+                )),
+                _ => None,
+            })?,
+            _ => return None,
+        };
+
+        let func = self.lens.look_up(&tag_type)?.logical_function.as_ref()?;
+        func.query()
+            .allows_direct_projection(ctx)
+            .then(|| tag_type.as_str().to_string())
+    }
+
+    pub fn fallback_tag_type(&self, tag_type: &str) -> Option<String> {
+        let desc = self.lens.look_up(&TagType::from(tag_type))?;
+        let func = desc.logical_function.as_ref()?;
+        for rule in func.query().read().rules() {
+            if let crate::query::lens_reader::ReadRule::Fallback(from_type) =
+                rule
+            {
+                return Some(from_type.to_string());
+            }
+        }
+        None
+    }
+
+    pub fn data_source(&self, tag_type: &str) -> DataSource {
+        if self.short {
+            if let Some(tags_dir) = &self.store_tags_dir {
+                if tags_dir.join(format!("type={tag_type}")).exists() {
+                    return DataSource::TagsPartition;
+                }
+                if let Some(fb) = self.fallback_tag_type(tag_type) {
+                    if tags_dir.join(format!("type={fb}")).exists() {
+                        return DataSource::TagsPartition;
+                    }
+                }
+            }
+        }
+        DataSource::OneView
     }
 
     /// 並び順を物理解決して保持する。優先順位は
@@ -3163,6 +3246,38 @@ mod tests {
     use crate::query::lens_schema::StorageMapping;
     use crate::tag::TagRegistry;
     use crate::types::{Label, SType};
+
+    #[test]
+    fn test_resolver_determine_data_source_dynamically() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let tags_dir = dir.path().join("tags");
+        std::fs::create_dir_all(tags_dir.join("type=extension")).unwrap();
+
+        let registry = TagRegistry::with_standard();
+        let resolver_short = Resolver::new_nowarn("extension:", &registry)
+            .unwrap()
+            .with_short(true)
+            .with_store_tags_dir(Some(tags_dir.clone()));
+
+        assert_eq!(
+            resolver_short.data_source("extension"),
+            DataSource::TagsPartition,
+        );
+        assert_eq!(resolver_short.data_source("size"), DataSource::OneView,);
+        assert_eq!(resolver_short.data_source("mtime"), DataSource::OneView,);
+
+        let resolver_normal = Resolver::new_nowarn("extension:", &registry)
+            .unwrap()
+            .with_short(false)
+            .with_store_tags_dir(Some(tags_dir));
+
+        assert_eq!(
+            resolver_normal.data_source("extension"),
+            DataSource::OneView,
+        );
+    }
 
     #[test]
     fn test_is_pure_scalar() {
@@ -4762,5 +4877,37 @@ mod tests_walk_fold {
             None,
             "sum(size:) + sum(mtime:) should yield None"
         );
+    }
+
+    #[test]
+    fn test_get_single_direct_projection_with_extension() {
+        let r =
+            Resolver::new_nowarn("extension:", &TagRegistry::with_standard())
+                .unwrap();
+        assert_eq!(
+            r.get_single_direct_projection(),
+            Some("extension".to_string())
+        );
+
+        let r2 = Resolver::new_nowarn(
+            "extension: & mtime:>2020-01-01",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
+        assert_eq!(r2.get_single_direct_projection(), None);
+    }
+
+    #[test]
+    fn test_get_single_direct_projection_with_stem() {
+        let r = Resolver::new_nowarn("stem:", &TagRegistry::with_standard())
+            .unwrap();
+        assert_eq!(r.get_single_direct_projection(), Some("stem".to_string()));
+
+        let r2 = Resolver::new_nowarn(
+            "stem: & mtime:>2020-01-01",
+            &TagRegistry::with_standard(),
+        )
+        .unwrap();
+        assert_eq!(r2.get_single_direct_projection(), None);
     }
 }

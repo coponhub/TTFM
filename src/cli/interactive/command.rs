@@ -367,6 +367,7 @@ fn render_current_page<W: Write, E: Write>(
         cid,
         cache: true,
         order: Vec::new(),
+        short: false,
     };
     let mut sink = ColorWarningSink { writer: err_out };
     let resp = search(store, registry, &query, opts, &mut sink)?;
@@ -389,6 +390,7 @@ fn execute_search_and_render<W: Write, E: Write>(
         cid: cid.clone(),
         cache: true,
         order: Vec::new(),
+        short: false,
     };
     let mut sink = ColorWarningSink { writer: err_out };
     let resp = search(store, registry, query, opts, &mut sink)?;
